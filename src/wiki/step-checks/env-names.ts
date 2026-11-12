@@ -1,72 +1,62 @@
 /**
  * The state of each key NAME a `.env` file assigns, for the `env` probe. Pure.
- * A value is read only far enough to tell empty from non-empty and to find
- * where it ends; no value, nor any part of one, leaves this function.
+ * A value is read only far enough to tell empty from non-empty; no value, nor
+ * any part of one, leaves this function.
  *
- * The reader owns only the lines it reads the way Bun 1.3.10's loader does
- * (held to a child `bun --env-file` by a differential test and a seeded fuzz,
- * `env-names.test.ts`). `set`: the last assignment has a value that is
- * non-empty once trimmed (the probe's `processHasEnv` rule); `unset`: it is
- * empty; `unsure`: a `$` anywhere in the value (Bun expands it, single quotes
- * included). `lostTrack`: from some line on, the reader cannot tell what Bun
- * reads, so a later line may be no key or a hidden one; it stops there and
- * marks every key it read `unsure`. That is any non-blank, non-comment line
- * that is not `[export ]KEY=value`: every colon form (measured: `K: v` sets K,
- * `K:v` sets nothing, an empty `K:` takes the whole next line as its value), a
- * BOM, a line with no `=`. Inside an assignment it is a quote that never
- * closes (Bun reads it raw and goes on), a backslash inside a quoted value
- * (Bun reads `\"` as an escaped quote), and the opening quote character again
- * before the close (Bun closes only on a quote followed by spaces, `#` or the
- * line's end).
+ * A closed grammar: the reader keeps track only when EVERY line (split on
+ * `\n`, one trailing `\r` dropped) is one of
+ *   - empty;
+ *   - `#` then printable ASCII (0x20–0x7E);
+ *   - `[export ]KEY=VALUE`: `export` and exactly one space, KEY
+ *     `[A-Za-z_][A-Za-z0-9_]*`, no whitespace around `=`, and VALUE one of
+ *     empty (`unset`); one or more SAFE characters (`set`); `"…"` or `'…'`
+ *     closing at the line's end, its body SAFE characters and spaces (`set`
+ *     with a SAFE character in it, `unset` when empty).
+ * SAFE is 0x21–0x7E minus `"` `'` `` ` `` `\` `$` `#`. Anything else (a
+ * spaces-only quoted body, leading or trailing whitespace, a tab, non-ASCII,
+ * a control character, a BOM, an inline comment, a colon form) sets
+ * `lostTrack`: no key is claimed and the probe answers `unknown`. The last
+ * assignment of a key decides, as in Bun. `env-names.test.ts` holds every
+ * production to a child `bun --env-file` (Bun 1.3.10): every character in
+ * eight positions, two-character values, and seeded whole files.
  */
 
-export type EnvKeyState = "set" | "unset" | "unsure";
+export type EnvKeyState = "set" | "unset";
 
-export interface EnvKeyStates {
-  keys: ReadonlyMap<string, EnvKeyState>;
-  lostTrack: boolean;
+export type EnvKeyStates =
+  | { keys: ReadonlyMap<string, EnvKeyState>; lostTrack: false }
+  /** `lostLine`: the first line out of the grammar, 1-based. */
+  | { keys: ReadonlyMap<string, EnvKeyState>; lostTrack: true; lostLine: number };
+
+const SAFE = String.raw`\x21\x25\x26\x28-\x5B\x5D-\x5F\x61-\x7E`;
+const COMMENT = /^#[\x20-\x7E]*$/;
+const ASSIGN = /^(?:export )?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+const UNQUOTED = new RegExp(`^[${SAFE}]+$`);
+const QUOTED = new RegExp(`^(?:"([${SAFE} ]*)"|'([${SAFE} ]*)')$`);
+const HAS_SAFE = new RegExp(`[${SAFE}]`);
+
+/** One assignment's value: its state, or null when the line is out of the grammar. */
+function valueState(value: string): EnvKeyState | null {
+  if (value === "") return "unset";
+  if (UNQUOTED.test(value)) return "set";
+  const q = QUOTED.exec(value);
+  if (!q) return null;
+  const body = q[1] ?? q[2]!;
+  if (body === "") return "unset";
+  return HAS_SAFE.test(body) ? "set" : null;
 }
-
-/** Bun accepts `-` and `.` in a key and a leading digit: tracked so a quote they open is followed. */
-const ASSIGN = /^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*=(.*)$/;
-const QUOTES = new Set(['"', "'", "`"]);
-/** A closing quote: spaces, then a comment or the line's end. */
-const AFTER_CLOSE = /^[ \t]*(?:#.*)?$/;
 
 export function envFileKeyStates(text: string): EnvKeyStates {
   const keys = new Map<string, EnvKeyState>();
-  const lines = text.split(/\r\n|\r|\n/);
-  // Every key read so far is unsure too: a line past this point may assign it again.
-  const lost = (key?: string): EnvKeyStates => {
-    if (key) keys.set(key, "unsure");
-    for (const k of keys.keys()) keys.set(k, "unsure");
-    return { keys, lostTrack: true };
-  };
+  const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (/^[ \t]*(?:#.*)?$/.test(line)) continue;
+    const raw = lines[i]!;
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (line === "" || COMMENT.test(line)) continue;
     const m = ASSIGN.exec(line);
-    if (!m) return lost();
-    const key = m[1]!;
-    const rest = m[2]!.replace(/^[ \t]+/, "");
-    let value: string;
-    const q = rest[0];
-    if (q !== undefined && QUOTES.has(q)) {
-      // The quoted region: from after the opening quote to the first `q`, across lines.
-      let region = rest.slice(1);
-      let at = region.indexOf(q);
-      let j = i;
-      while (at < 0 && j + 1 < lines.length) {
-        j++;
-        region += "\n" + lines[j]!;
-        at = region.indexOf(q);
-      }
-      if (at < 0) return lost(key);
-      value = region.slice(0, at);
-      if (value.includes("\\") || !AFTER_CLOSE.test(region.slice(at + 1).split("\n")[0]!)) return lost(key);
-      i = j;
-    } else value = rest.split("#")[0]!; // a backslash here is literal to Bun too
-    keys.set(key, value.includes("$") ? "unsure" : value.trim() === "" ? "unset" : "set");
+    const state = m ? valueState(m[2]!) : null;
+    if (!m || !state) return { keys: new Map(), lostTrack: true, lostLine: i + 1 };
+    keys.set(m[1]!, state);
   }
   return { keys, lostTrack: false };
 }

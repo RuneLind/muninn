@@ -78,8 +78,8 @@ export async function probeEnv(key: string, deps: ProbeDeps): Promise<ProbeResul
   // No file: nothing was loaded from one, so the key provably is not in it.
   if ("missing" in read) return notYet(`${key} is not in .env (there is no .env here)`);
   const { keys, lostTrack } = envFileKeyStates(read.text);
+  if (lostTrack) return unknown(".env has a line muninn cannot read the way Bun does");
   const state = keys.get(key);
-  if (lostTrack || state === "unsure") return unknown(".env has a line muninn cannot read the way Bun does");
   if (state === "unset") return notYet(`${key} is in .env with an empty value`);
   if (state !== "set") return notYet(`${key} is not in .env`);
   if (!deps.processHasEnv(key)) return notYet(`${key} is set in .env, not in the running process: restart`);
