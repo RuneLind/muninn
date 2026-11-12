@@ -167,8 +167,17 @@ describe("pushed, real git: content filters", () => {
       // Stat-dirty, so a comparison would read f through the filter.
       utimesSync(path.join(work, "f"), OLD, OLD);
       expect(existsSync(ran)).toBe(false);
-      expect(await pushed(work)).toEqual({ state: "unknown", why: "skills uses a content filter: muninn does not run the repo's own commands" });
+      expect(await pushed(work)).toEqual({ state: "unknown", why: "git's config for skills names a content filter command: muninn does not run it" });
       expect(existsSync(ran)).toBe(false);
     });
   }
+
+  test("finding 2 (verify pass): a filter only in the user's global config, used by no attribute: unknown, and the why does not blame the repo", async () => {
+    const { base, work } = fixture();
+    const global = path.join(base, "global-gitconfig");
+    writeFileSync(global, "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n");
+    const git: ProbeDeps["git"] = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: global } });
+    const deps: ProbeDeps = { git, roots: { dirs: [], named: new Map([["skills", work]]) }, readEnvFile: async () => ({ missing: true }), processHasEnv: () => false, appliedMigrations: async () => new Set() };
+    expect(await probePushed("skills", deps)).toEqual({ state: "unknown", why: "git's config for skills names a content filter command: muninn does not run it" });
+  });
 });

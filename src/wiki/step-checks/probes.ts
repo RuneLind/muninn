@@ -7,19 +7,22 @@
  * write, no fetch, pull or checkout, no DB write; the git probes (`checkout`,
  * `pushed`) run with replace refs, grafts and lazy fetch off and answer a
  * partial clone `unknown` before any object lookup (`refusePartialClone`).
- * `pushed` runs no command the repo's config names: no fsmonitor hook, and a
- * content filter is `unknown` before any comparison. Every outside read comes
- * in through {@link ProbeDeps}, so tests never touch the real machine, except
- * `pushed`'s `lstat` of the git-dir files an operation in progress leaves, at
- * paths git names, its `realpath` of each worktree, and its scratch index, a
- * temp file outside the repo removed after use.
+ * `pushed` keeps git from running two kinds of command the config names: the
+ * fsmonitor hook (switched off) and content filters (`unknown` before any
+ * comparison). Like `checkout`, its `ls-remote` still runs what git runs to
+ * reach origin: `remote.origin.uploadpack`, credential helpers, the transport.
+ * Every outside read comes in through {@link ProbeDeps}, so tests never touch
+ * the real machine, except `pushed`'s `lstat` of the git-dir files an
+ * operation in progress leaves, at paths git names, its `realpath` of each
+ * worktree and git dir, its read of each linked git dir's `gitdir` file, and
+ * its scratch index, a temp file outside the repo removed after use.
  *
  * A `why` is one short sentence for the reader: it names keys, repos,
  * branches, versions and short shas, never an env value, file contents or a
  * path.
  */
 
-import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CheckProbe } from "../../format/check-tag.ts";
@@ -402,14 +405,15 @@ async function refuseHiddenEntries(dir: string, name: string, git: GitRun): Prom
 }
 
 /**
- * `unknown` when any config scope git reads in `dir` names a `filter.<x>.clean`
- * or `.process` command: comparing an attributed file runs it (git-lfs's
+ * `unknown` when any config scope git reads in `dir` (the repo's, the user's,
+ * the system's) names a `filter.<x>.clean` or `.process` command, whether or
+ * not an attribute uses it: comparing an attributed file runs it (git-lfs's
  * writes into the git dir). Null when none does.
  */
 async function refuseFilters(dir: string, label: string, git: GitRun): Promise<ProbeResult | null> {
   const res = await git(dir, ["config", "--get-regexp", "^filter\\..*\\.(clean|process)$"], { timeoutMs: GIT_LOCAL_MS });
   if (res.exitCode === 1 && !res.stderr?.trim() && !res.timedOut) return null;
-  if (res.exitCode === 0) return unknown(`${label} uses a content filter: muninn does not run the repo's own commands`);
+  if (res.exitCode === 0) return unknown(`git's config for ${label} names a content filter command: muninn does not run it`);
   return unknown(`${gitFailure(res, "git config")} on ${label}`);
 }
 
@@ -430,7 +434,8 @@ async function freshIndexDirty(dir: string, label: string, git: GitRun): Promise
   }
   try {
     const env = { GIT_INDEX_FILE: path.join(tmp, "index") };
-    // git 2.54 never splits a `GIT_INDEX_FILE` index (measured); the switch guards against a shared index written into the git dir.
+    // git splits only an index it read or one asked to split: `read-tree` into a fresh file wrote no `sharedindex.*`
+    // even under `core.splitIndex=true` (measured, git 2.54). The switch is a guard; an explicit `--split-index` would write one.
     const read = await git(dir, [...NO_FSMONITOR, "-c", "core.splitIndex=false", "read-tree", "HEAD"], { timeoutMs: GIT_LOCAL_MS, env });
     if (!read.ok || read.exitCode !== 0) return unknown(`${gitFailure(read, "git read-tree")} on ${label}`);
     const status = await git(dir, [...NO_FSMONITOR, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignore-submodules=none"], { timeoutMs: GIT_LOCAL_MS, env });
@@ -445,12 +450,12 @@ async function freshIndexDirty(dir: string, label: string, git: GitRun): Promise
 
 /**
  * Null when nothing tracked in worktree `wt` is modified or staged, proven by
- * content. `unknown` for a worktree whose directory is gone, an unborn HEAD,
- * an operation in progress, a content filter, a hidden index entry or a
- * submodule; `not-yet` for a staged or modified file.
+ * content. `unknown` for an unborn HEAD, an operation in progress, a content
+ * filter, a hidden index entry or a submodule; `not-yet` for a staged or
+ * modified file. The caller has proven `wt.real` is that worktree
+ * ({@link refuseMisplacedWorktrees}).
  */
-async function worktreeUncommitted(wt: WorktreeRecord & { real: string | null }, probed: boolean, name: string, git: GitRun): Promise<ProbeResult | null> {
-  if (wt.prunable || !wt.real) return unknown(`a worktree of ${name} is missing its directory: muninn cannot check it`);
+async function worktreeUncommitted(wt: WorktreeRecord & { real: string }, probed: boolean, name: string, git: GitRun): Promise<ProbeResult | null> {
   const label = probed ? name : `another worktree of ${name}`;
   if (wt.head === null || ZERO_SHA.test(wt.head)) return unknown(`${label} has no commit yet`);
   const dir = wt.real;
@@ -467,6 +472,75 @@ async function worktreeUncommitted(wt: WorktreeRecord & { real: string | null },
   return files ? dirty : null;
 }
 
+/** What git answers in a worktree directory, each path `realpath`'d; null for a path that does not resolve. */
+interface WorktreeIdentity {
+  gitDir: string | null;
+  common: string | null;
+  top: string | null;
+}
+
+/** `rev-parse` in `dir`: its git dir, common dir and toplevel, absolute. Otherwise the `unknown` to answer. */
+async function worktreeIdentity(dir: string, label: string, git: GitRun): Promise<WorktreeIdentity | ProbeResult> {
+  const res = await git(dir, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"], { timeoutMs: GIT_LOCAL_MS, maxLines: 3 });
+  const garbled = unknown(`git rev-parse gave an answer muninn cannot read on ${label}`);
+  if (res.capped) return garbled;
+  if (!res.ok || res.exitCode !== 0) return unknown(`${gitFailure(res, "git rev-parse")} on ${label}`);
+  const lines = res.stdout.split("\n").filter((l) => l !== "");
+  if (lines.length !== 3 || !lines.every((l) => path.isAbsolute(l))) return garbled;
+  const [gitDir, common, top] = await Promise.all(lines.map((l) => realpath(l).catch(() => null)));
+  return { gitDir: gitDir!, common: common!, top: top! };
+}
+
+/**
+ * The directory a linked git dir's `gitdir` file names (`<worktree>/.git`, absolute or
+ * relative to the git dir: gitrepository-layout), `realpath`'d; git lists that record
+ * at this path. Null when the file is missing, unreadable or of another shape.
+ */
+async function recordedDir(gitDir: string): Promise<string | null> {
+  try {
+    const line = (await readFile(path.join(gitDir, "gitdir"), "utf8")).trimEnd();
+    if (!line.endsWith("/.git")) return null;
+    return await realpath(path.dirname(path.resolve(gitDir, line)));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Null only when the worktree records and the git dirs are in bijection inside
+ * ONE repository, so every check runs in the worktree git recorded: every
+ * record's directory exists and resolves to a distinct directory; in each, git
+ * names (i) the probed repo's common dir and (ii) that directory as its
+ * toplevel; (iii) no two directories share a git dir; (iv) the main record's
+ * git dir is the common dir, and a linked record's is a linked git dir whose
+ * `gitdir` file names that directory. A directory replaced by a clone fails
+ * (i); one standing in for another worktree of the repo, listed or not (its
+ * `gitdir` file gone), fails (iv); a symlink onto another record's directory
+ * fails (iii). `resolved[0]` is the main record when it is not bare.
+ */
+async function refuseMisplacedWorktrees(resolved: readonly (WorktreeRecord & { real: string | null; main: boolean })[], dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
+  if (resolved.some((w) => w.prunable || !w.real)) return unknown(`a worktree of ${name} is missing its directory: muninn cannot check it`);
+  const own = resolved.filter((w) => w.real === dir);
+  if (own.length !== 1) return unknown(`git worktree list does not name ${name}'s own worktree once`);
+  if (new Set(resolved.map((w) => w.real)).size !== resolved.length) return unknown(`two worktrees of ${name} resolve to one directory`);
+  const label = (w: { real: string | null }) => (w.real === dir ? name : `another worktree of ${name}`);
+  // One git call at a time, the probed worktree first.
+  const answers = new Map<(typeof resolved)[number], WorktreeIdentity>();
+  for (const w of [own[0]!, ...resolved.filter((r) => r !== own[0])]) {
+    const id = await worktreeIdentity(w.real!, label(w), git);
+    if ("state" in id) return id;
+    answers.set(w, id);
+  }
+  const misplaced = unknown(`a worktree of ${name} is not where git recorded it`);
+  const common = answers.get(own[0]!)!.common;
+  if (common === null || [...answers].some(([w, a]) => a.common !== common || a.gitDir === null || a.top !== w.real)) return misplaced;
+  if (new Set([...answers.values()].map((a) => a.gitDir)).size !== answers.size) return unknown(`two worktrees of ${name} share one git dir`);
+  for (const [w, { gitDir }] of answers) {
+    if (w.main ? gitDir !== common : gitDir === common || (await recordedDir(gitDir!)) !== w.real) return misplaced;
+  }
+  return null;
+}
+
 /**
  * `pushed="<repo>"`: no commit reachable from a local branch (`refs/heads/*`)
  * or from any worktree's HEAD is missing from the branches origin has NOW, and
@@ -480,7 +554,8 @@ async function worktreeUncommitted(wt: WorktreeRecord & { real: string | null },
  * `not-yet`, some missing with a tip absent is `unknown` (the commits may sit
  * under that tip). Everything that could hide a change or a commit is
  * `unknown` before that: a partial or shallow clone, an origin that pushes
- * elsewhere than it reads, and per worktree a missing directory, an operation
+ * elsewhere than it reads, a worktree record that is not that worktree
+ * ({@link refuseMisplacedWorktrees}), and per worktree an operation
  * in progress, a content filter, a submodule, an assume-unchanged or
  * skip-worktree entry. Untracked files are not counted.
  */
@@ -504,14 +579,17 @@ export async function probePushed(name: string, deps: ProbeDeps): Promise<ProbeR
   const records = parseWorktreeList(listed.stdout);
   if (!records) return unknown(`git worktree list gave an answer muninn cannot read on ${name}`);
   const worktreeHeads = parseWorktreeHeads(listed.stdout)!;
-  const worktrees = records.filter((w) => w.head !== null);
+  // `git worktree list` names the main worktree first; a bare main has no HEAD and is skipped.
+  const worktrees = records.flatMap((w, i) => (w.head !== null ? [{ ...w, main: i === 0 }] : []));
   if (worktrees.length > PUSHED_MAX_WORKTREES) return unknown(`${name} has over ${PUSHED_MAX_WORKTREES} worktrees: muninn does not check them all`);
   const resolved = await Promise.all(worktrees.map(async (w) => ({ ...w, real: await realpath(w.path).catch(() => null) })));
-  const own = resolved.filter((w) => w.real === dir);
-  if (own.length !== 1) return unknown(`git worktree list does not name ${name}'s own worktree once`);
+  const misplaced = await refuseMisplacedWorktrees(resolved, dir, name, git);
+  if (misplaced) return misplaced;
+  const checked = resolved as (WorktreeRecord & { real: string })[];
+  const own = checked.find((w) => w.real === dir)!;
   // The probed worktree first, then the rest; the first answer that is not «clean» stands.
-  for (const wt of [own[0]!, ...resolved.filter((w) => w !== own[0])]) {
-    const found = await worktreeUncommitted(wt, wt === own[0], name, git);
+  for (const wt of [own, ...checked.filter((w) => w !== own)]) {
+    const found = await worktreeUncommitted(wt, wt === own, name, git);
     if (found) return found;
   }
   const head = await git(dir, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { timeoutMs: GIT_LOCAL_MS });

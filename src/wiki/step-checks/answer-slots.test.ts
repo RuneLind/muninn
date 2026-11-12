@@ -30,7 +30,7 @@ function repos(n: number): Map<string, string> {
   const named = new Map<string, string>();
   for (let i = 0; i < n; i++) {
     const dir = path.join(base, `repo${i}`);
-    mkdirSync(dir);
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
     named.set(`repo${i}`, dir);
   }
   return named;
@@ -52,6 +52,7 @@ function countingGit(delay: (args: string) => Promise<void>) {
       // `pushed`'s reads, answered as a clean, pushed repo.
       if (a.startsWith("config --get-regexp") && a.includes("pushurl")) return okRes("remote.origin.url u\n");
       if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
+      if (a === "rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel") return okRes(`${cwd}/.git\n${cwd}/.git\n${cwd}\n`);
       if (a === "rev-parse --is-shallow-repository") return okRes("false\n");
       if (a.startsWith("rev-parse --git-path")) return okRes(args.filter((x, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""));
       if (a === "rev-parse --verify --quiet HEAD^{commit}") return okRes(`${TIP}\n`);

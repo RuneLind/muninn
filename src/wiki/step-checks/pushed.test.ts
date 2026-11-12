@@ -4,16 +4,28 @@
  * rows against real git on throwaway repos are in `pushed-git*.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
-import { CHECKOUT_GIT_ENV, parseRemoteHeads, parseWorktreeHeads, parseWorktreeList, probePushed, type ProbeDeps } from "./probes.ts";
+import { CHECKOUT_GIT_ENV, parseRemoteHeads, parseWorktreeHeads, parseWorktreeList, probePushed, type ProbeDeps, type ProbeResult } from "./probes.ts";
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake-")));
 // A second worktree's directory: the probe resolves every listed worktree on disk.
 const DIR2 = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake2-")));
+const DIR3 = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake3-")));
+// The git dirs the fake's rev-parse names: DIR's own, and linked admin dirs whose `gitdir` files point back at DIR2 and DIR3.
+const COMMON = path.join(DIR, ".git");
+const ADMIN2 = path.join(COMMON, "worktrees", "w2");
+const ADMIN3 = path.join(COMMON, "worktrees", "w3");
+for (const [admin, wt] of [
+  [ADMIN2, DIR2],
+  [ADMIN3, DIR3],
+]) {
+  mkdirSync(admin!, { recursive: true });
+  writeFileSync(path.join(admin!, "gitdir"), `${wt}/.git\n`);
+}
 const OK = (stdout = ""): GitResult => ({ ok: true, stdout, exitCode: 0 });
 const EXIT = (code: number): GitResult => ({ ok: false, stdout: "", exitCode: code });
 const TIMED_OUT: GitResult = { ok: false, stdout: "", timedOut: true };
@@ -46,6 +58,8 @@ interface World {
   batch?: (stdin: string) => GitResult;
   count?: GitResult;
   source?: GitResult;
+  /** `rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel`, per worktree directory. */
+  identity?: (cwd: string) => GitResult;
 }
 interface Call {
   args: string[];
@@ -53,12 +67,22 @@ interface Call {
   stdin?: string;
 }
 
+const IDENTITY = "rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel";
+/** What real git says in DIR (the main worktree) and in DIR2 / DIR3 (linked ones). */
+const identityOf = (cwd: string): GitResult => {
+  if (cwd === DIR) return OK(`${COMMON}\n${COMMON}\n${DIR}\n`);
+  if (cwd === DIR2) return OK(`${ADMIN2}\n${COMMON}\n${DIR2}\n`);
+  if (cwd === DIR3) return OK(`${ADMIN3}\n${COMMON}\n${DIR3}\n`);
+  return EXIT(128);
+};
+
 /** One repo `skills` at {@link DIR}; records argv, env and stdin of every call. */
 function pushedGit(w: World, log: Call[] = []): GitRun {
-  return async (_cwd, args, opts) => {
+  return async (cwd, args, opts) => {
     log.push({ args: [...args], env: opts?.env, stdin: opts?.stdin });
     const a = args.join(" ").replace(/^-c core\.fsmonitor=false /, "").replace(/^-c core\.splitIndex=false /, "");
     if (a === "rev-parse --show-toplevel") return OK(`${DIR}\n`);
+    if (a === IDENTITY) return (w.identity ?? identityOf)(cwd);
     if (a === "remote get-url origin") return OK(`${URL}\n`);
     if (a.startsWith("config --get-regexp") && a.includes("promisor")) return w.promisor ?? EXIT(1);
     if (a.startsWith("config --get-regexp") && a.includes("pushurl")) return w.origin ?? OK(`remote.origin.url ${URL}\n`);
@@ -217,7 +241,7 @@ describe("pushed: the truth table over a fake git", () => {
   });
 
   test("findings 1-3 (PR #850): filter config, staged index, scratch index and worktree list rows", async () => {
-    expect(await run({ filters: OK("filter.lfs.clean git-lfs clean -- %f\n") })).toEqual({ state: "unknown", why: "skills uses a content filter: muninn does not run the repo's own commands" });
+    expect(await run({ filters: OK("filter.lfs.clean git-lfs clean -- %f\n") })).toEqual({ state: "unknown", why: "git's config for skills names a content filter command: muninn does not run it" });
     expect(await run({ filters: EXIT(128) })).toEqual({ state: "unknown", why: "git config failed on skills" });
     expect(await run({ staged: EXIT(1) })).toEqual({ state: "not-yet", why: "skills has uncommitted changes: commit and push" });
     expect(await run({ staged: EXIT(128) })).toEqual({ state: "unknown", why: "git diff-index failed on skills" });
@@ -248,6 +272,108 @@ describe("pushed: the truth table over a fake git", () => {
       { path: "/b", head: WT, branch: null, prunable: true },
       { path: "/c", head: null, branch: null, prunable: false },
     ]);
+  });
+
+  describe("finding 1 (verify pass on PR #850): records and git dirs in bijection inside one repository", () => {
+    const TWO = OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0`);
+    const THREE = OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0worktree ${DIR3}\0HEAD ${WT}\0detached\0\0`);
+    const MISPLACED: ProbeResult = { state: "unknown", why: "a worktree of skills is not where git recorded it" };
+    /** `identityOf`, with `cwd`'s answer replaced. */
+    const at = (dir: string, res: GitResult) => (cwd: string) => (cwd === dir ? res : identityOf(cwd));
+    const answer = (...lines: string[]) => OK(lines.map((l) => `${l}\n`).join(""));
+
+    test("three consistent records: ok, every record asked once, before any cleanliness check", async () => {
+      const log: Call[] = [];
+      expect((await run({ worktrees: THREE }, log)).state).toBe("ok");
+      const asked = log.flatMap((c, i) => (c.args.join(" ") === IDENTITY ? [i] : []));
+      expect(asked.length).toBe(3);
+      const firstCheck = log.findIndex((c) => c.args[0] === "rev-parse" && c.args[1] === "--git-path");
+      expect(Math.max(...asked)).toBeLessThan(firstCheck);
+    });
+
+    test("rev-parse failing, timing out, capped or answering a shape muninn cannot read: unknown, saying which", async () => {
+      expect(await run({ worktrees: TWO, identity: at(DIR, EXIT(128)) })).toEqual({ state: "unknown", why: "git rev-parse failed on skills" });
+      expect(await run({ worktrees: TWO, identity: at(DIR2, TIMED_OUT) })).toEqual({ state: "unknown", why: "git rev-parse timed out on another worktree of skills" });
+      expect(await run({ worktrees: TWO, identity: at(DIR2, EXIT(128)) })).toEqual({ state: "unknown", why: "git rev-parse failed on another worktree of skills" });
+      const garbled: ProbeResult = { state: "unknown", why: "git rev-parse gave an answer muninn cannot read on another worktree of skills" };
+      expect(await run({ worktrees: TWO, identity: at(DIR2, { ok: true, stdout: `${ADMIN2}\n${COMMON}\n${DIR2}\n`, exitCode: 0, capped: true }) })).toEqual(garbled);
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN2, COMMON)) })).toEqual(garbled);
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN2, COMMON, DIR2, DIR2)) })).toEqual(garbled);
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(".git/worktrees/w2", COMMON, DIR2)) })).toEqual(garbled);
+      // Two failures: the probed worktree's is the one named, wherever it is listed.
+      const twoFail = OK(`worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0worktree ${DIR}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0`);
+      expect(await run({ worktrees: twoFail, identity: (cwd) => (cwd === DIR ? TIMED_OUT : EXIT(128)) })).toEqual({ state: "unknown", why: "git rev-parse timed out on skills" });
+    });
+
+    test("(i) another repository's common dir, or one that does not resolve: unknown", async () => {
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN2, path.join(DIR2, ".git"), DIR2)) })).toEqual(MISPLACED);
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN2, path.join(DIR, "nowhere"), DIR2)) })).toEqual(MISPLACED);
+    });
+
+    test("(i) under a bare main record, a common dir that resolves for no record: unknown", async () => {
+      const admin1 = path.join(COMMON, "worktrees", "w1");
+      mkdirSync(admin1, { recursive: true });
+      writeFileSync(path.join(admin1, "gitdir"), `${DIR}/.git\n`);
+      const bareMain = OK(`worktree /bare\0bare\0\0worktree ${DIR}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0worktree ${DIR2}\0HEAD ${WT}\0detached\0\0`);
+      const gone = path.join(DIR, "no-such-common");
+      expect(await run({ worktrees: bareMain, identity: (cwd) => (cwd === DIR ? answer(admin1, gone, DIR) : answer(ADMIN2, gone, DIR2)) })).toEqual(MISPLACED);
+    });
+
+    test("a git dir that does not resolve: unknown", async () => {
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(path.join(COMMON, "worktrees", "gone"), COMMON, DIR2)) })).toEqual(MISPLACED);
+    });
+
+    test("(ii) a toplevel that is not the recorded directory: unknown", async () => {
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN2, COMMON, DIR3)) })).toEqual(MISPLACED);
+      expect(await run({ worktrees: TWO, identity: at(DIR, answer(COMMON, COMMON, DIR2)) })).toEqual(MISPLACED);
+    });
+
+    test("(iii) two records on one directory, or two directories on one git dir: unknown", async () => {
+      // DIR3 recorded twice: both records resolve to it.
+      expect(await run({ worktrees: OK(`${WORKTREES}worktree ${DIR3}\0HEAD ${WT}\0detached\0\0worktree ${DIR3}\0HEAD ${WT}\0detached\0\0`) })).toEqual({
+        state: "unknown",
+        why: "two worktrees of skills resolve to one directory",
+      });
+      expect(await run({ worktrees: THREE, identity: at(DIR3, answer(ADMIN2, COMMON, DIR3)) })).toEqual({ state: "unknown", why: "two worktrees of skills share one git dir" });
+    });
+
+    test("(iv) a git dir whose record does not name this directory: unknown", async () => {
+      // The main worktree's directory answering a linked git dir.
+      expect(await run({ worktrees: TWO, identity: at(DIR, answer(ADMIN3, COMMON, DIR)) })).toEqual(MISPLACED);
+      // A linked record's directory answering the common dir, under a bare main record (so no other record holds it).
+      const admin1 = path.join(COMMON, "worktrees", "w1");
+      mkdirSync(admin1, { recursive: true });
+      writeFileSync(path.join(admin1, "gitdir"), `${DIR}/.git\n`);
+      const bareMain = OK(`worktree /bare\0bare\0\0worktree ${DIR}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0worktree ${DIR2}\0HEAD ${WT}\0detached\0\0`);
+      const linkedOnly = (cwd: string) => (cwd === DIR ? answer(admin1, COMMON, DIR) : cwd === DIR2 ? answer(COMMON, COMMON, DIR2) : identityOf(cwd));
+      expect(await run({ worktrees: bareMain, identity: linkedOnly })).toEqual(MISPLACED);
+      // Even when the common dir holds a `gitdir` file naming that directory.
+      writeFileSync(path.join(COMMON, "gitdir"), `${DIR2}/.git\n`);
+      try {
+        expect(await run({ worktrees: bareMain, identity: linkedOnly })).toEqual(MISPLACED);
+      } finally {
+        rmSync(path.join(COMMON, "gitdir"));
+      }
+      // The same pair with DIR2 answering its own linked git dir is consistent.
+      expect((await run({ worktrees: bareMain, identity: (cwd) => (cwd === DIR ? answer(admin1, COMMON, DIR) : identityOf(cwd)) })).state).toBe("ok");
+      // A linked git dir whose `gitdir` names another directory (DIR3's admin dir, from DIR2).
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(ADMIN3, COMMON, DIR2)) })).toEqual(MISPLACED);
+      // A linked git dir with no `gitdir` file, and one whose `gitdir` does not end in /.git.
+      const bare = path.join(COMMON, "worktrees", "nofile");
+      mkdirSync(bare, { recursive: true });
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(bare, COMMON, DIR2)) })).toEqual(MISPLACED);
+      const odd = path.join(COMMON, "worktrees", "odd");
+      mkdirSync(odd, { recursive: true });
+      writeFileSync(path.join(odd, "gitdir"), `${DIR2}/notgit\n`);
+      expect(await run({ worktrees: TWO, identity: at(DIR2, answer(odd, COMMON, DIR2)) })).toEqual(MISPLACED);
+    });
+
+    test("(iv) a relative `gitdir` resolves against the git dir that holds it: ok", async () => {
+      const rel = path.join(COMMON, "worktrees", "rel");
+      mkdirSync(rel, { recursive: true });
+      writeFileSync(path.join(rel, "gitdir"), `${path.relative(rel, DIR2)}/.git\n`);
+      expect((await run({ worktrees: TWO, identity: at(DIR2, answer(rel, COMMON, DIR2)) })).state).toBe("ok");
+    });
   });
 
   const unknownRows: [string, World][] = [
