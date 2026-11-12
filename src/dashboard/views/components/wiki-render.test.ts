@@ -151,7 +151,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // form's body): 860,073 (292,789). Fix round 2 (the lead sentence reads a line with no <Check> outside
 // code with main's tag set): 860,258 (292,866).
 // 2026-11-12, owner-step chips (enhanceStepChecks, checkChip and its glyph table): 861,690 bytes (293,395 gzipped), from 860,258.
-const WIKI_CLIENT_MAX_BYTES = 862_000;
+// Its fix round 1 batch 3 (the chip after Done, a button with its reasons, no part of a copy): 862,338 (293,607).
+const WIKI_CLIENT_MAX_BYTES = 863_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

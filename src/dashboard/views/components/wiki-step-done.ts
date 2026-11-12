@@ -374,18 +374,29 @@ const CHIP: Record<CheckState, [glyph: string, label: string]> = { ok: ["\u2713"
 const known = (s: unknown): s is CheckState => typeof s === "string" && Object.prototype.hasOwnProperty.call(CHIP, s);
 const chipOf = (s: unknown) => (known(s) ? CHIP[s] : CHIP.unknown);
 
-/** A chip's text and its title: one machine reads «✓ checked», several «laptop ✓ · mini ?»; the title holds every probe's why. */
-export function checkChip(step: CheckedStep): { state: CheckState; text: string; title: string } {
+/** A chip's text, its name and its title: one machine reads «✓ checked» (named «Check: checked»), several «laptop ✓ · mini ?»; the title holds every probe's why. */
+export function checkChip(step: CheckedStep): { state: CheckState; text: string; name: string; title: string } {
   const state = known(step.state) ? step.state : "unknown";
   const ms = Array.isArray(step.machines) ? step.machines : [];
   const many = ms.length > 1;
-  const text = many ? ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[0]}`).join(" \u00B7 ") : chipOf(state).join(" ");
+  const each = (i: 0 | 1, sep: string) => ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[i]}`).join(sep);
+  const text = many ? each(0, " \u00B7 ") : chipOf(state).join(" ");
+  const name = `Check: ${CHIP[state][1]}${many ? ` (${each(1, ", ")})` : ""}`;
   const title = ms
     .flatMap((m) => (Array.isArray(m.probes) ? m.probes : []).map((p) => `${many && m.name ? `${m.name}: ` : ""}${p.kind}=${p.value}: ${p.why}`))
     .concat(step.problems ?? [])
     .join("\n");
-  return { state, text, title };
+  return { state, text, name, title };
 }
+
+/** Done goes before its row's slot, whichever answer came first: a chip that lands late then only ever grows the row to Done's right or below it. */
+function slotAfterDone(li: Element): void {
+  const slot = li.querySelector(":scope > .step-check");
+  const done = li.querySelector(`:scope > [${STEP_DONE_ATTR}]`);
+  if (slot && done) done.after(slot);
+}
+
+let whyIds = 0;
 
 /**
  * Fill the `.step-check` slot of each step the route answered with a chip.
@@ -410,15 +421,36 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
     const lanes = renderedLanes(article);
     const byKey = new Map(steps.map((s) => [s.key, s]));
     for (const pair of pairStepRows(lanes.map((l) => l.lane), { laneRows: a.laneRows as number[], steps: steps.map((s) => ({ key: s.key, lane: s.lane, row: s.row, refusal: null })) })) {
-      const slot = laneRows(lanes[pair.lane]!.el)[pair.row]?.querySelector<HTMLElement>(":scope > .step-check");
-      if (!slot || slot.firstChild) continue;
+      const li = laneRows(lanes[pair.lane]!.el)[pair.row];
+      const slot = li?.querySelector<HTMLElement>(":scope > .step-check");
+      if (!li || !slot || slot.firstChild) continue;
       const c = checkChip(byKey.get(pair.key)!);
-      const chip = article.ownerDocument.createElement("span");
+      const doc = article.ownerDocument;
+      // A button, so keyboard and touch reach the reasons: activating it shows or hides them, nothing else.
+      const chip = doc.createElement("button");
+      chip.type = "button";
       chip.className = "step-chip";
       chip.dataset.state = c.state;
       chip.textContent = c.text;
       chip.title = c.title;
+      chip.setAttribute("aria-label", c.name);
       slot.appendChild(chip);
+      if (c.title) {
+        const why = doc.createElement("span");
+        why.className = "step-chip-why";
+        why.id = `step-chip-why-${++whyIds}`;
+        why.hidden = true;
+        why.textContent = c.title;
+        chip.setAttribute("aria-describedby", why.id);
+        chip.setAttribute("aria-expanded", "false");
+        chip.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          why.hidden = !why.hidden;
+          chip.setAttribute("aria-expanded", String(!why.hidden));
+        });
+        slot.appendChild(why);
+      }
     }
   })();
 }
@@ -483,6 +515,7 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
       const text = li.querySelector<HTMLElement>(":scope > .check-text");
       if (text) text.appendChild(btn);
       else li.insertBefore(btn, li.querySelector(":scope > ul, :scope > ol"));
+      slotAfterDone(li);
     }
   })();
 }
@@ -529,10 +562,15 @@ export function stepDoneStyles(): string {
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
     .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }
+    /* The chip and its reasons are no part of a copied row. */
+    .step-check { user-select: none; -webkit-user-select: none; }
     .step-chip {
-      margin-left: 0.5em; padding: 0 0.45em; font-size: 11px; line-height: 1.5; border-radius: 6px; white-space: nowrap;
-      border: 1px solid var(--border-secondary); color: var(--text-secondary); cursor: help;
+      margin-left: 0.5em; padding: 0 0.45em; font-family: inherit; font-size: 11px; line-height: 1.5; vertical-align: baseline;
+      border-radius: 6px; white-space: nowrap; background: transparent; cursor: pointer;
+      border: 1px solid var(--border-secondary); color: var(--text-secondary);
     }
+    .step-chip-why { display: block; margin: 2px 0 4px; font-size: 12px; color: var(--text-secondary); white-space: pre-line; }
+    .step-chip-why[hidden] { display: none; }
     /* The pill text tones (shared-styles), not the bare status colours: those measure under AA at 11px in light. */
     .step-chip[data-state="ok"] { color: var(--tone-good); border-color: var(--status-success); }
     .step-chip[data-state="not-yet"] { color: var(--tone-warn); border-color: var(--status-warning); }`;
