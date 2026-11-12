@@ -12,12 +12,13 @@
  * (c) and (d)).
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import { envFileKeyStates } from "./env-names.ts";
 import { probeEnv, type ProbeDeps } from "./probes.ts";
+import { readDotEnv } from "./real-deps.ts";
 
 const FULL = process.env.ENV_NAMES_SWEEP === "full";
 
@@ -27,9 +28,14 @@ const isPlain = (ch: string) => code(ch) >= 0x20 && code(ch) <= 0x7e;
 const isSafe = (ch: string) => code(ch) >= 0x21 && code(ch) <= 0x7e && !"\"'`\\$#".includes(ch);
 const isKeyStart = (ch: string) => /^[A-Za-z_]$/.test(ch);
 const isKeyChar = (ch: string) => /^[A-Za-z0-9_]$/.test(ch);
+/** One code point of a comment: tab, printable ASCII, or a scalar value at U+00A0 or above (a lone surrogate is none). */
+const isCommentChar = (ch: string) => {
+  const cp = ch.codePointAt(0)!;
+  return ch === "\t" || isPlain(ch) || (cp >= 0xa0 && (cp < 0xd800 || cp > 0xdfff));
+};
 function specLine(line: string): boolean {
   if (line === "") return true;
-  if (line[0] === "#") return [...line.slice(1)].every(isPlain);
+  if (line[0] === "#") return [...line.slice(1)].every(isCommentChar);
   const s = line.startsWith("export ") ? line.slice(7) : line;
   const eq = s.indexOf("=");
   if (eq < 1) return false;
@@ -74,6 +80,8 @@ function bunLoads(texts: readonly string[]): Map<string, number>[] {
     if (proc.exitCode !== 0) throw new Error(`bun exited ${proc.exitCode}`);
     for (const [k, len] of JSON.parse(proc.stdout.toString()) as [string, number][]) out[Number(/ZQ(\d+)_/.exec(k)![1])]?.set(k, len);
   }
+  // Removed now, not at the run's end: the full sweep writes ~200,000 files, past the end hook's timeout.
+  rmSync(dir, { recursive: true, force: true });
   return out;
 }
 
@@ -157,15 +165,123 @@ describe("envFileKeyStates: the grammar, case by case", () => {
     expect(r).toEqual({ keys: new Map(), lostTrack: true, lostLine: 3 });
   });
   test("each construct just outside the grammar loses track", () => {
-    for (const text of ["export  A=1", "export\tA=1", " A=1", "A=1 ", "A =1", "1A=1", "A-B=1", "A.B=1", "A", "=1", 'A="  "', "A='x'y", "A=\"x\" ", "A=`x`", "A=\"a'b\"", " #c", "#\tc", "A=x\r\r", "A=x\rB=y"])
+    for (const text of ["export  A=1", "export\tA=1", " A=1", "A=1 ", "A =1", "1A=1", "A-B=1", "A.B=1", "A", "=1", 'A="  "', "A='x'y", "A=\"x\" ", "A=`x`", "A=\"a'b\"", " #c", "\t#c", "#\0c", "#\vc", "#\fc", "#\rc", "#c\r\r", "#\x7fc", "#\x80c", "#\x85c", "#\x9fc", "#\ud800c", "#c\udfff", "A=x\r\r", "A=x\rB=y"])
       expect([text, envFileKeyStates(text).lostTrack]).toEqual([text, true]);
+  });
+  test("non-ASCII in a key, an unquoted value or a quoted value loses track", () => {
+    for (const text of ["Aé=1\n", "A=é\n", "A=x—y\n", 'A="é"\n', "A='x y—'\n", "A=\u00a0\n", "A=x\u2028\n", "A=x#é\n", "A=x # —\n", 'A="x" # é\n'])
+      expect([text, envFileKeyStates(text)]).toEqual([text, { keys: new Map(), lostTrack: true, lostLine: 1 }]);
+  });
+  test("the line number of a lost line counts every line before it, comments included", () => {
+    expect(envFileKeyStates("# — a\r\n\nA=1\n#\tb\nB=é\n")).toEqual({ keys: new Map(), lostTrack: true, lostLine: 5 });
+  });
+});
+
+describe("envFileKeyStates against Bun: comments beyond ASCII", () => {
+  const DIRECT: [string, (p: string) => string][] = [
+    ["an em dash comment", (p) => `${p}A=1\n# a — b\n${p}B=2\n`],
+    ["an en dash comment", (p) => `${p}A=1\n# 2026–11\n${p}B=2\n`],
+    ["# é", (p) => `${p}A=1\n# é\n${p}B=\n`],
+    ["a comment with a tab", (p) => `${p}A=1\n#\tx\t\n${p}B=2\n`],
+    ["a comment of only #", (p) => `${p}A=1\n#\n${p}B=2\n`],
+    ["CRLF after a non-ASCII comment", (p) => `${p}A=1\r\n# → é —\r\n${p}B=2\r\n`],
+    ["a non-ASCII comment as the last line, no newline", (p) => `${p}A=1\n# ✓ done`],
+  ];
+  DIRECT.forEach(([what, make]) => {
+    bunTest(`${what}: keeps track and agrees with Bun`, () => {
+      const text = make("ZQ0_");
+      expect(spec(text)).toBe(true);
+      expect(envFileKeyStates(text).lostTrack).toBe(false);
+      expect(disagreements(text, bunLoads([text])[0]!)).toEqual([]);
+    });
+  });
+  bunTest("non-ASCII in a key, an unquoted value or a quoted value: lost track, no claim against Bun", () => {
+    const texts = ["ZQ0_Aé=1\nZQ0_B=1\n", "ZQ1_A=é\n", 'ZQ2_A="é"\n', "ZQ3_A='—'\n"];
+    const bun = bunLoads(texts);
+    texts.forEach((t, i) => {
+      expect([t, envFileKeyStates(t).lostTrack]).toEqual([t, true]);
+      expect(disagreements(t, bun[i]!)).toEqual([]);
+    });
+  });
+
+  /** The code points one comment character is tried with; the committed run is a fixed slice, `ENV_NAMES_SWEEP=full` the whole set. */
+  function sweepCodePoints(): number[] {
+    const out: number[] = [];
+    const take = (c: number) => (c < 0xd800 || c > 0xdfff) && out.push(c);
+    for (let c = 0; c <= 0xffff; c++) if (FULL || c <= 0x7ff || c % 17 === 0) take(c);
+    for (let c = 0x10000; c <= 0x10ffff; c += FULL ? 251 : 4096) take(c);
+    for (const c of [0x10ffff, 0xe000, 0xfffd, 0xfffe, 0xffff, 0x2028, 0x2029, 0x0085, 0x200b, 0x202e, 0xfeff]) take(c);
+    return out;
+  }
+  bunTest("every code point in a comment, mid-comment and last: kept exactly where the grammar says, and then the comment swallows and hides nothing", () => {
+    const started = performance.now();
+    const cps = sweepCodePoints();
+    const makers = cps.flatMap((c) => {
+      const ch = String.fromCodePoint(c);
+      return [(p: string) => `${p}A=1\n#x${ch}y\n${p}B=1\n`, (p: string) => `${p}A=1\n#x${ch}\n${p}B=1\n`];
+    });
+    const texts = makers.map((m, i) => m(`ZQ${i}_`));
+    const bun = bunLoads(texts);
+    const bad: string[] = [];
+    let kept = 0;
+    texts.forEach((t, i) => {
+      const lost = envFileKeyStates(t).lostTrack;
+      if (lost === spec(t)) bad.push(`U+${cps[i >> 1]!.toString(16)}: reader lostTrack=${lost}, grammar ${spec(t) ? "in" : "out"}`);
+      if (lost) return;
+      kept++;
+      const m = bun[i]!;
+      if (m.get(`ZQ${i}_A`) !== 1 || m.get(`ZQ${i}_B`) !== 1 || m.size !== 2) bad.push(`U+${cps[i >> 1]!.toString(16)} form ${i & 1}: Bun loaded ${JSON.stringify([...m])}`);
+    });
+    expect(bad).toEqual([]);
+    expect(kept).toBeGreaterThan(texts.length / 2);
+    expect(kept).toBeLessThan(texts.length);
+    if (FULL) console.info(`code points: ${texts.length} cases, ${kept} in the grammar, ${bad.length} disagreements, ${Math.round(performance.now() - started)} ms`);
+  }, 120_000);
+
+  bunTest("malformed UTF-8 in a comment: readDotEnv decodes it to U+FFFD with the newlines intact, the reader keeps track, and Bun still loads the next key", async () => {
+    const SEQS: number[][] = [[0xe2, 0x80], [0xc3], [0xff], [0xc0, 0x80], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf0, 0x9f], [0xf8, 0x88, 0x80, 0x80, 0x80]];
+    for (let b = 0x80; b <= 0xff; b++) SEQS.push([b]);
+    const utf8 = (s: string) => [...new TextEncoder().encode(s)];
+    const dirs: string[] = [];
+    const files: Uint8Array[] = [];
+    SEQS.forEach((seq, j) => {
+      for (const [eol, mid] of [["\n", "y"], ["\n", ""], ["\r\n", ""]]) {
+        const p = `ZQ${files.length}_`;
+        files.push(Uint8Array.from([...utf8(`${p}A=1${eol}#x`), ...seq, ...utf8(`${mid}${eol}${p}B=1${eol}`)]));
+        dirs.push(testTempDirSync(path.join(ROOT, `raw${j}-`)));
+      }
+    });
+    files.forEach((bytes, i) => writeFileSync(path.join(dirs[i]!, ".env"), bytes));
+    const proc = Bun.spawnSync([process.execPath, ...dirs.map((d) => `--env-file=${path.join(d, ".env")}`), "-e", PRINT], { cwd: ROOT, env: { PATH: process.env.PATH ?? "" }, stdout: "pipe", stderr: "pipe" });
+    expect(proc.exitCode).toBe(0);
+    const loaded = new Map(JSON.parse(proc.stdout.toString()) as [string, number][]);
+    const bad: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const read = await readDotEnv(dirs[i]!);
+      if (!("text" in read)) {
+        bad.push(`${i}: not read`);
+        continue;
+      }
+      const lines = read.text.split("\n");
+      if (lines.length !== 4 || !lines[1]!.includes("\ufffd")) bad.push(`${i}: decoded to ${lines.length} lines, U+FFFD ${lines[1]!.includes("\ufffd")}`);
+      if (envFileKeyStates(read.text).lostTrack || !spec(read.text)) bad.push(`${i}: reader or grammar out`);
+      if (loaded.get(`ZQ${i}_A`) !== 1 || loaded.get(`ZQ${i}_B`) !== 1) bad.push(`${i}: Bun A=${loaded.get(`ZQ${i}_A`)} B=${loaded.get(`ZQ${i}_B`)}`);
+    }
+    expect(bad).toEqual([]);
+    expect(files.length).toBe(SEQS.length * 3);
   });
 });
 
 describe("envFileKeyStates: no value leaves it", () => {
   test("no marker substring in the result, the probe's answers or a thrown error, and the module logs nothing", async () => {
-    const markers = ["MARKERone", "MARKERtwo", "MARKERthree", "MARKERfour"];
-    const texts = [`A=${markers[0]}\nB="${markers[1]} x"\nC='${markers[2]}'\n`, `A=${markers[3]} broken\nB=${markers[0]}\n`];
+    const markers = ["MARKERone", "MARKERtwo", "MARKERthree", "MARKERfour", "MARKERfive", "MARKERsix", "MARKERseven"];
+    const texts = [
+      `A=${markers[0]}\nB="${markers[1]} x"\nC='${markers[2]}'\n`,
+      `A=${markers[3]} broken\nB=${markers[0]}\n`,
+      `# ${markers[4]} — é\nA=1\n#\t${markers[5]}\n`,
+      `# ${markers[4]} —\nA=${markers[6]}é\n`,
+      `A=1\n#${markers[5]}\v${markers[6]}\nB=2\n`,
+    ];
     const seen: string[] = [];
     for (const text of texts) {
       try {
@@ -176,7 +292,10 @@ describe("envFileKeyStates: no value leaves it", () => {
       for (const key of ["A", "B", "C", "NOPE"])
         for (const has of [true, false]) seen.push(JSON.stringify(await probeEnv(key, envDeps(text, has))));
     }
-    expect(seen.length).toBe(2 * (2 + 8));
+    expect(seen.length).toBe(texts.length * (2 + 8));
+    // Both answers are exercised: a kept file and a lost one.
+    expect(seen.some((s) => s.includes('"state":"ok"'))).toBe(true);
+    expect(seen.some((s) => s.includes(".env line 2 is not"))).toBe(true);
     for (const m of markers) for (const s of seen) expect(s).not.toContain(m);
     // Nothing to log with: the reader imports nothing.
     expect(readFileSync(path.join(import.meta.dir, "env-names.ts"), "utf8")).not.toMatch(/^\s*import\s/m);
@@ -190,7 +309,7 @@ function envDeps(text: string, processHas: boolean): ProbeDeps {
 describe("probeEnv over the reader", () => {
   test("lost track answers unknown for every key, even one assigned before the broken line and held by the process", async () => {
     for (const key of ["EARLY", "LATE", "NOPE"])
-      expect(await probeEnv(key, envDeps("EARLY=1\nBAD LINE\nLATE=2\n", true))).toEqual({ state: "unknown", why: ".env has a line muninn cannot read the way Bun does" });
+      expect(await probeEnv(key, envDeps("EARLY=1\nBAD LINE\nLATE=2\n", true))).toEqual({ state: "unknown", why: ".env line 2 is not a form muninn can read the way Bun does" });
   });
 });
 
@@ -246,6 +365,8 @@ function rng(seed: number) {
 type R = () => number;
 const pick = <T,>(r: R, xs: readonly T[]) => xs[Math.floor(r() * xs.length)]!;
 const SAFE = PLAIN.filter(isSafe);
+/** What a seeded comment is drawn from: ASCII, tab, and non-ASCII from every UTF-8 length, the separators and the specials. */
+const COMMENT_CHARS = [...PLAIN, "\t", "\t", ..."é—–→\u00a0\u2028\u2029\u200b\u202e\ufeff\ufffd\ufffe\uffff\ue000ø漢✓", "\u{1f600}", "\u{10ffff}", "\u{10000}"];
 const str = (r: R, alphabet: readonly string[], min: number, max: number) => Array.from({ length: min + Math.floor(r() * (max - min + 1)) }, () => pick(r, alphabet)).join("");
 
 /** One in-grammar `.env` text whose keys all carry prefix `p`. */
@@ -256,7 +377,7 @@ function inGrammarText(r: R, p: string): string {
     const roll = r();
     let line: string;
     if (roll < 0.08) line = "";
-    else if (roll < 0.16) line = "#" + str(r, PLAIN, 0, 12);
+    else if (roll < 0.16) line = "#" + str(r, COMMENT_CHARS, 0, 12);
     else {
       const v = r();
       let value: string;

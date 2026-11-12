@@ -6,19 +6,25 @@
  * A closed grammar: the reader keeps track only when EVERY line (split on
  * `\n`, one trailing `\r` dropped) is one of
  *   - empty;
- *   - `#` then printable ASCII (0x20–0x7E);
+ *   - `#` as the line's first character, then any of: tab, printable ASCII
+ *     (0x20–0x7E), a Unicode scalar value at U+00A0 or above (so U+FFFD,
+ *     which `Bun.file().text()` makes of malformed UTF-8, too);
  *   - `[export ]KEY=VALUE`: `export` and exactly one space, KEY
  *     `[A-Za-z_][A-Za-z0-9_]*`, no whitespace around `=`, and VALUE one of
  *     empty (`unset`); one or more SAFE characters (`set`); `"…"` or `'…'`
  *     closing at the line's end, its body SAFE characters and spaces (`set`
  *     with a SAFE character in it, `unset` when empty).
  * SAFE is 0x21–0x7E minus `"` `'` `` ` `` `\` `$` `#`. Anything else (a
- * spaces-only quoted body, leading or trailing whitespace, a tab, non-ASCII,
- * a control character, a BOM, an inline comment, a colon form) sets
- * `lostTrack`: no key is claimed and the probe answers `unknown`. The last
+ * spaces-only quoted body, leading or trailing whitespace, a tab or non-ASCII
+ * outside a comment, a C0 control but tab, DEL, a C1 control or a lone
+ * surrogate anywhere, a BOM, an inline comment, a colon form) sets
+ * `lostTrack`: no key is claimed and the probe answers `unknown`. Bun 1.3.10
+ * kept every code point in a comment as comment content; controls stay out
+ * because nothing needs them. The last
  * assignment of a key decides, as in Bun. `env-names.test.ts` holds every
  * production to a child `bun --env-file` (Bun 1.3.10): every character in
- * eight positions, two-character values, and seeded whole files.
+ * eight positions, two-character values, code points in a comment, malformed
+ * UTF-8 in a comment, and seeded whole files.
  */
 
 export type EnvKeyState = "set" | "unset";
@@ -29,7 +35,7 @@ export type EnvKeyStates =
   | { keys: ReadonlyMap<string, EnvKeyState>; lostTrack: true; lostLine: number };
 
 const SAFE = String.raw`\x21\x25\x26\x28-\x5B\x5D-\x5F\x61-\x7E`;
-const COMMENT = /^#[\x20-\x7E]*$/;
+const COMMENT = /^#[\t\x20-\x7E\u00A0-\uD7FF\uE000-\u{10FFFF}]*$/u;
 const ASSIGN = /^(?:export )?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 const UNQUOTED = new RegExp(`^[${SAFE}]+$`);
 const QUOTED = new RegExp(`^(?:"([${SAFE} ]*)"|'([${SAFE} ]*)')$`);

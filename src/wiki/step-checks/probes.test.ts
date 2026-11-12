@@ -95,23 +95,23 @@ describe("env", () => {
     expect(await probeEnv("SET_KEY", deps({ readEnvFile: async () => ({ failed: true }) }))).toEqual({ state: "unknown", why: ".env could not be read" });
   });
   test("a key on a line the reader cannot read the way Bun does: unknown, even when the process has it", async () => {
-    const UNREAD = { state: "unknown" as const, why: ".env has a line muninn cannot read the way Bun does" };
+    const UNREAD = { state: "unknown" as const, why: ".env line 1 is not a form muninn can read the way Bun does" };
     // `$UNSET` loads empty under Bun; `KEY: v` is Bun syntax the reader does not follow.
     for (const text of ["K=$UNSET\n", "K=${UNSET}\n", 'K="a$b"\n', "K: v\n", 'K="a\\"b"\n'])
       expect([text, await probeEnv("K", deps({ readEnvFile: async () => ({ text }) }))]).toEqual([text, UNREAD]);
   });
   test("an unclosed quote, or a backslash in a quoted value, makes every key unknown: a clean line after it may be no key", async () => {
-    const UNREAD = { state: "unknown" as const, why: ".env has a line muninn cannot read the way Bun does" };
+    const UNREAD = { state: "unknown" as const, why: ".env line 1 is not a form muninn can read the way Bun does" };
     // Bun reads `\"` as an escaped quote, so INESC is inside ESC's value.
     expect(await probeEnv("INESC", deps({ readEnvFile: async () => ({ text: 'ESC="a\\"\nINESC=fake\ntail"\n' }) }))).toEqual(UNREAD);
     // Bun sets AFTER and reads UNCLOSED raw; the reader cannot follow either.
     expect(await probeEnv("AFTER", deps({ readEnvFile: async () => ({ text: 'UNCLOSED="abc\nAFTER=after\n' }) }))).toEqual(UNREAD);
     // A key BEFORE the open quote is unknown too: a later line could assign it again.
-    expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ text: 'EARLY=1\nUNCLOSED="abc\n' }) }))).toEqual(UNREAD);
+    expect(await probeEnv("EARLY", deps({ readEnvFile: async () => ({ text: 'EARLY=1\nUNCLOSED="abc\n' }) }))).toEqual({ ...UNREAD, why: ".env line 2 is not a form muninn can read the way Bun does" });
   });
   test("a colon line before the key: unknown, never ok, though the shell exported the key (Bun reads the next line as the colon key's value)", async () => {
     const r = await probeEnv("WIKI_FLAG", deps({ readEnvFile: async () => ({ text: "OTHER_SETTING:\nWIKI_FLAG=1\n" }), processHasEnv: () => true }));
-    expect(r).toEqual({ state: "unknown", why: ".env has a line muninn cannot read the way Bun does" });
+    expect(r).toEqual({ state: "unknown", why: ".env line 1 is not a form muninn can read the way Bun does" });
     // Bun keeps AA=x (the `AA=` line is BB's value): not «empty value».
     expect((await probeEnv("AA", deps({ readEnvFile: async () => ({ text: "AA=x\nBB:\nAA=\n" }) }))).state).toBe("unknown");
     // Bun sets E: not «not in .env».
