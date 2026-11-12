@@ -2,11 +2,14 @@
  * The step checks' applied-migrations read (`readAppliedMigrations`,
  * `src/wiki/step-checks/real-deps.ts`) against the REAL test database, on the
  * shared 5-connection pool with every connection busy: the probe answers
- * `unknown` at its 100 ms bound, and no statement another caller has pipelined
+ * `unknown` at its 40 ms bound, and no statement another caller has pipelined
  * behind the read is ever cancelled. Cancelling a pipelined postgres.js query
  * sends a CancelRequest for the backend's pid, which lands on whatever that
- * backend runs then, usually the next caller's statement (reproduced: 3 of 60
- * rounds). Here the read is only raced by a timer and left to finish.
+ * backend runs then, usually the next caller's statement (a cancelling read in
+ * this harness failed a foreign statement in 29 of 30 rounds, 2026-11-12). Here
+ * the read is only raced by a timer and left to finish. The holds are 120 ms
+ * and the rounds 15 to stay under CI's 10 s per-file bar (was 300 ms × 30,
+ * 12 s); the read still cannot get a connection before ~90 ms, past the bound.
  */
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -20,7 +23,9 @@ import { readAppliedMigrations } from "../wiki/step-checks/real-deps.ts";
 setupTestDb();
 
 const POOL = 5;
-const ROUNDS = 30;
+const ROUNDS = 15;
+const HOLD_S = 0.12;
+const BOUND_MS = 40;
 const page = ["---", "title: T", "---", "", "<NextMoves>", "", '<Lane kind="you">', "", '1. M <Check migration="001" />', "", "</Lane>", "", "</NextMoves>", ""].join("\n");
 
 function probeDeps(read: () => Promise<ReadonlySet<string>>): ProbeDeps {
@@ -47,9 +52,9 @@ async function round(read: () => Promise<ReadonlySet<string>>): Promise<{ state:
     () => undefined,
     (e: unknown) => void failures.push(e instanceof Error ? e.message : String(e)),
   );
-  const holds = Array.from({ length: POOL }, () => caught(sql`SELECT pg_sleep(0.3)`));
+  const holds = Array.from({ length: POOL }, () => caught(sql`SELECT pg_sleep(${HOLD_S})`));
   await Bun.sleep(30);
-  const answered = answerStepChecks(page, { probes: probeDeps(read), machine: null, cache: new ProbeCache(), boundMs: 100 });
+  const answered = answerStepChecks(page, { probes: probeDeps(read), machine: null, cache: new ProbeCache(), boundMs: BOUND_MS });
   await Bun.sleep(5);
   const behind = Array.from({ length: 3 * POOL }, (_, i) => caught(sql`SELECT pg_sleep(0.02), ${i}::int AS i`));
   const a = await answered;
