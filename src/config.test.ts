@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig, resolveMachineName } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -486,5 +486,16 @@ describe("WIKI_ANSWER_GROUPS", () => {
     }
     // No groups: nothing to clash with.
     expect(answerGroupsBootLines(resolveWikiAnswerConfig({ WIKI_ANSWER_OWNER: "fag" })).warnings).toEqual([]);
+  });
+});
+
+describe("resolveMachineName (MUNINN_MACHINE)", () => {
+  test("trimmed and lower-cased; unset, blank or not a machine name is null", () => {
+    expect(resolveMachineName(" Laptop ")).toBe("laptop");
+    expect(resolveMachineName("mini")).toBe("mini");
+    expect(resolveMachineName(undefined)).toBeNull();
+    expect(resolveMachineName("  ")).toBeNull();
+    expect(resolveMachineName("my laptop")).toBeNull();
+    expect(resolveMachineName("-x")).toBeNull();
   });
 });

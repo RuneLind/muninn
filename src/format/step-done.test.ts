@@ -487,9 +487,10 @@ describe("the postcondition", () => {
 describe("youListStepLines", () => {
   test("each step's FIRST source line, counted from the top of the file", () => {
     const text = page(moves(you("1. Do\n   more\n2. Second")));
+    const keys = listYouSteps(text)!.map((s) => s.key);
     expect(youListStepLines(text)).toEqual([
-      { line: 9, text: "Do\nmore", taskList: false },
-      { line: 11, text: "Second", taskList: false },
+      { key: keys[0]!, line: 9, text: "Do\nmore", taskList: false },
+      { key: keys[1]!, line: 11, text: "Second", taskList: false },
     ]);
   });
 });

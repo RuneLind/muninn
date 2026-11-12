@@ -352,7 +352,10 @@ alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
 model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the
 search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
 the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
-atlas), the MCP-status probe and the two WS upgrade paths. A second list,
+atlas), the spawning wiki reads (plan-card, the work map's GitHub check, the
+decision inbox, felles-status, and `/api/wiki/step-checks`, whose probes spawn
+git and run one network `ls-remote` per named repo), the MCP-status probe and
+the two WS upgrade paths. A second list,
 `REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
 whose `?refresh=1` forces a rebuild — `/api/wiki/pages`,
 `/api/wiki/index-coverage` and `/api/wiki/stale` (a full index build with its git reads),

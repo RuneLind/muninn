@@ -409,6 +409,8 @@ export const E2E_PORTS = {
   "wiki-phone-width": 3241,
   // Done on a `you`-lane step: preview, remove, the next Done, the stale refusal.
   "wiki-step-done": 3242,
+  // The owner-step check chips beside Done: env and migration probes on a spawned muninn.
+  "wiki-step-checks": 3244,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

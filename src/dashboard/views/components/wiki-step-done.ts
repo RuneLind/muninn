@@ -28,6 +28,10 @@
  * also sit in `WIKI_READONLY_BLOCKED_SELECTOR` (and so in the read slice's
  * hidden set). For a wiki outside the close route's scope, or one with no
  * registry name, the list answers 200 with no steps and no hash: no buttons.
+ *
+ * The owner-step check chips (`enhanceStepChecks`, PR 2 of the owner-step
+ * checks) ride the same pairing from their own route's answer, behind
+ * `wikiToolsFlag` only: they read, so a read-only wiki gets them too.
  */
 
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
@@ -356,6 +360,69 @@ async function write(
   setOff(go, !retryable(r.status, r.data));
 }
 
+type CheckState = "ok" | "not-yet" | "unknown";
+interface CheckedStep {
+  key: string;
+  lane: number;
+  row: number;
+  state: CheckState;
+  machines: { name: string | null; state: CheckState; why: string; probes: { kind: string; value: string; why: string }[] }[];
+  problems?: string[];
+}
+
+const CHIP: Record<CheckState, [glyph: string, label: string]> = { ok: ["\u2713", "checked"], "not-yet": ["\u25CB", "not yet"], unknown: ["?", "unknown"] };
+const known = (s: unknown): s is CheckState => typeof s === "string" && Object.prototype.hasOwnProperty.call(CHIP, s);
+const chipOf = (s: unknown) => (known(s) ? CHIP[s] : CHIP.unknown);
+
+/** A chip's text and its title: one machine reads «✓ checked», several «laptop ✓ · mini ?»; the title holds every probe's why. */
+export function checkChip(step: CheckedStep): { state: CheckState; text: string; title: string } {
+  const state = known(step.state) ? step.state : "unknown";
+  const ms = Array.isArray(step.machines) ? step.machines : [];
+  const many = ms.length > 1;
+  const text = many ? ms.map((m) => `${m.name ?? "here"} ${chipOf(m.state)[0]}`).join(" \u00B7 ") : chipOf(state).join(" ");
+  const title = ms
+    .flatMap((m) => (Array.isArray(m.probes) ? m.probes : []).map((p) => `${many && m.name ? `${m.name}: ` : ""}${p.kind}=${p.value}: ${p.why}`))
+    .concat(step.problems ?? [])
+    .join("\n");
+  return { state, text, title };
+}
+
+/**
+ * Fill the `.step-check` slot of each step the route answered with a chip.
+ * Rows pair as Done's do (`pairStepRows`), never by a slot's own attributes.
+ * No slot on the page, a failed request, or an answer for other page bytes:
+ * no request or no chips. Exported for the DOM test; `get` is `fetch`.
+ */
+export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext, get: (url: string) => Promise<Response> = (u) => fetch(u)): Promise<void> {
+  if (!article.querySelector(".step-check")) return Promise.resolve();
+  const shown = ctx.hash();
+  return (async () => {
+    let a: { hash?: unknown; laneRows?: unknown; steps?: unknown };
+    try {
+      const res = await get(`/api/wiki/step-checks?wiki=${encodeURIComponent(ctx.wiki)}&relPath=${encodeURIComponent(ctx.relPath)}`);
+      if (!res.ok) return;
+      a = await res.json();
+    } catch {
+      return;
+    }
+    if (!article.isConnected || !shown || a?.hash !== shown || !Array.isArray(a.steps) || !Array.isArray(a.laneRows)) return;
+    const steps = a.steps as CheckedStep[];
+    const lanes = renderedLanes(article);
+    const byKey = new Map(steps.map((s) => [s.key, s]));
+    for (const pair of pairStepRows(lanes.map((l) => l.lane), { laneRows: a.laneRows as number[], steps: steps.map((s) => ({ key: s.key, lane: s.lane, row: s.row, refusal: null })) })) {
+      const slot = laneRows(lanes[pair.lane]!.el)[pair.row]?.querySelector<HTMLElement>(":scope > .step-check");
+      if (!slot || slot.firstChild) continue;
+      const c = checkChip(byKey.get(pair.key)!);
+      const chip = article.ownerDocument.createElement("span");
+      chip.className = "step-chip";
+      chip.dataset.state = c.state;
+      chip.textContent = c.text;
+      chip.title = c.title;
+      slot.appendChild(chip);
+    }
+  })();
+}
+
 /** Put a Done button on each open step of the rendered article's `you` lanes. */
 export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): void {
   const article = root.querySelector<HTMLElement>(".wiki-article:not(.wiki-ask-article)");
@@ -368,6 +435,8 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
     const note = showNotice(article, notice.text, "status");
     if (notice.focus) note.focus({ preventScroll: true });
   }
+  // The checks read only: a read-only wiki gets its chips; the pod has no route.
+  if (wikiToolsFlag()) void enhanceStepChecks(article, ctx);
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;
   if (!countedLanes(article).some((l) => l.dataset.kind === "you" && Number(l.dataset.count) > 0)) return;
   const shownHash = ctx.hash();
@@ -459,5 +528,12 @@ export function stepDoneStyles(): string {
       margin: 0 0 8px; padding: 6px 10px; border-radius: 8px; font-size: 13px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary);
     }
-    .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }`;
+    .${STEP_DONE_NOTE_CLASS}[role="alert"] { color: var(--status-error); font-weight: 500; }
+    .step-chip {
+      margin-left: 0.5em; padding: 0 0.45em; font-size: 11px; line-height: 1.5; border-radius: 6px; white-space: nowrap;
+      border: 1px solid var(--border-secondary); color: var(--text-secondary); cursor: help;
+    }
+    /* The pill text tones (shared-styles), not the bare status colours: those measure under AA at 11px in light. */
+    .step-chip[data-state="ok"] { color: var(--tone-good); border-color: var(--status-success); }
+    .step-chip[data-state="not-yet"] { color: var(--tone-warn); border-color: var(--status-warning); }`;
 }

@@ -552,6 +552,8 @@ Derived, never authored. On the reader's page render (`views: true` and `itemDat
 
 **Step text.** `Check` is in `COMPONENT_TAG_SOURCE*` like every other name, so search text, share prep, the Similar query, the fact-check neutralizer and the edit zones treat it exactly as `Verdict`, a `<Check` inside a code span included (stripped, or defanged by the neutralizer). `leadSentence` reads the first line as if a trailing tag were absent, then strips every other `<Check>` outside code, so the Done log line, the commit subject, the lane peek and `/plans` `youSteps` never carry one; a `<Check>` inside a code span stays in the lead as written (every other name is stripped in code too, as before). Done still removes the raw line whole.
 
+**The chip (PR 2).** The reader fills a slot with a chip only for a step `GET /api/wiki/step-checks` answered, paired to its row by Done's `pairStepRows`: «✓ checked», «○ not yet», «? unknown», or per machine («laptop ✓ · mini ?») when the tag names several; each probe's `why` is the `title`. The slot's `data-check-*` values are raw page text and decide nothing. Probes, machines and the route: `src/wiki/reference/notes.md`, «Owner-step checks».
+
 ⚠️ **The list walker and a component can read one tag twice.** `NextMoves` re-renders its lane bodies (`observeComponentScope`): the reader's slot hook reports a lane task-list row's tag, `checklistHtml`'s inline scan reports it again. Lint judges values once per source offset; placement it reads from the page's steps, not from the observer. Pinned by `src/format/check-tag.test.ts` and the `<Check>` block of `src/wiki/lint-components.test.ts`.
 
 ## `<Query>` — one prod query as a card

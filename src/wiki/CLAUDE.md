@@ -137,6 +137,7 @@ Pages and routes:
 - Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
 - Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
+- Owner-step checks (`src/wiki/step-checks/`, `GET /api/wiki/step-checks`, `MUNINN_MACHINE`) [trap]
 - Related work (`related.ts`, `prRefs`, the Connections panel's top block)
 - `prRefs` — a derived index field [trap]
 - The rule (`computeRelated`, pure) [trap]
