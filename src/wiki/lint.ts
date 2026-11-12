@@ -84,11 +84,12 @@
  *                      a key another page `owns:` (D10), and an `owns:` entry
  *                      that names no key. Off unless `.wiki-reader.json`
  *                      declares `statePhrases`. Rules: `lint-state.ts`.
- * 15. component-value / component-attr — on `.mdx` pages, a component
+ * 15. component-value / component-attr / check-placement — on `.mdx` pages, a component
  *                      attribute the renderer falls back on (a value its spec
  *                      `parse` rejects, or a missing `required` one) or drops
  *                      (an attribute `COMPONENT_ATTRS` does not list, or an
- *                      earlier spelling of a repeated one). Not culled. Rules:
+ *                      earlier spelling of a repeated one); a `<Check>` naming
+ *                      no usable probe, or on a line of its own. Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
  *                      5, 6, 6b, 10, 11, 12, 13, 16, 17 and 18 (`checkPageText`).
  * 16. ledger-row-state / chain-close-conflict / plan-no-ledger — what the decision views

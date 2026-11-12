@@ -463,6 +463,14 @@ export const COMPONENT_SPEC = {
   // (`PDL;Sigrun`), `groups` a node's column (`web=frontend;api=core`). See
   // `src/format/system-map.ts`; lint checks `system-map` and `system-map-drift`.
   SystemMap: { attrs: { caption: text, external: text, groups: text } },
+  // A machine-readable fact a `you` step names, on the step's own line. Each
+  // attribute but `on` is one probe; the values are checked in `check-tag.ts`
+  // (`parseCheckAttrs`), not here, so the browser bundle carries no rule.
+  Check: {
+    attrs: { env: text, migration: text, checkout: text, pushed: text, restart: text, on: text },
+    selfClosing: true,
+    inline: true,
+  },
 } as const satisfies Record<string, ComponentSpec>;
 
 export type ComponentName = keyof typeof COMPONENT_SPEC;

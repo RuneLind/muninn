@@ -127,6 +127,34 @@ describe("checkComponents — one finding each", () => {
   });
 });
 
+describe("checkComponents — <Check>", () => {
+  const lane = (...items: string[]) => page("<NextMoves>", '<Lane kind="you">', "", ...items, "", "</Lane>", "</NextMoves>");
+
+  test("valid tags on step lines: nothing", () => {
+    expect(run(lane('1. **Restart.** <Check env="WIKI_STALE_CONFIRM_WIKIS" restart="3010" />', '2. Migrate <Check migration="086" on="laptop,mini" />'))).toEqual([]);
+  });
+
+  test("an unknown attribute, and no probe", () => {
+    expect(lines(lane('1. Do it <Check foo="1" />'))).toEqual([
+      '8 Check foo="1" is not a Check attribute; the renderer drops it',
+      "8 Check names no probe: give one of env, migration, checkout, pushed, restart",
+    ]);
+    expect(lines(lane("1. Do it <Check />"))).toEqual(["8 Check names no probe: give one of env, migration, checkout, pushed, restart"]);
+  });
+
+  test("a probe value of the wrong shape", () => {
+    expect(lines(lane('1. Do it <Check restart="port 3010" />'))).toEqual([
+      '8 Check restart="port 3010" is not a port number (digits); the probe is dropped',
+      "8 Check names no probe: give one of env, migration, checkout, pushed, restart",
+    ]);
+  });
+
+  test("on a line of its own: check-placement", () => {
+    const f = run(lane("1. Restart", "", '<Check restart="3010" />'));
+    expect(f.map((x) => `${x.check} ${x.line}`)).toEqual(["check-placement 10"]);
+  });
+});
+
 /** Each review shape, asserted on the renderer's HTML AND on the finding, so
  *  the test proves agreement rather than a model of the renderer. */
 describe("checkComponents agrees with the renderer on the review shapes", () => {

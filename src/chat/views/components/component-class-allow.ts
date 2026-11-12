@@ -100,6 +100,8 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   "stp-unavailable",
   // `<SystemMap>`: no class. Chat prints the edge table as a plain table; only
   // the wiki reader's page render draws the map (`systemMapView`).
+  // `<Check>`: no class. Chat renders nothing for it; only the wiki reader
+  // emits its empty `step-check` slot.
   "delta-table", "dt-better-lower", "dt-better-higher", "dt-body", "dt-wrap", "dt-table", "dt-run",
   "dt-delta", "dt-delta-runs", "dt-abs", "dt-pct", "dt-good", "dt-bad", "dt-flat", "dt-none",
   "dt-unavailable", "dt-note", "dt-warning", "dt-truncated", "dt-mark", "dt-delta-dir", "dt-overflow",

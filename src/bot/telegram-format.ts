@@ -20,6 +20,7 @@ import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
+import { withoutChecks } from "../format/check-tag.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 
@@ -213,6 +214,9 @@ const telegramRenderer: BlockRenderer = {
       case "Question":
         // No card and no state: a bold lead line naming the question, then its body.
         return `<b>${escapeHtml(questionLeadText(attrs))}</b>\n${children}`;
+      case "Check":
+        // On a line of its own it names no step (lint `check-placement`): nothing to print.
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -230,6 +234,8 @@ const telegramRenderer: BlockRenderer = {
         return `[${text.trim()}]`;
       case "Fact":
         return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "Check":
+        return ""; // never reached: `withoutChecks` drops it before this call
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -252,7 +258,7 @@ function renderInline(text: string): string {
   // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
   // into the string. No parking needed — the fallback is plain text, so the label
   // rides through the ampersand + tag-escape passes below exactly like prose.
-  result = scanInlineComponents(result)
+  result = withoutChecks(scanInlineComponents(result))
     .map((seg) =>
       seg.kind === "text" ? seg.text : telegramRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )

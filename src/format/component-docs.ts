@@ -218,6 +218,18 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
       groups: { doc: "A node's column (default: repos, or external for an external name)", printType: '"<name>=<group>;…"' },
     },
   },
+  Check: {
+    doc: "A fact a `you` step names, written at the end of the step's own line (`1. **Restart.** <Check restart=\"3010\" />`). Give at least one probe attribute. The wiki reader keeps an empty slot for it; every other surface prints nothing.",
+    teach: WIKI,
+    attrs: {
+      env: { doc: "An env key the instance must hold", printType: '"<ENV_KEY>"' },
+      migration: { doc: "A schema_migrations version that must be applied", printType: '"<digits>"' },
+      checkout: { doc: "A repo that must be checked out on the machine", printType: '"<repo>"' },
+      pushed: { doc: "A repo whose commits must be pushed", printType: '"<repo>"' },
+      restart: { doc: "The muninn port that must have restarted", printType: '"<port>"' },
+      on: { doc: "The machines that must hold it (default: the reader's own)", printType: '"<machine>,<machine>"' },
+    },
+  },
 };
 
 /**

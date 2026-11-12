@@ -2610,6 +2610,9 @@ const webRenderer: BlockRenderer = {
         }
         return questionCardHtml(attrs, children);
       }
+      case "Check":
+        // On a line of its own it names no step (lint `check-placement`).
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2636,6 +2639,10 @@ const webRenderer: BlockRenderer = {
         // `**1.32 kg**` as literal asterisks. Chip-only is the safe answer here.
         return factMarkParts(attrs).chip;
       }
+      case "Check":
+        // An empty reader-only slot carrying the check's attributes, for the
+        // probe chip to fill (`check-tag.ts`); chat gets nothing.
+        return currentReader ? `<span class="step-check" ${READER_ONLY_ATTR}${Object.entries(attrs).map(([k, v]) => ` data-check-${k}="${escapeHtml(v)}"`).join("")}></span>` : "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;

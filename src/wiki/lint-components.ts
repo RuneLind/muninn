@@ -9,6 +9,10 @@
  *  - `component-attr` — an attribute `COMPONENT_ATTRS` does not list, which
  *    `parseAttrs` drops before any renderer sees it, or an earlier spelling of
  *    a repeated attribute, which it drops for the last one.
+ *  - `check-placement` — a `<Check>` on a line of its own, which names no step
+ *    (it belongs at the end of the step's line; `check-tag.ts`). A `<Check>`
+ *    naming no probe, or a probe value of the wrong shape, is a
+ *    `component-value` finding (`parseCheckAttrs`).
  *
  * Not reported: an unknown tag name (it renders as visible escaped text), the
  * `parseString` attributes, the other attributes of a component whose
@@ -57,13 +61,14 @@ import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type C
 import { COMPONENT_DOCS, attrAliasFor, attrDoc, hintFor, suggestFor, type ComponentDoc } from "../format/component-docs.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
+import { parseCheckAttrs } from "../format/check-tag.ts";
 import { renderWikiHtml } from "./render.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import { parkLinksThenCodeSpans } from "./park-links.ts";
 import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import type { LintFinding } from "./lint.ts";
 
-export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr"] as const;
+export const COMPONENT_LINT_CHECKS = ["component-value", "component-attr", "check-placement"] as const;
 
 const SPEC: Readonly<Record<ComponentName, ComponentSpec>> = COMPONENT_SPEC;
 
@@ -78,6 +83,8 @@ interface Tag {
   name: ComponentName;
   attrs: string;
   inNextMoves?: true;
+  /** The block parser read it: the tag owns its line. */
+  block?: true;
   sourceAttrs?: string;
   line?: number;
   offset?: number;
@@ -278,6 +285,19 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
       return out;
     }
   }
+  if (tag.name === "Check") {
+    if (tag.block) {
+      out.push({
+        check: "check-placement",
+        ...at,
+        message: "Check sits on a line of its own; it names no step there, and Done would leave it behind",
+        detail: "Write it at the end of the step's own line: `1. **Restart.** <Check restart=\"3010\" />`.",
+      });
+    }
+    for (const problem of parseCheckAttrs(known).problems) {
+      out.push({ check: "component-value", ...at, message: `Check ${problem}`, detail: `Check takes ${listed.join(", ")}.` });
+    }
+  }
   for (const [attr, spec] of attrs) {
     const raw = known[attr];
     if (raw === undefined || !spec.parse(raw).fellBack) continue;
@@ -380,7 +400,10 @@ function markBody(content: string): { marked: string; offsets: number[] } {
 }
 
 const tagKey = (t: ObservedComponentTag) => `${t.name}\u0000${t.inline}\u0000${t.inNextMoves ?? ""}\u0000${t.rawAttrs}`;
-const nmOf = (t: ObservedComponentTag): { inNextMoves?: true } => (t.inNextMoves ? { inNextMoves: true } : {});
+const nmOf = (t: ObservedComponentTag): { inNextMoves?: true; block?: true } => ({
+  ...(t.inNextMoves ? { inNextMoves: true as const } : {}),
+  ...(t.name === "Check" && !t.inline ? { block: true as const } : {}),
+});
 
 /** The marked render's tags with their source offsets, or null when they are
  *  not, tag for tag, the plain render's. A tag read with no marker has none. */
@@ -415,8 +438,9 @@ function lineAt(content: string, offset: number): number {
   return line;
 }
 
-/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or `<Chart>` is a finding. */
-const REQUIRED_NAMES = COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required));
+/** Components with a `required` attribute (Meter, Chart): a bare `<Meter>` or
+ *  `<Chart>` is a finding. So is a bare `<Check />`: it names no probe. */
+const REQUIRED_NAMES = [...COMPONENT_NAMES.filter((n) => Object.values(SPEC[n].attrs).some((a) => a.required)), "Check"];
 /**
  * A tag this check could judge: a component name followed by an attribute, or
  * a component with a required attribute in any form. A page with neither has

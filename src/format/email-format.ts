@@ -43,6 +43,7 @@ import { statusRows } from "./report-top.ts";
 import { questionLeadText } from "./question.ts";
 import { nestedChildren, ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "./block-renderer.ts";
 import { parseEmbedAttrs } from "./embed.ts";
+import { withoutChecks } from "./check-tag.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "./query-block.ts";
 import {
   Placeholders,
@@ -396,6 +397,9 @@ const emailRenderer: BlockRenderer = {
           `<div style="margin:12px 0;padding:10px 12px;border:1px solid ${BORDER};border-radius:6px;">` +
           `<div style="font-weight:600;margin:0 0 6px;color:${TEXT};">${escapeHtml(questionLeadText(attrs))}</div>${children}</div>`
         );
+      case "Check":
+        // On a line of its own it names no step (lint `check-placement`): nothing to print.
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -416,6 +420,8 @@ const emailRenderer: BlockRenderer = {
         // its wrapped PROSE keeps running through the inline pipeline (escaping it
         // here would render `**1.32 kg**` as literal asterisks). Marker-only.
         return factMarker(normalizeFactVerdict(attrs.v));
+      case "Check":
+        return ""; // never reached: `withoutChecks` drops it before this call
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -516,7 +522,7 @@ function renderInline(text: string): string {
   // Spans pair by the shared exact-N rule (`renderCodeSpans`).
   let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `<code style="${S.code}">${escapeHtml(code)}</code>`));
 
-  result = scanInlineComponents(result)
+  result = withoutChecks(scanInlineComponents(result))
     .map((seg) => {
       if (seg.kind === "text") return seg.text;
       if (seg.name === "Fact") {

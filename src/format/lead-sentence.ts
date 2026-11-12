@@ -3,7 +3,7 @@
  * and the «Oppfølging» block's peek. Browser-safe.
  */
 
-import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "./markdown-ast.ts";
+import { COMPONENT_TAG_SOURCE_SINGLE_LINE, componentTagSourceSingleLine } from "./markdown-ast.ts";
 import { isAbbreviation } from "./abbreviations.ts";
 
 /** A lead sentence's length cap. */
@@ -24,6 +24,9 @@ export function sentenceEnd(text: string): number {
 }
 
 const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
+/** A step's `<Check …/>` with the spaces before it: the tag prints nothing, so
+ *  a sentence running on past it keeps one space, not two. */
+const CHECK_TAG_RE = new RegExp(`[ \\t]*(?:${componentTagSourceSingleLine(["Check"])})`, "g");
 
 /**
  * An item's lead sentence as plain text: the bold run it opens with (the house
@@ -37,6 +40,7 @@ const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
 export function leadSentence(item: string, opts: { keepLabel?: boolean } = {}): string {
   let first = item
     .split("\n")[0]!
+    .replace(CHECK_TAG_RE, "")
     .replace(COMPONENT_TAG_RE, "")
     .trim()
     .replace(/^\[[ xX]\][ \t]*/, "");

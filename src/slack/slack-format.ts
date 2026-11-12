@@ -19,6 +19,7 @@ import { tldrFallbackLabel } from "../format/genre-lists.ts";
 import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
+import { withoutChecks } from "../format/check-tag.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
 import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
 import {
@@ -223,6 +224,9 @@ const slackRenderer: BlockRenderer = {
       case "Question":
         // No card and no state: a bold lead line naming the question, then its body.
         return `*${slackLiteral(questionLeadText(attrs))}*\n${children}`;
+      case "Check":
+        // On a line of its own it names no step (lint `check-placement`): nothing to print.
+        return "";
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -240,6 +244,8 @@ const slackRenderer: BlockRenderer = {
         return `[${text.trim()}]`;
       case "Fact":
         return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "Check":
+        return ""; // never reached: `withoutChecks` drops it before this call
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -354,7 +360,7 @@ function renderInline(text: string): string {
   // into the string. No parking needed — the fallback is plain mrkdwn, so the
   // label rides through the passes below (the trailing tag-strip neutralizes any
   // tag in the label text).
-  result = scanInlineComponents(result)
+  result = withoutChecks(scanInlineComponents(result))
     .map((seg) =>
       seg.kind === "text" ? seg.text : slackRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )
