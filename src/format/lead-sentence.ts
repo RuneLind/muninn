@@ -5,6 +5,7 @@
 
 import { COMPONENT_TAG_SOURCE_SINGLE_LINE, componentTagSourceSingleLine } from "./markdown-ast.ts";
 import { isAbbreviation } from "./abbreviations.ts";
+import { lineCodeSpanRanges } from "./code-spans.ts";
 
 /** A lead sentence's length cap. */
 export const MOVES_STEP_CHARS = 160;
@@ -23,10 +24,9 @@ export function sentenceEnd(text: string): number {
   return -1;
 }
 
-const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g");
-/** A step's `<Check …/>` with the spaces before it: the tag prints nothing, so
- *  a sentence running on past it keeps one space, not two. */
-const CHECK_TAG_RE = new RegExp(`[ \\t]*(?:${componentTagSourceSingleLine(["Check"])})`, "g");
+/** Any component tag, or a step's `<Check …/>` with the spaces before it: the
+ *  tag prints nothing, so a sentence running on past it keeps one space. */
+const TAG_RE = new RegExp(`([ \\t]*(?:${componentTagSourceSingleLine(["Check"])}))|${COMPONENT_TAG_SOURCE_SINGLE_LINE}`, "g");
 
 /**
  * An item's lead sentence as plain text: the bold run it opens with (the house
@@ -38,10 +38,11 @@ const CHECK_TAG_RE = new RegExp(`[ \\t]*(?:${componentTagSourceSingleLine(["Chec
  * capped at `MOVES_STEP_CHARS` with an ellipsis.
  */
 export function leadSentence(item: string, opts: { keepLabel?: boolean } = {}): string {
-  let first = item
-    .split("\n")[0]!
-    .replace(CHECK_TAG_RE, "")
-    .replace(COMPONENT_TAG_RE, "")
+  const line = item.split("\n")[0]!;
+  const code = lineCodeSpanRanges(line);
+  // A `<Check>` inside a code span is text, as on every renderer.
+  let first = line
+    .replace(TAG_RE, (m, check: string | undefined, i: number) => (check && code.some((r) => i >= r.start && i < r.end) ? m : ""))
     .trim()
     .replace(/^\[[ xX]\][ \t]*/, "");
   // The label run may not contain its own delimiter: only the FIRST bold run

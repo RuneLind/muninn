@@ -1,6 +1,5 @@
 import {
   parseBlocks,
-  scanInlineComponents,
   normalizeVerdictValue,
   normalizeFactVerdict,
   FACT_VERDICT_MARK,
@@ -258,7 +257,7 @@ function renderInline(text: string): string {
   // occurrence with its plain-text fallback (✅/❌ + label, or [label]) directly
   // into the string. No parking needed — the fallback is plain text, so the label
   // rides through the ampersand + tag-escape passes below exactly like prose.
-  result = withoutChecks(scanInlineComponents(result))
+  result = withoutChecks(result)
     .map((seg) =>
       seg.kind === "text" ? seg.text : telegramRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )

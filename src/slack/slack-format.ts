@@ -1,6 +1,5 @@
 import {
   parseBlocks,
-  scanInlineComponents,
   normalizeVerdictValue,
   normalizeFactVerdict,
   FACT_VERDICT_MARK,
@@ -360,7 +359,7 @@ function renderInline(text: string): string {
   // into the string. No parking needed — the fallback is plain mrkdwn, so the
   // label rides through the passes below (the trailing tag-strip neutralizes any
   // tag in the label text).
-  result = withoutChecks(scanInlineComponents(result))
+  result = withoutChecks(result)
     .map((seg) =>
       seg.kind === "text" ? seg.text : slackRenderer.inlineComponent(seg.name, seg.attrs, seg.text),
     )

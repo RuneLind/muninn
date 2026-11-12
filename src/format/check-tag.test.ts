@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CHECK_PROBES, parseCheckAttrs, stepChecks, withoutChecks } from "./check-tag.ts";
-import { scanInlineComponents } from "./markdown-ast.ts";
+import { spaceCheckTags } from "./check-gap.ts";
 import { leadSentence } from "./lead-sentence.ts";
 import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
 import { formatEmailHtml } from "./email-format.ts";
@@ -51,7 +51,7 @@ describe("stepChecks", () => {
 });
 
 describe("withoutChecks", () => {
-  const text = (s: string) => withoutChecks(scanInlineComponents(s)).map((g) => (g.kind === "text" ? g.text : `[${g.name}]`)).join("");
+  const text = (s: string) => withoutChecks(s).map((g) => (g.kind === "text" ? g.text : `[${g.name}]`)).join("");
   test("the tag and the spaces before it go; no doubled or leading space is left", () => {
     expect(text(`Restart. ${ENV}`)).toBe("Restart.");
     expect(text(`Restart ${ENV} then rest`)).toBe("Restart then rest");
@@ -145,5 +145,73 @@ describe("renderers", () => {
       expect(out).not.toContain("Check");
       expect(out).not.toContain("WIKI_STALE");
     }
+  });
+});
+
+// Fix round 1 batch 1 (PR #846): the tag leaves the spacing the line has without it.
+describe("removing the tag leaves the line as if it were never there", () => {
+  const X = `<Check env="X" />`;
+  const surfaces = [
+    ["slack", formatSlackMrkdwn],
+    ["telegram", formatTelegramHtml],
+    ["email", formatEmailHtml],
+    ["chat", (s: string) => formatWebHtml(s)],
+  ] as const;
+  const same = (tagged: string, plain: string) => {
+    for (const [name, render] of surfaces) expect({ name, out: render(tagged) }).toEqual({ name, out: render(plain) });
+  };
+
+  test("after a non-text inline component the space before the next word stays (1a)", () => {
+    for (const lead of ["<Pill>x</Pill>", `<Verdict value="yes">ok</Verdict>`, `<Fact id="f1">x</Fact>`]) {
+      same(`1. a ${lead} ${X} b`, `1. a ${lead} b`);
+      same(`a ${lead} ${X} b`, `a ${lead} b`);
+    }
+    expect(formatSlackMrkdwn(`1. a <Pill>x</Pill> ${X} b`)).toContain("a [x] b");
+    expect(formatTelegramHtml(`1. a <Pill>x</Pill> ${X} b`)).toContain("[x] b");
+    expect(formatEmailHtml(`a <Pill>x</Pill> ${X} b`)).toMatch(/x<\/span> b/);
+  });
+
+  test("at the start of a line after a soft break no leading space is left (1b)", () => {
+    same(`a\n${X} b`, `a\nb`);
+    expect(formatSlackMrkdwn(`a\n${X} b`)).toBe("a\nb");
+    // The renderers pass one line at a time; the helper holds the rule for a newline inside its text too.
+    expect(spaceCheckTags(`a\n${X} b`)).toBe(`a\n${X}b`);
+  });
+
+  test("chat prints the line as it reads without the tag (2)", () => {
+    same(`**Render the pages again** ${X}, now`, `**Render the pages again**, now`);
+    same(`1. **Restart** ${X} then go.`, `1. **Restart** then go.`);
+    same(`1. Run it and restart. ${X}\n2. Next`, `1. Run it and restart.\n2. Next`);
+    same(`see the new blocks ${X}.`, `see the new blocks.`);
+    same(`1. **Restart**${X} then go.`, `1. **Restart** then go.`);
+  });
+
+  test("the reader's slot sits against the text, with no space before punctuation or doubled (2)", () => {
+    const slot = /<span class="step-check"[^>]*><\/span>/g;
+    const cases: [string, string][] = [
+      [`**Render the pages again** ${X}, now`, `**Render the pages again**, now`],
+      [`see the new blocks ${X}.`, `see the new blocks.`],
+      [`1. **Restart** ${X} then go.`, `1. **Restart** then go.`],
+      [`1. Run it and restart. ${X}\n2. Next`, `1. Run it and restart.\n2. Next`],
+    ];
+    for (const [tagged, plain] of cases) {
+      const html = formatWebHtml(tagged, { reader: true });
+      expect(html).toMatch(slot);
+      expect(html.replace(slot, "")).toBe(formatWebHtml(plain, { reader: true }));
+    }
+    expect(formatWebHtml(`**Render the pages again** ${X}, now`, { reader: true })).toContain(`again</strong><span class="step-check"`);
+    expect(formatWebHtml(`see the new blocks ${X}.`, { reader: true })).toContain(`blocks<span class="step-check" data-reader-only data-check-env="X"></span>.`);
+  });
+
+  test("a tag inside a code span stays in the lead sentence; one outside still goes (3)", () => {
+    expect(leadSentence('Use `<Check restart="3010" />` on the line.')).toBe('Use <Check restart="3010" /> on the line.');
+    expect(leadSentence('Write `a <Check env="X" /> b` now')).toBe('Write a <Check env="X" /> b now');
+    expect(leadSentence(`Use \`<Check restart="3010" />\` here ${X} then.`)).toBe('Use <Check restart="3010" /> here then.');
+    // Other components in code are flattened as before the tag existed.
+    expect(leadSentence('Use `<Pill>x</Pill>` now')).toBe("Use x now");
+    const doc = page(moves(`1. Use \`<Check restart="3010" />\` on the line.\n2. Write \`a ${X} b\` now ${ENV}\n3. Read it.`));
+    expect(extractNextMoves(doc)!.youSteps).toEqual(['Use <Check restart="3010" /> on the line.', `Write a ${X} b now`, "Read it."]);
+    const r = stepDoneEdit(doc, listYouSteps(doc)![1]!.key);
+    expect(r.ok && stepDoneLogLine(r)).toBe(`Step done: Write a ${X} b now`);
   });
 });

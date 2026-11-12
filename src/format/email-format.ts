@@ -19,7 +19,6 @@
 
 import {
   parseBlocks,
-  scanInlineComponents,
   normalizeCalloutTone,
   normalizePillTone,
   normalizeVerdictValue,
@@ -522,7 +521,7 @@ function renderInline(text: string): string {
   // Spans pair by the shared exact-N rule (`renderCodeSpans`).
   let result = renderCodeSpans(text, (s) => s, (code) => ph.add("INLINE", `<code style="${S.code}">${escapeHtml(code)}</code>`));
 
-  result = withoutChecks(scanInlineComponents(result))
+  result = withoutChecks(result)
     .map((seg) => {
       if (seg.kind === "text") return seg.text;
       if (seg.name === "Fact") {

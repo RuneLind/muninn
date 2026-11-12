@@ -34,6 +34,7 @@ import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { spaceCheckTags } from "../format/check-gap.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
@@ -2682,7 +2683,8 @@ function renderInlineWith(text: string, chips: boolean): string {
   // inside inlineComponent, so the parked value is safe. A component whose label
   // contained backticks now embeds an INLINE sentinel; the fixed-point restore
   // in Placeholders resolves that nesting.
-  result = scanInlineComponents(result)
+  // `spaceCheckTags`: the zero-width `Check` slot leaves the words spaced as without it.
+  result = scanInlineComponents(spaceCheckTags(result))
     .map((seg) => {
       if (seg.kind === "text") return seg.text;
       // `Fact` is the one inline component that wraps PROSE rather than a plain

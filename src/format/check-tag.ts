@@ -12,6 +12,7 @@
 
 import { scanInlineComponents, type InlineSegment } from "./markdown-ast.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { spaceCheckTags } from "./check-gap.ts";
 
 /** The attributes that each name one probe, in spec order. `on` is not one. */
 export const CHECK_PROBES = ["env", "migration", "checkout", "pushed", "restart"] as const;
@@ -80,31 +81,17 @@ export function stepChecks(text: string): StepCheck[] {
 }
 
 /**
- * `segs` with every `<Check>` gone, for a text surface that prints nothing
- * for it. The spaces before the tag go with it (`restart. <Check …/>` reads
- * `restart.`); a tag with no text before it takes the spaces after it, so
- * no surface gets a doubled or a leading space where the tag was.
+ * `text`'s inline segments with every `<Check>` gone, for a text surface that
+ * prints nothing for it: the line keeps the spacing it has without the tag
+ * (`spaceCheckTags`). `text` is code-parked, as `scanInlineComponents` takes it.
  */
-export function withoutChecks(segs: readonly InlineSegment[]): InlineSegment[] {
+export function withoutChecks(text: string): InlineSegment[] {
   const out: InlineSegment[] = [];
-  let dropLead = false;
-  for (const seg of segs) {
-    if (seg.kind === "component" && seg.name === "Check") {
-      const prev = out[out.length - 1];
-      if (prev?.kind === "text") prev.text = prev.text.replace(/[ \t]+$/, "");
-      dropLead = prev === undefined || (prev.kind === "text" && prev.text === "");
-      continue;
-    }
-    if (seg.kind === "text") {
-      const text = dropLead ? seg.text.replace(/^[ \t]+/, "") : seg.text;
-      dropLead = false;
-      const prev = out[out.length - 1];
-      if (prev?.kind === "text") prev.text += text;
-      else out.push({ kind: "text", text });
-      continue;
-    }
-    dropLead = false;
-    out.push(seg);
+  for (const seg of scanInlineComponents(spaceCheckTags(text))) {
+    if (seg.kind === "component" && seg.name === "Check") continue;
+    const prev = out[out.length - 1];
+    if (seg.kind === "text" && prev?.kind === "text") prev.text += seg.text;
+    else out.push(seg);
   }
   return out;
 }
