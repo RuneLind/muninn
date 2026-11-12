@@ -22,7 +22,7 @@ function probes(over: Partial<ProbeDeps> = {}): ProbeDeps {
     roots: null,
     readEnvFile: async () => ({ text: "HAVE=1\n" }),
     processHasEnv: () => true,
-    hasMigration: async (v) => v === "086",
+    appliedMigrations: async () => new Set(["086"]),
     ...over,
   };
 }
@@ -51,7 +51,7 @@ describe("answerStepChecks", () => {
   test("a page with no check answers no steps and runs nothing", async () => {
     let ran = 0;
     const text = page("1. Plain step.");
-    const a = await answerStepChecks(text, deps({}, { readEnvFile: async () => (ran++, { text: "" }), hasMigration: async () => (ran++, true) }));
+    const a = await answerStepChecks(text, deps({}, { readEnvFile: async () => (ran++, { text: "" }), appliedMigrations: async () => (ran++, new Set<string>()) }));
     expect(a).toEqual({ hash: sha256(text), machine: null, laneRows: [1], steps: [] });
     expect(ran).toBe(0);
   });
@@ -138,7 +138,7 @@ describe("answerStepChecks", () => {
     let now = 0;
     let runs = 0;
     const cache = new ProbeCache(() => now, 30_000);
-    const p = { hasMigration: async (v: string) => (runs++, await Bun.sleep(5), v === "086") };
+    const p = { appliedMigrations: async () => (runs++, await Bun.sleep(5), new Set(["086"])) };
     const text = page('1. A <Check migration="086" />', '2. B <Check migration="086" />');
     await Promise.all([answerStepChecks(text, deps({ cache }, p)), answerStepChecks(text, deps({ cache }, p))]);
     expect(runs).toBe(1);
@@ -152,7 +152,7 @@ describe("answerStepChecks", () => {
 
   test("a probe still running at the answer's bound answers unknown, timed out", async () => {
     const t0 = Date.now();
-    const a = await answerStepChecks(page('1. A <Check migration="086" env="HAVE" />'), deps({ boundMs: 50 }, { hasMigration: () => new Promise(() => {}) }));
+    const a = await answerStepChecks(page('1. A <Check migration="086" env="HAVE" />'), deps({ boundMs: 50 }, { appliedMigrations: () => new Promise(() => {}) }));
     expect(Date.now() - t0).toBeLessThan(1_000);
     expect(a.steps[0]!.machines[0]!.probes.map((p) => [p.kind, p.state, p.why])).toEqual([
       ["env", "ok", "HAVE is set in .env and in the running process"],

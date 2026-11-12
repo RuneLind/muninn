@@ -42,7 +42,7 @@ const probes: ProbeDeps = {
   roots: null,
   readEnvFile: async () => ({ text: "HAVE=1\n" }),
   processHasEnv: () => true,
-  hasMigration: async (v) => v === "086",
+  appliedMigrations: async () => new Set(["086"]),
 };
 
 const answer = () => answerStepChecks(PAGE, { probes, machine: "laptop", cache: new ProbeCache() });

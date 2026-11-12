@@ -498,4 +498,37 @@ describe("resolveMachineName (MUNINN_MACHINE)", () => {
     expect(resolveMachineName("my laptop")).toBeNull();
     expect(resolveMachineName("-x")).toBeNull();
   });
+
+  // `loadConfig()` runs before `setupLogging()` and again at runtime: a warn from the
+  // parse is dropped at boot and repeats later. The boot line warns, once, after logging.
+  describe("the warning", () => {
+    afterEach(async () => {
+      await reset();
+    });
+
+    test("the parse itself never warns, however often loadConfig runs", async () => {
+      const records: LogRecord[] = [];
+      await configure({ sinks: { capture: (r: LogRecord) => records.push(r) }, loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }], reset: true });
+      for (let i = 0; i < 3; i++) expect(resolveMachineName("my laptop")).toBeNull();
+      expect(records.filter((r) => r.level === "warning")).toEqual([]);
+    });
+
+    test("machineBootWarning: a line for a malformed value that does not echo it; null otherwise", async () => {
+      const cfg = (await import("./config.ts")) as Record<string, unknown>;
+      const line = (cfg.machineBootWarning as (raw: string | undefined) => string | null);
+      expect(line("my laptop")).toContain("MUNINN_MACHINE");
+      expect(line("my laptop")).not.toContain("my laptop");
+      expect(line("mini")).toBeNull();
+      expect(line(" Laptop ")).toBeNull();
+      expect(line(undefined)).toBeNull();
+      expect(line("  ")).toBeNull();
+    });
+
+    test("index.ts logs it after setupLogging, once", async () => {
+      const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+      const at = src.indexOf("machineBootWarning(");
+      expect(at).toBeGreaterThan(src.indexOf("await setupLogging("));
+      expect(src.indexOf("machineBootWarning(", at + 1)).toBe(-1);
+    });
+  });
 });

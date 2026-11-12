@@ -2,7 +2,10 @@
  * A page's owner-step checks, answered (mimir plan muninn-wiki-owner-step-checks,
  * PR 2): every open list step of a counted `you` lane whose first line ends in
  * a valid `<Check …/>`, each probe run once per (kind, value) inside a short
- * cache, per machine the check names. Read only: the route
+ * cache, per machine the check names. A page runs at most
+ * {@link MAX_PROBES_PER_PAGE} distinct probes, its `migration=` probes share
+ * one applied-set read, and git-spawning probes take one of
+ * {@link GIT_PROBE_SLOTS} process-wide slots. Read only: the route
  * (`routes/wiki-step-checks.ts`) reads the page and hands the text here.
  *
  * Steps come from `youListStepLines` + `stepCheck`, the walk lint's
@@ -62,23 +65,83 @@ export type PeerAnswerer = (machine: string, probes: readonly CheckProbe[]) => P
 
 export const noPeer: PeerAnswerer = async (machine, probes) => probes.map(() => ({ state: "unknown", why: `no peer configured for ${machine}` }));
 
-/** Probe answers per (kind, value): reused for {@link PROBE_TTL_MS} after they settle; identical probes in flight share one run. */
+/** How many answers {@link ProbeCache} keeps: past it the oldest goes first. */
+export const PROBE_CACHE_MAX = 500;
+/** Distinct (kind, value) probes one page may run; the rest answer `unknown`. The largest real `you` lane has under 20 steps. */
+export const MAX_PROBES_PER_PAGE = 60;
+/** Git-spawning probes running at once, process-wide: 8 at once timed `ls-remote` out (measured in review). */
+export const GIT_PROBE_SLOTS = 4;
+
+const GIT_KINDS: ReadonlySet<CheckProbe["kind"]> = new Set(["checkout"]);
+const MIGRATIONS_KEY = "migrations\u0000*";
+const TOO_MANY: ProbeResult = { state: "unknown", why: "too many checks on this page" };
+const probeKey = (p: CheckProbe) => `${p.kind}\u0000${p.value}`;
+
+/**
+ * Answers by key: reused for {@link PROBE_TTL_MS} after they settle, identical
+ * reads in flight share one run. At most `maxEntries`, oldest first out;
+ * expired entries are dropped on every miss. A read that rejects is not kept,
+ * and one still unsettled after the TTL is no longer shared.
+ */
 export class ProbeCache {
-  private readonly entries = new Map<string, { promise: Promise<ProbeResult>; settledAt: number | null }>();
-  constructor(private readonly now: () => number = Date.now, private readonly ttlMs = PROBE_TTL_MS) {}
+  private readonly entries = new Map<string, { promise: Promise<unknown>; startedAt: number; settledAt: number | null }>();
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly ttlMs = PROBE_TTL_MS,
+    private readonly maxEntries = PROBE_CACHE_MAX,
+  ) {}
+
+  get size(): number {
+    return this.entries.size;
+  }
 
   get(probe: CheckProbe, run: () => Promise<ProbeResult>): Promise<ProbeResult> {
-    const key = `${probe.kind}\u0000${probe.value}`;
+    return this.getKey(probeKey(probe), run);
+  }
+
+  getKey<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const now = this.now();
+    const fresh = (e: { startedAt: number; settledAt: number | null }) => now - (e.settledAt ?? e.startedAt) < this.ttlMs;
     const hit = this.entries.get(key);
-    if (hit && (hit.settledAt === null || this.now() - hit.settledAt < this.ttlMs)) return hit.promise;
-    const entry = { promise: run(), settledAt: null as number | null };
+    if (hit && fresh(hit)) return hit.promise as Promise<T>;
+    for (const [k, e] of this.entries) if (!fresh(e)) this.entries.delete(k);
+    const entry = { promise: run() as Promise<unknown>, startedAt: now, settledAt: null as number | null };
+    this.entries.delete(key);
     this.entries.set(key, entry);
-    void entry.promise.then(() => {
-      entry.settledAt = this.now();
-    });
-    return entry.promise;
+    while (this.entries.size > this.maxEntries) this.entries.delete(this.entries.keys().next().value!);
+    entry.promise.then(
+      () => {
+        entry.settledAt = this.now();
+      },
+      () => {
+        if (this.entries.get(key) === entry) this.entries.delete(key);
+      },
+    );
+    return entry.promise as Promise<T>;
   }
 }
+
+/** A counting semaphore: at most `limit` runs at once, the rest wait in order. */
+export class ProbeSlots {
+  private active = 0;
+  private readonly waiting: (() => void)[] = [];
+  constructor(private readonly limit: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active < this.limit) this.active++;
+    else await new Promise<void>((resolve) => this.waiting.push(resolve));
+    try {
+      return await fn();
+    } finally {
+      // A waiter takes the slot over; `active` drops only when none waits.
+      const next = this.waiting.shift();
+      if (next) next();
+      else this.active--;
+    }
+  }
+}
+
+const sharedGitSlots = new ProbeSlots(GIT_PROBE_SLOTS);
 
 export interface AnswerDeps {
   probes: ProbeDeps;
@@ -88,6 +151,8 @@ export interface AnswerDeps {
   peer?: PeerAnswerer;
   /** Defaults to {@link ANSWER_BOUND_MS}. */
   boundMs?: number;
+  /** Defaults to one process-wide {@link ProbeSlots} of {@link GIT_PROBE_SLOTS}. */
+  gitSlots?: ProbeSlots;
 }
 
 /** The checked steps of `text`, with their keys, rows and checks. Null when the page's steps cannot be read. */
@@ -135,8 +200,24 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
   const deadline = new Promise<ProbeResult>((resolve) => {
     timer = setTimeout(() => resolve({ state: "unknown", why: "timed out" }), deps.boundMs ?? ANSWER_BOUND_MS);
   });
-  const local = (p: CheckProbe) => Promise.race([deps.cache.get(p, () => runProbe(p, deps.probes)), deadline]);
+  // The page's first MAX_PROBES_PER_PAGE distinct probes run; the rest are capped.
+  const allowed = new Set<string>();
+  for (const s of found.steps) for (const p of s.probes) if (allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
+  const capped = (p: CheckProbe) => !allowed.has(probeKey(p));
+  // One applied-set read per cache window, shared by every `migration=` probe.
+  const probeDeps: ProbeDeps = { ...deps.probes, appliedMigrations: () => deps.cache.getKey(MIGRATIONS_KEY, () => deps.probes.appliedMigrations()) };
+  const slots = deps.gitSlots ?? sharedGitSlots;
+  const run = (p: CheckProbe) => (GIT_KINDS.has(p.kind) ? slots.run(() => runProbe(p, probeDeps)) : runProbe(p, probeDeps));
+  // A migration answer is not cached on its own: it would outlive the set it was read from.
+  const local = (p: CheckProbe): Promise<ProbeResult> =>
+    capped(p) ? Promise.resolve(TOO_MANY) : Promise.race([p.kind === "migration" ? run(p) : deps.cache.get(p, () => run(p)), deadline]);
   const peer = deps.peer ?? noPeer;
+  const viaPeer = async (name: string, probes: readonly CheckProbe[]): Promise<ProbeResult[]> => {
+    const asked = probes.filter((p) => !capped(p));
+    const got = asked.length ? await peer(name, asked) : [];
+    let k = 0;
+    return probes.map((p) => (capped(p) ? TOO_MANY : (got[k++] ?? { state: "unknown", why: "no answer" })));
+  };
   try {
     const steps = await Promise.all(
       found.steps.map(async (s): Promise<StepCheckAnswer> => {
@@ -146,7 +227,7 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
             : name === null || deps.machine === null
               ? s.probes.map(() => ({ state: "unknown" as const, why: "this muninn has no MUNINN_MACHINE" }))
               : await Promise.race([
-                  peer(name, s.probes).catch(() => s.probes.map(() => ({ state: "unknown" as const, why: `the peer for ${name} failed` }))),
+                  viaPeer(name, s.probes).catch(() => s.probes.map(() => ({ state: "unknown" as const, why: `the peer for ${name} failed` }))),
                   deadline.then((d) => s.probes.map(() => d)),
                 ]);
           return machineOf(name, s.probes.map((p, k) => ({ kind: p.kind, value: p.value, ...(results[k] ?? { state: "unknown", why: "no answer" }) })), s.problems);

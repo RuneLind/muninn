@@ -53,7 +53,7 @@ function deps(over: Partial<ProbeDeps> = {}, w?: World, calls?: string[][]): Pro
     roots: { dirs: [], named: new Map([["muninn", DIR], ["mimir", DIR]]) },
     readEnvFile: async () => ({ text: "SET_KEY=s3cr3t-value\nBLANK_KEY=\n" }),
     processHasEnv: () => true,
-    hasMigration: async (v) => v === "086",
+    appliedMigrations: async () => new Set(["086"]),
     ...over,
   };
 }
@@ -115,7 +115,7 @@ describe("migration", () => {
   test("applied: ok; not applied: not-yet; the read fails: unknown", async () => {
     expect((await probeMigration("086", deps())).state).toBe("ok");
     expect((await probeMigration("087", deps())).state).toBe("not-yet");
-    const r = await probeMigration("086", deps({ hasMigration: async () => Promise.reject(new Error("password=hunter2")) }));
+    const r = await probeMigration("086", deps({ appliedMigrations: async () => Promise.reject(new Error("password=hunter2")) }));
     expect(r).toEqual({ state: "unknown", why: "this machine's database could not be read" });
   });
 });
@@ -210,7 +210,7 @@ describe("pushed and restart: muninn cannot prove these yet", () => {
     test(`${kind} answers unknown and spawns nothing, reads nothing`, async () => {
       const calls: string[][] = [];
       let reads = 0;
-      const d = deps({ readEnvFile: async () => (reads++, { text: "" }), hasMigration: async () => (reads++, true), processHasEnv: () => (reads++, true) }, {}, calls);
+      const d = deps({ readEnvFile: async () => (reads++, { text: "" }), appliedMigrations: async () => (reads++, new Set<string>()), processHasEnv: () => (reads++, true) }, {}, calls);
       expect(await runProbe({ kind, value: kind === "restart" ? "3010" : "muninn" }, d)).toEqual({ state: "unknown", why: "muninn cannot prove this yet" });
       expect(calls).toEqual([]);
       expect(reads).toBe(0);

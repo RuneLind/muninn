@@ -435,7 +435,7 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
     const note = showNotice(article, notice.text, "status");
     if (notice.focus) note.focus({ preventScroll: true });
   }
-  // The checks read only: a read-only wiki gets its chips; the pod has no route.
+  // The checks read only: a read-only instance gets its chips (a read-only root's answer has none); the pod has no route.
   if (wikiToolsFlag()) void enhanceStepChecks(article, ctx);
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;
   if (!countedLanes(article).some((l) => l.dataset.kind === "you" && Number(l.dataset.count) > 0)) return;

@@ -354,7 +354,8 @@ search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
 the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
 atlas), the spawning wiki reads (plan-card, the work map's GitHub check, the
 decision inbox, felles-status, and `/api/wiki/step-checks`, whose probes spawn
-git and run one network `ls-remote` per named repo), the MCP-status probe and
+git and run one network `ls-remote` per named repo, only on a wiki in Done's
+triage scope and never on a `WIKI_READONLY_ROOTS` root), the MCP-status probe and
 the two WS upgrade paths. A second list,
 `REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
 whose `?refresh=1` forces a rebuild — `/api/wiki/pages`,

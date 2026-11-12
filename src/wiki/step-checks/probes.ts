@@ -34,8 +34,8 @@ export interface ProbeDeps {
   readEnvFile: () => Promise<EnvFileRead>;
   /** Whether the running process has `key` set to a non-empty value. Never the value. */
   processHasEnv: (key: string) => boolean;
-  /** Whether `schema_migrations` of this machine's database holds `version`; throws when it cannot be read. */
-  hasMigration: (version: string) => Promise<boolean>;
+  /** Every `schema_migrations.version` of this machine's database: ONE read, shared by every `migration=` probe of a cache window; throws when it cannot be read. */
+  appliedMigrations: () => Promise<ReadonlySet<string>>;
 }
 
 /** Bounds per probe and per git call. `ls-remote` is the one network read. */
@@ -89,7 +89,7 @@ export async function probeEnv(key: string, deps: ProbeDeps): Promise<ProbeResul
 export async function probeMigration(version: string, deps: ProbeDeps): Promise<ProbeResult> {
   let applied: boolean;
   try {
-    applied = await deps.hasMigration(version);
+    applied = (await deps.appliedMigrations()).has(version);
   } catch {
     return unknown("this machine's database could not be read");
   }

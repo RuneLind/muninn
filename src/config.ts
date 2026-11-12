@@ -947,16 +947,21 @@ export function positiveEnvInt(name: string, defaultValue: number): number {
  * `MUNINN_MACHINE` — which machine this muninn answers owner-step checks for
  * (`<Check on="laptop,mini">`, `src/wiki/step-checks/`). Trimmed and
  * lower-cased; unset, blank or not a machine name (`^[a-z0-9][\w.-]*$`, the
- * tag's own `on` shape) is null, with a warning for the last. Null only makes
- * a check that names machines answer `unknown`, so nothing fails closed here;
- * the hostname is never guessed from.
+ * tag's own `on` shape) is null. Null only makes a check that names machines
+ * answer `unknown`, so nothing fails closed here; the hostname is never guessed
+ * from. It logs nothing: `loadConfig()` runs before `setupLogging()` and again
+ * at runtime, so the boot line ({@link machineBootWarning}) warns, once.
  */
 export function resolveMachineName(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
   const v = (raw ?? "").trim().toLowerCase();
-  if (!v) return null;
-  if (/^[a-z0-9][\w.-]*$/.test(v)) return v;
-  log.warn("MUNINN_MACHINE is not a machine name (lower-case letters, digits, . _ -); step checks answer as if it were unset");
-  return null;
+  return v && /^[a-z0-9][\w.-]*$/.test(v) ? v : null;
+}
+
+/** The boot warning for a `MUNINN_MACHINE` that is set but not a machine name, or null. Never echoes the value. */
+export function machineBootWarning(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
+  return (raw ?? "").trim() !== "" && resolveMachineName(raw) === null
+    ? "MUNINN_MACHINE is not a machine name (lower-case letters, digits, . _ -); step checks answer as if it were unset"
+    : null;
 }
 
 export function loadConfig() {
