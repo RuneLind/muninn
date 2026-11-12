@@ -59,6 +59,7 @@ import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
 import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
 import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
+import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
 import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
 import { realTriageRunDeps, registerWikiDecisionTriageRunRoute } from "./wiki-decision-triage-run.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
@@ -2092,6 +2093,8 @@ export function registerWikiToolRoutes(
     readonlyRefusal,
     egressRefusal: (c, entry) => egressRefusal(c, entry, false),
   });
+  // The owner-step checks beside Done: read-only probes of this machine.
+  registerWikiStepChecksRoute(app, config);
   // The triage's status line and /models card: the nightly log on this machine.
   registerWikiDecisionTriageStatusRoutes(app, () => realTriageStatusDeps(config));
   // Run now beside that line: one model-off pass through the loop's own half.

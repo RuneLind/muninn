@@ -130,6 +130,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // The decision inbox SPAWNS one `git log` per open card (the commit that added
   // it), a fan-out the wiki sizes. The card's same-origin fetch passes.
   "/api/wiki/decision-inbox",
+  // The owner-step checks SPAWN git per uncached probe, one of them a network
+  // `ls-remote` to each named repo's origin. The reader's same-origin fetch passes.
+  "/api/wiki/step-checks",
   // The felles status SPAWNS Bun and a gcloud bucket listing per uncached
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.

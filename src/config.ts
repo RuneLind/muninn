@@ -943,6 +943,27 @@ export function positiveEnvInt(name: string, defaultValue: number): number {
   return defaultValue;
 }
 
+/**
+ * `MUNINN_MACHINE` — which machine this muninn answers owner-step checks for
+ * (`<Check on="laptop,mini">`, `src/wiki/step-checks/`). Trimmed and
+ * lower-cased; unset, blank or not a machine name (`^[a-z0-9][\w.-]*$`, the
+ * tag's own `on` shape) is null. Null only makes a check that names machines
+ * answer `unknown`, so nothing fails closed here; the hostname is never guessed
+ * from. It logs nothing: `loadConfig()` runs before `setupLogging()` and again
+ * at runtime, so the boot line ({@link machineBootWarning}) warns, once.
+ */
+export function resolveMachineName(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
+  const v = (raw ?? "").trim().toLowerCase();
+  return v && /^[a-z0-9][\w.-]*$/.test(v) ? v : null;
+}
+
+/** The boot warning for a `MUNINN_MACHINE` that is set but not a machine name, or null. Never echoes the value. */
+export function machineBootWarning(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
+  return (raw ?? "").trim() !== "" && resolveMachineName(raw) === null
+    ? "MUNINN_MACHINE is not a machine name (lower-case letters, digits, . _ -); step checks answer as if it were unset"
+    : null;
+}
+
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
@@ -1015,6 +1036,8 @@ export function loadConfig() {
     // The decision triage's repo roots (`src/wiki/decision-triage/`), and its
     // switch: unset, the nightly pass stays off.
     decisionTriageRepoRoots: (process.env.DECISION_TRIAGE_REPO_ROOTS ?? "").trim() || null,
+    // Which machine this is, for owner-step checks that name machines (`on=`).
+    machine: resolveMachineName(),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

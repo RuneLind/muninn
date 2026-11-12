@@ -58,17 +58,32 @@ export function realStepDoneDeps(config: Config): StepDoneDeps {
   };
 }
 
-/** The wiki `name` names, if Done may write it: a 403 for a readonly root, a 404 outside the close route's scope.
- *  `outside` is set with that 404 and says why, so the list can answer it without failing. */
-async function resolveWiki(c: Context, deps: StepDoneDeps, name: string): Promise<{ entry: WikiRegistryEntry } | { res: Response; outside?: string }> {
+/** What {@link stepWikiScope} reads: the owner-step checks route resolves through it too. */
+export type StepWikiScopeDeps = Pick<StepDoneDeps, "registry" | "workMapWikis" | "answerConfig" | "isReadonlyRoot">;
+
+/**
+ * Where Done is offered: the wiki `name` names, unless its root is read-only
+ * (`WIKI_READONLY_ROOTS`) or it is outside the close route's triage scope
+ * (`outside` says why). The instance switch is not read here: Done's POST
+ * refuses it, the checks route does not.
+ */
+export async function stepWikiScope(deps: StepWikiScopeDeps, name: string): Promise<{ entry: WikiRegistryEntry } | { readonlyRoot: true } | { outside: string }> {
   const registry = deps.registry();
   const entryOf = (n: string) => registry.find((e) => e.name.toLowerCase() === n.toLowerCase());
   const named = entryOf(name);
-  if (named && deps.isReadonlyRoot(named.root)) return { res: c.json({ error: "This wiki is read-only here.", readonly: true }, 403) };
+  if (named && deps.isReadonlyRoot(named.root)) return { readonlyRoot: true };
   const scope = await triageScope({ workMapWikis: deps.workMapWikis(), answerWikis: deps.answerConfig().wikis, entryOf, isReadonlyRoot: deps.isReadonlyRoot });
   const verdict = scopeVerdict(scope, name);
-  if ("reason" in verdict) return { res: c.json({ error: `no Done here: ${verdict.reason}` }, 404), outside: verdict.reason };
-  return { entry: verdict.entry };
+  return "reason" in verdict ? { outside: verdict.reason } : { entry: verdict.entry };
+}
+
+/** The wiki `name` names, if Done may write it: a 403 for a readonly root, a 404 outside the close route's scope.
+ *  `outside` is set with that 404 and says why, so the list can answer it without failing. */
+async function resolveWiki(c: Context, deps: StepDoneDeps, name: string): Promise<{ entry: WikiRegistryEntry } | { res: Response; outside?: string }> {
+  const found = await stepWikiScope(deps, name);
+  if ("readonlyRoot" in found) return { res: c.json({ error: "This wiki is read-only here.", readonly: true }, 403) };
+  if ("outside" in found) return { res: c.json({ error: `no Done here: ${found.outside}` }, 404), outside: found.outside };
+  return found;
 }
 
 const LOG_PROMISE = "log.md gets this entry; if appending it fails, the page edit still stands.";

@@ -281,4 +281,8 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   // anonymous-lookup case into an authenticated one on that machine only; the
   // suite passes `token` explicitly.
   "MUNINN_GITHUB_TOKEN",
+  // `MUNINN_MACHINE` — which machine an owner-step check answers for
+  // (`src/wiki/step-checks/`). A developer's `laptop` would turn every
+  // `on=`-less case into a named one on that machine only.
+  "MUNINN_MACHINE",
 ];

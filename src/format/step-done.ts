@@ -188,13 +188,14 @@ export function listYouSteps(text: string): YouStep[] | null {
 /** Each open LIST step of {@link listYouSteps}, refused ones included, with
  *  its first source line (1-based on the page) and whether its list is a task
  *  list (a `[ ]`/`[x]` row in it, which the reader draws as a checklist).
- *  Lint's `check-placement` reads where a step's `<Check>` may go from here. */
-export function youListStepLines(text: string): { line: number; text: string; taskList: boolean }[] | null {
+ *  Lint's `check-placement` reads where a step's `<Check>` may go from here,
+ *  and the step-checks route which keyed step a check belongs to. */
+export function youListStepLines(text: string): { key: string; line: number; text: string; taskList: boolean }[] | null {
   const p = parsePage(text);
   if ("error" in p) return null;
   return p.steps.flatMap((s) => {
     const at = s.list ? listItemLines(s.list)?.[s.item] : undefined;
-    return s.list && at?.length ? [{ line: p.from + at[0]! + 1, text: s.text, taskList: isTaskList(s.list) }] : [];
+    return s.list && at?.length ? [{ key: s.key, line: p.from + at[0]! + 1, text: s.text, taskList: isTaskList(s.list) }] : [];
   });
 }
 

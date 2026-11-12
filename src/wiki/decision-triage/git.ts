@@ -28,9 +28,10 @@ export interface GitResult {
 
 export const failureOf = (res: GitResult): SearchFailure => (res.timedOut ? "timed out" : "git error");
 
-export type GitRun = (cwd: string, args: readonly string[], opts?: { timeoutMs?: number; maxLines?: number }) => Promise<GitResult>;
+/** `env`: variables added to the child's allowlisted environment (the step-check probe's object-lookup switches); absent, the environment is the allowlist alone. */
+export type GitRun = (cwd: string, args: readonly string[], opts?: { timeoutMs?: number; maxLines?: number; env?: Readonly<Record<string, string>> }) => Promise<GitResult>;
 
-/** The real runner. Its children get an allowlisted environment. */
+/** The real runner. Its children get an allowlisted environment, plus `opts.env` when given. */
 export const realGit: GitRun = async (cwd, args, opts = {}) => {
   let proc;
   try {
@@ -47,6 +48,7 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
         GIT_TERMINAL_PROMPT: "0",
         GIT_SSH_COMMAND: "ssh -o BatchMode=yes",
         LC_ALL: "C",
+        ...opts.env,
       },
     });
   } catch (err) {
