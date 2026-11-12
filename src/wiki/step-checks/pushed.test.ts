@@ -4,14 +4,16 @@
  * rows against real git on throwaway repos are in `pushed-git*.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { realpathSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
-import { CHECKOUT_GIT_ENV, parseRemoteHeads, parseWorktreeHeads, probePushed, type ProbeDeps } from "./probes.ts";
+import { CHECKOUT_GIT_ENV, parseRemoteHeads, parseWorktreeHeads, parseWorktreeList, probePushed, type ProbeDeps } from "./probes.ts";
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake-")));
+// A second worktree's directory: the probe resolves every listed worktree on disk.
+const DIR2 = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake2-")));
 const OK = (stdout = ""): GitResult => ({ ok: true, stdout, exitCode: 0 });
 const EXIT = (code: number): GitResult => ({ ok: false, stdout: "", exitCode: code });
 const TIMED_OUT: GitResult = { ok: false, stdout: "", timedOut: true };
@@ -23,7 +25,7 @@ const WT = "4".repeat(40);
 const ZERO = "0".repeat(40);
 const URL = "git@github.com:x/skills.git";
 const INDEX = `H 100644 ${"5".repeat(40)} 0\tf\0H 100755 ${"6".repeat(40)} 0\tbin/run\0`;
-const WORKTREES = `worktree /w\0HEAD ${LOCAL}\0branch refs/heads/main\0\0`;
+const WORKTREES = `worktree ${DIR}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0`;
 // One path per --git-path argument, none of which exists under DIR.
 const gitPaths = (args: readonly string[]) => OK(args.filter((a, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""));
 
@@ -34,6 +36,9 @@ interface World {
   gitPath?: (args: readonly string[]) => GitResult;
   index?: GitResult;
   status?: GitResult;
+  filters?: GitResult;
+  staged?: GitResult;
+  readTree?: GitResult;
   head?: GitResult;
   branch?: GitResult;
   worktrees?: GitResult;
@@ -52,14 +57,17 @@ interface Call {
 function pushedGit(w: World, log: Call[] = []): GitRun {
   return async (_cwd, args, opts) => {
     log.push({ args: [...args], env: opts?.env, stdin: opts?.stdin });
-    const a = args.join(" ").replace(/^-c core\.fsmonitor=false /, "");
+    const a = args.join(" ").replace(/^-c core\.fsmonitor=false /, "").replace(/^-c core\.splitIndex=false /, "");
     if (a === "rev-parse --show-toplevel") return OK(`${DIR}\n`);
     if (a === "remote get-url origin") return OK(`${URL}\n`);
     if (a.startsWith("config --get-regexp") && a.includes("promisor")) return w.promisor ?? EXIT(1);
     if (a.startsWith("config --get-regexp") && a.includes("pushurl")) return w.origin ?? OK(`remote.origin.url ${URL}\n`);
     if (a === "rev-parse --is-shallow-repository") return w.shallow ?? OK("false\n");
     if (a.startsWith("rev-parse --git-path")) return (w.gitPath ?? gitPaths)(args);
+    if (a.startsWith("config --get-regexp ^filter")) return w.filters ?? EXIT(1);
     if (a === "ls-files -v -s -z") return w.index ?? OK(INDEX);
+    if (a === "diff-index --cached --quiet HEAD") return w.staged ?? OK("");
+    if (a === "read-tree HEAD") return w.readTree ?? OK("");
     if (a.startsWith("status --porcelain")) return w.status ?? OK("");
     if (a === "rev-parse --verify --quiet HEAD^{commit}") return w.head ?? OK(`${LOCAL}\n`);
     if (a.startsWith("for-each-ref")) return w.branch ?? OK("refs/heads/main\n");
@@ -82,13 +90,13 @@ const run = (w: World = {}, log?: Call[]) => probePushed("skills", deps(pushedGi
 
 describe("pushed: the truth table over a fake git", () => {
   test("nothing missing from the live remote and a clean tree: ok", async () => {
-    expect(await run()).toEqual({ state: "ok", why: "every commit on skills's branches and worktree HEADs is on an origin branch, and nothing tracked is uncommitted" });
+    expect(await run()).toEqual({ state: "ok", why: "every commit on skills's branches and worktree HEADs is on an origin branch, and no tracked file is modified or staged in its worktree" });
   });
 
   test("every call carries the lookup switches; tips and worktree HEADs go on stdin; refs/remotes is never read", async () => {
     const log: Call[] = [];
-    await run({ worktrees: OK(`${WORKTREES}worktree /w2\0HEAD ${WT}\0detached\0\0`) }, log);
-    expect(log.every((c) => c.env === CHECKOUT_GIT_ENV)).toBe(true);
+    await run({ worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0detached\0\0`) }, log);
+    expect(log.every((c) => Object.entries(CHECKOUT_GIT_ENV).every(([k, v]) => c.env?.[k] === v))).toBe(true);
     expect(log.some((c) => c.args.join(" ").includes("refs/remotes"))).toBe(false);
     const revList = log.find((c) => c.args[0] === "rev-list")!;
     expect(revList.args).toEqual(["rev-list", "--count", "--branches", "HEAD", "--stdin"]);
@@ -105,7 +113,7 @@ describe("pushed: the truth table over a fake git", () => {
   test("commits missing and every remote tip here: not-yet, a count and a start that reaches one of them", async () => {
     expect(await run({ count: OK("3\n") })).toEqual({ state: "not-yet", why: "3 commits in skills are on no origin branch (one of them on wip-x): push" });
     expect(await run({ count: OK("1\n"), source: OK("HEAD\n") })).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch (on HEAD): push" });
-    expect(await run({ count: OK("2\n"), source: OK(`${WT}\n`), worktrees: OK(`${WORKTREES}worktree /w2\0HEAD ${WT}\0detached\0\0`) })).toEqual({
+    expect(await run({ count: OK("2\n"), source: OK(`${WT}\n`), worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0detached\0\0`) })).toEqual({
       state: "not-yet",
       why: "2 commits in skills are on no origin branch (one of them on a worktree's HEAD 4444444): push",
     });
@@ -177,6 +185,40 @@ describe("pushed: the truth table over a fake git", () => {
     // A pushInsteadOf that does not match origin's url changes nothing.
     expect((await run({ origin: OK(`remote.origin.url ${URL}\nurl.x.pushinsteadof https://gitlab.com/\n`) })).state).toBe("ok");
     expect(await run({ origin: EXIT(1) })).toEqual({ state: "unknown", why: "skills has no origin" });
+  });
+
+  test("findings 1-3 (PR #850): filter config, staged index, scratch index and worktree list rows", async () => {
+    expect(await run({ filters: OK("filter.lfs.clean git-lfs clean -- %f\n") })).toEqual({ state: "unknown", why: "skills uses a content filter: muninn does not run the repo's own commands" });
+    expect(await run({ filters: EXIT(128) })).toEqual({ state: "unknown", why: "git config failed on skills" });
+    expect(await run({ staged: EXIT(1) })).toEqual({ state: "not-yet", why: "skills has uncommitted changes: commit and push" });
+    expect(await run({ staged: EXIT(128) })).toEqual({ state: "unknown", why: "git diff-index failed on skills" });
+    expect(await run({ readTree: EXIT(128) })).toEqual({ state: "unknown", why: "git read-tree failed on skills" });
+    expect(await run({ worktrees: OK(`worktree ${DIR2}\0HEAD ${LOCAL}\0branch refs/heads/main\0\0`) })).toEqual({ state: "unknown", why: "git worktree list does not name skills's own worktree once" });
+    expect(await run({ worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${ZERO}\0branch refs/heads/u\0\0`) })).toEqual({ state: "unknown", why: "another worktree of skills has no commit yet" });
+    expect(await run({ worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0`) })).toEqual({
+      state: "ok",
+      why: "every commit on skills's branches and worktree HEADs is on an origin branch, and no tracked file is modified or staged in any of its 2 worktrees",
+    });
+  });
+
+  test("finding 1 (PR #850): read-tree and status share one scratch index outside the repo, removed afterwards", async () => {
+    const log: Call[] = [];
+    await run({}, log);
+    const read = log.find((c) => c.args.includes("read-tree"))!;
+    const status = log.find((c) => c.args.includes("status"))!;
+    const index = read.env!.GIT_INDEX_FILE!;
+    expect(path.isAbsolute(index) && !index.startsWith(DIR)).toBe(true);
+    expect(status.env!.GIT_INDEX_FILE).toBe(index);
+    expect(read.args).toEqual(["-c", "core.fsmonitor=false", "-c", "core.splitIndex=false", "read-tree", "HEAD"]);
+    expect(existsSync(path.dirname(index))).toBe(false);
+  });
+
+  test("parseWorktreeList (PR #850): path, branch and prunable per record", () => {
+    expect(parseWorktreeList(`worktree /a\0HEAD ${LOCAL}\0branch refs/heads/main\0\0worktree /b\0HEAD ${WT}\0detached\0prunable gitdir file points to non-existent location\0\0worktree /c\0bare\0\0`)).toEqual([
+      { path: "/a", head: LOCAL, branch: "main", prunable: false },
+      { path: "/b", head: WT, branch: null, prunable: true },
+      { path: "/c", head: null, branch: null, prunable: false },
+    ]);
   });
 
   const unknownRows: [string, World][] = [

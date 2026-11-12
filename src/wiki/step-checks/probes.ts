@@ -7,16 +7,20 @@
  * write, no fetch, pull or checkout, no DB write; the git probes (`checkout`,
  * `pushed`) run with replace refs, grafts and lazy fetch off and answer a
  * partial clone `unknown` before any object lookup (`refusePartialClone`).
- * Every outside read comes in through {@link ProbeDeps}, so tests never touch
- * the real machine, except `pushed`'s `lstat` of the git-dir files an
- * operation in progress leaves, at paths git names.
+ * `pushed` runs no command the repo's config names: no fsmonitor hook, and a
+ * content filter is `unknown` before any comparison. Every outside read comes
+ * in through {@link ProbeDeps}, so tests never touch the real machine, except
+ * `pushed`'s `lstat` of the git-dir files an operation in progress leaves, at
+ * paths git names, its `realpath` of each worktree, and its scratch index, a
+ * temp file outside the repo removed after use.
  *
  * A `why` is one short sentence for the reader: it names keys, repos,
  * branches, versions and short shas, never an env value, file contents or a
  * path.
  */
 
-import { lstat } from "node:fs/promises";
+import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { CheckProbe } from "../../format/check-tag.ts";
 import { findRepo, type GitResult, type GitRun, type RepoRoots } from "../decision-triage/git.ts";
@@ -45,10 +49,11 @@ export interface ProbeDeps {
 }
 
 /**
- * Bounds per probe and per git call. `ls-remote` is the one network read. A
- * `pushed` run took 74–83 ms on the real skills checkout and 707–764 ms on
- * the real muninn checkout (measured 2026-11-12); its bound stays under the
- * answer's `ANSWER_BOUND_MS`.
+ * Bounds per probe and per git call. `ls-remote` is the one network read.
+ * `pushed`'s per-worktree checks took 70–90 ms a worktree on the real skills
+ * checkout and 160–410 ms on the real muninn checkout (measured 2026-11-12,
+ * after content comparison replaced the stat-trusting `status`); its bound
+ * stays under the answer's `ANSWER_BOUND_MS`.
  */
 export const PROBE_BOUND_MS: Record<CheckProbe["kind"], number> = { env: 2_000, migration: 3_000, checkout: 6_500, pushed: 7_000, restart: 1_000 };
 const GIT_LOCAL_MS = 2_000;
@@ -142,8 +147,8 @@ export function parseSymrefHead(stdout: string): { branch: string; tip: string }
  */
 export const CHECKOUT_GIT_ENV: Readonly<Record<string, string>> = { GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null", GIT_NO_LAZY_FETCH: "1" };
 
-/** `git`, with {@link CHECKOUT_GIT_ENV} on every call. */
-const checkoutGit = (git: GitRun): GitRun => (cwd, args, opts) => git(cwd, args, { ...opts, env: CHECKOUT_GIT_ENV });
+/** `git`, with {@link CHECKOUT_GIT_ENV} on every call, over any `env` the caller adds. */
+const checkoutGit = (git: GitRun): GitRun => (cwd, args, opts) => git(cwd, args, { ...opts, env: opts?.env ? { ...opts.env, ...CHECKOUT_GIT_ENV } : CHECKOUT_GIT_ENV });
 
 /** A partial clone's config: any promisor remote, or the repository extension. Matched against git's lower-cased names. */
 const PARTIAL_CLONE_KEYS = "^(remote\\..*\\.promisor|extensions\\.partialclone)$";
@@ -206,11 +211,18 @@ export async function probeCheckout(name: string, deps: ProbeDeps): Promise<Prob
 export const PUSHED_MAX_HEADS = 2_000;
 
 /**
- * On the `pushed` probe's index reads. A lagging or lying `core.fsmonitor`
- * hides a modified file from `status` (measured, git 2.54: a hook that reports
- * nothing hid ` M f`; with this switch the fsmonitor extension already in the
- * index is ignored and ` M f` shows). It also keeps `status` from running a
- * hook the repo's own config names.
+ * Worktrees checked for uncommitted files; past it the answer is `unknown`.
+ * One worktree's checks took 160–410 ms on the real muninn checkout (measured
+ * 2026-11-12), run one after another inside `PROBE_BOUND_MS.pushed`.
+ */
+export const PUSHED_MAX_WORKTREES = 12;
+
+/**
+ * On the `pushed` probe's index reads: keeps git from running the
+ * `core.fsmonitor` hook the repo's config names, and from trusting an
+ * fsmonitor extension in the index. It does not stop other repo-config
+ * commands: a content filter is refused before any comparison
+ * ({@link refuseFilters}).
  */
 const NO_FSMONITOR = ["-c", "core.fsmonitor=false"] as const;
 
@@ -253,6 +265,20 @@ const ZERO_SHA = /^0+$/;
  * (`branch`, `detached`, `locked`, `prunable`) are skipped.
  */
 export function parseWorktreeHeads(stdout: string): string[] | null {
+  const list = parseWorktreeList(stdout);
+  return list ? [...new Set(list.flatMap((w) => (w.head && !ZERO_SHA.test(w.head) ? [w.head] : [])))] : null;
+}
+
+/** One record of `git worktree list --porcelain`. `head` is null for a bare one; all zeros for an unborn branch. */
+export interface WorktreeRecord {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  prunable: boolean;
+}
+
+/** {@link parseWorktreeHeads}'s records, each with its path, branch and `prunable` flag. */
+export function parseWorktreeList(stdout: string): WorktreeRecord[] | null {
   const records: string[][] = [[]];
   for (const field of stdout.split("\0")) {
     if (field === "") {
@@ -261,18 +287,18 @@ export function parseWorktreeHeads(stdout: string): string[] | null {
   }
   if (records.at(-1)!.length === 0) records.pop();
   if (records.length === 0) return null;
-  const heads = new Set<string>();
+  const out: WorktreeRecord[] = [];
   for (const fields of records) {
     if (!fields[0]!.startsWith("worktree ")) return null;
     const head = fields.filter((f) => f.startsWith("HEAD "));
     const bare = fields.includes("bare");
     if (head.length > 1 || (head.length === 0) === !bare) return null;
-    if (head.length === 0) continue;
-    const sha = head[0]!.slice(5);
-    if (!SHA.test(sha)) return null;
-    if (!ZERO_SHA.test(sha)) heads.add(sha);
+    const sha = head.length === 0 ? null : head[0]!.slice(5);
+    if (sha !== null && !SHA.test(sha)) return null;
+    const branch = fields.find((f) => f.startsWith("branch refs/heads/"))?.slice("branch refs/heads/".length) ?? null;
+    out.push({ path: fields[0]!.slice("worktree ".length), head: sha, branch, prunable: fields.some((f) => f === "prunable" || f.startsWith("prunable ")) });
   }
-  return [...heads];
+  return out;
 }
 
 /**
@@ -361,9 +387,76 @@ async function refuseHiddenEntries(dir: string, name: string, git: GitRun): Prom
 }
 
 /**
+ * `unknown` when any config scope git reads in `dir` names a `filter.<x>.clean`
+ * or `.process` command: comparing an attributed file runs it (git-lfs's
+ * writes into the git dir). Null when none does.
+ */
+async function refuseFilters(dir: string, label: string, git: GitRun): Promise<ProbeResult | null> {
+  const res = await git(dir, ["config", "--get-regexp", "^filter\\..*\\.(clean|process)$"], { timeoutMs: GIT_LOCAL_MS });
+  if (res.exitCode === 1 && !res.stderr?.trim() && !res.timedOut) return null;
+  if (res.exitCode === 0) return unknown(`${label} uses a content filter: muninn does not run the repo's own commands`);
+  return unknown(`${gitFailure(res, "git config")} on ${label}`);
+}
+
+/**
+ * Whether a tracked file in `dir` differs from HEAD by content: `status`
+ * against a fresh index (`read-tree HEAD` into a temp file outside the repo).
+ * That index holds no stat data, no assume-unchanged or skip-worktree bit and
+ * no fsmonitor extension, so every file is read and compared (measured: an
+ * edit `core.trustctime=false` or `core.checkStat=minimal` hid from `status`
+ * shows). The temp file is removed on every path.
+ */
+async function freshIndexDirty(dir: string, label: string, git: GitRun): Promise<boolean | ProbeResult> {
+  let tmp: string;
+  try {
+    tmp = await mkdtemp(path.join(tmpdir(), "muninn-pushed-index-"));
+  } catch {
+    return unknown(`muninn could not make a scratch index for ${label}`);
+  }
+  try {
+    const env = { GIT_INDEX_FILE: path.join(tmp, "index") };
+    // git 2.54 never splits a `GIT_INDEX_FILE` index (measured); the switch guards against a shared index written into the git dir.
+    const read = await git(dir, [...NO_FSMONITOR, "-c", "core.splitIndex=false", "read-tree", "HEAD"], { timeoutMs: GIT_LOCAL_MS, env });
+    if (!read.ok || read.exitCode !== 0) return unknown(`${gitFailure(read, "git read-tree")} on ${label}`);
+    const status = await git(dir, [...NO_FSMONITOR, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignore-submodules=none"], { timeoutMs: GIT_LOCAL_MS, env });
+    // A capped status already printed a change.
+    if (status.capped && status.stdout !== "") return true;
+    if (!status.ok || status.exitCode !== 0) return unknown(`${gitFailure(status, "git status")} on ${label}`);
+    return status.stdout !== "";
+  } finally {
+    await rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Null when nothing tracked in worktree `wt` is modified or staged, proven by
+ * content. `unknown` for a worktree whose directory is gone, an unborn HEAD,
+ * an operation in progress, a content filter, a hidden index entry or a
+ * submodule; `not-yet` for a staged or modified file.
+ */
+async function worktreeUncommitted(wt: WorktreeRecord & { real: string | null }, probed: boolean, name: string, git: GitRun): Promise<ProbeResult | null> {
+  if (wt.prunable || !wt.real) return unknown(`a worktree of ${name} is missing its directory: muninn cannot check it`);
+  const label = probed ? name : `another worktree of ${name}`;
+  if (wt.head === null || ZERO_SHA.test(wt.head)) return unknown(`${label} has no commit yet`);
+  const dir = wt.real;
+  const refused = (await refuseInProgress(dir, label, git)) ?? (await refuseFilters(dir, label, git)) ?? (await refuseHiddenEntries(dir, label, git));
+  if (refused) return refused;
+  const branch = wt.branch && /^[\w./-]{1,100}$/.test(wt.branch) ? ` (on ${wt.branch})` : "";
+  const dirty = notYet(probed ? `${name} has uncommitted changes: commit and push` : `${name} has uncommitted changes in another worktree${branch}: commit and push`);
+  // The index against HEAD's tree: no stat data is read.
+  const staged = await git(dir, [...NO_FSMONITOR, "diff-index", "--cached", "--quiet", "HEAD"], { timeoutMs: GIT_LOCAL_MS });
+  if (staged.exitCode === 1 && !staged.timedOut) return dirty;
+  if (!staged.ok || staged.exitCode !== 0) return unknown(`${gitFailure(staged, "git diff-index")} on ${label}`);
+  const files = await freshIndexDirty(dir, label, git);
+  if (typeof files !== "boolean") return files;
+  return files ? dirty : null;
+}
+
+/**
  * `pushed="<repo>"`: no commit reachable from a local branch (`refs/heads/*`)
  * or from any worktree's HEAD is missing from the branches origin has NOW, and
- * no tracked file in the probed worktree is modified or staged.
+ * no tracked file in ANY worktree is modified or staged, compared by content
+ * ({@link worktreeUncommitted}; at most {@link PUSHED_MAX_WORKTREES}).
  *
  * Origin's tips come from one live `ls-remote --heads`, never the local
  * `refs/remotes/*`, which are only as fresh as the last fetch. Only tips
@@ -372,8 +465,9 @@ async function refuseHiddenEntries(dir: string, name: string, git: GitRun): Prom
  * `not-yet`, some missing with a tip absent is `unknown` (the commits may sit
  * under that tip). Everything that could hide a change or a commit is
  * `unknown` before that: a partial or shallow clone, an origin that pushes
- * elsewhere than it reads, an operation in progress, a submodule, an index
- * entry `status` skips. Untracked files are not counted.
+ * elsewhere than it reads, and per worktree a missing directory, an operation
+ * in progress, a content filter, a submodule, an assume-unchanged or
+ * skip-worktree entry. Untracked files are not counted.
  */
 export async function probePushed(name: string, deps: ProbeDeps): Promise<ProbeResult> {
   const git = checkoutGit(deps.git);
@@ -388,24 +482,28 @@ export async function probePushed(name: string, deps: ProbeDeps): Promise<ProbeR
       if (shallow.stdout.trim() === "true") return unknown(`${name} is a shallow clone: muninn cannot walk all of its history`);
       return shallow.stdout.trim() === "false" ? null : unknown(`git could not say whether ${name} is a shallow clone`);
     })()) ??
-    (await refuseSplitOrigin(dir, name, git)) ??
-    (await refuseInProgress(dir, name, git)) ??
-    (await refuseHiddenEntries(dir, name, git));
+    (await refuseSplitOrigin(dir, name, git));
   if (refused) return refused;
-  const status = await git(dir, [...NO_FSMONITOR, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignore-submodules=none"], { timeoutMs: GIT_LOCAL_MS });
-  // A capped status already printed a change.
-  if (status.capped && status.stdout !== "") return notYet(`${name} has uncommitted changes: commit and push`);
-  if (!status.ok || status.exitCode !== 0) return unknown(`${gitFailure(status, "git status")} on ${name}`);
-  if (status.stdout !== "") return notYet(`${name} has uncommitted changes: commit and push`);
+  const listed = await git(dir, ["worktree", "list", "--porcelain", "-z"], { timeoutMs: GIT_LOCAL_MS });
+  if (!listed.ok || listed.capped || listed.exitCode !== 0) return unknown(`${gitFailure(listed, "git worktree list")} on ${name}`);
+  const records = parseWorktreeList(listed.stdout);
+  if (!records) return unknown(`git worktree list gave an answer muninn cannot read on ${name}`);
+  const worktreeHeads = parseWorktreeHeads(listed.stdout)!;
+  const worktrees = records.filter((w) => w.head !== null);
+  if (worktrees.length > PUSHED_MAX_WORKTREES) return unknown(`${name} has over ${PUSHED_MAX_WORKTREES} worktrees: muninn does not check them all`);
+  const resolved = await Promise.all(worktrees.map(async (w) => ({ ...w, real: await realpath(w.path).catch(() => null) })));
+  const own = resolved.filter((w) => w.real === dir);
+  if (own.length !== 1) return unknown(`git worktree list does not name ${name}'s own worktree once`);
+  // The probed worktree first, then the rest; the first answer that is not «clean» stands.
+  for (const wt of [own[0]!, ...resolved.filter((w) => w !== own[0])]) {
+    const found = await worktreeUncommitted(wt, wt === own[0], name, git);
+    if (found) return found;
+  }
   const head = await git(dir, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { timeoutMs: GIT_LOCAL_MS });
   if (!head.ok || head.exitCode !== 0 || !SHA.test(head.stdout.trim())) return unknown(head.exitCode === 1 && !head.timedOut ? `${name} has no commit yet` : `${gitFailure(head, "git rev-parse")} on ${name}`);
   const branch = await git(dir, ["for-each-ref", "--count=1", "--format=%(refname)", "refs/heads/"], { timeoutMs: GIT_LOCAL_MS });
   if (!branch.ok || branch.exitCode !== 0) return unknown(`${gitFailure(branch, "git for-each-ref")} on ${name}`);
   if (branch.stdout.trim() === "") return unknown(`${name} has no local branch`);
-  const listed = await git(dir, ["worktree", "list", "--porcelain", "-z"], { timeoutMs: GIT_LOCAL_MS });
-  if (!listed.ok || listed.capped || listed.exitCode !== 0) return unknown(`${gitFailure(listed, "git worktree list")} on ${name}`);
-  const worktreeHeads = parseWorktreeHeads(listed.stdout);
-  if (!worktreeHeads) return unknown(`git worktree list gave an answer muninn cannot read on ${name}`);
   const remote = await git(dir, ["ls-remote", "--heads", "origin"], { timeoutMs: LS_REMOTE_MS, maxLines: PUSHED_MAX_HEADS });
   if (remote.capped) return unknown(`origin has over ${PUSHED_MAX_HEADS} branches: muninn does not read them all`);
   if (!remote.ok || remote.exitCode !== 0) return unknown(`${gitFailure(remote, "git ls-remote")}: what origin has is unknown`);
@@ -419,7 +517,8 @@ export async function probePushed(name: string, deps: ProbeDeps): Promise<ProbeR
   const count = await git(dir, ["rev-list", "--count", ...walk], { timeoutMs: GIT_LOCAL_MS, stdin });
   if (!count.ok || count.exitCode !== 0 || !/^\d+$/.test(count.stdout.trim())) return unknown(`${gitFailure(count, "git rev-list")} on ${name}`);
   const n = Number(count.stdout.trim());
-  if (n === 0) return ok(`every commit on ${name}'s branches and worktree HEADs is on an origin branch, and nothing tracked is uncommitted`);
+  const scope = worktrees.length === 1 ? "its worktree" : `any of its ${worktrees.length} worktrees`;
+  if (n === 0) return ok(`every commit on ${name}'s branches and worktree HEADs is on an origin branch, and no tracked file is modified or staged in ${scope}`);
   if (have.missing > 0) return unknown(`origin has ${plural(have.missing, "branch tip", "branch tips")} ${name} does not have: fetch first`);
   // Which start reaches one of the unpushed commits: a branch's name, `HEAD`, or a worktree HEAD's sha.
   const src = await git(dir, ["log", "--no-show-signature", "--source", "--format=%S", "-n", "1", ...walk], { timeoutMs: GIT_LOCAL_MS, stdin });
