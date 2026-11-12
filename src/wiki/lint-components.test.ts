@@ -198,6 +198,22 @@ describe("checkComponents — <Check>", () => {
     ]) expect(m).not.toContain("does not end it");
   });
 
+  test("placement findings merge with another check's findings, in line order", () => {
+    const content = page('Prose <Pill tone="bad">a</Pill> here.', "", `## Head ${C}`, "", 'More <Pill tone="worse">b</Pill>.');
+    expect(run(content).map((f) => `${f.line} ${f.check}`)).toEqual(["5 component-value", "7 check-placement", "9 component-value"]);
+  });
+
+  test("a two-line step: the tag counts on its first line only", () => {
+    const msg = (content: string) => run(content).map((f) => `${f.line} ${f.message}`);
+    expect(msg(lane(`1. Do ${C}`, "   more"))).toEqual([]);
+    expect(msg(lane("1. Do", `   more ${C}`))).toEqual([expect.stringMatching(/^10 Check is not on the first line of an open step/)]);
+  });
+
+  test("a <Check> on the first body line is seen, with frontmatter and without", () => {
+    expect(found(["---", "title: X", "---", `## Head ${C}`, "", "Text."].join("\n"))).toEqual(["check-placement@4"]);
+    expect(found([`## Head ${C}`, "", "Text."].join("\n"))).toEqual(["check-placement@1"]);
+  });
+
   test("a done row, an empty row and a tag-only step: one true message each", () => {
     const msg = (content: string) => run(content).map((f) => `${f.check} ${f.message}`);
     // A done row is a lane-list item but no open step.
