@@ -9,6 +9,7 @@ import { listYouSteps } from "../../format/step-done.ts";
 import type { GitRun } from "../decision-triage/git.ts";
 import { answerStepChecks, checkedSteps, ProbeCache, type AnswerDeps } from "./answer.ts";
 import type { ProbeDeps } from "./probes.ts";
+import { checkComponents } from "../lint-components.ts";
 
 const page = (...items: string[]) => ["---", "title: T", "---", "", "<NextMoves>", "", '<Lane kind="you">', "", ...items, "", "</Lane>", "", "</NextMoves>", ""].join("\n");
 
@@ -160,5 +161,40 @@ describe("answerStepChecks", () => {
       ["migration", "unknown", "timed out"],
     ]);
     expect(a.steps[0]!.state).toBe("unknown");
+  });
+});
+
+describe("a tag lint reports is never ok", () => {
+  // Every surviving probe answers ok on this machine. Rows 1-4 reach the
+  // answer with a problem; rows 5-7 are no trailing tag at all, so no check.
+  const malformed = [
+    ["duplicate env", '<Check env="MISSING" env="HAVE" on="laptop" />', "component-attr"],
+    ["duplicate on", '<Check env="HAVE" on="mini" on="laptop" />', "component-attr"],
+    ["wrong-case ON", '<Check env="HAVE" ON="mini" />', "component-attr"],
+    ["unknown envs", '<Check envs="MISSING" env="HAVE" />', "component-attr"],
+    ["single-quoted value", `<Check env="HAVE" on='mini' />`, "check-placement"],
+    ["unquoted value", '<Check env="HAVE" on=mini />', "check-placement"],
+    ["stray text", '<Check env="HAVE" please on="laptop" />', "check-placement"],
+  ] as const;
+  const controls = ['<Check env="HAVE" on="laptop" />', '<Check env="HAVE" migration="086" />', '<Check env="HAVE" />'];
+
+  test.each(malformed)("%s: lint reports it, and the step is not ok", async (_n, tag, check) => {
+    const text = page(`1. **Do it.** ${tag}`);
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain(check);
+    const a = await answerStepChecks(text, deps({ machine: "laptop" }));
+    expect(a.steps.filter((s) => s.state === "ok")).toEqual([]);
+    for (const s of checkedSteps(text)!.steps) expect(s.problems).not.toEqual([]);
+  });
+
+  test("well-formed controls keep no problems and read ok", async () => {
+    const text = page(...controls.map((t, i) => `${i + 1}. **Do it.** ${t}`));
+    expect(checkComponents("plans/x.mdx", text)).toEqual([]);
+    expect(checkedSteps(text)!.steps.map((s) => s.problems)).toEqual([[], [], []]);
+    expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps.map((s) => s.state)).toEqual(["ok", "ok", "ok"]);
+  });
+
+  test("a not-yet probe still wins over the problem's unknown", async () => {
+    const a = await answerStepChecks(page('1. A <Check env="HAVE" env="MISSING" />'), deps({ machine: "laptop" }));
+    expect(a.steps[0]!.state).toBe("not-yet");
   });
 });

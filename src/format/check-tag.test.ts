@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CHECK_PROBES, checkSlotHtml, parseCheckAttrs, stepCheck } from "./check-tag.ts";
+import { CHECK_PROBES, checkSlotHtml, parseCheckAttrs, readCheckRun, stepCheck } from "./check-tag.ts";
 import { leadSentence } from "./lead-sentence.ts";
 import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
 import { formatEmailHtml } from "./email-format.ts";
@@ -76,6 +76,27 @@ describe("stepCheck", () => {
     expect(stepCheck(`Do \`${ENV}\``)).toBeNull();
     expect(stepCheck(`Do it\n${ENV}`)).toBeNull();
     expect(stepCheck(ENV)).toBeNull();
+  });
+});
+
+describe("readCheckRun", () => {
+  test("only whitespace-led spec pairs, each once, read with no problem", () => {
+    expect(readCheckRun(` env="A" migration="086"\ton="laptop"`)).toEqual({ attrs: { env: "A", migration: "086", on: "laptop" }, problems: [] });
+    expect(readCheckRun("")).toEqual({ attrs: {}, problems: [] });
+  });
+  test("an unknown or wrong-case name, a repeat, or leftover text is one problem each", () => {
+    for (const run of [` env="A" ON="mini"`, ` envs="A" env="B"`, ` env="A" env="B"`, ` on="a" env="A" on="b"`, ` env="A" on='mini'`, ` env="A" on=mini`, ` env="A" please`, `env="A"`]) {
+      expect(readCheckRun(run).problems).toHaveLength(1);
+    }
+    expect(readCheckRun(` env="A" env="B"`).attrs).toEqual({ env: "B" });
+  });
+  test("stepCheck carries the run's problems beside the read probes", () => {
+    expect(stepCheck(`**Add A and B.** <Check env="A" env="B" on="laptop" />`)).toEqual({
+      probes: [{ kind: "env", value: "B" }],
+      on: ["laptop"],
+      problems: ["env is given more than once; only the last is read"],
+    });
+    expect(stepCheck(`Go. <Check env="A" ON="mini" />`)).toMatchObject({ on: null, problems: [expect.stringContaining("ON=")] });
   });
 });
 

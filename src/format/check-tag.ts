@@ -72,12 +72,50 @@ export function parseCheckAttrs(attrs: Readonly<Record<string, string>>): CheckA
   return { probes, on, problems };
 }
 
+const CHECK_ATTR_NAMES: readonly string[] = [...CHECK_PROBES, "on"];
+const PAIR = /\s+([A-Za-z][\w-]*)="([^"]*)"/y;
+
+/**
+ * A raw attribute run read against a closed grammar: in full, whitespace-led
+ * `name="value"` pairs, each name one of the six spec attributes, each at most
+ * once. Anything else is one problem line, so the step can never read `ok`:
+ * `parseAttrs` would drop an unknown name and let a repeated one overwrite in
+ * silence. A repeated name keeps its last value, as the renderer and lint do.
+ */
+export function readCheckRun(raw: string): { attrs: Record<string, string>; problems: string[] } {
+  const attrs: Record<string, string> = {};
+  const problems: string[] = [];
+  const seen = new Set<string>();
+  let at = 0;
+  let m: RegExpExecArray | null;
+  PAIR.lastIndex = 0;
+  while ((m = PAIR.exec(raw)) !== null) {
+    at = PAIR.lastIndex;
+    const name = m[1]!;
+    const value = m[2]!;
+    if (!CHECK_ATTR_NAMES.includes(name)) {
+      problems.push(`${name}=${JSON.stringify(value)} is not a Check attribute; it is not read`);
+      continue;
+    }
+    if (seen.has(name)) problems.push(`${name} is given more than once; only the last is read`);
+    seen.add(name);
+    attrs[name] = value;
+  }
+  const rest = raw.slice(at).trim();
+  if (rest) problems.push(`${JSON.stringify(rest)} is not a name="value" pair; it is not read`);
+  return { attrs, problems };
+}
+
 /** The one validly placed check on a step's first line, or null: the tag must
  *  be the last thing on that line (`check-trailing.ts`). An earlier tag on the
- *  line, or one on a later line, is no check (lint `check-placement`). */
+ *  line, or one on a later line, is no check (lint `check-placement`). The
+ *  run's grammar problems ({@link readCheckRun}) come first. */
 export function stepCheck(stepFirstLine: string): CheckAttrs | null {
   const t = trailingCheck(stepFirstLine.split("\n")[0]!);
-  return t ? parseCheckAttrs(parseAttrs(t[1], "Check")) : null;
+  if (!t) return null;
+  const run = readCheckRun(t[1]);
+  const read = parseCheckAttrs(run.attrs);
+  return { ...read, problems: [...run.problems, ...read.problems] };
 }
 
 /** The reader's empty slot for a trailing tag's raw attribute run: only the

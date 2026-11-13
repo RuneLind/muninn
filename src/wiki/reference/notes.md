@@ -2396,7 +2396,7 @@ Rules a caller can get wrong from outside:
 
 ## Owner-step checks (`src/wiki/step-checks/`, `GET /api/wiki/step-checks`, `MUNINN_MACHINE`)
 
-The chip on a `you` step whose first line ends in `<Check …/>` (Owner step checks PR 2; the tag is in `src/web/reference/notes.md`). The bar: never a false «checked». A probe answers `ok` only when it has proven the fact on this machine, `not-yet` when the fact provably does not hold yet, `unknown` for everything else (a failed read, a timeout, a repo it cannot find, a dropped attribute). A machine is `ok` only when every probe is and the tag dropped nothing (`parseCheckAttrs` problems); a step only when every machine it names is; any `not-yet` wins over `unknown`, and an empty set is `unknown` (`combineStates`).
+The chip on a `you` step whose first line ends in `<Check …/>` (Owner step checks PR 2; the tag is in `src/web/reference/notes.md`). The bar: never a false «checked». A probe answers `ok` only when it has proven the fact on this machine, `not-yet` when the fact provably does not hold yet, `unknown` for everything else (a failed read, a timeout, a repo it cannot find, a dropped attribute). A machine is `ok` only when every probe is and the tag dropped nothing (`stepCheck`'s problems: `readCheckRun`'s grammar lines, then `parseCheckAttrs`'s); a step only when every machine it names is; any `not-yet` wins over `unknown`, and an empty set is `unknown` (`combineStates`).
 
 | File | What it owns |
 |---|---|

@@ -300,7 +300,7 @@ function checkTag(relPath: string, tag: Tag): LintFinding[] {
   return out;
 }
 
-const CHECK_EXAMPLE = '`1. **Restart.** <Check restart="3010" />`';
+const CHECK_EXAMPLE = '`1. **Add the key.** <Check env="KEY" on="laptop" />`';
 
 /** A `<Check>`'s value problems. Where it sits is {@link checkPlacement}'s. */
 function checkFindings(at: { relPath: string; line?: number }, known: Readonly<Record<string, string>>): LintFinding[] {
