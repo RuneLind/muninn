@@ -17,6 +17,7 @@
 
 import { stepCheck, type CheckProbe } from "../../format/check-tag.ts";
 import { listYouSteps, youLaneRows, youListStepLines } from "../../format/step-done.ts";
+import { misplacedCheckLines } from "../lint-components.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { combineStates, probeRuns, runProbe, startProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
 import { stampSource, within, type Clocks, type Stamp } from "./two-clock.ts";
@@ -182,6 +183,10 @@ export interface AnswerDeps {
   gitSlots?: ProbeSlots;
 }
 
+/** The problem line of a step whose item (`youListStepLines`' `line` to `end`)
+ *  holds a `<Check` lint reports as `check-placement`: its fact is never probed. */
+export const ANOTHER_CHECK = "the step holds another Check tag, which is not read: only the tag ending its first line counts";
+
 /** The checked steps of `text`, with their keys, rows and checks. Null when the page's steps cannot be read. */
 export function checkedSteps(text: string): { laneRows: number[]; steps: { key: string; lane: number; row: number; probes: CheckProbe[]; on: string[] | null; problems: string[] }[] } | null {
   const listed = listYouSteps(text);
@@ -190,11 +195,14 @@ export function checkedSteps(text: string): { laneRows: number[]; steps: { key: 
   const laneRows = youLaneRows(text);
   if (!laneRows) return null;
   const byKey = new Map(listed.map((s) => [s.key, s]));
+  const misplaced = misplacedCheckLines(text);
   const steps = lines.flatMap((l) => {
     const step = byKey.get(l.key);
     if (l.taskList || !step || step.row === null) return [];
     const check = stepCheck(l.text.split("\n")[0]!);
-    return check ? [{ key: l.key, lane: step.lane, row: step.row, probes: check.probes, on: check.on, problems: check.problems }] : [];
+    if (!check) return [];
+    const problems = misplaced.some((n) => n >= l.line && n < l.end) ? [...check.problems, ANOTHER_CHECK] : check.problems;
+    return [{ key: l.key, lane: step.lane, row: step.row, probes: check.probes, on: check.on, problems }];
   });
   return { laneRows, steps };
 }

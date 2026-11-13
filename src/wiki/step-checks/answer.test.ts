@@ -7,7 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { sha256 } from "../../utils/date-hash.ts";
 import { listYouSteps } from "../../format/step-done.ts";
 import type { GitRun } from "../decision-triage/git.ts";
-import { answerStepChecks, checkedSteps, ProbeCache, type AnswerDeps } from "./answer.ts";
+import { ANOTHER_CHECK, answerStepChecks, checkedSteps, ProbeCache, type AnswerDeps } from "./answer.ts";
 import type { ProbeDeps } from "./probes.ts";
 import { checkComponents } from "../lint-components.ts";
 
@@ -196,5 +196,61 @@ describe("a tag lint reports is never ok", () => {
   test("a not-yet probe still wins over the problem's unknown", async () => {
     const a = await answerStepChecks(page('1. A <Check env="HAVE" env="MISSING" />'), deps({ machine: "laptop" }));
     expect(a.steps[0]!.state).toBe("not-yet");
+  });
+});
+
+describe("a step holding another Check tag is never ok", () => {
+  // The step's item runs from its first line to the next top-level item of
+  // its lane, or to the lane's end: its first line, continuation lines and
+  // nested content. Any `<Check` there that lint reports (`check-placement`)
+  // keeps the step from `ok`, wherever it sits. The trailing tag is ok alone.
+  const T = '<Check env="HAVE" on="laptop" />';
+  const other = '<Check env="MISSING" />';
+  const where = [
+    ["a second tag before the trailing one", [`1. **Do it.** <Check migration="086" on="laptop" /> ${T}`]],
+    ["an earlier tag mid-sentence", [`1. **Do.** ${other} then ${T}`]],
+    ["a tag inside the bold label", [`1. **Do it ${other}.** ${T}`]],
+    ["a tag at the very start of the text", [`1. ${other} **Do.** ${T}`]],
+    ["a continuation line", [`1. **Do.** ${T}`, `   ${other}`]],
+    ["a continuation line's middle", [`1. **Do.** ${T}`, `   and then ${other} too`]],
+    ["a nested list item", [`1. **Do.** ${T}`, `   - nested ${other}`]],
+    ["a nested list's continuation", [`1. **Do.** ${T}`, "   - nested", `     ${other}`]],
+    ["a paragraph after a blank line", [`1. **Do.** ${T}`, "", `   ${other}`]],
+    ["a single-quoted tag on a continuation", [`1. **Do.** ${T}`, `   <Check env='MISSING' />`]],
+    ["a paired tag on a continuation", [`1. **Do.** ${T}`, `   <Check env="MISSING">x</Check>`]],
+    ["a tag wrapped over two lines", [`1. **Do.** ${T}`, '   <Check env="MISSING"', '   on="laptop" />']],
+    ["a lane paragraph after the last step", [`1. **Do.** ${T}`, "", other]],
+  ] as const;
+
+  test.each(where)("%s: lint reports it, and the step is not ok", async (_n, items) => {
+    const text = page(...items);
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain("check-placement");
+    const steps = checkedSteps(text)!.steps;
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.problems).toContain(ANOTHER_CHECK);
+    expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps.map((s) => s.state)).toEqual(["unknown"]);
+  });
+
+  const exempt = [
+    ["a code span on the first line", [`1. **Do \`<Check env="MISSING" />\`.** ${T}`]],
+    ["a code span on a continuation", [`1. **Do.** ${T}`, '   see `<Check env="MISSING" />`']],
+    ["a fence under the item", [`1. **Do.** ${T}`, "", "   ```", `   ${other}`, "   ```"]],
+    ["the longer name Checklist", [`1. **Do.** ${T}`, "   a <Checklist> mention"]],
+  ] as const;
+
+  test.each(exempt)("%s: lint is silent, and the step reads ok", async (_n, items) => {
+    const text = page(...items);
+    expect(checkComponents("plans/x.mdx", text).filter((f) => f.check === "check-placement")).toEqual([]);
+    expect(checkedSteps(text)!.steps.map((s) => s.problems)).toEqual([[]]);
+    expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps.map((s) => s.state)).toEqual(["ok"]);
+  });
+
+  test.each([
+    ["the next step", page(`1. **Do.** ${T}`, `2. **Then.** ${other} here`, `3. **Last.** ${T}`), 2],
+    ["past the lane", page(`1. **Do.** ${T}`) + `\n${other}\n`, 1],
+    ["another lane", page(`1. **Do.** ${T}`).replace("</NextMoves>", `<Lane kind="you">\n\n${other}\n\n1. **B.** ${T}\n\n</Lane>\n\n</NextMoves>`), 2],
+  ] as const)("a tag in %s is not this step's", (_n, text, n) => {
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain("check-placement");
+    expect(checkedSteps(text)!.steps.map((s) => s.problems)).toEqual(Array.from({ length: n }, () => []));
   });
 });

@@ -563,10 +563,27 @@ const PLACEMENT: Record<"unread" | "paired" | "steps" | "off-step" | "task-list"
  * `<Check` is that tag; every other `<Check` is judged by its own shape.
  */
 function checkPlacement(relPath: string, content: string, paired: () => ReadonlySet<number | undefined>): LintFinding[] {
+  return placementKinds(content, paired).map(({ line, kind }) => ({
+    check: "check-placement",
+    relPath,
+    line,
+    message: PLACEMENT[kind],
+    detail: `Write one self-closing tag, double-quoted attributes, as the last thing on a you step's first line, after its sentence: ${CHECK_EXAMPLE}.`,
+  }));
+}
+
+/** The 1-based line of each `<Check` that {@link checkPlacement} reports, one
+ *  entry per mention: the step-checks answer keeps a step holding one from
+ *  `ok`. No render: whether a tag is the paired form only names the case. */
+export function misplacedCheckLines(content: string): number[] {
+  return CHECK_MENTION_RE.test(content) ? placementKinds(content, () => new Set()).map((k) => k.line) : [];
+}
+
+function placementKinds(content: string, paired: () => ReadonlySet<number | undefined>): { line: number; kind: keyof typeof PLACEMENT }[] {
   const steps = youListStepLines(content);
   const firstLines = new Map((steps ?? []).map((s) => [s.line, { trailing: trailingCheck(s.text.split("\n")[0]!) !== undefined, taskList: s.taskList }]));
   const mentions = checkMentions(content);
-  const out: LintFinding[] = [];
+  const out: { line: number; kind: keyof typeof PLACEMENT }[] = [];
   mentions.forEach((m, k) => {
     const lastOnLine = mentions[k + 1]?.line !== m.line;
     CHECK_TAG_AT.lastIndex = m.at;
@@ -579,14 +596,7 @@ function checkPlacement(relPath: string, content: string, paired: () => Readonly
     else if (!step) kind = "off-step";
     else if (step.taskList) kind = "task-list";
     else kind = step.trailing && lastOnLine ? null : "not-last";
-    if (kind === null) return;
-    out.push({
-      check: "check-placement",
-      relPath,
-      line: m.line,
-      message: PLACEMENT[kind],
-      detail: `Write one self-closing tag, double-quoted attributes, as the last thing on a you step's first line, after its sentence: ${CHECK_EXAMPLE}.`,
-    });
+    if (kind !== null) out.push({ line: m.line, kind });
   });
   return out;
 }
