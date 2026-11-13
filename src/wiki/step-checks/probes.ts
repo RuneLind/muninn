@@ -252,8 +252,9 @@ const NO_FSMONITOR = ["-c", "core.fsmonitor=false"] as const;
 
 /**
  * What an operation in progress leaves in a worktree's git dir, and the operation's name for the `why`.
- * Not `REBASE_HEAD`: it records where a rebase stopped and can outlive the rebase, while a stopped rebase
- * always leaves `rebase-merge` or `rebase-apply` (measured, both backends, git 2.54).
+ * Not `REBASE_HEAD`: it can outlive the rebase (`git rebase --quit` leaves it). A rebase stopped on a
+ * conflict leaves its backend's directory, `rebase-merge` or `rebase-apply`, which `git status` reads as
+ * a rebase (both measured in `checkout-git.test.ts`, git 2.54).
  */
 const IN_PROGRESS: readonly (readonly [string, string])[] = [
   ["MERGE_HEAD", "merge"],

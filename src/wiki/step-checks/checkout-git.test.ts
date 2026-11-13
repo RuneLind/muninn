@@ -88,6 +88,13 @@ describe("R1: a named roots entry is the only candidate", () => {
       expect(await probe("muninn", depsWith(roots))).toEqual({ state: "unknown", why: "the repo roots name muninn in another letter case: muninn cannot tell whether that entry is this repo" });
     });
 
+    test(`${kind}: a tag name in upper case, a lower-case roots key: unknown, never the root dir's clone`, async () => {
+      const base = newBase();
+      fixture(base, "Muninn");
+      const roots: RepoRoots = { dirs: [base], named: new Map([["muninn", path.join(base, "gone")]]) };
+      expect(await probe("Muninn", depsWith(roots))).toEqual({ state: "unknown", why: "the repo roots name Muninn in another letter case: muninn cannot tell whether that entry is this repo" });
+    });
+
     test(`${kind}: an exact key beside a letter-case variant: the exact entry wins`, async () => {
       const base = newBase();
       const { clone } = fixture(base);
@@ -141,14 +148,25 @@ describe("R2: an operation in progress is unknown", () => {
   }
   const leftIn = (clone: string) => Object.fromEntries(["rebase-merge", "rebase-apply", "REBASE_HEAD"].map((f) => [f, existsSync(path.join(clone, ".git", f))]));
 
-  test("what a rebase stopped on a conflict leaves, per backend: always its directory; REBASE_HEAD is no sign of its own", () => {
+  const rebaseInStatus = (clone: string) => execFileSync("git", ["status"], { cwd: clone, env: { ...ENV, LC_ALL: "C", LANGUAGE: "C" } }).toString().includes("rebase in progress");
+
+  // Measures git, not muninn: IN_PROGRESS relies on this layout, so a git version that changes it fails here.
+  test("git's layout: a rebase stopped on a conflict leaves its backend's directory, which status reads; REBASE_HEAD outlives --quit", () => {
     const merge = conflictingRebase();
     expect(shCode(merge, "rebase", "-q", "--merge", "origin/main")).not.toBe(0);
     const apply = conflictingRebase();
     expect(shCode(apply, "rebase", "-q", "--apply", "origin/main")).not.toBe(0);
-    expect({ merge: leftIn(merge), apply: leftIn(apply) }).toEqual({
+    expect({ merge: leftIn(merge), apply: leftIn(apply), status: [rebaseInStatus(merge), rebaseInStatus(apply)] }).toEqual({
       merge: { "rebase-merge": true, "rebase-apply": false, REBASE_HEAD: true },
       apply: { "rebase-merge": false, "rebase-apply": true, REBASE_HEAD: true },
+      status: [true, true],
+    });
+    sh(merge, "rebase", "--quit");
+    sh(apply, "rebase", "--quit");
+    expect({ merge: leftIn(merge), apply: leftIn(apply), status: [rebaseInStatus(merge), rebaseInStatus(apply)] }).toEqual({
+      merge: { "rebase-merge": false, "rebase-apply": false, REBASE_HEAD: true },
+      apply: { "rebase-merge": false, "rebase-apply": false, REBASE_HEAD: true },
+      status: [false, false],
     });
   });
 
