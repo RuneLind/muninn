@@ -8,8 +8,9 @@
 
 | File | Role |
 |---|---|
-| `index.ts` | Bolt app setup, all four event handlers, thread tracking wiring, context fetching |
-| `handler.ts` | Central message pipeline: auth → prompt → Claude → extract posts → format → send |
+| `index.ts` | Bolt app setup; registers the four handlers and wires thread tracking |
+| `handlers/` | One module per path: `assistant-dm.ts`, `channel-mention.ts`, `thread-follow-up.ts`, `direct-message.ts` (+ `types.ts`); the mention and follow-up paths fetch context |
+| `handler.ts` | Slack entry to the shared pipeline: channel-reference normalization → auth → topic commands → `processMessage` (`src/core/message-processor.ts`) |
 | `slack-format.ts` | Converts Claude markdown to Slack mrkdwn (different syntax!) |
 | `cache.ts` | User-identity + channel-ID caches; `resolveSlackUser`, `resolveChannelId`, `makePostToChannel` |
 | `message-fetcher.ts` | `fetchChannelMessages` / `fetchThreadMessages` — recent context for @mentions and threads |
@@ -18,7 +19,7 @@
 
 ## Four Handler Paths
 
-Every Slack message enters through one of four paths in `index.ts`. All four call the same `handleMessage()` from `handler.ts`, but with different parameters:
+Every Slack message enters through one of four paths in `handlers/`, registered by `index.ts`. All four call the same `handleMessage()` from `handler.ts`, but with different parameters:
 
 ### 1. Assistant DM (`assistant.userMessage`)
 - Platform: `slack_assistant`
@@ -73,9 +74,9 @@ The `client` (WebClient) is available differently depending on handler:
 
 When `postToChannel` is provided to `handleMessage()`:
 
-1. Handler appends `SLACK_POST_CAPABILITY` to system prompt (tells Claude the XML syntax)
+1. `src/core/prompt-assembly.ts` appends `slackPostCapability()` (`src/core/response-handler.ts`) to the system prompt (tells Claude the XML syntax)
 2. Claude responds with `<slack-post channel="#name">content</slack-post>` tags
-3. `extractChannelPosts()` parses both complete and incomplete tags (two-pass regex)
+3. `extractChannelPosts()` (`src/core/response-handler.ts`) parses both complete and incomplete tags (two-pass regex)
 4. Each post is sent via `postToChannel(channel, formatSlackMrkdwn(message))`
 5. `makePostToChannel` resolves `#name` → channel ID via `resolveChannelId()` (cached)
 6. Failed posts are appended as error messages to the DM response

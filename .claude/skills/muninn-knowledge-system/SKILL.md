@@ -39,13 +39,13 @@ Scheduler (60s tick, independent)
 
 `spawnHaiku(prompt, opts)` is the Claude CLI leg — the watchers call it directly, and the Haiku router falls back to it:
 
-- Spawns `claude -p <prompt> --output-format json --model claude-haiku-5-5` via `Bun.spawn`
+- Spawns `claude -p <prompt> --output-format stream-json --verbose --model claude-haiku-5-5` via `Bun.spawn`, tool-less (`--tools "" --strict-mcp-config`) unless the caller opts into the email watcher's `gmail-read` surface
 - Sets `CLAUDE_CODE_ENTRYPOINT` env var per caller
-- Parses JSON output, extracts token usage (input includes cache tokens)
+- Parses the NDJSON stream (`StreamParser`, falling back to a single-JSON parse when the `result` event is missing), extracts token usage (input includes cache tokens)
 - Fires `trackUsage()` → INSERT into `haiku_usage` table (fire-and-forget)
 - Returns `{ result, inputTokens, outputTokens, model }`
 
-**`callHaikuMessageWithFallback(prompt, fallback, opts)`** (`src/ai/haiku-direct.ts`) — the high-level wrapper the scheduler uses. Routes through the Haiku router (`cli` / `anthropic` / `copilot` / `vertex`, picked per bot) and returns `{ text, usage }` with `text` = the `fallback` string on error. The old `callHaiku(prompt, fallback, source)` is gone; nothing in the scheduler spawns the CLI directly any more — it reaches `spawnHaiku` only as the router's fallback.
+**`callHaikuMessageWithFallback(prompt, fallback, opts)`** (`src/ai/haiku-direct.ts`) — the high-level wrapper the scheduler uses. Routes through the Haiku router (`cli` / `anthropic` / `copilot` / `vertex`, picked per bot) and returns `{ text, usage }` with `text` = the `fallback` string on error. The scheduler reaches `spawnHaiku` only as the router's fallback.
 
 `spawnHaiku` times out after `HAIKU_TIMEOUT_MS` (60 s) unless the caller passes `timeoutMs`.
 
@@ -105,20 +105,18 @@ Scheduler (60s tick, independent)
 
 Assembles full context for the main Claude call.
 
-**Parallel data loading (4 concurrent queries):**
-1. `getRecentMessages(userId, 20)` — conversation history
+**Parallel data loading (5 concurrent queries):**
+1. `getRecentMessages(userId, 20, botName, threadId, { excludeProactive: true })` — thread-scoped conversation history
 2. `generateEmbedding(currentMessage)` — vector for memory search
-3. `getActiveGoals(userId)`
-4. `getScheduledTasksForUser(userId)`
+3. `getActiveGoals(userId, botName)`
+4. `getScheduledTasksForUser(userId, botName)`
+5. `getRecentAlerts(userId, botName, 24, 5)` — recent proactive messages
 
-**Then:** `searchMemoriesHybrid(query, embedding, 5)` — see Hybrid Memory Search below.
+**Then:** `searchMemoriesHybrid(userId, currentMessage, queryEmbedding, 5, botName)` — see Hybrid Memory Search below.
 
-**System prompt assembly** (joined with `\n\n`):
-- Base persona (Jarvis identity, tone)
-- Goal awareness instructions + scheduled task awareness
-- Top 5 relevant memories: `"- {summary} [{tags}]"`
-- Active goals: `"- {title} (deadline: {date}) [{tags}]"`
-- Scheduled tasks: `"- {title} ({taskType}, {schedule})"`
+**System prompt** (stable across turns, so it caches; joined with `\n\n`): the bot's persona (CLAUDE.md), user identity, tool restrictions, then standing rules (research nudge, component rules, turn instruction).
+
+**User prompt:** `<conversation_history>`, then a `<context>` block with this turn's memories (`"- {summary} [{tags}]"`, personal and shared), active goals, scheduled tasks and recent alerts, then the message.
 
 **Returns:** `PromptBuildResult` with prompts + timing metadata (dbHistoryMs, embeddingMs, memorySearchMs, counts).
 
@@ -133,7 +131,7 @@ Assembles full context for the main Claude call.
 
 ## Hybrid Memory Search (`src/db/memories.ts`)
 
-**Function:** `searchMemoriesHybrid(query, embedding, limit)`
+**Function:** `searchMemoriesHybrid(userId, query, embedding, limit, botName?, tags?)`
 
 Combines two ranking signals via Reciprocal Rank Fusion (RRF):
 - **FTS:** `plainto_tsquery('english', query)` against `search_vector` (GIN index) — top 20

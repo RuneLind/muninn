@@ -4,7 +4,7 @@ Background monitors that check external services at intervals and send alerts to
 
 ## Detail: `src/watchers/reference/notes.md`
 
-Detail about one checker or one function lives in `src/watchers/reference/notes.md`, which is not loaded automatically. A `src/<module>/CLAUDE.md` cited inside `notes.md` may now mean that module's `reference/notes.md`. The counts in this section are this file's own (measured 2026-11-03).
+Detail about one checker or one function lives in `src/watchers/reference/notes.md`, which is not loaded automatically. A `src/<module>/CLAUDE.md` cited inside `notes.md` can point at text held in that module's `reference/notes.md`; search both. The counts in this section are this file's own (measured 2026-11-03).
 
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/watchers/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Keep the window at 120 chars or less. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note.
 - **Before editing a file:** search its basename and the exported functions you are changing; few hits is not full coverage: `x.ts` gets 3 lines, while its section, `X/Twitter Watcher — Key Lessons`, runs to 75k chars under a heading without the basename. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading.

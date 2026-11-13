@@ -186,4 +186,3 @@ When modifying web chat rendering:
 - [ ] Ensure `resolveConversation` matches `type === 'web'`
 - [ ] Server applies `formatWebHtml()` when `isWeb === true`
 - [ ] Client `sanitizeHtml` receives correct `isWeb` flag
-- [ ] Keep server-side and client-side `formatWebHtml` in sync
