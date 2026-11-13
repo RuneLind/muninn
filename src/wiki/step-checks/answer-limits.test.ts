@@ -334,6 +334,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
     });
     let w = newWorld();
     const probeWorld = () => world({ env: w.env, git: repoGit(w.kinds), roots: { dirs: [], named }, applyRead: async () => (w.dbDown ? Promise.reject(new Error("down")) : w.applied) });
+    let checkoutOks = 0;
     for (let trial = 0; trial < 250; trial++) {
       // Up to 120 steps over 125 distinct probes: past the cap of 60 on many pages.
       const n = 1 + Math.floor(rand() * 120);
@@ -346,6 +347,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
       const a = await answerStepChecks(page(...items), deps(probeWorld(), { cache, gitSlots }));
       for (const got of probesOf(a)) {
         if (got.state !== "ok") continue;
+        if (got.kind === "checkout") checkoutOks++;
         const direct = await runProbe({ kind: got.kind, value: got.value } as CheckProbe, probeWorld());
         expect([trial, got.kind, got.value, direct.state]).toEqual([trial, got.kind, got.value, "ok"]);
       }
@@ -354,5 +356,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
         w = newWorld();
       } else now += 100;
     }
+    // The loop checks only ok answers: a fake that stopped answering would pass it vacuously.
+    expect(checkoutOks).toBeGreaterThan(0);
   }, 30_000);
 });

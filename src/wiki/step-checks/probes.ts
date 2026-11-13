@@ -211,11 +211,12 @@ export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun
 
 async function repoDir(name: string, deps: ProbeDeps): Promise<{ dir: string } | ProbeResult> {
   if (!deps.roots) return unknown(`DECISION_TRIAGE_REPO_ROOTS is not set, so ${name} cannot be found`);
-  // A named entry is the only candidate: findRepo would fall through to another clone under the root dirs.
+  // A named entry is the only candidate, and one in another letter case is unknown: findRepo would fall through to another clone under the root dirs.
   if (deps.roots.named.has(name)) {
     const found = await findRepo(name, { dirs: [], named: deps.roots.named }, deps.git);
     return "reason" in found ? unknown(`${name}'s entry in the repo roots is not that repo: ${found.reason}`) : found;
   }
+  if ([...deps.roots.named.keys()].some((k) => k.toLowerCase() === name.toLowerCase())) return unknown(`the repo roots name ${name} in another letter case: muninn cannot tell whether that entry is this repo`);
   const found = await findRepo(name, deps.roots, deps.git);
   return "reason" in found ? unknown(`${name} not found under the repo roots: ${found.reason}`) : found;
 }
@@ -420,12 +421,12 @@ function isNetworkUrl(url: string): boolean {
 }
 
 /**
- * `unknown` unless origin's URL after `insteadOf` (`ls-remote --get-url`, the
- * URL fetch and push both use once {@link refuseSplitOrigin} passed) is a
+ * `unknown` unless origin's URL after `insteadOf` (`ls-remote --get-url`) is a
  * network URL ({@link isNetworkUrl}): a local path, gitfile or bundle can be
- * this checkout's own objects under another name, which no check closes. An ssh
- * URL with `core.sshCommand` set is `unknown` too: realGit's `GIT_SSH_COMMAND`
- * overrides it for the probe, while a push honours it.
+ * this checkout's own objects under another name, which no check closes. With
+ * `sshCommand` (`pushed`, from {@link refuseSplitOrigin}; `checkout` passes
+ * false) a URL that is not `https`, `http` or `git` is `unknown` too: realGit's
+ * `GIT_SSH_COMMAND` overrides `core.sshCommand` for the probe, a push honours it.
  */
 async function refuseLocalOrigin(dir: string, name: string, sshCommand: boolean, git: GitRun): Promise<ProbeResult | null> {
   const res = await git(dir, ["ls-remote", "--get-url", "origin"], { timeoutMs: GIT_LOCAL_MS, maxLines: 2 });

@@ -80,6 +80,29 @@ describe("R1: a named roots entry is the only candidate", () => {
     });
   }
 
+  for (const [kind, probe] of [["checkout", probeCheckout], ["pushed", probePushed]] as const) {
+    test(`${kind}: a roots key naming the repo in another letter case: unknown, never the root dir's clone`, async () => {
+      const base = newBase();
+      fixture(base);
+      const roots: RepoRoots = { dirs: [base], named: new Map([["Muninn", path.join(base, "gone")]]) };
+      expect(await probe("muninn", depsWith(roots))).toEqual({ state: "unknown", why: "the repo roots name muninn in another letter case: muninn cannot tell whether that entry is this repo" });
+    });
+
+    test(`${kind}: an exact key beside a letter-case variant: the exact entry wins`, async () => {
+      const base = newBase();
+      const { clone } = fixture(base);
+      const roots: RepoRoots = { dirs: [], named: new Map([["muninn", clone], ["Muninn", path.join(base, "gone")]]) };
+      expect((await probe("muninn", depsWith(roots))).state).toBe("ok");
+    });
+
+    test(`${kind}: a key that is another name: the root dirs are still searched`, async () => {
+      const base = newBase();
+      fixture(base);
+      const roots: RepoRoots = { dirs: [base], named: new Map([["muninn-old", path.join(base, "gone")]]) };
+      expect((await probe("muninn", depsWith(roots))).state).toBe("ok");
+    });
+  }
+
   test("no named entry for the name: the clone under a root dir is still found", async () => {
     const base = newBase();
     fixture(base);
