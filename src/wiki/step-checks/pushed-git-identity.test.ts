@@ -13,11 +13,9 @@ import { cpSync, mkdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlin
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit, type GitRun } from "../decision-triage/git.ts";
+import { networkOrigin } from "../../test/hermetic-git.ts";
 import { probePushed, type ProbeDeps, type ProbeResult } from "./probes.ts";
 
-// The probe reads every config scope; a runner's global git-lfs filter would answer every row `unknown`.
-const hermeticGit: GitRun = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
@@ -45,7 +43,7 @@ function fixture() {
 
 const pushed = (clone: string) => {
   const deps: ProbeDeps = {
-    git: hermeticGit,
+    git: networkOrigin(),
     roots: { dirs: [], named: new Map([["skills", clone]]) },
     readEnvFile: async () => ({ missing: true }),
     processHasEnv: () => false,

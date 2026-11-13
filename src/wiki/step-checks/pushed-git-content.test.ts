@@ -11,11 +11,10 @@ import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, utimes
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit, type GitRun } from "../decision-triage/git.ts";
+import { networkOrigin } from "../../test/hermetic-git.ts";
+import { realGit } from "../decision-triage/git.ts";
 import { probePushed, type ProbeDeps } from "./probes.ts";
 
-// The probe reads every config scope; a runner's global git-lfs filter would answer every row `unknown`.
-const hermeticGit: GitRun = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
 
 // The probe's worktree cap (`PUSHED_MAX_WORKTREES`), spelled here so this file loads against a build without it.
 const PUSHED_MAX_WORKTREES = 12;
@@ -39,7 +38,7 @@ function fixture() {
 
 const pushed = (clone: string, name = "skills") => {
   const deps: ProbeDeps = {
-    git: hermeticGit,
+    git: networkOrigin(),
     roots: { dirs: [], named: new Map([[name, clone]]) },
     readEnvFile: async () => ({ missing: true }),
     processHasEnv: () => false,
@@ -194,7 +193,7 @@ describe("pushed, real git: content filters", () => {
     const { base, work } = fixture();
     const global = path.join(base, "global-gitconfig");
     writeFileSync(global, "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n");
-    const git: ProbeDeps["git"] = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1" } });
+    const git: ProbeDeps["git"] = networkOrigin(undefined, (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1" } }));
     const deps: ProbeDeps = { git, roots: { dirs: [], named: new Map([["skills", work]]) }, readEnvFile: async () => ({ missing: true }), processHasEnv: () => false, appliedMigrations: async () => new Set() };
     expect(await probePushed("skills", deps)).toEqual({ state: "unknown", why: "git's config for skills names a content filter command: muninn does not run it" });
   });
