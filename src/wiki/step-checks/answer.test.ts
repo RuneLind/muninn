@@ -252,6 +252,22 @@ describe("a step holding another Check tag is never ok", () => {
     expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps.map((s) => s.state)).toEqual(["unknown"]);
   });
 
+  // A lane written on one line closes on the step's own line, which bounds
+  // nothing: the item runs to the page's end, so the earlier tag still counts.
+  const oneLineLane = `<Lane kind="you">1. **Do.** ${other} <Check env="HAVE" /></Lane>`;
+  const singleLine = [
+    ["a lane on one line", ["---", "title: T", "---", "", "<NextMoves>", "", oneLineLane, "", "</NextMoves>", ""].join("\n")],
+    ["NextMoves and its lane on one line", ["---", "title: T", "---", "", `<NextMoves>${oneLineLane}</NextMoves>`, ""].join("\n")],
+  ] as const;
+
+  test.each(singleLine)("%s: lint reports the earlier tag, and the step is not ok", async (_n, text) => {
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain("check-placement");
+    const steps = checkedSteps(text)!.steps;
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.problems).toContain(ANOTHER_CHECK);
+    expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps.map((s) => s.state)).toEqual(["unknown"]);
+  });
+
   const exempt = [
     ["a code span on the first line", [`1. **Do \`<Check env="MISSING" />\`.** ${T}`]],
     ["a code span on a continuation", [`1. **Do.** ${T}`, '   see `<Check env="MISSING" />`']],

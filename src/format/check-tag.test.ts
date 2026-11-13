@@ -98,6 +98,12 @@ describe("readCheckRun", () => {
       problems: ["on is given more than once; only the last is read", "env is given more than once; only the last is read"],
     });
   });
+  test("a repeated unknown name is one line per pair, not one per name", () => {
+    expect(readCheckRun(` bogus="1" bogus="1" env="HAVE"`)).toEqual({
+      attrs: { env: "HAVE" },
+      problems: ['bogus="1" is not a Check attribute; it is not read', 'bogus="1" is not a Check attribute; it is not read'],
+    });
+  });
   // Placement (`check-trailing.ts`) allows only spaces or tabs between pairs
   // and no `"`, backtick or newline in a value: the grammar reads that alphabet
   // and no wider one, so a run placement refuses is never a clean run.

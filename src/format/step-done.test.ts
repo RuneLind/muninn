@@ -493,4 +493,11 @@ describe("youListStepLines", () => {
       { key: keys[1]!, line: 11, end: 13, text: "Second", taskList: false },
     ]);
   });
+  test("a lane closing on the step's own line ends the item at the page's end", () => {
+    const lane = '<Lane kind="you">1. **Do.** <Check env="A" /></Lane>';
+    const split = ["---", "title: T", "---", "", "<NextMoves>", "", lane, "", "</NextMoves>", ""].join("\n");
+    const joined = ["---", "title: T", "---", "", `<NextMoves>${lane}</NextMoves>`, ""].join("\n");
+    expect(youListStepLines(split)!.map(({ line, end }) => ({ line, end }))).toEqual([{ line: 7, end: 11 }]);
+    expect(youListStepLines(joined)!.map(({ line, end }) => ({ line, end }))).toEqual([{ line: 5, end: 7 }]);
+  });
 });

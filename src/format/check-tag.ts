@@ -79,8 +79,10 @@ const PAIR = new RegExp(pairSource(true), "y");
  * A raw attribute run read against a closed grammar: in full, `name="value"`
  * pairs led by spaces or tabs, in placement's own alphabet ({@link pairSource}:
  * no `"`, backtick or newline in a value), each name one of the six spec attributes, each at most
- * once. Anything else is one problem line, so the step can never read `ok`:
- * `parseAttrs` would drop an unknown name and let a repeated one overwrite in
+ * once. Anything else gives a problem line, so the step can never read `ok`:
+ * one line per repeated spec name, however often it repeats, one line per
+ * unread pair (an unknown name repeated is named each time), one for leftover
+ * text. Without them `parseAttrs` would drop an unknown name and let a repeated one overwrite in
  * silence. A repeated name keeps its last value, as the renderer and lint do.
  */
 export function readCheckRun(raw: string): { attrs: Record<string, string>; problems: string[] } {
