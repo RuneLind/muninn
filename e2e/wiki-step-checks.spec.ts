@@ -33,7 +33,8 @@
  *  6. A `MUNINN_WIKI_READONLY=1` instance draws the chips, and no «Remove N checked».
  *  7. «Remove N checked» (PR 3): one preview names exactly the ✓ steps and
  *     every renumbering, one confirm removes exactly those with one log entry,
- *     and the not-yet, unknown and unchecked steps stay.
+ *     and the not-yet, unknown and unchecked steps stay. A single Done's
+ *     preview and the all-preview close each other: one panel at a time.
  *
  * CI runs Chromium; WebKit and Firefox run this file by hand (a config with
  * those projects).
@@ -135,6 +136,10 @@ PAGES[REL_R] = lanePage("Check fixture remove", [
   '4. Apply the second old migration. <Check migration="086" />',
   `5. Restart this muninn. <Check migration="086" restart="${PORT}" />`,
 ]);
+
+/** A single Done's preview and the all-preview on one lane: two checked steps, nothing written. */
+const REL_P = "plans/e2e-checks-panels.mdx";
+PAGES[REL_P] = lanePage("Check fixture panels", ['1. Apply the panel step. <Check migration="086" />', '2. Apply the other panel step. <Check migration="086" />']);
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid" };
 const git = (root: string, ...args: string[]) => execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env: GIT_ENV });
@@ -628,6 +633,31 @@ test.describe("«Remove N checked» (owner-step checks PR 3)", () => {
     await expect(chips(p)).toHaveCount(2);
     expect(await chips(p).allTextContents()).toEqual(["○", "?"]);
     await expect(btn).toHaveCount(0);
+  });
+});
+
+test.describe("«Remove N checked» and a single Done share one panel", () => {
+  test("opening either preview closes the other: never two panels at once, and nothing is written", async ({ page: p }) => {
+    await openAt(p, REL_P);
+    await expect(chips(p)).toHaveCount(2);
+    const panels = p.locator(".wiki-article .wiki-step-done-panel");
+    const rowPanel = row(p, "Apply the panel step").locator(":scope > .wiki-step-done-panel");
+    const allPanel = p.locator(".wiki-article .wiki-step-done-allrow > .wiki-step-done-panel");
+    const done = row(p, "Apply the panel step").locator("[data-step-done]");
+    const all = p.locator(".wiki-article [data-step-done-all]");
+    await expect(all).toHaveText("Remove 2 checked");
+    await done.click();
+    await expect(rowPanel.locator("[data-step-done-confirm]")).toBeVisible();
+    await expect(panels).toHaveCount(1);
+    await all.click();
+    await expect(allPanel.locator("[data-step-done-all-confirm]")).toBeVisible();
+    await expect(rowPanel).toHaveCount(0);
+    await expect(panels).toHaveCount(1);
+    await done.click();
+    await expect(rowPanel.locator("[data-step-done-confirm]")).toBeVisible();
+    await expect(allPanel).toHaveCount(0);
+    await expect(panels).toHaveCount(1);
+    expect(await readFile(path.join(root, REL_P), "utf8")).toBe(PAGES[REL_P]);
   });
 });
 
