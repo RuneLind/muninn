@@ -964,6 +964,70 @@ export function machineBootWarning(raw: string | undefined = process.env.MUNINN_
     : null;
 }
 
+export interface PeersParse {
+  /** Machine name → the peer's origin (`https://host[:port]`, no trailing slash). */
+  peers: ReadonlyMap<string, string>;
+  /** One line per dropped entry, by position; never echoes a URL. */
+  warnings: string[];
+}
+
+/**
+ * `MUNINN_PEERS` — the other machines' muninns that answer owner-step checks for
+ * themselves (`GET /api/checks/answer`): comma-separated `name=url`, e.g.
+ * `mini=https://mini.example.ts.net`. Names take {@link resolveMachineName}'s
+ * grammar. A url is kept only when its text, lower-cased, IS its parsed origin
+ * (optionally plus `/`), so anything WHATWG normalisation would change (dot
+ * segments, `https:host`, a short IPv4, an explicit default port) is dropped;
+ * the host must be a DNS name, an IPv4 literal or a bracketed IPv6, the port
+ * not 0. Plain `http:` only to a loopback host: anyone on the path can forge a
+ * reply. A malformed entry, a duplicate name and an entry naming `ownMachine`
+ * are each dropped with a warning (the `SYNC_REPOS` rule: never guess), never a
+ * boot failure: a dropped peer only leaves that machine's checks `unknown`. A
+ * set list with no `ownMachine` adds one warning: it is never consulted. Pure:
+ * the boot line logs the warnings.
+ */
+export function parsePeers(raw: string | undefined = process.env.MUNINN_PEERS, ownMachine: string | null = resolveMachineName()): PeersParse {
+  const peers = new Map<string, string>();
+  const warnings: string[] = [];
+  const entries = (raw ?? "").split(",").map((s) => s.trim());
+  const HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])$/;
+  const LOOPBACK = /^(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])$/;
+  entries.forEach((entry, i) => {
+    if (!entry) return;
+    const at = `MUNINN_PEERS entry ${i + 1}`;
+    const eq = entry.indexOf("=");
+    const name = eq > 0 ? resolveMachineName(entry.slice(0, eq)) : null;
+    if (!name) return void warnings.push(`${at} is skipped: expected name=url with a machine name (lower-case letters, digits, . _ -)`);
+    const urlRaw = entry.slice(eq + 1).trim();
+    let url: URL | null = null;
+    try {
+      url = new URL(urlRaw);
+    } catch {
+      url = null;
+    }
+    const text = urlRaw.toLowerCase();
+    if (
+      !url ||
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      (text !== url.origin && text !== `${url.origin}/`) ||
+      !HOST.test(url.hostname) ||
+      url.port === "0"
+    ) {
+      return void warnings.push(`${at} (${name}) is skipped: the url must be exactly http(s)://host[:port] with an optional trailing /, a non-default non-zero port and no credentials, path, query, fragment or anything the URL parser would rewrite`);
+    }
+    if (url.protocol === "http:" && !LOOPBACK.test(url.hostname)) {
+      return void warnings.push(`${at} (${name}) is skipped: plain http is allowed only to a loopback host (localhost, 127.x.x.x, [::1]); use https`);
+    }
+    if (name === ownMachine) return void warnings.push(`${at} (${name}) is skipped: it names this machine (MUNINN_MACHINE)`);
+    if (peers.has(name)) return void warnings.push(`${at} (${name}) is skipped: duplicate name`);
+    peers.set(name, url.origin);
+  });
+  if (ownMachine === null && entries.some((e) => e !== "")) {
+    warnings.push("MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked");
+  }
+  return { peers, warnings };
+}
+
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
@@ -1038,6 +1102,8 @@ export function loadConfig() {
     decisionTriageRepoRoots: (process.env.DECISION_TRIAGE_REPO_ROOTS ?? "").trim() || null,
     // Which machine this is, for owner-step checks that name machines (`on=`).
     machine: resolveMachineName(),
+    // The other machines' muninns that answer step checks for themselves (`MUNINN_PEERS`).
+    peers: parsePeers().peers,
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

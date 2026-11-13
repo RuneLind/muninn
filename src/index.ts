@@ -1,5 +1,5 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { answerGroupsBootLines, ConfigError, loadConfig, machineBootWarning, resolveServingProfile } from "./config.ts";
+import { answerGroupsBootLines, ConfigError, loadConfig, machineBootWarning, parsePeers, resolveServingProfile } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
@@ -288,6 +288,8 @@ for (const line of config.wikiDefaultLens.warnings) log.warn("{line}", { line })
 // `MUNINN_MACHINE` set to something that is not a machine name: the parse logs nothing.
 const machineLine = machineBootWarning();
 if (machineLine) log.warn("{line}", { line: machineLine });
+// `MUNINN_PEERS`: entries the parse dropped, by position, and the one line saying the list goes unused until MUNINN_MACHINE is set.
+for (const line of parsePeers().warnings) log.warn("{line}", { line });
 
 // Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on
 // every profile — not inside the per-bot scheduler, which needs a Telegram bot.

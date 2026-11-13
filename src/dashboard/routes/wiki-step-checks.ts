@@ -17,6 +17,10 @@
  * difference from Done: a read-only instance (`MUNINN_WIKI_READONLY`, the
  * mini) still answers, since it writes nothing and answers for its own machine.
  * A page with no checked step answers `steps: []` and runs no probe.
+ *
+ * A machine named in `on=` other than this one is asked through `MUNINN_PEERS`
+ * (`peer.ts`, `GET /api/checks/answer` on that machine); no entry for it
+ * answers `unknown`, «no peer configured».
  */
 
 import path from "node:path";
@@ -27,6 +31,7 @@ import { getWikiIndex } from "../../wiki/store.ts";
 import { defaultPageWriteIo } from "../../wiki/page-write.ts";
 import { answerStepChecks, type AnswerDeps } from "../../wiki/step-checks/answer.ts";
 import { realProbeDeps, stepCheckCache } from "../../wiki/step-checks/real-deps.ts";
+import { sharedPeerAnswerer } from "../../wiki/step-checks/peer.ts";
 import { realStepDoneDeps, stepWikiScope, type StepWikiScopeDeps } from "./wiki-step-done.ts";
 
 const log = getLog("dashboard", "wiki-step-checks");
@@ -39,7 +44,7 @@ export interface StepChecksRouteDeps {
 }
 
 export function realStepChecksDeps(config: Config): StepChecksRouteDeps {
-  return { scope: realStepDoneDeps(config), answer: { probes: realProbeDeps(config), machine: config.machine, cache: stepCheckCache } };
+  return { scope: realStepDoneDeps(config), answer: { probes: realProbeDeps(config), machine: config.machine, cache: stepCheckCache, peer: sharedPeerAnswerer(config.peers) } };
 }
 
 export function registerWikiStepChecksRoute(app: Hono, config: Config, depsFor: () => StepChecksRouteDeps = () => realStepChecksDeps(config)): void {

@@ -285,4 +285,8 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   // (`src/wiki/step-checks/`). A developer's `laptop` would turn every
   // `on=`-less case into a named one on that machine only.
   "MUNINN_MACHINE",
+  // `MUNINN_PEERS` — the other machines' muninns a step check asks
+  // (`src/wiki/step-checks/peer.ts`). A developer's value would point a suite's
+  // named-machine cases at a real tailnet address on that machine only.
+  "MUNINN_PEERS",
 ];

@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig, resolveMachineName } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig, resolveMachineName, parsePeers } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -536,5 +536,171 @@ describe("resolveMachineName (MUNINN_MACHINE)", () => {
       const m = /const (\w+) = machineBootWarning\(\);\s*if \(\1\) log\.warn\("\{line\}", \{ line: \1 \}\);/.exec(src);
       expect(m?.[1]).toBe("machineLine");
     });
+  });
+});
+
+describe("parsePeers (MUNINN_PEERS)", () => {
+  test("unset or blank: no peers, no warnings", () => {
+    for (const raw of [undefined, "", "  ", " , "]) expect(parsePeers(raw, "laptop")).toEqual({ peers: new Map(), warnings: [] });
+  });
+
+  test("name=url pairs: names lower-cased, urls stored as their origin", () => {
+    const { peers, warnings } = parsePeers(" Mini=https://mini.example.ts.net/ , box=http://127.0.0.1:3012", "laptop");
+    expect([...peers]).toEqual([
+      ["mini", "https://mini.example.ts.net"],
+      ["box", "http://127.0.0.1:3012"],
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  // Finding 1 (PR #852): plain http lets anyone on the path forge a reply, so it is
+  // kept only for a loopback host; every other host needs https.
+  const SCHEME_HOST: [string, string, string | null][] = [
+    ["http localhost", "http://localhost:3010", "http://localhost:3010"],
+    ["http localhost, no port", "http://localhost", "http://localhost"],
+    ["http 127.0.0.1", "http://127.0.0.1:3010", "http://127.0.0.1:3010"],
+    ["http 127.8.9.10", "http://127.8.9.10:3010", "http://127.8.9.10:3010"],
+    ["http [::1]", "http://[::1]:3010", "http://[::1]:3010"],
+    ["http LAN ip", "http://10.0.0.2:3010", null],
+    ["http 192.168 ip", "http://192.168.0.5", null],
+    ["http tailnet ip", "http://100.64.1.2:3010", null],
+    ["http tailnet name", "http://mini.example.ts.net", null],
+    ["http hostname", "http://mini:3010", null],
+    ["http localhost-lookalike", "http://localhost.example", null],
+    ["http 128.0.0.1", "http://128.0.0.1", null],
+    ["http [::2]", "http://[::2]:3010", null],
+    ["https LAN ip", "https://10.0.0.2:3010", "https://10.0.0.2:3010"],
+    ["https tailnet name", "https://mini.example.ts.net", "https://mini.example.ts.net"],
+    ["https hostname", "https://mini:3010", "https://mini:3010"],
+    ["https localhost", "https://localhost:3010", "https://localhost:3010"],
+  ];
+  for (const [label, url, kept] of SCHEME_HOST) {
+    test(`scheme and host: ${label} → ${kept ? "kept" : "dropped"}`, () => {
+      const { peers, warnings } = parsePeers(`mini=${url}`, "laptop");
+      if (kept) {
+        expect([...peers]).toEqual([["mini", kept]]);
+        expect(warnings).toEqual([]);
+      } else {
+        expect([...peers]).toEqual([]);
+        expect(warnings).toEqual(["MUNINN_PEERS entry 1 (mini) is skipped: plain http is allowed only to a loopback host (localhost, 127.x.x.x, [::1]); use https"]);
+      }
+    });
+  }
+
+  // Finding 2 (PR #852): the raw text must equal the parsed origin (or origin + "/"):
+  // anything WHATWG normalisation had to change is dropped, as is port 0 and a host
+  // outside the DNS/IP grammar. An explicit default port is dropped too (the origin
+  // drops it, so the text is not its origin).
+  const URL_SHAPE: [string, string, string | null][] = [
+    ["scheme with no slashes", "http:localhost", null],
+    ["https with no slashes", "https:a.example", null],
+    ["https with one slash", "https:/a.example", null],
+    ["= in the host", "https://h=x", null],
+    ["_ in the host", "https://h_x", null],
+    ["port 0", "https://h:0", null],
+    ["encoded dot-dot path", "https://a.example/%2e%2e", null],
+    ["dot path", "https://a.example/./", null],
+    ["dot-dot path", "https://h/a/..", null],
+    ["short ipv4", "http://127.1:3010", null],
+    ["leading-zero port", "https://a.example:03010", null],
+    ["explicit default https port", "https://a.example:443", null],
+    ["explicit default http port", "http://localhost:80", null],
+    ["backslash", "https:\\\\a.example", null],
+    ["kept: [::1] with port", "http://[::1]:3010", "http://[::1]:3010"],
+    ["kept: trailing slash", "https://a.example/", "https://a.example"],
+    ["kept: upper-case host and scheme", "HTTPS://MINI.Example", "https://mini.example"],
+    ["kept: non-default port", "https://a.example:8443", "https://a.example:8443"],
+    ["kept: https ipv4", "https://100.64.1.2", "https://100.64.1.2"],
+  ];
+  for (const [label, url, kept] of URL_SHAPE) {
+    test(`url shape: ${label} → ${kept ? "kept" : "dropped"}`, () => {
+      const { peers, warnings } = parsePeers(`mini=${url}`, "laptop");
+      if (kept) {
+        expect([...peers]).toEqual([["mini", kept]]);
+        expect(warnings).toEqual([]);
+      } else {
+        expect([...peers]).toEqual([]);
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toStartWith("MUNINN_PEERS entry 1 (mini) is skipped: the url must be exactly ");
+        expect(warnings[0]).not.toContain(url);
+      }
+    });
+  }
+
+  test("empty items and whitespace still count toward positions", () => {
+    const { peers, warnings } = parsePeers(" , ,mini=https://a.test, ,box=http://10.0.0.2", "laptop");
+    expect([...peers]).toEqual([["mini", "https://a.test"]]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toStartWith("MUNINN_PEERS entry 5 (box)");
+  });
+
+  // Finding 3 (PR #852): with no MUNINN_MACHINE every named machine answers before a
+  // peer is asked, so a set peer list does nothing; say so once.
+  const UNUSED = "MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked";
+  test("MUNINN_PEERS set, MUNINN_MACHINE unset or invalid: one warning that the list is unused", () => {
+    expect(parsePeers("mini=https://mini.test", null).warnings).toEqual([UNUSED]);
+    expect(parsePeers("mini=https://mini.test", resolveMachineName("Not A Name")).warnings).toEqual([UNUSED]);
+    expect(parsePeers("mini=https://mini.test,box=https://box.test", null).warnings.filter((w) => w === UNUSED)).toHaveLength(1);
+  });
+  test("no unused warning when both are set, or when MUNINN_PEERS is unset or blank", () => {
+    expect(parsePeers("mini=https://mini.test", "laptop").warnings).toEqual([]);
+    for (const raw of [undefined, "", "  ", " , "]) expect(parsePeers(raw, null).warnings).toEqual([]);
+  });
+
+  const DROPPED: [string, string][] = [
+    ["no =", "mini"],
+    ["empty name", "=https://mini.test"],
+    ["bad name", "my mini=https://mini.test"],
+    ["name starting with -", "-mini=https://mini.test"],
+    ["empty url", "mini="],
+    ["not a url", "mini=mini.test"],
+    ["ftp", "mini=ftp://mini.test"],
+    ["file", "mini=file:///etc/passwd"],
+    ["javascript", "mini=javascript:alert(1)"],
+    ["credentials", "mini=https://user:pw@mini.test"],
+    ["user only", "mini=https://user@mini.test"],
+    ["a path", "mini=https://mini.test/api"],
+    ["a query", "mini=https://mini.test/?x=1"],
+    ["an empty query", "mini=https://mini.test?"],
+    ["a fragment", "mini=https://mini.test/#x"],
+    ["names this machine", "laptop=https://laptop.test"],
+    ["names this machine, other case", "Laptop=https://laptop.test"],
+  ];
+  for (const [name, raw] of DROPPED) {
+    test(`dropped with one warning that echoes no url: ${name}`, () => {
+      const { peers, warnings } = parsePeers(`${raw},ok=https://ok.test`, "laptop");
+      expect([...peers.keys()]).toEqual(["ok"]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith("MUNINN_PEERS entry 1");
+      expect(warnings[0]).not.toContain(".test");
+      expect(warnings[0]).not.toContain("pw");
+    });
+  }
+
+  test("a duplicate name keeps the first and warns about the second", () => {
+    const { peers, warnings } = parsePeers("mini=https://a.test,mini=https://b.test", "laptop");
+    expect([...peers]).toEqual([["mini", "https://a.test"]]);
+    expect(warnings).toEqual(["MUNINN_PEERS entry 2 (mini) is skipped: duplicate name"]);
+  });
+
+  test("with no MUNINN_MACHINE, no entry can be this machine", () => {
+    expect([...parsePeers("laptop=https://laptop.test", null).peers.keys()]).toEqual(["laptop"]);
+  });
+
+  test("loadConfig carries the parsed map; index.ts logs the warnings after setupLogging", async () => {
+    const prev = process.env.MUNINN_PEERS;
+    const prevDb = process.env.DATABASE_URL;
+    process.env.MUNINN_PEERS = "mini=https://mini.test";
+    process.env.DATABASE_URL ??= "postgresql://x@127.0.0.1:5432/x";
+    try {
+      expect([...loadConfig().peers]).toEqual([["mini", "https://mini.test"]]);
+    } finally {
+      if (prev === undefined) delete process.env.MUNINN_PEERS;
+      else process.env.MUNINN_PEERS = prev;
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+    }
+    const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+    const at = src.indexOf("parsePeers().warnings");
+    expect(at).toBeGreaterThan(src.indexOf("await setupLogging("));
   });
 });
