@@ -194,6 +194,6 @@ Follow the existing pattern:
 4. Parse response and save to DB via `src/db/<domain>.ts`
 5. Wire into `src/core/metadata-extractor.ts` as fire-and-forget alongside existing extractors
 6. Add source label to dashboard stats if token visibility needed
-7. If context needed in main prompt: add to `buildPrompt()` parallel queries and system prompt assembly
+7. If context needed in main prompt: add to `buildPrompt()` parallel queries and the user turn's `<context>` block
 
 For detailed implementation patterns, read the existing extractors — they all follow the same structure: prompt construction, one `runHaikuExtraction()` call, conditional DB save in `onResult`.

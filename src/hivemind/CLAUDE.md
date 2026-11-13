@@ -86,7 +86,7 @@ Phases 1, 2, 3, and 4 of the integration plan, archived in mimir at `archive/mun
   hit the router persists `auto_respond_paused=true` + `pause_reason` on the
   thread row (migration 036) and skips further autorespond until manually
   unpaused. We deliberately did **not** add a token budget — the hourly cap
-  bounds cumulative turns, and so cost, per peer thread. Add a token budget
+  bounds cumulative turns per peer thread. Add a token budget
   later if real-world traffic needs one.
 - **Trace emission.** Each autorespond cycle creates a new `Tracer` rooted at
   `hivemind_autorespond` with point-in-time `peer_inbound` and `peer_outbound`

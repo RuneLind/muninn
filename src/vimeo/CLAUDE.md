@@ -1135,9 +1135,10 @@ directory. That is load-bearing: `summarizer.test.ts` uses `mock.module` on
 `../ai/one-shot.ts` and `../gardener/source-drafter-run.ts`, which a large share
 of the suite imports transitively, so it needs its OWN `bun test` process, and a
 `src/vimeo/` directory argument would sweep it into a shared one. `url` / `oembed` /
-`vtt` / `captions` / `state` mock nothing and sit in shared links (`media` too — its
+`vtt` / `state` mock nothing and sit in shared links (`media` too — its
 download half is driven through `fetchImpl`, no network — and `whisper`, whose
-download is `fetchImpl` and whose two spawns are the `run` seam); `summarizer` gets
+download is `fetchImpl` and whose two spawns are the `run` seam); `captions` mocks
+nothing either but has its own pinned link (its entry in `scripts/test-chain.ts` says why); `summarizer` gets
 its own link, which `bun scripts/test-chain.ts write` keeps for every `mock.module` file. The route's
 own cases live in `src/dashboard/routes/capture-route-job-ordering.test.ts`,
 which already runs in a process of its own for the same reason.
