@@ -288,7 +288,7 @@ for (const line of config.wikiDefaultLens.warnings) log.warn("{line}", { line })
 // `MUNINN_MACHINE` set to something that is not a machine name: the parse logs nothing.
 const machineLine = machineBootWarning();
 if (machineLine) log.warn("{line}", { line: machineLine });
-// `MUNINN_PEERS` entries the parse dropped, by position.
+// `MUNINN_PEERS`: entries the parse dropped, by position, and the one line saying the list goes unused until MUNINN_MACHINE is set.
 for (const line of parsePeers().warnings) log.warn("{line}", { line });
 
 // Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on

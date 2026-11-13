@@ -3,9 +3,10 @@
  * probe of that request `unknown`, a timeout answers inside its bound, the
  * cache is per (machine, kind, value), and only ok/not-yet are kept.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import type { CheckProbe } from "../../format/check-tag.ts";
-import { createPeerAnswerer, readPeerReply } from "./peer.ts";
+import { createPeerAnswerer, PEER_DOWN_WINDOW_MS, readPeerReply } from "./peer.ts";
 
 const P: CheckProbe[] = [
   { kind: "env", value: "HAVE" },
@@ -19,10 +20,10 @@ const PEERS = new Map([
 const json = (body: unknown, init: ResponseInit = {}) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" }, ...init });
 const good = (machine = "beta", states = ["not-yet", "ok"]) => ({ v: 1, machine, results: P.map((p, i) => ({ ...p, state: states[i], why: `w${i}` })) });
 
-function client(reply: (url: URL, init: RequestInit) => Response | Promise<Response>, opts: { timeoutMs?: number; now?: () => number } = {}) {
+function client(reply: (url: URL, init: RequestInit) => Response | Promise<Response>, opts: { timeoutMs?: number; now?: () => number; peers?: ReadonlyMap<string, string> } = {}) {
   const calls: URL[] = [];
   const answer = createPeerAnswerer({
-    peers: PEERS,
+    peers: opts.peers ?? PEERS,
     timeoutMs: opts.timeoutMs,
     now: opts.now,
     fetch: async (input, init) => {
@@ -195,11 +196,13 @@ describe("createPeerAnswerer", () => {
     expect(states(b)).toEqual(["ok", "ok"]);
   });
 
-  test("an unknown is not cached: a failed first answer does not stick", async () => {
+  test("an unknown is not cached: a failed first answer does not stick past the down window", async () => {
     let fail = true;
-    const { answer, calls } = client(() => (fail ? Promise.reject(new Error("down")) : json(good())));
+    let t = 0;
+    const { answer, calls } = client(() => (fail ? Promise.reject(new Error("down")) : json(good())), { now: () => t });
     expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
     fail = false;
+    t = PEER_DOWN_WINDOW_MS;
     expect(states(await answer("beta", P))).toEqual(["not-yet", "ok"]);
     expect(calls).toHaveLength(2);
   });
@@ -220,5 +223,202 @@ describe("createPeerAnswerer", () => {
     });
     expect(states(await answer("beta", many)).every((s) => s === "ok")).toBe(true);
     expect(calls.map((c) => c.searchParams.getAll("p").length)).toEqual([60, 15]);
+  });
+});
+
+describe("the down window: a transport-level failure answers that machine unknown at once for a while", () => {
+  const down = () => Promise.reject(Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), { code: "ConnectionRefused" }));
+
+  test("the window is 15 s", () => expect(PEER_DOWN_WINDOW_MS).toBe(15_000));
+
+  test("a throwing fetch: the next ask inside the window makes no request and says «a moment ago»; after it, the network again", async () => {
+    let t = 1_000;
+    const { answer, calls } = client(down, { now: () => t });
+    expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
+    expect(calls).toHaveLength(1);
+    t += PEER_DOWN_WINDOW_MS - 1;
+    const inside = await answer("beta", P);
+    expect(calls).toHaveLength(1);
+    expect(states(inside)).toEqual(["unknown", "unknown"]);
+    for (const r of inside) {
+      expect(r.why).toStartWith("the peer for beta ");
+      expect(r.why).toContain("a moment ago");
+      expect(r.why).not.toContain("\n");
+    }
+    t += 1;
+    expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("a peer that recovers is read normally once the window has passed", async () => {
+    let t = 0;
+    let up = false;
+    const { answer, calls } = client(() => (up ? json(good()) : down()), { now: () => t });
+    await answer("beta", P);
+    up = true;
+    t = 5_000;
+    expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
+    expect(calls).toHaveLength(1);
+    t = PEER_DOWN_WINDOW_MS;
+    expect(states(await answer("beta", P))).toEqual(["not-yet", "ok"]);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("machine beta's window does not silence delta", async () => {
+    const { answer, calls } = client((u) => (u.hostname === "beta.test" ? down() : json(good("delta"))), { now: () => 0 });
+    await answer("beta", P);
+    expect(states(await answer("delta", P))).toEqual(["not-yet", "ok"]);
+    expect(calls.map((c) => c.hostname)).toEqual(["beta.test", "delta.test"]);
+    await answer("beta", P);
+    expect(calls).toHaveLength(2);
+  });
+
+  const WHOLE: [string, () => Response | Promise<Response>][] = [
+    ["answers as another machine", () => json(good("gamma"))],
+    ["v=2", () => json({ ...good(), v: 2 })],
+    ["429 busy", () => json({ error: "busy" }, { status: 429 })],
+    ["HTML", () => new Response("<html></html>", { status: 200, headers: { "content-type": "text/html" } })],
+    ["a different number of results", () => json({ ...good(), results: good().results.slice(1) })],
+  ];
+  for (const [name, reply] of WHOLE) {
+    test(`a whole-reply refusal opens the window: ${name}`, async () => {
+      const { answer, calls } = client(reply, { now: () => 0 });
+      await answer("beta", P);
+      const again = await answer("beta", P);
+      expect(calls).toHaveLength(1);
+      expect(states(again)).toEqual(["unknown", "unknown"]);
+      for (const r of again) expect(r.why).toContain("a moment ago");
+    });
+  }
+
+  test("a valid reply with a probe-level unknown opens no window and is still not cached", async () => {
+    const { answer, calls } = client(() => json(good("beta", ["unknown", "unknown"])), { now: () => 0 });
+    await answer("beta", P);
+    const again = await answer("beta", P);
+    expect(calls).toHaveLength(2);
+    for (const r of again) expect(r.why).not.toContain("a moment ago");
+  });
+
+  test("an ok cached from a valid reply before the failure is still served in the window; the rest is unknown, never ok", async () => {
+    let t = 0;
+    let up = true;
+    const { answer, calls } = client((u) => {
+      if (!up) return down();
+      const asked = u.searchParams.getAll("p").map((s) => ({ kind: s.split(":")[0], value: s.slice(s.indexOf(":") + 1) }));
+      return json({ v: 1, machine: "beta", results: asked.map((p) => ({ ...p, state: "ok" })) });
+    }, { now: () => t });
+    expect(states(await answer("beta", [P[0]!]))).toEqual(["ok"]);
+    up = false;
+    t = 1_000;
+    expect(states(await answer("beta", [P[1]!]))).toEqual(["unknown"]);
+    expect(calls).toHaveLength(2);
+    t = 2_000;
+    const got = await answer("beta", P);
+    expect(calls).toHaveLength(2);
+    expect(got[0]).toEqual({ state: "ok", why: "beta: holds" });
+    expect(got[1]!.state).toBe("unknown");
+    expect(got[1]!.why).toContain("a moment ago");
+    // Once the cached ok expires inside the window, it is unknown too: the window never yields ok.
+    t = 30_000 - 1;
+    expect(states(await answer("beta", P))).toEqual(["ok", "unknown"]);
+    t = 30_000;
+    expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
+  });
+});
+
+describe("why and log for a fetch that throws", () => {
+  // Shapes observed from Bun 1.3.10 against a local Bun.serve (see the real-Bun tests below).
+  const redirectErr = () => Object.assign(new Error('UnexpectedRedirect fetching "https://beta.test/api/checks/answer?v=1". For more information, pass `verbose: true` in the second argument to fetch()'), { code: "UnexpectedRedirect" });
+  const refusedErr = () => Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), { code: "ConnectionRefused" });
+  const timeoutErr = () => new DOMException("The operation timed out.", "TimeoutError");
+  const abortErr = () => new DOMException("The operation was aborted.", "AbortError");
+
+  const WHY: [string, () => unknown, string][] = [
+    ["a redirect refused by redirect: error", redirectErr, "the peer for beta answered with a redirect"],
+    ["a refused connection", refusedErr, "the peer for beta could not be reached"],
+    ["a TimeoutError", timeoutErr, "the peer for beta timed out"],
+    ["an AbortError", abortErr, "the peer for beta timed out"],
+  ];
+  for (const [name, err, why] of WHY) {
+    test(`the why names it: ${name}`, async () => {
+      const { answer } = client(() => Promise.reject(err()), { now: () => 0 });
+      expect(await answer("beta", P)).toEqual(P.map(() => ({ state: "unknown", why })));
+    });
+  }
+
+  describe("the log", () => {
+    const records: LogRecord[] = [];
+    const capture = async () => {
+      records.length = 0;
+      await configure({ sinks: { capture: (r: LogRecord) => void records.push(r) }, loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }, { category: ["logtape", "meta"], sinks: [], lowestLevel: "fatal" }], reset: true });
+    };
+    afterEach(async () => {
+      await reset();
+    });
+    const rendered = (r: LogRecord) => r.message.map(String).join("");
+
+    test("one warn per window per machine, naming the machine and the error, never the url", async () => {
+      await capture();
+      let t = 0;
+      const { answer } = client(() => Promise.reject(redirectErr()), { now: () => t });
+      for (let i = 0; i < 5; i++) await answer("beta", P);
+      const many: CheckProbe[] = Array.from({ length: 75 }, (_, i) => ({ kind: "env", value: `K${i}` }));
+      await answer("beta", many);
+      expect(records).toHaveLength(1);
+      const r = records[0]!;
+      expect(r.level).toBe("warning");
+      expect(r.properties.machine).toBe("beta");
+      expect(r.properties.errorName).toBe("Error");
+      expect(r.properties.errorCode).toBe("UnexpectedRedirect");
+      expect(rendered(r)).toContain("beta");
+      const all = rendered(r) + JSON.stringify(r.properties);
+      expect(all).not.toContain("beta.test");
+      expect(all).not.toContain("https://");
+      t = PEER_DOWN_WINDOW_MS;
+      await answer("beta", P);
+      expect(records).toHaveLength(2);
+    });
+
+    test("a page whose 75 probes fail in two requests logs once", async () => {
+      await capture();
+      const { answer, calls } = client(() => Promise.reject(refusedErr()), { now: () => 0 });
+      await answer("beta", Array.from({ length: 75 }, (_, i) => ({ kind: "env", value: `K${i}` })));
+      expect(calls).toHaveLength(2);
+      expect(records).toHaveLength(1);
+    });
+
+    test("each machine gets its own line", async () => {
+      await capture();
+      const { answer } = client(() => Promise.reject(refusedErr()), { now: () => 0 });
+      await answer("beta", P);
+      await answer("delta", P);
+      await answer("beta", P);
+      expect(records.map((r) => r.properties.machine)).toEqual(["beta", "delta"]);
+    });
+
+    test("a refused whole reply logs its reason, with no error name", async () => {
+      await capture();
+      const { answer } = client(() => json({ error: "busy" }, { status: 429 }), { now: () => 0 });
+      await answer("beta", P);
+      expect(records).toHaveLength(1);
+      expect(records[0]!.properties.machine).toBe("beta");
+      expect(records[0]!.properties.reason).toBe("is busy");
+    });
+  });
+
+  describe("against real Bun fetch and a local stub", () => {
+    test("a redirect reads «answered with a redirect»; a closed port «could not be reached»", async () => {
+      const srv = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:1/x" } }) });
+      const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+      const closedPort = closed.port;
+      closed.stop(true);
+      try {
+        const answer = createPeerAnswerer({ peers: new Map([["beta", `http://127.0.0.1:${srv.port}`], ["delta", `http://127.0.0.1:${closedPort}`]]) });
+        expect(await answer("beta", [P[0]!])).toEqual([{ state: "unknown", why: "the peer for beta answered with a redirect" }]);
+        expect(await answer("delta", [P[0]!])).toEqual([{ state: "unknown", why: "the peer for delta could not be reached" }]);
+      } finally {
+        srv.stop(true);
+      }
+    });
   });
 });

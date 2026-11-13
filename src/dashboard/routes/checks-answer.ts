@@ -57,7 +57,9 @@ export function parseProbeParam(raw: string): CheckProbe | null {
 
 export function registerChecksAnswerRoute(app: Hono, config: Config, depsFor: () => ChecksAnswerDeps = () => realChecksAnswerDeps(config)): void {
   app.get(CHECKS_ANSWER_PATH, async (c) => {
-    // Bounds the probe work any caller can queue behind the shared git slots a local page also waits on.
+    // Bounds the requests in flight, not the git-slot queue: jobs a request queued keep
+    // waiting there after its 6 s bound, so a caller repeating requests can still grow
+    // that queue, which is unbounded (a follow-up).
     if (inFlight >= PEER_ROUTE_MAX_IN_FLIGHT) return c.json({ error: "busy: too many check requests at once" }, 429);
     inFlight++;
     try {
