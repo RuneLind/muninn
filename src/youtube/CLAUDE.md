@@ -441,7 +441,7 @@ same path + same url overwrites, same path + a DIFFERENT url forks `Title (2).md
 (`main/ingest/_markdown_writer.py`). So a re-capture whose auto-picked category
 or resolved title differs by a character writes a second document under a second
 path, and one whose url differs forks even where the path matches — which is why
-nothing stored is built from `body.url` (below). This map is the only thing in
+nothing stored is built from `body.url` (above). This map is the only thing in
 front of that.
 
 **A `/summaries` Delete invalidates both halves.** `backlog-doc-delete` calls
