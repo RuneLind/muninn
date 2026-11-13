@@ -12,7 +12,8 @@
  * Steps come from `youListStepLines` + `stepCheck`, the walk lint's
  * `check-placement` and Done read; a task-list row has no slot and gets no
  * answer. A step is `ok` only when every machine it names is `ok`; a machine
- * is `ok` only when every probe is, and the check dropped no attribute.
+ * is `ok` only when every probe is, the check dropped no attribute, and the
+ * step's item holds no other `<Check` lint reports ({@link ANOTHER_CHECK}).
  */
 
 import { stepCheck, type CheckProbe } from "../../format/check-tag.ts";
