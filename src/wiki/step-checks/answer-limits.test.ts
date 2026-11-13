@@ -241,6 +241,9 @@ describe("git-spawning probes run at most 4 at a time", () => {
         if (a === "rev-parse --show-toplevel") return ok(`${cwd}\n`);
         if (a === "remote get-url origin") return ok(`https://github.com/x/${path.basename(cwd)}.git\n`);
         if (a === "ls-remote --symref origin HEAD") return ok(`ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`);
+        if (a === "ls-remote --get-url origin") return ok(`https://github.com/x/${path.basename(cwd)}.git\n`);
+        // No operation in progress: git names paths that do not exist.
+        if (a.startsWith("rev-parse --git-path")) return ok(args.filter((_, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""));
         // No partial-clone key (git config exits 1 on no match).
         if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
         return ok();
@@ -302,6 +305,8 @@ describe("property: capped, cached and slotted answers are never ok where the di
     if (a === "rev-parse --show-toplevel") return { ok: true, stdout: `${cwd}\n`, exitCode: 0 };
     if (a === "remote get-url origin") return { ok: true, stdout: `https://github.com/x/${path.basename(cwd)}.git\n`, exitCode: 0 };
     if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
+    if (a === "ls-remote --get-url origin") return { ok: true, stdout: `https://github.com/x/${path.basename(cwd)}.git\n`, exitCode: 0 };
+    if (a.startsWith("rev-parse --git-path")) return { ok: true, stdout: args.filter((_, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""), exitCode: 0 };
     if (a.startsWith("ls-remote")) return kind === "failing" ? { ok: false, stdout: "", exitCode: 128 } : { ok: true, stdout: `ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`, exitCode: 0 };
     if (a.startsWith("cat-file")) return kind === "not-yet" ? { ok: false, stdout: "", exitCode: 1 } : { ok: true, stdout: "", exitCode: 0 };
     return { ok: true, stdout: "", exitCode: 0 };

@@ -13,11 +13,13 @@
  * origin: `remote.origin.uploadpack`, credential helpers, the transport.
  * `pushed` answers any `remote.origin.*` key outside its allowlist (uploadpack
  * among them) `unknown` before its `ls-remote`, which then runs only
- * credential helpers and the transport, and reads only a network origin: a
- * local one is `unknown`, since a path cannot be proven another repository.
+ * credential helpers and the transport. Both read only a network origin: a
+ * local one is `unknown`, since a path cannot be proven another repository;
+ * both answer an operation in progress `unknown`, and a named roots entry
+ * that is not the repo `unknown` rather than trying another clone.
  * Every outside read comes in through {@link ProbeDeps}, so tests never touch
- * the real machine, except `pushed`'s `lstat` of the git-dir files an
- * operation in progress leaves, at paths git names, its `realpath` of each
+ * the real machine, except both probes' `lstat` of the git-dir files an
+ * operation in progress leaves, at paths git names, `pushed`'s `realpath` of each
  * worktree and git dir, its read of each linked git dir's `gitdir` file, and
  * its scratch index, a temp file outside the repo removed after use.
  *
@@ -178,12 +180,19 @@ async function refusePartialClone(dir: string, label: string, git: GitRun): Prom
  * Whether `dir`'s HEAD contains origin's default-branch tip as origin has it
  * NOW, never the local `origin/<branch>` ref, which is only as fresh as the
  * last fetch. A partial clone is `unknown` before anything else
- * ({@link refusePartialClone}).
+ * ({@link refusePartialClone}), then an operation in progress (a stopped
+ * `pull --rebase` leaves HEAD on origin's tip: {@link refuseInProgress}) and a
+ * local origin ({@link refuseLocalOrigin}).
  */
 export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun): Promise<ProbeResult> {
   const git = checkoutGit(rawGit);
   const partial = await refusePartialClone(dir, label, git);
   if (partial) return partial;
+  const busy = await refuseInProgress(dir, label, git);
+  if (busy) return busy;
+  // `false`: checkout proves what origin's URL serves, not where a push goes, so core.sshCommand is not refused.
+  const local = await refuseLocalOrigin(dir, label, false, git);
+  if (local) return local;
   const remote = await git(dir, ["ls-remote", "--symref", "origin", "HEAD"], { timeoutMs: LS_REMOTE_MS, maxLines: 20 });
   if (!remote.ok || remote.capped) return unknown(`${gitFailure(remote, "git ls-remote")}: origin's default branch is unknown`);
   const head = parseSymrefHead(remote.stdout);
@@ -202,6 +211,11 @@ export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun
 
 async function repoDir(name: string, deps: ProbeDeps): Promise<{ dir: string } | ProbeResult> {
   if (!deps.roots) return unknown(`DECISION_TRIAGE_REPO_ROOTS is not set, so ${name} cannot be found`);
+  // A named entry is the only candidate: findRepo would fall through to another clone under the root dirs.
+  if (deps.roots.named.has(name)) {
+    const found = await findRepo(name, { dirs: [], named: deps.roots.named }, deps.git);
+    return "reason" in found ? unknown(`${name}'s entry in the repo roots is not that repo: ${found.reason}`) : found;
+  }
   const found = await findRepo(name, deps.roots, deps.git);
   return "reason" in found ? unknown(`${name} not found under the repo roots: ${found.reason}`) : found;
 }

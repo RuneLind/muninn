@@ -11,8 +11,12 @@ import { readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit, type GitResult, type GitRun } from "../decision-triage/git.ts";
+import { networkOrigin } from "../../test/hermetic-git.ts";
+import type { GitResult, GitRun } from "../decision-triage/git.ts";
 import { bounded, combineStates, probeCheckout, probeEnv, probeMigration, runProbe, type ProbeDeps } from "./probes.ts";
+
+/** Real git off the global config, with a network origin URL: the fixtures' origins are local bares, which `checkout` refuses. */
+const NETWORK = networkOrigin("https://example.invalid/muninn.git");
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-probes-")));
 
@@ -26,6 +30,8 @@ interface World {
   symref?: GitResult;
   catFile?: GitResult;
   ancestor?: GitResult;
+  gitPath?: GitResult;
+  getUrl?: GitResult;
 }
 
 /**
@@ -44,6 +50,8 @@ function fakeGit(w: World = {}, calls: string[][] = [], envs: (Readonly<Record<s
     if (a.startsWith("rev-parse --verify --quiet refs/remotes/origin/")) return OK("b".repeat(40));
     if (a === "ls-remote --symref origin HEAD") return w.symref ?? OK(`ref: refs/heads/main\tHEAD\n${TIP}\tHEAD\n`);
     if (a.startsWith("ls-remote origin refs/heads/")) return OK(`${"b".repeat(40)}\t${args[2]}\n`);
+    if (a.startsWith("rev-parse --git-path")) return w.gitPath ?? OK(args.filter((x) => x !== "rev-parse" && x !== "--git-path").map((f) => `.git/${f}\n`).join(""));
+    if (a === "ls-remote --get-url origin") return w.getUrl ?? OK("https://github.com/x/muninn.git\n");
     if (a.startsWith("cat-file -e")) return w.catFile ?? OK();
     if (a.startsWith("merge-base --is-ancestor")) return w.ancestor ?? OK();
     return EXIT(128);
@@ -137,7 +145,7 @@ describe("checkout", () => {
   test("HEAD equal to or ahead of origin's live tip: ok, read with one ls-remote --symref and never a fetch", async () => {
     const calls: string[][] = [];
     expect(await probeCheckout("muninn", deps({}, {}, calls))).toEqual({ state: "ok", why: `muninn contains origin's main tip ${SHORT}` });
-    expect(calls.filter((c) => c[0] === "ls-remote")).toEqual([["ls-remote", "--symref", "origin", "HEAD"]]);
+    expect(calls.filter((c) => c[0] === "ls-remote")).toEqual([["ls-remote", "--get-url", "origin"], ["ls-remote", "--symref", "origin", "HEAD"]]);
     expect(calls.some((c) => ["fetch", "pull", "checkout", "reset"].includes(c[0]!))).toBe(false);
     // HEAD ahead of the tip answers the same: merge-base --is-ancestor exits 0.
     expect((await probeCheckout("muninn", deps({}, { ancestor: OK() }))).state).toBe("ok");
@@ -189,8 +197,8 @@ describe("checkout", () => {
     expect((await probeCheckout("muninn", deps({}, {}, calls, envs))).state).toBe("ok");
     const OFF = { GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null", GIT_NO_LAZY_FETCH: "1" };
     expect(calls.map((c, i) => [c[0], envs[i]])).toEqual(calls.map((c) => [c[0], OFF]));
-    // findRepo's two reads, the config read, ls-remote, cat-file, merge-base.
-    expect(calls.map((c) => c[0])).toEqual(["rev-parse", "remote", "config", "ls-remote", "cat-file", "merge-base"]);
+    // findRepo's two reads, the config read, the in-progress paths, the origin URL, ls-remote, cat-file, merge-base.
+    expect(calls.map((c) => c[0])).toEqual(["rev-parse", "remote", "config", "rev-parse", "ls-remote", "ls-remote", "cat-file", "merge-base"]);
   });
   test("a partial clone (a promisor remote or extensions.partialclone): unknown before any object lookup", async () => {
     const calls: string[][] = [];
@@ -203,11 +211,20 @@ describe("checkout", () => {
     expect((await probeCheckout("muninn", deps({}, { promisor: TIMED_OUT }))).state).toBe("unknown");
     expect((await probeCheckout("muninn", deps({}, { promisor: { ok: false, stdout: "", stderr: "error: x", exitCode: 1 } }))).state).toBe("unknown");
   });
+  test("the in-progress paths or the origin URL cannot be read: unknown", async () => {
+    expect(await probeCheckout("muninn", deps({}, { gitPath: EXIT(128) }))).toEqual({ state: "unknown", why: "git rev-parse failed on muninn" });
+    expect(await probeCheckout("muninn", deps({}, { getUrl: EXIT(2) }))).toEqual({ state: "unknown", why: "git ls-remote failed on muninn" });
+  });
+  test("an origin URL that is not a network address: unknown; https and scp-like: ok", async () => {
+    const LOCAL = { state: "unknown" as const, why: "muninn's origin is not a network address: muninn cannot prove it is another repository" };
+    for (const url of ["file:///srv/git/muninn.git", "/srv/git/muninn.git"]) expect([url, await probeCheckout("muninn", deps({}, { getUrl: OK(`${url}\n`) }))]).toEqual([url, LOCAL]);
+    for (const url of ["https://github.com/x/muninn.git", "git@github.com:x/muninn.git"]) expect([url, (await probeCheckout("muninn", deps({}, { getUrl: OK(`${url}\n`) }))).state]).toEqual([url, "ok"]);
+  });
   test("no roots, a repo not found: unknown", async () => {
     expect(await probeCheckout("muninn", deps({ roots: null }))).toEqual({ state: "unknown", why: "DECISION_TRIAGE_REPO_ROOTS is not set, so muninn cannot be found" });
     expect((await probeCheckout("huginn", deps())).state).toBe("unknown");
-    // mimir resolves to a folder whose origin names muninn.
-    expect((await probeCheckout("mimir", deps())).why).toBe("mimir not found under the repo roots: origin names another repo");
+    // mimir's named entry is a folder whose origin names muninn: no other candidate is tried.
+    expect((await probeCheckout("mimir", deps())).why).toBe("mimir's entry in the repo roots is not that repo: origin names another repo");
   });
 });
 
@@ -231,7 +248,7 @@ describe("checkout, real git: a stale local origin/HEAD", () => {
     // The precondition the false ok needed: the local origin/HEAD still names master.
     expect(sh(clone, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).toBe("origin/master");
     const mainTip = sh(work, "rev-parse", "HEAD");
-    const r = await probeCheckout("muninn", deps({ git: realGit, roots: { dirs: [], named: new Map([["muninn", clone]]) } }));
+    const r = await probeCheckout("muninn", deps({ git: NETWORK, roots: { dirs: [], named: new Map([["muninn", clone]]) } }));
     expect(r).toEqual({ state: "not-yet", why: `muninn does not contain origin's main tip ${mainTip.slice(0, 7)}: pull` });
   });
 });
@@ -253,7 +270,7 @@ describe("checkout, real git: replace refs and a partial clone", () => {
     sh(work, "push", "-q", "origin", "HEAD:main");
     return { base, remote, work };
   }
-  const realDeps = (clone: string) => deps({ git: realGit, roots: { dirs: [], named: new Map([["muninn", clone]]) } });
+  const realDeps = (clone: string) => deps({ git: NETWORK, roots: { dirs: [], named: new Map([["muninn", clone]]) } });
 
   test("HEAD an orphan commit that `git replace` swaps for a fake child of origin's tip: not-yet, never ok", async () => {
     const { base, remote } = remoteWithOneCommit();

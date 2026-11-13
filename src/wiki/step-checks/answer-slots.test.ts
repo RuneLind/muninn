@@ -36,6 +36,9 @@ function repos(n: number): Map<string, string> {
   return named;
 }
 
+/** A network `ls-remote`; `ls-remote --get-url` reads config only. */
+const networkLs = (a: string) => a.startsWith("ls-remote") && a !== "ls-remote --get-url origin";
+
 /** A fake git that counts calls in flight; `delay` decides each call's duration. */
 function countingGit(delay: (args: string) => Promise<void>) {
   const c = { active: 0, peak: 0, lsRemote: 0 };
@@ -44,8 +47,7 @@ function countingGit(delay: (args: string) => Promise<void>) {
     c.peak = Math.max(c.peak, c.active);
     try {
       const a = args.join(" ");
-      // `ls-remote --get-url` reads config only: not a network read.
-      if (a.startsWith("ls-remote") && a !== "ls-remote --get-url origin") c.lsRemote++;
+      if (networkLs(a)) c.lsRemote++;
       await delay(a);
       if (a === "rev-parse --show-toplevel") return okRes(`${cwd}\n`);
       if (a === "remote get-url origin") return okRes(`https://github.com/x/${path.basename(cwd)}.git\n`);
@@ -100,7 +102,7 @@ describe("a checkout probe holds its slot until its git chain settles", () => {
     PROBE_BOUND_MS.checkout = 40;
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
-    const { git, c } = countingGit((a) => (a.startsWith("ls-remote") ? gate : Promise.resolve()));
+    const { git, c } = countingGit((a) => (networkLs(a) ? gate : Promise.resolve()));
     const slots = new ProbeSlots(1);
     const t0 = Date.now();
     const a = await answerStepChecks(checkouts(1), deps(probeDeps(git, repos(1)), { gitSlots: slots }));
@@ -144,7 +146,7 @@ describe("an unsettled read's age counts from when it got its slot", () => {
     const blocker = slots.run(() => new Promise<void>((r) => (unblock = r)));
     let openLs!: () => void;
     const lsGate = new Promise<void>((r) => (openLs = r));
-    const { git, c } = countingGit((a) => (a.startsWith("ls-remote") ? lsGate : Promise.resolve()));
+    const { git, c } = countingGit((a) => (networkLs(a) ? lsGate : Promise.resolve()));
     const d = deps(probeDeps(git, repos(1)), { cache, gitSlots: slots, boundMs: 5_000 });
     const first = answerStepChecks(checkouts(1), d);
     await Bun.sleep(10);
@@ -166,7 +168,7 @@ describe("an unsettled read's age counts from when it got its slot", () => {
     const cache = new ProbeCache(() => now, 30_000);
     let openLs!: () => void;
     const lsGate = new Promise<void>((r) => (openLs = r));
-    const { git, c } = countingGit((a) => (a.startsWith("ls-remote") ? lsGate : Promise.resolve()));
+    const { git, c } = countingGit((a) => (networkLs(a) ? lsGate : Promise.resolve()));
     const d = deps(probeDeps(git, repos(1)), { cache, boundMs: 5_000 });
     const first = answerStepChecks(checkouts(1), d);
     for (let i = 0; i < 100 && c.lsRemote === 0; i++) await Bun.sleep(5);
