@@ -4,12 +4,12 @@
  * rows against real git on throwaway repos are in `pushed-git*.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
-import { CHECKOUT_GIT_ENV, parseRemoteHeads, parseWorktreeHeads, parseWorktreeList, probePushed, type ProbeDeps, type ProbeResult } from "./probes.ts";
+import { CHECKOUT_GIT_ENV, PUSHED_MAX_WORKTREES, parseRemoteHeads, parseWorktreeHeads, parseWorktreeList, probePushed, type ProbeDeps, type ProbeResult } from "./probes.ts";
 
 const DIR = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-fake-")));
 // A second worktree's directory: the probe resolves every listed worktree on disk.
@@ -459,6 +459,7 @@ describe("pushed: the truth table over a fake git", () => {
     ["worktree list garbled", { worktrees: OK(`HEAD ${LOCAL}\0\0`) }],
     ["worktree list with a short sha", { worktrees: OK("worktree /w\0HEAD abc\0\0") }],
     ["worktree list empty", { worktrees: OK("") }],
+    ["a worktree record both bare and with a HEAD", { worktrees: OK(`worktree ${DIR}\0bare\0HEAD ${LOCAL}\0branch refs/heads/main\0\0`) }],
     ["ls-remote failing", { heads: EXIT(128) }],
     ["ls-remote timing out", { heads: TIMED_OUT }],
     ["ls-remote capped", { heads: { ok: true, stdout: `${R1}\trefs/heads/main`, capped: true } }],
@@ -496,5 +497,84 @@ describe("pushed: the truth table over a fake git", () => {
     expect(parseWorktreeHeads(`worktree /a\0\0`)).toBeNull();
     expect(parseWorktreeHeads(`worktree /a\0HEAD ${LOCAL}\0HEAD ${WT}\0\0`)).toBeNull();
     expect(parseWorktreeHeads(`worktree /a\0bare\0HEAD ${LOCAL}\0\0`)).toBeNull();
+  });
+
+  describe("guards no row pinned before (PR #850 tests batch)", () => {
+    const MISSING: ProbeResult = { state: "unknown", why: "a worktree of skills is missing its directory: muninn cannot check it" };
+
+    test("a record git marks prunable, though its directory exists: unknown", async () => {
+      expect(await run({ worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0detached\0prunable gitdir file points to non-existent location\0\0`) })).toEqual(MISSING);
+    });
+
+    test("a record whose path does not resolve, not marked prunable: unknown", async () => {
+      expect(await run({ worktrees: OK(`${WORKTREES}worktree ${path.join(DIR2, "no-such-dir")}\0HEAD ${WT}\0detached\0\0`) })).toEqual(MISSING);
+    });
+
+    test(`worktree cap: ${PUSHED_MAX_WORKTREES} records are checked, ${PUSHED_MAX_WORKTREES + 1} are unknown`, async () => {
+      // Linked worktrees beyond DIR2/DIR3, each with an admin dir naming it back.
+      const extra = Array.from({ length: PUSHED_MAX_WORKTREES }, (_, i) => {
+        const dir = realpathSync(testTempDirSync(path.join(tmpdir(), `step-pushed-cap${i}-`)));
+        const admin = path.join(COMMON, "worktrees", `cap${i}`);
+        mkdirSync(admin, { recursive: true });
+        writeFileSync(path.join(admin, "gitdir"), `${dir}/.git\n`);
+        return { dir, admin };
+      });
+      const identity = (cwd: string) => {
+        const e = extra.find((x) => x.dir === cwd);
+        return e ? OK(`${e.admin}\n${COMMON}\n${e.dir}\n`) : identityOf(cwd);
+      };
+      const list = (n: number) => OK(WORKTREES + extra.slice(0, n - 1).map((e) => `worktree ${e.dir}\0HEAD ${WT}\0detached\0\0`).join(""));
+      expect(await run({ worktrees: list(PUSHED_MAX_WORKTREES), identity })).toEqual({
+        state: "ok",
+        why: `every commit on skills's branches and worktree HEADs is on an origin branch, and no tracked file is modified or staged in any of its ${PUSHED_MAX_WORKTREES} worktrees`,
+      });
+      expect(await run({ worktrees: list(PUSHED_MAX_WORKTREES + 1), identity })).toEqual({ state: "unknown", why: `skills has over ${PUSHED_MAX_WORKTREES} worktrees: muninn does not check them all` });
+    });
+
+    test("the probed directory recorded twice: unknown, before the one-directory check", async () => {
+      expect(await run({ worktrees: OK(`${WORKTREES}worktree ${DIR}\0HEAD ${LOCAL}\0detached\0\0`) })).toEqual({ state: "unknown", why: "git worktree list does not name skills's own worktree once" });
+    });
+
+    test("filter config timing out, or exiting 1 with stderr: unknown, saying which", async () => {
+      expect(await run({ filters: TIMED_OUT })).toEqual({ state: "unknown", why: "git config timed out on skills" });
+      // A timed-out answer never reads as «no such key», whatever exit code it carries.
+      expect(await run({ filters: { ok: false, stdout: "", exitCode: 1, timedOut: true } })).toEqual({ state: "unknown", why: "git config timed out on skills" });
+      expect(await run({ filters: { ok: false, stdout: "", exitCode: 1, stderr: "error: bad config line 3" } })).toEqual({ state: "unknown", why: "git config failed on skills" });
+    });
+
+    test("cat-file capped or timing out: unknown, each with its own why", async () => {
+      expect(await run({ batch: () => ({ ok: true, stdout: `${R1} commit 1\n${R2} commit 1\n`, capped: true }) })).toEqual({ state: "unknown", why: "git cat-file gave an answer muninn cannot read on skills" });
+      expect(await run({ batch: () => TIMED_OUT })).toEqual({ state: "unknown", why: "git cat-file timed out on skills" });
+    });
+
+    test("a branch name of 100 chars reaches a why, one of 101 does not: the --source name and another worktree's branch", async () => {
+      const b100 = "b".repeat(100);
+      const b101 = "b".repeat(101);
+      expect(await run({ count: OK("1\n"), source: OK(`${b100}\n`) })).toEqual({ state: "not-yet", why: `1 commit in skills is on no origin branch (on ${b100}): push` });
+      expect(await run({ count: OK("1\n"), source: OK(`${b101}\n`) })).toEqual({ state: "not-yet", why: "1 commit in skills is on no origin branch: push" });
+      // A staged file in DIR2 only.
+      const dirtyIn2 = (branch: string): GitRun => {
+        const base = pushedGit({ worktrees: OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/${branch}\0\0`) });
+        return (cwd, args, opts) => (cwd === DIR2 && args.includes("diff-index") ? Promise.resolve(EXIT(1)) : base(cwd, args, opts));
+      };
+      expect(await probePushed("skills", deps(dirtyIn2(b100)))).toEqual({ state: "not-yet", why: `skills has uncommitted changes in another worktree (on ${b100}): commit and push` });
+      expect(await probePushed("skills", deps(dirtyIn2(b101)))).toEqual({ state: "not-yet", why: "skills has uncommitted changes in another worktree: commit and push" });
+    });
+
+    test("a linked git dir's gitdir file is compared by realpath: a symlinked spelling of the directory matches, another directory does not", async () => {
+      const links = realpathSync(testTempDirSync(path.join(tmpdir(), "step-pushed-links-")));
+      const viaLink = path.join(links, "dir2-link");
+      symlinkSync(DIR2, viaLink);
+      const admin = path.join(COMMON, "worktrees", "via-link");
+      mkdirSync(admin, { recursive: true });
+      writeFileSync(path.join(admin, "gitdir"), `${viaLink}/.git\n`);
+      const TWO = OK(`${WORKTREES}worktree ${DIR2}\0HEAD ${WT}\0branch refs/heads/side\0\0`);
+      const at = (g: string) => (cwd: string) => (cwd === DIR2 ? OK(`${g}\n${COMMON}\n${DIR2}\n`) : identityOf(cwd));
+      expect((await run({ worktrees: TWO, identity: at(admin) })).state).toBe("ok");
+      const other = path.join(COMMON, "worktrees", "via-other");
+      mkdirSync(other, { recursive: true });
+      writeFileSync(path.join(other, "gitdir"), `${DIR3}/.git\n`);
+      expect(await run({ worktrees: TWO, identity: at(other) })).toEqual({ state: "unknown", why: "a worktree of skills is not where git recorded it" });
+    });
   });
 });

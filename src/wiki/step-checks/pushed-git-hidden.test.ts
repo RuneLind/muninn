@@ -12,8 +12,11 @@ import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit } from "../decision-triage/git.ts";
+import { realGit, type GitRun } from "../decision-triage/git.ts";
 import { probePushed, type ProbeDeps } from "./probes.ts";
+
+// The probe reads every config scope; a runner's global git-lfs filter would answer every row `unknown`.
+const hermeticGit: GitRun = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: ENV, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
@@ -40,7 +43,7 @@ const commit = (dir: string, text: string, file = "f") => {
 
 const pushed = (clone: string, name = "skills") => {
   const deps: ProbeDeps = {
-    git: realGit,
+    git: hermeticGit,
     roots: { dirs: [], named: new Map([[name, clone]]) },
     readEnvFile: async () => ({ missing: true }),
     processHasEnv: () => false,

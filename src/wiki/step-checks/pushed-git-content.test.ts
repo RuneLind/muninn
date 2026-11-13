@@ -11,8 +11,11 @@ import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, utimes
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../../test/temp-dir.ts";
-import { realGit } from "../decision-triage/git.ts";
+import { realGit, type GitRun } from "../decision-triage/git.ts";
 import { probePushed, type ProbeDeps } from "./probes.ts";
+
+// The probe reads every config scope; a runner's global git-lfs filter would answer every row `unknown`.
+const hermeticGit: GitRun = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
 
 // The probe's worktree cap (`PUSHED_MAX_WORKTREES`), spelled here so this file loads against a build without it.
 const PUSHED_MAX_WORKTREES = 12;
@@ -36,7 +39,7 @@ function fixture() {
 
 const pushed = (clone: string, name = "skills") => {
   const deps: ProbeDeps = {
-    git: realGit,
+    git: hermeticGit,
     roots: { dirs: [], named: new Map([[name, clone]]) },
     readEnvFile: async () => ({ missing: true }),
     processHasEnv: () => false,
@@ -147,6 +150,21 @@ describe("pushed, real git: every worktree", () => {
     expect(await pushed(work)).toEqual({ state: "unknown", why: "a worktree of skills is missing its directory: muninn cannot check it" });
   });
 
+  test("a linked worktree whose commondir file is relative (git's default, and another relative spelling of it): ok", async () => {
+    const { base, work } = fixture();
+    const wt = linked(base, work);
+    const commondir = path.join(work, ".git", "worktrees", "wt2", "commondir");
+    expect(readFileSync(commondir, "utf8")).toBe("../..\n");
+    expect((await pushed(work)).state).toBe("ok");
+    // From work/.git/worktrees/wt2, up four levels to the temp dir, then back down.
+    writeFileSync(commondir, "../../../../work/.git\n");
+    expect((await pushed(work)).state).toBe("ok");
+    expect((await pushed(wt)).state).toBe("ok");
+    // A relative commondir one level short resolves nowhere: `git worktree list` itself fails.
+    writeFileSync(commondir, "../../../work/.git\n");
+    expect(await pushed(work)).toEqual({ state: "unknown", why: "git worktree list failed on skills" });
+  });
+
   test(`finding 2: more than ${PUSHED_MAX_WORKTREES} worktrees: unknown`, async () => {
     const { base, work } = fixture();
     for (let i = 0; i < PUSHED_MAX_WORKTREES; i++) sh(work, "worktree", "add", "-q", "--detach", path.join(base, `w${i}`));
@@ -176,7 +194,7 @@ describe("pushed, real git: content filters", () => {
     const { base, work } = fixture();
     const global = path.join(base, "global-gitconfig");
     writeFileSync(global, "[filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n");
-    const git: ProbeDeps["git"] = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: global } });
+    const git: ProbeDeps["git"] = (cwd, args, opts) => realGit(cwd, args, { ...opts, env: { ...opts?.env, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1" } });
     const deps: ProbeDeps = { git, roots: { dirs: [], named: new Map([["skills", work]]) }, readEnvFile: async () => ({ missing: true }), processHasEnv: () => false, appliedMigrations: async () => new Set() };
     expect(await probePushed("skills", deps)).toEqual({ state: "unknown", why: "git's config for skills names a content filter command: muninn does not run it" });
   });
