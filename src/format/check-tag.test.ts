@@ -5,6 +5,7 @@ import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { COMPONENT_NAMES } from "./component-spec.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { trailingCheck } from "./check-trailing.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -89,6 +90,31 @@ describe("readCheckRun", () => {
       expect(readCheckRun(run).problems).toHaveLength(1);
     }
     expect(readCheckRun(` env="A" env="B"`).attrs).toEqual({ env: "B" });
+  });
+  // Placement (`check-trailing.ts`) allows only spaces or tabs between pairs
+  // and no `"`, backtick or newline in a value: the grammar reads that alphabet
+  // and no wider one, so a run placement refuses is never a clean run.
+  const wider = [
+    ["an NBSP before a pair", ` env="A" on="x"`],
+    ["an em space before a pair", ` env="A" on="x"`],
+    ["a newline before a pair", ` env="A"\n on="b"`],
+    ["a carriage return before a pair", ` env="A"\r on="b"`],
+    ["a form feed before a pair", ` env="A"\f on="b"`],
+    ["an NBSP leading the run", ` env="A"`],
+    ["a trailing NBSP", ` env="A" `],
+    ["a trailing newline", ` env="A"\n`],
+    ["a backtick in a value", ` env="A\`B"`],
+    ["a newline in a value", ` env="A\nB"`],
+  ] as const;
+  test.each(wider)("%s: placement refuses it, and the grammar reports it", (_n, run) => {
+    expect(trailingCheck(`Do. <Check${run} />`)).toBeUndefined();
+    expect(readCheckRun(run).problems).not.toEqual([]);
+  });
+  test("a run placement accepts is the run the grammar reads clean", () => {
+    for (const run of [` env="A"`, `\tenv="A"`, ` env="A" \t on="x"`, ` migration="086"\ton="laptop"`]) {
+      expect(trailingCheck(`Do. <Check${run} />`)?.[1]).toBe(run);
+      expect(readCheckRun(run).problems).toEqual([]);
+    }
   });
   test("stepCheck carries the run's problems beside the read probes", () => {
     expect(stepCheck(`**Add A and B.** <Check env="A" env="B" on="laptop" />`)).toEqual({

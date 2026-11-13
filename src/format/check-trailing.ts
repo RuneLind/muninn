@@ -13,7 +13,16 @@
  * backtick in a value refuses the tag, so no code span can hold one that
  * ends the line.
  */
-const TRAILING_CHECK = /^(.*[^ \t\n])[ \t]*<Check((?:[ \t]+[A-Za-z][\w-]*="[^"`\n]*")*)[ \t]*\/>(?=[ \t]*(?:\n|$))/;
+const TRAILING_CHECK = new RegExp(`^(.*[^ \\t\\n])[ \\t]*<Check((?:${pairSource(false)})*)[ \\t]*\\/>(?=[ \\t]*(?:\\n|$))`);
+
+/** One attribute pair of a placed tag's run: spaces or tabs, a name, `="`, a
+ *  value with no `"`, backtick or newline, `"`. `readCheckRun` (`check-tag.ts`)
+ *  reads the run with this same source, capturing, so its grammar's alphabet
+ *  can never be wider than placement's. */
+export function pairSource(capture: boolean): string {
+  const [o, c] = capture ? ["(", ")"] : ["", ""];
+  return `[ \\t]+${o}[A-Za-z][\\w-]*${c}="${o}[^"\`\\n]*${c}"`;
+}
 
 /** `item`'s validly placed tag as `[the item without it and the spaces or
  *  tabs before it, its raw attribute run]`; what follows the tag is kept.

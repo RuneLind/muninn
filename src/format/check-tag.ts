@@ -9,7 +9,7 @@
 import { parseAttrs } from "./markdown-ast.ts";
 import { escapeHtml } from "./markdown-core.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
-import { trailingCheck } from "./check-trailing.ts";
+import { pairSource, trailingCheck } from "./check-trailing.ts";
 
 /** The attributes that each name one probe, in spec order. `on` is not one. */
 export const CHECK_PROBES = ["env", "migration", "checkout", "pushed", "restart"] as const;
@@ -73,11 +73,12 @@ export function parseCheckAttrs(attrs: Readonly<Record<string, string>>): CheckA
 }
 
 const CHECK_ATTR_NAMES: readonly string[] = [...CHECK_PROBES, "on"];
-const PAIR = /\s+([A-Za-z][\w-]*)="([^"]*)"/y;
+const PAIR = new RegExp(pairSource(true), "y");
 
 /**
- * A raw attribute run read against a closed grammar: in full, whitespace-led
- * `name="value"` pairs, each name one of the six spec attributes, each at most
+ * A raw attribute run read against a closed grammar: in full, `name="value"`
+ * pairs led by spaces or tabs, in placement's own alphabet ({@link pairSource}:
+ * no `"`, backtick or newline in a value), each name one of the six spec attributes, each at most
  * once. Anything else is one problem line, so the step can never read `ok`:
  * `parseAttrs` would drop an unknown name and let a repeated one overwrite in
  * silence. A repeated name keeps its last value, as the renderer and lint do.
@@ -101,7 +102,7 @@ export function readCheckRun(raw: string): { attrs: Record<string, string>; prob
     seen.add(name);
     attrs[name] = value;
   }
-  const rest = raw.slice(at).trim();
+  const rest = raw.slice(at).replace(/^[ \t]+|[ \t]+$/g, "");
   if (rest) problems.push(`${JSON.stringify(rest)} is not a name="value" pair; it is not read`);
   return { attrs, problems };
 }
