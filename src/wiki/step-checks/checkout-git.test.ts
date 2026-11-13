@@ -129,6 +129,45 @@ describe("R2: an operation in progress is unknown", () => {
     expect(await probeCheckout("muninn", depsWith({ dirs: [], named: new Map([["muninn", clone]]) }))).toEqual({ state: "unknown", why: "muninn has a rebase in progress" });
   });
 
+  /** A clone with a local commit that conflicts with origin's next one, fetched, ready to rebase. */
+  function conflictingRebase() {
+    const base = newBase();
+    const { work, clone } = fixture(base);
+    commit(work, "two from origin");
+    sh(work, "push", "-q", "origin", "HEAD:main");
+    commit(clone, "two here");
+    sh(clone, "fetch", "-q");
+    return clone;
+  }
+  const leftIn = (clone: string) => Object.fromEntries(["rebase-merge", "rebase-apply", "REBASE_HEAD"].map((f) => [f, existsSync(path.join(clone, ".git", f))]));
+
+  test("what a rebase stopped on a conflict leaves, per backend: always its directory; REBASE_HEAD is no sign of its own", () => {
+    const merge = conflictingRebase();
+    expect(shCode(merge, "rebase", "-q", "--merge", "origin/main")).not.toBe(0);
+    const apply = conflictingRebase();
+    expect(shCode(apply, "rebase", "-q", "--apply", "origin/main")).not.toBe(0);
+    expect({ merge: leftIn(merge), apply: leftIn(apply) }).toEqual({
+      merge: { "rebase-merge": true, "rebase-apply": false, REBASE_HEAD: true },
+      apply: { "rebase-merge": false, "rebase-apply": true, REBASE_HEAD: true },
+    });
+  });
+
+  test("a rebase stopped on a conflict with the apply backend: unknown", async () => {
+    const clone = conflictingRebase();
+    expect(shCode(clone, "rebase", "-q", "--apply", "origin/main")).not.toBe(0);
+    expect(existsSync(path.join(clone, ".git", "rebase-apply"))).toBe(true);
+    expect(await probeCheckout("muninn", depsWith({ dirs: [], named: new Map([["muninn", clone]]) }))).toEqual({ state: "unknown", why: "muninn has a rebase or am in progress" });
+  });
+
+  for (const [kind, probe] of [["checkout", probeCheckout], ["pushed", probePushed]] as const) {
+    test(`${kind}: a REBASE_HEAD left behind with no rebase directory: ok, not a rebase in progress`, async () => {
+      const base = newBase();
+      const { clone } = fixture(base);
+      writeFileSync(path.join(clone, ".git", "REBASE_HEAD"), `${"d".repeat(40)}\n`);
+      expect(await probe("muninn", depsWith({ dirs: [], named: new Map([["muninn", clone]]) }))).toEqual({ state: "ok", why: expect.any(String) });
+    });
+  }
+
   test("a merge stopped on a conflict, HEAD ahead of origin's tip: unknown", async () => {
     const base = newBase();
     const { clone } = fixture(base);

@@ -18,10 +18,12 @@
  * both answer an operation in progress `unknown`, and a named roots entry
  * that is not the repo `unknown` rather than trying another clone.
  * Every outside read comes in through {@link ProbeDeps}, so tests never touch
- * the real machine, except both probes' `lstat` of the git-dir files an
- * operation in progress leaves, at paths git names, `pushed`'s `realpath` of each
- * worktree and git dir, its read of each linked git dir's `gitdir` file, and
- * its scratch index, a temp file outside the repo removed after use.
+ * the real machine, except: both probes' `realpath` of each candidate folder and
+ * of the toplevel git names in it (`findRepo`), and their `lstat` of the git-dir
+ * files an operation in progress leaves, at paths git names; `pushed`'s `realpath`
+ * of each worktree, of the git dir, common dir and toplevel git names in it and of
+ * the directory a linked git dir's `gitdir` file names, its read of that file,
+ * and its scratch index, a temp file outside the repo removed after use.
  *
  * A `why` is one short sentence for the reader: it names keys, repos,
  * branches, versions and short shas, never an env value, file contents or a
@@ -248,10 +250,13 @@ export const PUSHED_MAX_WORKTREES = 12;
  */
 const NO_FSMONITOR = ["-c", "core.fsmonitor=false"] as const;
 
-/** What an operation in progress leaves in a worktree's git dir, and the operation's name for the `why`. */
+/**
+ * What an operation in progress leaves in a worktree's git dir, and the operation's name for the `why`.
+ * Not `REBASE_HEAD`: it records where a rebase stopped and can outlive the rebase, while a stopped rebase
+ * always leaves `rebase-merge` or `rebase-apply` (measured, both backends, git 2.54).
+ */
 const IN_PROGRESS: readonly (readonly [string, string])[] = [
   ["MERGE_HEAD", "merge"],
-  ["REBASE_HEAD", "rebase"],
   ["rebase-merge", "rebase"],
   ["rebase-apply", "rebase or am"],
   ["CHERRY_PICK_HEAD", "cherry-pick"],
