@@ -30,7 +30,7 @@ function repos(n: number): Map<string, string> {
   const named = new Map<string, string>();
   for (let i = 0; i < n; i++) {
     const dir = path.join(base, `repo${i}`);
-    mkdirSync(dir);
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
     named.set(`repo${i}`, dir);
   }
   return named;
@@ -44,12 +44,23 @@ function countingGit(delay: (args: string) => Promise<void>) {
     c.peak = Math.max(c.peak, c.active);
     try {
       const a = args.join(" ");
-      if (a.startsWith("ls-remote")) c.lsRemote++;
+      // `ls-remote --get-url` reads config only: not a network read.
+      if (a.startsWith("ls-remote") && a !== "ls-remote --get-url origin") c.lsRemote++;
       await delay(a);
       if (a === "rev-parse --show-toplevel") return okRes(`${cwd}\n`);
       if (a === "remote get-url origin") return okRes(`https://github.com/x/${path.basename(cwd)}.git\n`);
       if (a === "ls-remote --symref origin HEAD") return okRes(`ref: refs/heads/main\tHEAD\n${TIP}\tHEAD\n`);
+      // `pushed`'s reads, answered as a clean, pushed repo.
+      if (a.startsWith("config -z --get-regexp") && a.includes("pushinsteadof")) return okRes("remote.origin.url\nhttps://github.com/x/r.git\0");
+      if (a === "ls-remote --get-url origin") return okRes("https://github.com/x/r.git\n");
       if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
+      if (a === "rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel") return okRes(`${cwd}/.git\n${cwd}/.git\n${cwd}\n`);
+      if (a === "rev-parse --is-shallow-repository") return okRes("false\n");
+      if (a.startsWith("rev-parse --git-path")) return okRes(args.filter((x, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""));
+      if (a === "rev-parse --verify --quiet HEAD^{commit}") return okRes(`${TIP}\n`);
+      if (a.startsWith("for-each-ref")) return okRes("refs/heads/main\n");
+      if (a === "worktree list --porcelain -z") return okRes(`worktree ${cwd}\0HEAD ${TIP}\0branch refs/heads/main\0\0`);
+      if (a.startsWith("rev-list --count")) return okRes("0\n");
       return okRes();
     } finally {
       c.active--;
@@ -104,6 +115,23 @@ describe("a checkout probe holds its slot until its git chain settles", () => {
     release();
     await next;
     expect(entered).toBe(true);
+  });
+});
+
+describe("pushed is a git probe: slotted and cached like checkout", () => {
+  test("six pushed probes on one slot: one git call at a time, every answer ok; a second page inside the TTL runs no git", async () => {
+    const named = repos(6);
+    const { git, c } = countingGit(() => Bun.sleep(2));
+    const text = page(...Array.from({ length: 6 }, (_, i) => `${i + 1}. P <Check pushed="repo${i}" />`));
+    const cache = new ProbeCache();
+    const a = await answerStepChecks(text, deps(probeDeps(git, named), { cache, gitSlots: new ProbeSlots(1), boundMs: 5_000 }));
+    expect(a.steps.map((s) => s.state)).toEqual(Array(6).fill("ok"));
+    expect(c.peak).toBe(1);
+    expect(c.lsRemote).toBe(6);
+    let calls = 0;
+    const counted: GitRun = async (cwd, args, opts) => (calls++, git(cwd, args, opts));
+    await answerStepChecks(text, deps(probeDeps(counted, named), { cache, gitSlots: new ProbeSlots(1), boundMs: 5_000 }));
+    expect(calls).toBe(0);
   });
 });
 

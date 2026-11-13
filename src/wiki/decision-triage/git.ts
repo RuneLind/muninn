@@ -28,8 +28,8 @@ export interface GitResult {
 
 export const failureOf = (res: GitResult): SearchFailure => (res.timedOut ? "timed out" : "git error");
 
-/** `env`: variables added to the child's allowlisted environment (the step-check probe's object-lookup switches); absent, the environment is the allowlist alone. */
-export type GitRun = (cwd: string, args: readonly string[], opts?: { timeoutMs?: number; maxLines?: number; env?: Readonly<Record<string, string>> }) => Promise<GitResult>;
+/** `env`: variables added to the child's allowlisted environment (the step-check probe's object-lookup switches); absent, the environment is the allowlist alone. `stdin`: text written to git's standard input (`--stdin` revision lists, so no list overflows the argument length); absent, stdin is closed. */
+export type GitRun = (cwd: string, args: readonly string[], opts?: { timeoutMs?: number; maxLines?: number; env?: Readonly<Record<string, string>>; stdin?: string }) => Promise<GitResult>;
 
 /** The real runner. Its children get an allowlisted environment, plus `opts.env` when given. */
 export const realGit: GitRun = async (cwd, args, opts = {}) => {
@@ -37,7 +37,7 @@ export const realGit: GitRun = async (cwd, args, opts = {}) => {
   try {
     proc = Bun.spawn(["git", "--no-pager", "--no-optional-locks", "--literal-pathspecs", ...args], {
       cwd,
-      stdin: "ignore",
+      stdin: opts.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
       stderr: "pipe",
       // Its own process group, so a timeout's kill reaches the transport child.

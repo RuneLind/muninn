@@ -73,7 +73,7 @@ describe("answerStepChecks", () => {
     ]);
   });
 
-  test("a step naming restart or pushed is never ok, whatever else holds, and runs no git", async () => {
+  test("restart, and pushed with no repo roots, are never ok, whatever else holds, and run no git", async () => {
     const text = page('1. A <Check env="HAVE" restart="3010" />', '2. B <Check migration="086" pushed="muninn" />', '3. C <Check pushed="muninn" restart="3010" />');
     const a = await answerStepChecks(text, deps());
     expect(a.steps.map((s) => s.state)).toEqual(["unknown", "unknown", "unknown"]);
@@ -81,6 +81,7 @@ describe("answerStepChecks", () => {
       ["env", "ok", "HAVE is set in .env and in the running process"],
       ["restart", "unknown", "muninn cannot prove this yet"],
     ]);
+    expect(a.steps[1]!.machines[0]!.probes[1]).toEqual({ kind: "pushed", value: "muninn", state: "unknown", why: "DECISION_TRIAGE_REPO_ROOTS is not set, so muninn cannot be found" });
   });
 
   test("a check whose tag dropped an attribute is never ok", async () => {
