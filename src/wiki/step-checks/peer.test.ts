@@ -226,7 +226,7 @@ describe("createPeerAnswerer", () => {
   });
 });
 
-describe("the down window: a transport-level failure answers that machine unknown at once for a while", () => {
+describe("the down window: a request that fails as a whole (thrown, timed out or refused) answers that machine unknown at once for a while", () => {
   const down = () => Promise.reject(Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), { code: "ConnectionRefused" }));
 
   test("the window is 15 s", () => expect(PEER_DOWN_WINDOW_MS).toBe(15_000));
@@ -323,6 +323,104 @@ describe("the down window: a transport-level failure answers that machine unknow
     expect(states(await answer("beta", P))).toEqual(["ok", "unknown"]);
     t = 30_000;
     expect(states(await answer("beta", P))).toEqual(["unknown", "unknown"]);
+  });
+
+  test("a valid reply that lands while the window is open closes it: the next ask goes to the network", async () => {
+    let release!: (r: Response) => void;
+    let n = 0;
+    const { answer, calls } = client((u) => {
+      n++;
+      if (n === 1) return new Promise<Response>((r) => (release = r));
+      if (n === 2) return down();
+      const asked = u.searchParams.getAll("p").map((s) => ({ kind: s.split(":")[0], value: s.slice(s.indexOf(":") + 1) }));
+      return json({ v: 1, machine: "beta", results: asked.map((p) => ({ ...p, state: "ok" })) });
+    }, { now: () => 0 });
+    const slow = answer("beta", [P[0]!]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+    // The window opens while the first request is still in flight.
+    expect(states(await answer("beta", [P[1]!]))).toEqual(["unknown"]);
+    expect(calls).toHaveLength(2);
+    release(json({ v: 1, machine: "beta", results: [{ ...P[0], state: "ok" }] }));
+    expect(states(await slow)).toEqual(["ok"]);
+    const after = await answer("beta", [P[1]!]);
+    expect(calls).toHaveLength(3);
+    expect(after).toEqual([{ state: "ok", why: "beta: holds" }]);
+  });
+
+  test("delta's failure opens delta's window only: beta, reachable, is still asked", async () => {
+    const { answer, calls } = client((u) => (u.hostname === "delta.test" ? down() : json(good("beta"))), { now: () => 0 });
+    expect(states(await answer("delta", P))).toEqual(["unknown", "unknown"]);
+    expect(states(await answer("beta", P))).toEqual(["not-yet", "ok"]);
+    expect(calls.map((c) => c.hostname)).toEqual(["delta.test", "beta.test"]);
+  });
+});
+
+describe("a clock that steps back expires a timer instead of stretching it", () => {
+  const down = () => Promise.reject(Object.assign(new Error("Unable to connect."), { code: "ConnectionRefused" }));
+  const T0 = 10_000_000;
+  const HOUR = 3_600_000;
+
+  test("window: inside it no request, at its end the network again (forward clock unchanged)", async () => {
+    let t = T0;
+    const { answer, calls } = client(down, { now: () => t });
+    await answer("beta", P);
+    await answer("beta", P);
+    expect(calls).toHaveLength(1);
+    t = T0 + PEER_DOWN_WINDOW_MS - 1;
+    await answer("beta", P);
+    expect(calls).toHaveLength(1);
+    t = T0 + PEER_DOWN_WINDOW_MS;
+    await answer("beta", P);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("window: the clock moved back 1 h, the next ask makes a request instead of «unreachable»", async () => {
+    let t = T0;
+    let up = false;
+    const { answer, calls } = client(() => (up ? json(good()) : down()), { now: () => t });
+    await answer("beta", P);
+    up = true;
+    t = T0 - HOUR;
+    const got = await answer("beta", P);
+    expect(calls).toHaveLength(2);
+    expect(states(got)).toEqual(["not-yet", "ok"]);
+  });
+
+  test("window: a step back smaller than the window (5 s) expires it too: the opening lies in the future", async () => {
+    let t = T0;
+    const { answer, calls } = client(down, { now: () => t });
+    await answer("beta", P);
+    t = T0 - 5_000;
+    const got = await answer("beta", P);
+    expect(calls).toHaveLength(2);
+    for (const r of got) expect(r.why).not.toContain("a moment ago");
+  });
+
+  test("cache: forward TTL unchanged — same instant and 29.999 s hit, 30 s misses", async () => {
+    let t = T0;
+    const { answer, calls } = client(() => json(good()), { now: () => t });
+    await answer("beta", P);
+    await answer("beta", P);
+    expect(calls).toHaveLength(1);
+    t = T0 + 29_999;
+    await answer("beta", P);
+    expect(calls).toHaveLength(1);
+    t = T0 + 30_000;
+    await answer("beta", P);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("cache: an ok cached, the clock moved back 1 h: the next ask is a miss and the peer's not-yet wins, never the stale ok", async () => {
+    let t = T0;
+    let s = ["ok", "ok"];
+    const { answer, calls } = client(() => json(good("beta", s)), { now: () => t });
+    expect(states(await answer("beta", P))).toEqual(["ok", "ok"]);
+    s = ["not-yet", "not-yet"];
+    t = T0 - HOUR;
+    expect(states(await answer("beta", P))).toEqual(["not-yet", "not-yet"]);
+    expect(calls).toHaveLength(2);
   });
 });
 

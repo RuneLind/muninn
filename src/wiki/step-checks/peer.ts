@@ -38,7 +38,7 @@ export const CHECKS_ANSWER_VERSION = 1;
 export const PEER_FETCH_TIMEOUT_MS = 7_000;
 /** The answering route's own bound: it must answer before the asker's {@link PEER_FETCH_TIMEOUT_MS} gives up. */
 export const PEER_ROUTE_BOUND_MS = 6_000;
-/** After a transport-level failure, a machine's probes answer `unknown` at once for this long instead of each page open waiting out {@link PEER_FETCH_TIMEOUT_MS} again. */
+/** After a request fails as a whole (fetch threw or timed out, or the reply was refused), a machine's probes answer `unknown` at once for this long instead of each page open waiting out {@link PEER_FETCH_TIMEOUT_MS} again. */
 export const PEER_DOWN_WINDOW_MS = 15_000;
 /** A reply for 60 probes is a few KiB. */
 export const PEER_MAX_BYTES = 64 * 1024;
@@ -134,10 +134,12 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
   /** Per machine: until when its probes answer unknown without a request, and why. Bounded by the configured peers. */
   const down = new Map<string, { until: number; reason: string }>();
 
+  // A timer whose start lies ahead of `now()` (the clock stepped back) is expired, never stretched: the worst case is one extra request.
   const isDown = (machine: string, t: number) => {
     const d = down.get(machine);
-    return d && t < d.until ? d : null;
+    return d && t < d.until && d.until - t <= downMs ? d : null;
   };
+  const fresh = (e: Entry, t: number) => e.settledAt === null || (e.settledAt <= t && t - e.settledAt < ttlMs);
 
   const settle = (machine: string, outcome: Outcome) => {
     if (!outcome.failure) {
@@ -230,7 +232,10 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
     const key = keyOf(machine, probe);
     const t = now();
     const hit = cache.get(key);
-    if (hit && (hit.settledAt === null || t - hit.settledAt < ttlMs)) return hit.promise;
+    if (hit) {
+      if (fresh(hit, t)) return hit.promise;
+      cache.delete(key);
+    }
     const d = isDown(machine, t);
     if (d) return Promise.resolve({ state: "unknown", why: `the peer for ${machine} was unreachable a moment ago (${d.reason})` });
     let resolve!: (r: ProbeResult) => void;
@@ -241,7 +246,7 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
         if (cache.get(key) === entry) cache.delete(key);
       } else entry.settledAt = now();
     });
-    for (const [k, e] of cache) if (e.settledAt !== null && t - e.settledAt >= ttlMs) cache.delete(k);
+    for (const [k, e] of cache) if (!fresh(e, t)) cache.delete(k);
     let batch = batches.get(machine);
     if (!batch) {
       batch = [];
