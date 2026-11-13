@@ -50,7 +50,8 @@ const NOW = Date.parse("2026-11-10T12:00:00+01:00");
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", root, ...args], {
     encoding: "utf8",
-    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" },
+    // Off the runner's global and system config, as `src/test/hermetic-git.ts` runs git.
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" },
   });
 
 async function resetPage(): Promise<void> {
@@ -327,6 +328,148 @@ describe("/api/wiki/step-done", () => {
     const res = await post({ step: keyOf(l, "Read the second note."), baseHash: l.baseHash, preview: true });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ refused: true, code: "nested" });
+  });
+
+  describe("the list form: steps", () => {
+    const ALL = ["**Restart the server:** so the bundle is fresh.", "Read the second note.", "Read the third note."];
+    const logEntries = async () => {
+      const log = await Bun.file(path.join(root, "log.md")).text().catch(() => "");
+      return log.split("\n").filter((l) => l.startsWith("## ["));
+    };
+    async function previewMany(texts: string[]) {
+      const { body: l } = await list();
+      const steps = texts.map((t) => keyOf(l, t));
+      const res = await post({ steps, baseHash: l.baseHash, preview: true });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown>, steps, baseHash: l.baseHash };
+    }
+
+    test("step and steps together, or neither, is a 400; so is a malformed list", async () => {
+      const { body: l } = await list();
+      const key = keyOf(l, "Read the second note.");
+      for (const body of [
+        { step: key, steps: [key] },
+        { step: "", steps: [key] },
+        {},
+        { steps: [] },
+        { steps: key },
+        { steps: [key, 3] },
+        { steps: [key, " "] },
+        { steps: [key, key] },
+        { steps: Array.from({ length: 201 }, (_, i) => `${key}${i}`) },
+      ]) {
+        const res = await post({ ...body, baseHash: l.baseHash, preview: true });
+        expect([JSON.stringify(Object.keys(body)), res.status]).toEqual([JSON.stringify(Object.keys(body)), 400]);
+      }
+      expect(await pageText()).toBe(PAGE);
+    });
+
+    test("a preview lists every removal and renumbering and writes nothing; the write is one log entry and one commit", async () => {
+      const commitsBefore = Number(git("rev-list", "--count", "HEAD").trim());
+      const entriesBefore = (await logEntries()).length;
+      const p = await previewMany([ALL[2]!, ALL[0]!]);
+      expect(p.status).toBe(200);
+      expect(p.body.removed).toEqual([
+        { line: 9, text: "1. **Restart the server:** so the bundle is fresh." },
+        { line: 11, text: "3. Read the third note." },
+      ]);
+      expect(p.body.renumbered).toEqual([{ line: 10, before: "2. Read the second note.", after: "1. Read the second note." }]);
+      expect((p.body.steps as { text: string }[]).map((s) => s.text)).toEqual([ALL[0]!, ALL[2]!]);
+      expect(p.body).toMatchObject({ laneRemoved: false, nextMovesRemoved: false, lanesRemoved: 0, blocksRemoved: 0 });
+      expect(p.body.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Steps done (2): Restart the server: so the bundle is fresh.; Read the third note.");
+      expect(await pageText()).toBe(PAGE);
+
+      const res = await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, committed: true });
+      const after = await pageText();
+      expect(after).toBe(PAGE.replace("1. **Restart the server:** so the bundle is fresh.\n2. Read the second note.\n3. Read the third note.", "1. Read the second note."));
+      const entries = await logEntries();
+      expect(entries.slice(entriesBefore)).toEqual(["## [2026-11-10] step-done | Step fixture"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain("- Steps done (2): Restart the server: so the bundle is fresh.; Read the third note.");
+      expect(Number(git("rev-list", "--count", "HEAD").trim())).toBe(commitsBefore + 1);
+      expect(git("log", "-1", "--format=%s")).toBe(`[step-done] 2 steps: ${REL}\n`);
+      expect(git("status", "--porcelain")).toBe("");
+    });
+
+    test("every step: the lane goes, the preview says so", async () => {
+      const p = await previewMany(ALL);
+      expect(p.body).toMatchObject({ laneRemoved: true, lanesRemoved: 1, nextMovesRemoved: false });
+      expect((await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash })).status).toBe(200);
+      const after = await pageText();
+      expect(after).not.toContain('<Lane kind="you">');
+      expect(after).toContain("- Waiting on O1.");
+    });
+
+    test("a preview hash of another list, or of the single form, is refused", async () => {
+      const two = await previewMany([ALL[0]!, ALL[1]!]);
+      const one = await previewOf(ALL[0]!);
+      const { body: l } = await list();
+      // The single step's preview hash does not let the list write through, nor a two-step hash a three-step list.
+      for (const previewHash of [one.body.previewHash, two.body.previewHash]) {
+        const res = await post({ steps: ALL.map((t) => keyOf(l, t)), baseHash: l.baseHash, previewHash });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ changed: true });
+      }
+      expect(await pageText()).toBe(PAGE);
+    });
+
+    test("a page changed between preview and write: 409 stale, nothing removed", async () => {
+      const p = await previewMany([ALL[1]!, ALL[2]!]);
+      const edited = PAGE.replace("Waiting on O1.", "Waiting on O1, edited.");
+      await Bun.write(path.join(root, REL), edited);
+      git("commit", "-q", "-am", "edit");
+      const res = await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ stale: true });
+      expect(await pageText()).toBe(edited);
+    });
+
+    test("a key of another hash, or a refused step, refuses the whole list", async () => {
+      const { body: l } = await list();
+      const good = keyOf(l, ALL[1]!);
+      const foreign = `${"0".repeat(16)}.0`;
+      const res = await post({ steps: [good, foreign], baseHash: l.baseHash, preview: true });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ refused: true, code: "no-step", key: foreign });
+
+      await Bun.write(path.join(root, REL), PAGE.replace("2. Read the second note.", "2. Read the second note.\n   - a child"));
+      git("commit", "-q", "-am", "nested");
+      __resetWikiCacheForTest();
+      const { body: l2 } = await list();
+      const nested = keyOf(l2, ALL[1]!);
+      const mixed = await post({ steps: [keyOf(l2, ALL[2]!), nested], baseHash: l2.baseHash, preview: true });
+      expect(mixed.status).toBe(409);
+      const body = (await mixed.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({ refused: true, code: "nested", key: nested });
+      expect(String(body.error)).toContain("«Read the second note.»");
+      // A write with a made-up preview hash: the refusal comes first, nothing goes.
+      expect((await post({ steps: [keyOf(l2, ALL[2]!), nested], baseHash: l2.baseHash, previewHash: "0".repeat(64) })).status).toBe(409);
+      expect(await pageText()).toContain("3. Read the third note.");
+    });
+
+    test("a read-only instance and a read-only root refuse the list form", async () => {
+      const { body: l } = await list();
+      const steps = [keyOf(l, ALL[1]!), keyOf(l, ALL[2]!)];
+      guardRefusal = new Response(JSON.stringify({ error: "readonly", readonly: true }), { status: 403 });
+      expect((await post({ steps, baseHash: l.baseHash, preview: true })).status).toBe(403);
+      guardRefusal = null;
+      const locked = await post({ wiki: LOCKED, steps, baseHash: l.baseHash, preview: true });
+      expect(locked.status).toBe(403);
+      expect((await post({ wiki: OUTSIDE, steps, baseHash: l.baseHash, preview: true })).status).toBe(404);
+      expect(await pageText()).toBe(PAGE);
+    });
+
+    test("a Gardener card holding the page refuses the list write", async () => {
+      const p = await previewMany([ALL[1]!, ALL[2]!]);
+      __setStaleProposalStoreForTest({
+        ...dbStaleProposalStore,
+        liveHolders: async () => [{ id: "00000000-0000-4000-8000-000000000002", groupKey: "g", topicKey: "t", targetPath: REL, kind: "stale-check", status: "draft" }],
+      });
+      const res = await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ held: true });
+      expect(await pageText()).toBe(PAGE);
+    });
   });
 
   // Fix round 1 batch 5: the two checks between the first read and the write.

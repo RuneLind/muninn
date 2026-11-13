@@ -8,6 +8,10 @@
  *    reader asks on every page that has a `you` lane.
  *  - `POST /api/wiki/step-done` with `{wiki, relPath, step, baseHash, preview: true}`
  *    answers what would go and the log line; with `{…, previewHash}` it writes.
+ *    `steps: [keys]` in place of `step` removes every named step in one pass:
+ *    one preview, one write, one log entry, one commit (the reader's «Remove N
+ *    checked»). One key the page cannot remove refuses the whole list. No
+ *    probe runs again here: the preview naming every step is the confirmation.
  *
  * The write copies the decision-inbox close (`wiki-decision-inbox.ts`): JSON
  * only, readonly refusal, the triage scope, egress, base hash, the hash of what
@@ -32,7 +36,7 @@ import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
 import { discoverAllBots } from "../../bots/config.ts";
 import { requireJsonRequest } from "./json-request.ts";
-import { listYouSteps, stepDoneEdit, stepDoneLogLine, youLaneRows } from "../../format/step-done.ts";
+import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepsDoneEdit, stepsDoneLogLine, youLaneRows } from "../../format/step-done.ts";
 import { realDecisionInboxDeps, type DecisionCloseGuards, type DecisionInboxDeps } from "./wiki-decision-inbox.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 
@@ -88,6 +92,58 @@ async function resolveWiki(c: Context, deps: StepDoneDeps, name: string): Promis
 
 const LOG_PROMISE = "log.md gets this entry; if appending it fails, the page edit still stands.";
 
+/** The most keys one list request may name before the page is read; the page's own step count bounds it after. */
+export const MAX_STEPS_PER_REQUEST = 200;
+
+/** `steps` as a list of distinct non-empty keys, or why it is not one. */
+function stepsList(raw: unknown): string[] | string {
+  if (!Array.isArray(raw) || raw.some((k) => typeof k !== "string" || k.trim() === "")) return "steps must be a list of step keys";
+  if (raw.length === 0) return "steps must name at least one step";
+  if (raw.length > MAX_STEPS_PER_REQUEST) return `steps names more than ${MAX_STEPS_PER_REQUEST} steps`;
+  const keys = (raw as string[]).map((k) => k.trim());
+  if (new Set(keys).size !== keys.length) return "steps names a step twice";
+  return keys;
+}
+
+/** What one Done form removes from a page text: the preview's body, what its hash covers, the log line and the new text. */
+type Planned =
+  | { ok: true; content: string; logLine: string; body: Record<string, unknown>; shown: unknown[] }
+  | { ok: false; reason: string; code: string; key?: string };
+
+function planOne(text: string, step: string): Planned {
+  const edit = stepDoneEdit(text, step);
+  if (!edit.ok) return edit;
+  const logLine = stepDoneLogLine(edit);
+  return {
+    ok: true,
+    content: edit.content,
+    logLine,
+    body: { removed: edit.removed, renumbered: edit.renumbered, laneRemoved: edit.laneRemoved, nextMovesRemoved: edit.nextMovesRemoved },
+    shown: [edit.removed, edit.renumbered, edit.laneRemoved, edit.nextMovesRemoved, logLine],
+  };
+}
+
+function planMany(text: string, keys: string[]): Planned {
+  const edit = stepsDoneEdit(text, keys);
+  if (!edit.ok) return edit;
+  const logLine = stepsDoneLogLine(edit);
+  return {
+    ok: true,
+    content: edit.content,
+    logLine,
+    body: {
+      steps: edit.steps,
+      removed: edit.removed,
+      renumbered: edit.renumbered,
+      laneRemoved: edit.lanesRemoved > 0,
+      nextMovesRemoved: edit.blocksRemoved > 0,
+      lanesRemoved: edit.lanesRemoved,
+      blocksRemoved: edit.blocksRemoved,
+    },
+    shown: ["steps", edit.steps, edit.removed, edit.renumbered, edit.lanesRemoved, edit.blocksRemoved, logLine],
+  };
+}
+
 export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: DecisionCloseGuards, depsFor: () => StepDoneDeps = () => realStepDoneDeps(config)): void {
   app.get(STEP_DONE_PATH, async (c) => {
     const wiki = c.req.query("wiki")?.trim();
@@ -136,7 +192,11 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
     const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string).trim() : "");
     const [wiki, relPath, step, baseHash, previewHash] = [str("wiki"), str("relPath"), str("step"), str("baseHash"), str("previewHash")];
     const preview = body.preview === true;
-    if (!wiki || !relPath || !step || !baseHash) return c.json({ error: "wiki, relPath, step and baseHash are required" }, 400);
+    // Exactly one form: `step` (one key) or `steps` (a list of keys, removed in one write).
+    if (body.step !== undefined && body.steps !== undefined) return c.json({ error: "send step or steps, not both" }, 400);
+    const keys = body.steps === undefined ? null : stepsList(body.steps);
+    if (typeof keys === "string") return c.json({ error: keys }, 400);
+    if (!wiki || !relPath || (!step && keys === null) || !baseHash) return c.json({ error: "wiki, relPath, step (or steps) and baseHash are required" }, 400);
     if (!preview && !previewHash) return c.json({ error: "previewHash is required: preview the step first" }, 400);
     const deps = depsFor();
     const found = await resolveWiki(c, deps, wiki);
@@ -152,20 +212,18 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
     const current = await io.readFile(path.join(entry.root, target.relPath));
     if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
     if (baseHash !== sha256(current)) return c.json({ error: "The page changed since it was shown. Reload it and try again.", stale: true }, 409);
-    const edit = stepDoneEdit(current, step);
-    if (!edit.ok) return c.json({ error: edit.reason, refused: true, code: edit.code }, 409);
+    const plan = (text: string): Planned => (keys === null ? planOne(text, step) : planMany(text, keys));
+    const planned = plan(current);
+    if (!planned.ok) return c.json({ error: planned.reason, refused: true, code: planned.code, ...(planned.key ? { key: planned.key } : {}) }, 409);
     const title = target.title ?? target.relPath;
-    const logLine = stepDoneLogLine(edit);
+    const logLine = planned.logLine;
     const logEntry = `## [${todayOslo(deps.now())}] ${STEP_DONE_LOG_KIND} | ${title}\n- ${logLine}`;
-    const shown = sha256(JSON.stringify([edit.removed, edit.renumbered, edit.laneRemoved, edit.nextMovesRemoved, logLine]));
+    const shown = sha256(JSON.stringify(planned.shown));
     if (preview) {
       return c.json({
         ok: true,
         preview: true,
-        removed: edit.removed,
-        renumbered: edit.renumbered,
-        laneRemoved: edit.laneRemoved,
-        nextMovesRemoved: edit.nextMovesRemoved,
+        ...planned.body,
         logEntry,
         logNote: LOG_PROMISE,
         baseHash,
@@ -195,7 +253,7 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
       logKind: STEP_DONE_LOG_KIND,
       logTitle: title,
       logLine: () => line,
-      commitMessage: () => `[step-done] ${line.replace(/^Step done: /, "")}: ${target.relPath}`,
+      commitMessage: () => (keys === null ? `[step-done] ${line.replace(/^Step done: /, "")}: ${target.relPath}` : `[step-done] ${keys.length} steps: ${target.relPath}`),
       now: deps.now,
       proceed: async () => {
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
@@ -208,12 +266,12 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
         return false;
       },
       transform: (raw) => {
-        const again = stepDoneEdit(raw, step);
+        const again = plan(raw);
         if (!again.ok) {
           refusal = again.reason;
           return null;
         }
-        line = stepDoneLogLine(again);
+        line = again.logLine;
         written = again.content;
         return again.content;
       },

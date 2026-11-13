@@ -414,3 +414,246 @@ export function stepDoneEdit(text: string, key: string, violationOf: typeof remo
     text: step.text,
   };
 }
+
+export type StepsDoneCode = StepDoneCode | "empty" | "duplicate" | "too-many";
+
+export type StepsDoneEdit =
+  | {
+      ok: true;
+      content: string;
+      removed: { line: number; text: string }[];
+      renumbered: { line: number; before: string; after: string }[];
+      /** How many lanes, and how many `<NextMoves>` blocks, go with their last step. */
+      lanesRemoved: number;
+      blocksRemoved: number;
+      /** The removed steps in page order. */
+      steps: { key: string; lead: string; text: string }[];
+    }
+  | { ok: false; code: StepsDoneCode; reason: string; key?: string };
+
+/** One log line's lead cap, and how many leads the line names before «and N more». */
+const LOG_LEAD_CHARS = 100;
+const LOG_LEADS = 8;
+const capped = (s: string, n: number) => {
+  const cs = [...s];
+  return cs.length > n ? `${cs.slice(0, n - 1).join("").trimEnd()}…` : s;
+};
+
+/** The `log.md` bullet a list Done writes: the count and each step's lead, bounded. */
+export function stepsDoneLogLine(edit: { steps: readonly { lead: string }[] }): string {
+  const n = edit.steps.length;
+  const named = edit.steps.slice(0, LOG_LEADS).map((s) => capped(s.lead, LOG_LEAD_CHARS));
+  const more = n > LOG_LEADS ? `; and ${n - LOG_LEADS} more` : "";
+  return `Steps done (${n}): ${named.join("; ")}${more}`;
+}
+
+/**
+ * Each surviving item's number once the items at `removed` go, by the single
+ * edit's rule applied removal by removal, lowest index first: a list whose
+ * items all carry one number keeps it, else every later item takes one off.
+ * Null where the single edit could not renumber (a number below zero).
+ */
+function numbersAfter(values: readonly number[], removed: ReadonlySet<number>): Map<number, number> | null {
+  let cur = values.map((v, k) => ({ k, v }));
+  for (const r of [...removed].sort((a, b) => a - b)) {
+    const pos = cur.findIndex((x) => x.k === r);
+    if (cur.some((x) => x.v !== cur[0]!.v)) {
+      for (let j = pos + 1; j < cur.length; j++) cur[j] = { k: cur[j]!.k, v: cur[j]!.v - 1 };
+    }
+    cur = cur.filter((_, j) => j !== pos);
+  }
+  if (cur.some((x) => x.v < 0)) return null;
+  return new Map(cur.map((x) => [x.k, x.v]));
+}
+
+/**
+ * The page text with every step `keys` names deleted in one pass over the
+ * original text, or why not. Every key must name an open step of this page
+ * text and pass the single edit on its own; one that does not refuses the lot,
+ * named. Renumbering, an emptied lane and an emptied `<NextMoves>` follow the
+ * single edit's rules; the result must read back, through the index's walk,
+ * as every lane minus exactly those steps.
+ */
+export function stepsDoneEdit(text: string, keys: readonly string[]): StepsDoneEdit {
+  const unplaceable = (why: string): StepsDoneEdit => ({ ok: false, code: "unplaceable", reason: `${why}: edit the steps on the page` });
+  if (keys.length === 0) return { ok: false, code: "empty", reason: "no steps were named" };
+  const seen = new Set<string>();
+  for (const k of keys) {
+    if (seen.has(k)) return { ok: false, code: "duplicate", reason: `step ${k} is named twice`, key: k };
+    seen.add(k);
+  }
+  const p = parsePage(text);
+  if ("error" in p) return unplaceable(p.error);
+  if (keys.length > p.steps.length) return { ok: false, code: "too-many", reason: `${keys.length} steps named, the page has ${p.steps.length}` };
+  const chosen: StepRef[] = [];
+  for (const k of keys) {
+    const step = p.steps.find((s) => s.key === k);
+    if (!step) return { ok: false, code: "no-step", reason: `the page has no open step ${k}: it changed or the step is gone`, key: k };
+    const lead = leadSentence(step.text, { keepLabel: true });
+    if (step.refusal) return { ok: false, code: step.list ? "nested" : "checklist", reason: `«${lead}»: ${step.refusal}`, key: k };
+    const single = stepDoneEdit(text, k);
+    if (!single.ok) return { ok: false, code: single.code, reason: `«${lead}»: ${single.reason}`, key: k };
+    chosen.push(step);
+  }
+  chosen.sort((a, b) => p.steps.indexOf(a) - p.steps.indexOf(b));
+
+  const { lines, ends, from } = p;
+  const fenced = readerFencedLines(lines.slice(from).join("\n"));
+  const del = new Set<number>();
+  const out = [...lines];
+  const renumbered: { line: number; before: string; after: string }[] = [];
+  const renumberedLists = new Set<ListBlock>();
+  // Per touched list: the indices of its items that go.
+  const byList = new Map<ListBlock, Set<number>>();
+  for (const s of chosen) {
+    const set = byList.get(s.list!) ?? new Set<number>();
+    set.add(s.item);
+    byList.set(s.list!, set);
+    for (const n of listItemLines(s.list!)![s.item]!) del.add(from + n);
+  }
+  for (const [list, gone] of byList) {
+    if (list.type !== "ol") continue;
+    const heads = listItemLines(list)!.map((ls) => from + ls[0]!);
+    const nums = heads.map((n) => MARKER_RE.exec(lines[n]!)?.[2]);
+    if (nums.some((n) => n === undefined)) return unplaceable("a numbered list's markers could not be read");
+    const values = nums.map((n) => parseInt(n!, 10));
+    const after = numbersAfter(values, gone);
+    if (!after) return unplaceable("a numbered list could not be renumbered");
+    for (const [k, v] of after) {
+      if (v === values[k]) continue;
+      const at = heads[k]!;
+      const next = withNumber(lines[at]!, v);
+      if (next === null) return unplaceable("a numbered list could not be renumbered");
+      out[at] = next;
+      renumbered.push({ line: at + 1, before: lines[at]!, after: next });
+      renumberedLists.add(list);
+    }
+  }
+  renumbered.sort((a, b) => a.line - b.line);
+
+  const bodyLeft = (open: number, close: number) => {
+    for (let i = open + 1; i < close; i++) if (!del.has(i) && !blank(lines[i])) return true;
+    return false;
+  };
+  const span = (b: ComponentBlock, name: string): [number, number] | null => {
+    if (b.line === undefined) return null;
+    const open = from + b.line;
+    const close = closeLine(lines, from, fenced, open, name);
+    return close > open ? [open, close] : null;
+  };
+  const lanes = [...new Set(chosen.map((s) => s.laneRef))];
+  const laneSpan = new Map<LaneRef, [number, number]>();
+  for (const ref of lanes) {
+    const ls = span(ref.laneBlock, "Lane");
+    const ns = span(ref.nm, "NextMoves");
+    if (!ls || !ns) return unplaceable("a lane has no source line");
+    laneSpan.set(ref, ls);
+  }
+  const removedLanes = new Set<LaneRef>();
+  for (const ref of lanes) {
+    const [o, c] = laneSpan.get(ref)!;
+    if (bodyLeft(o, c)) continue;
+    removedLanes.add(ref);
+    for (let i = o; i <= c; i++) del.add(i);
+  }
+  let blocksRemoved = 0;
+  for (const nm of new Set([...removedLanes].map((r) => r.nm))) {
+    const [o, c] = span(nm, "NextMoves")!;
+    if (bodyLeft(o, c)) continue;
+    blocksRemoved++;
+    for (let i = o; i <= c; i++) del.add(i);
+  }
+  // A run sits between items of one list when a line next to it is a
+  // surviving item of a list the run removed an item from, in a lane that stays.
+  const lineOwner = new Map<number, ListBlock>();
+  const siblingsOf = new Map<ListBlock, Set<number>>();
+  for (const [list, gone] of byList) {
+    const ref = chosen.find((s) => s.list === list)!.laneRef;
+    const all = listItemLines(list)!;
+    all.forEach((ls, k) => {
+      if (gone.has(k)) for (const n of ls) lineOwner.set(from + n, list);
+    });
+    siblingsOf.set(list, removedLanes.has(ref) ? new Set() : new Set(all.filter((_, k) => !gone.has(k)).flat().map((n) => from + n)));
+  }
+  const gapAt = settleBlanks(lines, del, from, (s, e) => {
+    for (let i = s; i <= e; i++) {
+      const list = lineOwner.get(i);
+      const sib = list && siblingsOf.get(list);
+      if (sib && (sib.has(s - 1) || sib.has(e + 1))) return true;
+    }
+    return false;
+  });
+  const kept: string[] = [];
+  let last = -1;
+  for (let i = 0; i < out.length; i++) {
+    if (gapAt.has(i)) kept.push(ends[i]!);
+    if (del.has(i)) continue;
+    kept.push(out[i]! + ends[i]!);
+    last = kept.length - 1;
+  }
+  if (del.has(lines.length - 1) && last >= 0) kept[last] = kept[last]!.replace(/\r?\n$/, "");
+  const content = kept.join("");
+  const removed = [...del].sort((a, b) => a - b).filter((i) => !blank(lines[i])).map((i) => ({ line: i + 1, text: lines[i]! }));
+
+  const why = removalsViolation(p, chosen, removedLanes, byList, renumberedLists, { content, renumbered });
+  if (why) return unplaceable(why);
+  return {
+    ok: true,
+    content,
+    removed,
+    renumbered,
+    lanesRemoved: removedLanes.size,
+    blocksRemoved,
+    steps: chosen.map((s) => ({ key: s.key, lead: leadSentence(s.text, { keepLabel: true }), text: s.text })),
+  };
+}
+
+/** {@link removalViolation} for a set of steps: the page must read back as every lane minus exactly `chosen`. */
+function removalsViolation(
+  p: Parsed,
+  chosen: StepRef[],
+  removedLanes: ReadonlySet<LaneRef>,
+  byList: ReadonlyMap<ListBlock, ReadonlySet<number>>,
+  renumberedLists: ReadonlySet<ListBlock>,
+  proposed: { content: string; renumbered: readonly { before: string; after: string }[] },
+): string | null {
+  const { from } = p;
+  const afterBlocks = parseBlocks(proposed.content.split(/\r?\n/).slice(from).join("\n"));
+  const before = countedNextMovesLanes(p.blocks).lanes;
+  const after = countedNextMovesLanes(afterBlocks).lanes;
+  const expected: string[] = [];
+  for (let at = 0; at < before.length; at++) {
+    const ref = p.refs[at]!;
+    const own = p.steps.filter((s) => s.laneRef === ref);
+    const drop = new Set(chosen.filter((s) => s.laneRef === ref).map((s) => own.indexOf(s)));
+    if (removedLanes.has(ref)) {
+      if (drop.size !== before[at]!.items.length) return "a lane would go with steps still in it";
+      continue;
+    }
+    expected.push(laneShape({ ...before[at]!, items: before[at]!.items.filter((_, k) => !drop.has(k)) }));
+  }
+  const got = after.map(laneShape);
+  if (got.length !== expected.length || got.some((g, k) => g !== expected[k])) return "the page would not read back as the steps removed";
+  const sameBut = (a: string, b: string) => a.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ") === b.replace(MARKER_RE, "$1#$3").replace(/^([ \t]*#\.)[ \t]+/, "$1 ");
+  if (proposed.renumbered.some((r) => !sameBut(r.before, r.after))) return "a renumbered line would change more than its number";
+  if (!proposed.renumbered.length) return null;
+  // Each renumbered list renders as one sequence: its numbers with the removed ones gone and each later one lowered by how many went before it.
+  const lists = (l: ComponentBlock) => l.children.filter((b): b is ListBlock => b.type === "ol" || b.type === "ul");
+  const afterRefs = countedLaneRefs(afterBlocks);
+  for (const [list, gone] of byList) {
+    if (!renumberedLists.has(list)) continue;
+    const ref = chosen.find((s) => s.list === list)!.laneRef;
+    if (removedLanes.has(ref)) continue;
+    const at = p.refs.indexOf(ref);
+    const afterAt = at - p.refs.slice(0, at).filter((r) => removedLanes.has(r)).length;
+    const own = lists(ref.laneBlock);
+    const idx = own.indexOf(list) - own.slice(0, own.indexOf(list)).filter((l) => (byList.get(l)?.size ?? 0) === l.items.length).length;
+    const afterLane = afterRefs[afterAt];
+    const now = afterLane ? lists(afterLane.laneBlock)[idx] : undefined;
+    const was = ordinals((list as OlBlock).start, list.items.length, (list as OlBlock).values);
+    const want = was.flatMap((n, k) => (gone.has(k) ? [] : [n - [...gone].filter((g) => g < k).length]));
+    const shown = now?.type === "ol" ? ordinals(now.start, now.items.length, now.values) : null;
+    if (!shown || shown.join() !== want.join()) return "a numbered list would not render as one sequence";
+  }
+  return null;
+}

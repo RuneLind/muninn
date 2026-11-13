@@ -4,7 +4,7 @@
  * is pinned in `e2e/wiki-step-done.spec.ts`.
  */
 import { expect, test } from "bun:test";
-import { needsReload, pairStepRows, previewHtml, renumberLine, retryable, type RenderedLane } from "./wiki-step-done.ts";
+import { checkedKeysByLane, needsReload, pairStepRows, previewAllHtml, previewHtml, renumberAllLine, renumberLine, retryable, type RenderedLane } from "./wiki-step-done.ts";
 
 const step = (key: string, lane: number, row: number | null, refusal: string | null = null) => ({ key, lane, row, refusal });
 
@@ -136,3 +136,54 @@ for (const [name, status, data, retry, reload] of REFUSALS) {
     expect(needsReload(status, data)).toBe(reload);
   });
 }
+
+test("«Remove N checked» collects exactly the ok steps, per lane, in row order", () => {
+  const pairs = [
+    { lane: 1, row: 1, key: "b2" },
+    { lane: 0, row: 2, key: "a3" },
+    { lane: 0, row: 0, key: "a1" },
+    { lane: 0, row: 1, key: "a2" },
+    { lane: 1, row: 0, key: "b1" },
+    { lane: 2, row: 0, key: "c1" },
+  ];
+  const byKey = new Map<string, { state: unknown }>([
+    ["a1", { state: "ok" }],
+    ["a2", { state: "not-yet" }],
+    ["a3", { state: "ok" }],
+    ["b1", { state: "unknown" }],
+    ["b2", { state: "OK" }],
+    // c1 has no <Check>: the route did not answer it.
+  ]);
+  expect([...checkedKeysByLane(pairs, byKey)]).toEqual([[0, ["a1", "a3"]]]);
+  expect([...checkedKeysByLane(pairs, new Map())]).toEqual([]);
+});
+
+test("the list preview names every step, every removed line and every renumbering", () => {
+  const html = previewAllHtml({
+    steps: [
+      { key: "k0", lead: "Run <b>migration</b> 088.", text: "" },
+      { key: "k2", lead: "Restart.", text: "" },
+    ],
+    removed: [
+      { line: 9, text: "1. Run migration 088." },
+      { line: 11, text: "3. Restart." },
+    ],
+    renumbered: [
+      { line: 10, before: "2. Read.", after: "1. Read." },
+      { line: 12, before: "4. Last.", after: "2. Last." },
+    ],
+    laneRemoved: false,
+    nextMovesRemoved: false,
+    lanesRemoved: 0,
+    blocksRemoved: 0,
+    logEntry: "## [d] step-done | T\n- Steps done (2): …",
+    logNote: "note",
+    previewHash: "h",
+  });
+  expect(html).toContain("these 2 checked steps");
+  expect(html).toContain("<li>Run &lt;b&gt;migration&lt;/b&gt; 088.</li><li>Restart.</li>");
+  expect(html).toContain('<span class="wiki-step-done-ln">9</span> 1. Run migration 088.\n<span class="wiki-step-done-ln">11</span> 3. Restart.');
+  expect(html).toContain("2 steps take new numbers: 2 becomes 1, 4 becomes 2.");
+  expect(html).toContain("data-step-done-all-confirm>Remove all 2</button>");
+  expect(renumberAllLine([])).toBe("");
+});

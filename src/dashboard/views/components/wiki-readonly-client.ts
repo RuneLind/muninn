@@ -100,6 +100,9 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // refuses on a read-only instance and root. Not the preview's Cancel.
   "[data-step-done]",
   "[data-step-done-confirm]",
+  // «Remove N checked» on a lane and its preview's Remove: the same route's list form.
+  "[data-step-done-all]",
+  "[data-step-done-all-confirm]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");

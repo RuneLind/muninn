@@ -34,12 +34,15 @@
  * `wikiToolsFlag` only: they read, so a read-only wiki gets them too.
  */
 
-import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
+import { wikiReadonlyFlag, wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import { wikiToolsFlag } from "./wiki-read-slice.ts";
 import { countedLanes } from "./wiki-report-blocks.ts";
 
 export const STEP_DONE_ATTR = "data-step-done";
 export const STEP_DONE_CONFIRM_ATTR = "data-step-done-confirm";
+/** «Remove N checked» on a `you` lane, and its preview's confirm. */
+export const STEP_DONE_ALL_ATTR = "data-step-done-all";
+export const STEP_DONE_ALL_CONFIRM_ATTR = "data-step-done-all-confirm";
 export const STEP_DONE_PANEL_CLASS = "wiki-step-done-panel";
 export const STEP_DONE_NOTE_CLASS = "wiki-step-done-note";
 
@@ -198,6 +201,8 @@ export function previewHtml(p: Preview): string {
   );
 }
 
+type PostJson = (body: Record<string, unknown>) => Promise<{ status: number; data: Record<string, unknown> }>;
+
 async function postJson(body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown> }> {
   const res = await fetch("/api/wiki/step-done", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -309,20 +314,27 @@ function openPreview(root: HTMLElement, li: HTMLElement, btn: HTMLButtonElement,
     const go = panel.querySelector<HTMLButtonElement>(`[${STEP_DONE_CONFIRM_ATTR}]`)!;
     go.focus({ preventScroll: true });
     go.addEventListener("click", () => {
-      if (!isOff(go)) void write(root, panel, go, step, name, ctx, baseHash, p.previewHash);
+      if (!isOff(go)) void write(root, panel, go, { which: { step: step.key }, removedNotice: REMOVED_NOTICE }, name, ctx, baseHash, p.previewHash);
     });
   })();
+}
+
+/** What a write removes: one step (`{step}`) or a list (`{steps}`), and the notice shown after it. */
+interface WriteTarget {
+  which: { step: string } | { steps: string[] };
+  removedNotice: string;
 }
 
 async function write(
   article: HTMLElement,
   panel: HTMLElement,
   go: HTMLButtonElement,
-  step: ListedStep,
+  target: WriteTarget,
   name: string,
   ctx: StepDonePageContext,
   baseHash: string,
   previewHash: string,
+  post: PostJson = postJson,
 ): Promise<void> {
   const err = panel.querySelector<HTMLElement>(".wiki-step-done-err")!;
   const reload = panel.querySelector<HTMLButtonElement>(".wiki-step-done-reload")!;
@@ -331,7 +343,7 @@ async function write(
   reload.hidden = true;
   let r: { status: number; data: Record<string, unknown> };
   try {
-    r = await postJson({ wiki: ctx.wiki, relPath: ctx.relPath, step: step.key, baseHash, previewHash });
+    r = await post({ wiki: ctx.wiki, relPath: ctx.relPath, ...target.which, baseHash, previewHash });
   } catch {
     r = { status: 0, data: { error: "The request failed: nothing is known to have been written. Reload the page." } };
   }
@@ -341,7 +353,7 @@ async function write(
     // Escape, another Done) does not stop it: the page changed all the same.
     const reloads = ctx.current() && article.isConnected;
     if (r.data.uncommitted === true) uncommitted.add(pageKey(ctx));
-    notices.set(pageKey(ctx), { text: r.data.uncommitted === true ? UNCOMMITTED_NOTICE : REMOVED_NOTICE, focus: reloads });
+    notices.set(pageKey(ctx), { text: r.data.uncommitted === true ? UNCOMMITTED_NOTICE : target.removedNotice, focus: reloads });
     if (reloads) ctx.reload();
     return;
   }
@@ -393,6 +405,129 @@ export function checkChip(step: CheckedStep): { state: CheckState; glyph: string
   return { state, glyph: CHIP[state][0], name, title };
 }
 
+interface PreviewAll extends Preview {
+  steps: { key: string; lead: string; text: string }[];
+  lanesRemoved: number;
+  blocksRemoved: number;
+}
+
+/** Every renumbering of a list Done as one line, «3 becomes 2, 5 becomes 3». Empty when none. */
+export function renumberAllLine(renumbered: Preview["renumbered"]): string {
+  if (!renumbered.length) return "";
+  const num = (line: string) => /^[ \t]*(\d+)\./.exec(line)?.[1] ?? "?";
+  const pairs = renumbered.map((r) => `${num(r.before)} becomes ${num(r.after)}`);
+  return `${renumbered.length === 1 ? "One step takes a new number" : `${renumbered.length} steps take new numbers`}: ${pairs.join(", ")}.`;
+}
+
+/** The list preview's body: each step that goes, every line that goes, every renumbering, what goes with them, the log entry. */
+export function previewAllHtml(p: PreviewAll): string {
+  const n = p.steps.length;
+  const steps = p.steps.map((s) => `<li>${esc(s.lead)}</li>`).join("");
+  const lines = p.removed.map((r) => `<span class="wiki-step-done-ln">${r.line}</span> ${esc(r.text)}`).join("\n");
+  const renumbers = renumberAllLine(p.renumbered);
+  const renum = renumbers ? `<div class="wiki-step-done-sub">${esc(renumbers)}</div>` : "";
+  const goes = p.blocksRemoved
+    ? `<div class="wiki-step-done-sub">That empties the next-moves block: the lane and the block go too.</div>`
+    : p.lanesRemoved
+      ? `<div class="wiki-step-done-sub">That empties ${p.lanesRemoved === 1 ? "the lane: the lane goes" : `${p.lanesRemoved} lanes: they go`} too.</div>`
+      : "";
+  return (
+    `<div class="wiki-step-done-head">Remove ${n === 1 ? "this checked step" : `these ${n} checked steps`} from the page. There is no undo.</div>` +
+    `<ol class="wiki-step-done-steps">${steps}</ol>` +
+    `<pre class="wiki-step-done-lines">${lines}</pre>${renum}${goes}` +
+    `<div class="wiki-step-done-sub">${esc(p.logNote)}</div>` +
+    `<pre class="wiki-step-done-log">${esc(p.logEntry)}</pre>` +
+    `<div class="wiki-step-done-acts"><button type="button" class="wiki-step-done-go" ${STEP_DONE_ALL_CONFIRM_ATTR}>Remove ${n === 1 ? "the step" : `all ${n}`}</button>` +
+    `<button type="button" class="wiki-step-done-reload" hidden>Reload the page</button>` +
+    `<button type="button" class="wiki-step-done-cancel">Cancel</button></div>` +
+    `<div class="wiki-step-done-err" role="alert" hidden></div>`
+  );
+}
+
+/**
+ * Per rendered lane (index into the DOM-order lanes), the keys of its paired
+ * steps whose answered state is exactly `ok`, in row order. A `not-yet`, an
+ * `unknown`, a malformed state or a step the route did not answer is never in it.
+ */
+export function checkedKeysByLane(pairs: { lane: number; row: number; key: string }[], byKey: Map<string, { state: unknown }>): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  for (const p of [...pairs].sort((a, b) => a.lane - b.lane || a.row - b.row)) {
+    if (byKey.get(p.key)?.state !== "ok") continue;
+    out.set(p.lane, [...(out.get(p.lane) ?? []), p.key]);
+  }
+  return out;
+}
+
+/** «Remove N checked» at the foot of a `you` lane: one preview of every checked step, one write. */
+function addRemoveAll(lane: HTMLElement, keys: string[], article: HTMLElement, ctx: StepDonePageContext, baseHash: string, post: PostJson): void {
+  const body = lane.querySelector<HTMLElement>(":scope > .nm-body");
+  if (!body || body.querySelector(`:scope > .wiki-step-done-allrow`)) return;
+  const doc = article.ownerDocument;
+  const n = keys.length;
+  const row = doc.createElement("div");
+  row.className = "wiki-step-done-allrow";
+  row.setAttribute("data-reader-only", "");
+  const btn = doc.createElement("button");
+  btn.type = "button";
+  btn.className = "wiki-step-done-all";
+  btn.setAttribute(STEP_DONE_ALL_ATTR, String(n));
+  btn.textContent = `Remove ${n} checked`;
+  btn.setAttribute("aria-label", `Remove the ${n === 1 ? "checked step" : `${n} checked steps`} from this lane: preview first`);
+  row.appendChild(btn);
+  body.appendChild(row);
+  const close = (panel: Element) => {
+    panel.remove();
+    btn.focus({ preventScroll: true });
+  };
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isOff(btn)) return;
+    const had = row.querySelector(`:scope > .${STEP_DONE_PANEL_CLASS}`);
+    closePanels(article);
+    if (had) return;
+    const panel = doc.createElement("div");
+    panel.className = STEP_DONE_PANEL_CLASS;
+    panel.setAttribute("role", "region");
+    panel.setAttribute("aria-label", "Remove the checked steps");
+    panel.setAttribute("data-reader-only", "");
+    panel.textContent = "Reading what goes…";
+    row.appendChild(panel);
+    panel.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      close(panel);
+    });
+    setOff(btn, true);
+    void (async () => {
+      let r: { status: number; data: Record<string, unknown> };
+      try {
+        r = await post({ wiki: ctx.wiki, relPath: ctx.relPath, steps: keys, baseHash, preview: true });
+      } catch {
+        r = { status: 0, data: { error: "The preview could not be fetched." } };
+      } finally {
+        setOff(btn, false);
+      }
+      if (!panel.isConnected) return;
+      if (r.status !== 200) {
+        panel.innerHTML = `<div class="wiki-step-done-err" role="alert">${esc(errorText(r.data, "These steps cannot be removed together."))}</div>`;
+        return;
+      }
+      const p = r.data as unknown as PreviewAll;
+      panel.innerHTML = previewAllHtml(p);
+      panel.querySelector<HTMLButtonElement>(".wiki-step-done-cancel")!.addEventListener("click", () => close(panel));
+      panel.querySelector<HTMLButtonElement>(".wiki-step-done-reload")!.addEventListener("click", () => ctx.reload());
+      const go = panel.querySelector<HTMLButtonElement>(`[${STEP_DONE_ALL_CONFIRM_ATTR}]`)!;
+      go.focus({ preventScroll: true });
+      const notice = `${n === 1 ? "The checked step is" : `${n} checked steps are`} removed from the page.`;
+      go.addEventListener("click", () => {
+        if (!isOff(go)) void write(article, panel, go, { which: { steps: keys }, removedNotice: notice }, `${n} checked steps`, ctx, baseHash, p.previewHash, post);
+      });
+    })();
+  });
+}
+
 /** Done goes before its row's slot, whichever answer came first. The slot is a fixed box (see the styles), so what lands in it later moves nothing. */
 function slotAfterDone(li: Element): void {
   const slot = li.querySelector(":scope > .step-check");
@@ -405,8 +540,18 @@ function slotAfterDone(li: Element): void {
  * Rows pair as Done's do (`pairStepRows`), never by a slot's own attributes.
  * No slot on the page, a failed request, or an answer for other page bytes:
  * no request or no chips. Exported for the DOM test; `get` is `fetch`.
+ *
+ * With `removeAll` (a page Done may write), each lane with at least one
+ * paired step answered `ok` also gets «Remove N checked» for exactly those
+ * keys (`checkedKeysByLane`). The server runs no probe at write time: the
+ * preview naming every step is the confirmation. `post` is the route call.
  */
-export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext, get: (url: string) => Promise<Response> = (u) => fetch(u)): Promise<void> {
+export function enhanceStepChecks(
+  article: HTMLElement,
+  ctx: StepDonePageContext,
+  get: (url: string) => Promise<Response> = (u) => fetch(u),
+  opts: { removeAll?: boolean; post?: PostJson } = {},
+): Promise<void> {
   if (!article.querySelector(".step-check")) return Promise.resolve();
   const shown = ctx.hash();
   return (async () => {
@@ -422,7 +567,13 @@ export function enhanceStepChecks(article: HTMLElement, ctx: StepDonePageContext
     const steps = a.steps as CheckedStep[];
     const lanes = renderedLanes(article);
     const byKey = new Map(steps.map((s) => [s.key, s]));
-    for (const pair of pairStepRows(lanes.map((l) => l.lane), { laneRows: a.laneRows as number[], steps: steps.map((s) => ({ key: s.key, lane: s.lane, row: s.row, refusal: null })) })) {
+    const pairs = pairStepRows(lanes.map((l) => l.lane), { laneRows: a.laneRows as number[], steps: steps.map((s) => ({ key: s.key, lane: s.lane, row: s.row, refusal: null })) });
+    if (opts.removeAll) {
+      // Only rows that carry their slot, so every collected step shows its ✓.
+      const shownPairs = pairs.filter((p) => laneRows(lanes[p.lane]!.el)[p.row]?.querySelector(":scope > .step-check"));
+      for (const [lane, keys] of checkedKeysByLane(shownPairs, byKey)) addRemoveAll(lanes[lane]!.el, keys, article, ctx, shown, opts.post ?? postJson);
+    }
+    for (const pair of pairs) {
       const li = laneRows(lanes[pair.lane]!.el)[pair.row];
       const slot = li?.querySelector<HTMLElement>(":scope > .step-check");
       if (!li || !slot || slot.firstChild) continue;
@@ -453,7 +604,8 @@ export function enhanceStepDone(root: HTMLElement, ctx: StepDonePageContext): vo
     if (notice.focus) note.focus({ preventScroll: true });
   }
   // The checks read only: a read-only instance gets its chips (a read-only root's answer has none); the pod has no route.
-  if (wikiToolsFlag()) void enhanceStepChecks(article, ctx);
+  // «Remove N checked» only where a write can land: not on a read-only instance or root (the blocked selector is the backstop).
+  if (wikiToolsFlag()) void enhanceStepChecks(article, ctx, undefined, { removeAll: !wikiReadonlyFlag() && !wikiReadonlyWikiFlag() && !uncommitted.has(key) });
   if (wikiReadonlyWikiFlag() || !wikiToolsFlag() || uncommitted.has(key)) return;
   if (!countedLanes(article).some((l) => l.dataset.kind === "you" && Number(l.dataset.count) > 0)) return;
   const shownHash = ctx.hash();
@@ -526,6 +678,14 @@ export function stepDoneStyles(): string {
       color: var(--text-primary); font-size: 13px; line-height: 1.5;
       display: flex; flex-direction: column; gap: 6px;
     }
+    .wiki-step-done-allrow { margin-top: 6px; }
+    .wiki-step-done-all {
+      padding: 2px 10px; font-size: 12px; line-height: 1.5; font-family: inherit; cursor: pointer; border-radius: 6px;
+      border: 1px solid var(--border-secondary); background: transparent; color: var(--text-secondary);
+    }
+    .wiki-step-done-all:hover, .wiki-step-done-all:focus-visible { color: var(--text-primary); }
+    .wiki-step-done-all[aria-disabled="true"] { cursor: progress; }
+    .wiki-step-done-steps { margin: 0; padding-left: 1.4em; }
     .wiki-step-done-head { font-weight: 600; }
     .wiki-step-done-sub { color: var(--text-secondary); }
     .wiki-step-done-lines, .wiki-step-done-log {

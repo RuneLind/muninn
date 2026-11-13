@@ -197,3 +197,12 @@ describe("Connections' attributes in the read-only selectors", () => {
     expect(egress).toContain(`[${DRAFT_PLAN_ATTR}]`);
   });
 });
+
+describe("Done's attributes in the read-only selectors", () => {
+  test("Done, its Remove, «Remove N checked» and its Remove, spelled as wiki-step-done.ts spells them; Cancel is not", async () => {
+    const { STEP_DONE_ATTR, STEP_DONE_CONFIRM_ATTR, STEP_DONE_ALL_ATTR, STEP_DONE_ALL_CONFIRM_ATTR } = await import("./wiki-step-done.ts");
+    const blocked = WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim());
+    for (const attr of [STEP_DONE_ATTR, STEP_DONE_CONFIRM_ATTR, STEP_DONE_ALL_ATTR, STEP_DONE_ALL_CONFIRM_ATTR]) expect(blocked).toContain(`[${attr}]`);
+    expect(blocked.some((s) => s.includes("cancel") && s.includes("step-done"))).toBe(false);
+  });
+});
