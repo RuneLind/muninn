@@ -139,7 +139,7 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
   const down = new Map<string, { openedAt: Stamp; reason: string }>();
 
   // Both timers are live only while their age is in [0, limit) on the wall AND the monotonic clock (`within`): a wall step
-  // back or forward and a sleep each expire them early, and nothing makes one outlive its limit on either clock.
+  // forward and a sleep expire them early, a wall step back expires them no later than the monotonic limit (two-clock.ts names the one residual).
   const isDown = (machine: string, t: Stamp) => {
     const d = down.get(machine);
     return d && within(d.openedAt, downMs, t) ? d : null;

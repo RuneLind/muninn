@@ -2,10 +2,11 @@
  * How long a step-check answer lives, on two clocks at once (mimir plan
  * muninn-wiki-owner-step-checks): the wall clock (`Date.now`), which counts
  * sleep but can step back or forward, and the monotonic clock
- * (`performance.now`), which never steps but stops while the machine sleeps.
- * An answer is live only while its age is inside the limit on BOTH, so each
- * clock covers the other's blind spot and no path makes it live longer than
- * the limit on either.
+ * (`performance.now`), which never steps and is assumed to stop while the
+ * machine sleeps (not measured; if it counts sleep the rule is only stricter).
+ * An answer is live only while its age is inside the limit on BOTH readings.
+ * What the two readings cannot see: a sleep followed by a wall step back to
+ * within the limit of the stamp. That one sequence can outlive the limit.
  */
 
 /** One instant, read from both clocks. */
