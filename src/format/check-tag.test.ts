@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { CHECK_PROBES, checkSlotHtml, parseCheckAttrs, stepCheck } from "./check-tag.ts";
+import { CHECK_PROBES, checkSlotHtml, parseCheckAttrs, readCheckRun, stepCheck } from "./check-tag.ts";
 import { leadSentence } from "./lead-sentence.ts";
 import { listYouSteps, stepDoneEdit, stepDoneLogLine } from "./step-done.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { COMPONENT_NAMES } from "./component-spec.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { trailingCheck } from "./check-trailing.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
@@ -76,6 +77,65 @@ describe("stepCheck", () => {
     expect(stepCheck(`Do \`${ENV}\``)).toBeNull();
     expect(stepCheck(`Do it\n${ENV}`)).toBeNull();
     expect(stepCheck(ENV)).toBeNull();
+  });
+});
+
+describe("readCheckRun", () => {
+  test("only whitespace-led spec pairs, each once, read with no problem", () => {
+    expect(readCheckRun(` env="A" migration="086"\ton="laptop"`)).toEqual({ attrs: { env: "A", migration: "086", on: "laptop" }, problems: [] });
+    expect(readCheckRun("")).toEqual({ attrs: {}, problems: [] });
+  });
+  test("an unknown or wrong-case name, a repeat, or leftover text is one problem each", () => {
+    for (const run of [` env="A" ON="mini"`, ` envs="A" env="B"`, ` env="A" env="B"`, ` on="a" env="A" on="b"`, ` env="A" on='mini'`, ` env="A" on=mini`, ` env="A" please`, `env="A"`]) {
+      expect(readCheckRun(run).problems).toHaveLength(1);
+    }
+    expect(readCheckRun(` env="A" env="B"`).attrs).toEqual({ env: "B" });
+  });
+  test("a name given three times is one problem line, and the last value is read", () => {
+    expect(readCheckRun(` env="A" env="B" env="C"`)).toEqual({ attrs: { env: "C" }, problems: ["env is given more than once; only the last is read"] });
+    expect(readCheckRun(` on="a" env="A" on="b" env="B" on="c"`)).toEqual({
+      attrs: { on: "c", env: "B" },
+      problems: ["on is given more than once; only the last is read", "env is given more than once; only the last is read"],
+    });
+  });
+  test("a repeated unknown name is one line per pair, not one per name", () => {
+    expect(readCheckRun(` bogus="1" bogus="1" env="HAVE"`)).toEqual({
+      attrs: { env: "HAVE" },
+      problems: ['bogus="1" is not a Check attribute; it is not read', 'bogus="1" is not a Check attribute; it is not read'],
+    });
+  });
+  // Placement (`check-trailing.ts`) allows only spaces or tabs between pairs
+  // and no `"`, backtick or newline in a value: the grammar reads that alphabet
+  // and no wider one, so a run placement refuses is never a clean run.
+  const wider = [
+    ["an NBSP before a pair", ` env="A" on="x"`],
+    ["an em space before a pair", ` env="A" on="x"`],
+    ["a newline before a pair", ` env="A"\n on="b"`],
+    ["a carriage return before a pair", ` env="A"\r on="b"`],
+    ["a form feed before a pair", ` env="A"\f on="b"`],
+    ["an NBSP leading the run", ` env="A"`],
+    ["a trailing NBSP", ` env="A" `],
+    ["a trailing newline", ` env="A"\n`],
+    ["a backtick in a value", ` env="A\`B"`],
+    ["a newline in a value", ` env="A\nB"`],
+  ] as const;
+  test.each(wider)("%s: placement refuses it, and the grammar reports it", (_n, run) => {
+    expect(trailingCheck(`Do. <Check${run} />`)).toBeUndefined();
+    expect(readCheckRun(run).problems).not.toEqual([]);
+  });
+  test("a run placement accepts is the run the grammar reads clean", () => {
+    for (const run of [` env="A"`, `\tenv="A"`, ` env="A" \t on="x"`, ` migration="086"\ton="laptop"`]) {
+      expect(trailingCheck(`Do. <Check${run} />`)?.[1]).toBe(run);
+      expect(readCheckRun(run).problems).toEqual([]);
+    }
+  });
+  test("stepCheck carries the run's problems beside the read probes", () => {
+    expect(stepCheck(`**Add A and B.** <Check env="A" env="B" on="laptop" />`)).toEqual({
+      probes: [{ kind: "env", value: "B" }],
+      on: ["laptop"],
+      problems: ["env is given more than once; only the last is read"],
+    });
+    expect(stepCheck(`Go. <Check env="A" ON="mini" />`)).toMatchObject({ on: null, problems: [expect.stringContaining("ON=")] });
   });
 });
 

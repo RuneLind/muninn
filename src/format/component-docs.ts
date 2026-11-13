@@ -219,7 +219,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     },
   },
   Check: {
-    doc: "The facts a `you` step names: one tag, the last thing on the step's first line, after its sentence (`1. **Restart.** <Check restart=\"3010\" />`). Give at least one probe attribute. The wiki reader keeps an empty slot for it; every other surface prints nothing.",
+    doc: "The facts a `you` step names: one tag, the last thing on the step's first line, after its sentence (`1. **Add the key.** <Check env=\"KEY\" on=\"laptop\" />`). Give at least one probe attribute, each attribute once. `restart` always reads unknown for now. The wiki reader keeps an empty slot for it; every other surface prints nothing.",
     teach: WIKI,
     attrs: {
       env: { doc: "An env key the instance must hold", printType: '"<ENV_KEY>"' },

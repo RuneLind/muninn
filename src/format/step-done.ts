@@ -189,13 +189,33 @@ export function listYouSteps(text: string): YouStep[] | null {
  *  its first source line (1-based on the page) and whether its list is a task
  *  list (a `[ ]`/`[x]` row in it, which the reader draws as a checklist).
  *  Lint's `check-placement` reads where a step's `<Check>` may go from here,
- *  and the step-checks route which keyed step a check belongs to. */
-export function youListStepLines(text: string): { key: string; line: number; text: string; taskList: boolean }[] | null {
+ *  and the step-checks route which keyed step a check belongs to. `end` is
+ *  the 1-based line the step's item ends before: the next top-level item of
+ *  any list in its lane, else the lane's closing line (the page's end when it
+ *  has none), so the item's continuation lines and nested content, and any
+ *  lane text after its last list, fall inside it. */
+export function youListStepLines(text: string): { key: string; line: number; end: number; text: string; taskList: boolean }[] | null {
   const p = parsePage(text);
   if ("error" in p) return null;
+  const fenced = readerFencedLines(p.lines.slice(p.from).join("\n"));
+  const ends = new Map<ComponentBlock, { heads: number[]; close: number }>();
+  const laneEnd = (lane: ComponentBlock) => {
+    let e = ends.get(lane);
+    if (!e) {
+      const heads = lane.children.flatMap((b) => (b.type === "ul" || b.type === "ol" ? (listItemLines(b) ?? []).flatMap((ls) => (ls.length ? [p.from + ls[0]! + 1] : [])) : []));
+      const shut = lane.line === undefined ? -1 : closeLine(p.lines, p.from, fenced, p.from + lane.line, "Lane");
+      ends.set(lane, (e = { heads, close: shut < 0 ? p.lines.length + 1 : shut + 1 }));
+    }
+    return e;
+  };
   return p.steps.flatMap((s) => {
     const at = s.list ? listItemLines(s.list)?.[s.item] : undefined;
-    return s.list && at?.length ? [{ key: s.key, line: p.from + at[0]! + 1, text: s.text, taskList: isTaskList(s.list) }] : [];
+    if (!s.list || !at?.length) return [];
+    const line = p.from + at[0]! + 1;
+    const lane = laneEnd(s.laneRef.laneBlock);
+    // A close at or before the step (the tags share its line) bounds nothing.
+    const end = Math.min(lane.close > line ? lane.close : p.lines.length + 1, ...lane.heads.filter((h) => h > line));
+    return [{ key: s.key, line, end, text: s.text, taskList: isTaskList(s.list) }];
   });
 }
 

@@ -9,7 +9,7 @@
 import { parseAttrs } from "./markdown-ast.ts";
 import { escapeHtml } from "./markdown-core.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
-import { trailingCheck } from "./check-trailing.ts";
+import { pairSource, trailingCheck } from "./check-trailing.ts";
 
 /** The attributes that each name one probe, in spec order. `on` is not one. */
 export const CHECK_PROBES = ["env", "migration", "checkout", "pushed", "restart"] as const;
@@ -72,12 +72,59 @@ export function parseCheckAttrs(attrs: Readonly<Record<string, string>>): CheckA
   return { probes, on, problems };
 }
 
+const CHECK_ATTR_NAMES: readonly string[] = [...CHECK_PROBES, "on"];
+const PAIR = new RegExp(pairSource(true), "y");
+
+/**
+ * A raw attribute run read against a closed grammar: in full, `name="value"`
+ * pairs led by spaces or tabs, in placement's own alphabet ({@link pairSource}:
+ * no `"`, backtick or newline in a value), each name one of the six spec attributes, each at most
+ * once. Anything else gives a problem line, so the step can never read `ok`:
+ * one line per repeated spec name, however often it repeats, one line per
+ * unread pair (an unknown name repeated is named each time), one for leftover
+ * text. Without them `parseAttrs` would drop an unknown name and let a repeated one overwrite in
+ * silence. A repeated name keeps its last value, as the renderer and lint do.
+ */
+export function readCheckRun(raw: string): { attrs: Record<string, string>; problems: string[] } {
+  const attrs: Record<string, string> = {};
+  const problems: string[] = [];
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  let at = 0;
+  let m: RegExpExecArray | null;
+  PAIR.lastIndex = 0;
+  while ((m = PAIR.exec(raw)) !== null) {
+    at = PAIR.lastIndex;
+    const name = m[1]!;
+    const value = m[2]!;
+    if (!CHECK_ATTR_NAMES.includes(name)) {
+      problems.push(`${name}=${JSON.stringify(value)} is not a Check attribute; it is not read`);
+      continue;
+    }
+    // One line per repeated name, however often it repeats.
+    if (seen.has(name) && !repeated.has(name)) {
+      repeated.add(name);
+      problems.push(`${name} is given more than once; only the last is read`);
+    }
+    seen.add(name);
+    attrs[name] = value;
+  }
+  const rest = raw.slice(at).replace(/^[ \t]+|[ \t]+$/g, "");
+  if (rest) problems.push(`${JSON.stringify(rest)} is not a name="value" pair; it is not read`);
+  return { attrs, problems };
+}
+
 /** The one validly placed check on a step's first line, or null: the tag must
  *  be the last thing on that line (`check-trailing.ts`). An earlier tag on the
- *  line, or one on a later line, is no check (lint `check-placement`). */
+ *  line, or one on a later line, is no check (lint `check-placement`). Its
+ *  problems: the run's grammar lines ({@link readCheckRun}), then
+ *  `parseCheckAttrs`'s; `checkedSteps` appends `ANOTHER_CHECK` after both. */
 export function stepCheck(stepFirstLine: string): CheckAttrs | null {
   const t = trailingCheck(stepFirstLine.split("\n")[0]!);
-  return t ? parseCheckAttrs(parseAttrs(t[1], "Check")) : null;
+  if (!t) return null;
+  const run = readCheckRun(t[1]);
+  const read = parseCheckAttrs(run.attrs);
+  return { ...read, problems: [...run.problems, ...read.problems] };
 }
 
 /** The reader's empty slot for a trailing tag's raw attribute run: only the
