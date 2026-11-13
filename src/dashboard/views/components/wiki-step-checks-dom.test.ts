@@ -224,6 +224,294 @@ describe("step-check chips: one glyph", () => {
   });
 });
 
+describe("«Remove N checked» on the lane (owner-step checks PR 3)", () => {
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+  const allButtons = (a: HTMLElement) => Array.from(a.querySelectorAll<HTMLButtonElement>("[data-step-done-all]"));
+  type Sent = Record<string, unknown>;
+  function poster(preview: Record<string, unknown>) {
+    const sent: Sent[] = [];
+    const post = async (body: Sent) => {
+      sent.push(body);
+      return body.preview === true ? { status: 200, data: { ok: true, preview: true, ...preview } } : { status: 200, data: { ok: true, committed: true } };
+    };
+    return { sent, post };
+  }
+  const PREVIEW = {
+    steps: [{ key: "k", lead: "Add the key", text: "" }],
+    removed: [{ line: 7, text: '1. Add the key <Check env="HAVE" />' }],
+    renumbered: [{ line: 8, before: "2. Plain step.", after: "1. Plain step." }],
+    laneRemoved: false,
+    nextMovesRemoved: false,
+    lanesRemoved: 0,
+    blocksRemoved: 0,
+    logEntry: "## [d] step-done | T\n- Step done: Add the key",
+    logNote: "note",
+    previewHash: "ph",
+  };
+
+  test("one button for the one ok step; its preview and its confirm send exactly that key, then the page reloads", async () => {
+    const a = mount();
+    const full = await answer();
+    const okKey = full.steps.find((s) => s.state === "ok")!.key;
+    const { sent, post } = poster(PREVIEW);
+    let reloads = 0;
+    await enhanceStepChecks(a, { ...ctx(sha256(PAGE)), reload: () => reloads++ }, respond(full), { removeAll: true, post });
+    const [btn, ...more] = allButtons(a);
+    expect(more).toEqual([]);
+    expect(btn!.textContent).toBe("Remove 1 checked");
+    // The button sits in the lane, not on a chip or a row.
+    expect(btn!.closest(".nm-lane")).not.toBeNull();
+    expect(btn!.closest("li")).toBeNull();
+    expect(a.querySelectorAll(".step-check button, .step-check [data-step-done-all]").length).toBe(0);
+    btn!.click();
+    await settle();
+    expect(sent).toEqual([{ wiki: "w", relPath: "plans/p.mdx", steps: [okKey], baseHash: sha256(PAGE), preview: true }]);
+    const panels = a.querySelectorAll(".wiki-step-done-panel");
+    expect(panels.length).toBe(1);
+    expect(panels[0]!.textContent).toContain("Remove this checked step from the page.");
+    expect(panels[0]!.textContent).toContain("2 becomes 1");
+    a.querySelector<HTMLButtonElement>("[data-step-done-all-confirm]")!.click();
+    await settle();
+    expect(sent[1]).toEqual({ wiki: "w", relPath: "plans/p.mdx", steps: [okKey], baseHash: sha256(PAGE), previewHash: "ph" });
+    expect(sent.length).toBe(2);
+    expect(reloads).toBe(1);
+  });
+
+  test("two ok steps: both keys in row order, never the not-yet, unknown or unchecked step", async () => {
+    const a = mount();
+    const full = await answer();
+    const steps = full.steps.map((s) => (s.row === 3 ? { ...s, state: "ok" as const } : s));
+    const { sent, post } = poster(PREVIEW);
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond({ ...full, steps }), { removeAll: true, post });
+    expect(allButtons(a).map((b) => b.textContent)).toEqual(["Remove 2 checked"]);
+    allButtons(a)[0]!.click();
+    await settle();
+    expect(sent[0]!.steps).toEqual([steps.find((s) => s.row === 0)!.key, steps.find((s) => s.row === 3)!.key]);
+  });
+
+  test("no button: zero ok steps, removeAll off, an answer for other bytes, a lane that does not pair; a second pass adds none", async () => {
+    const full = await answer();
+    const none = full.steps.map((s) => ({ ...s, state: s.state === "ok" ? ("not-yet" as const) : s.state }));
+    for (const [answerBody, opts, hash] of [
+      [{ ...full, steps: none }, { removeAll: true }, sha256(PAGE)],
+      [full, {}, sha256(PAGE)],
+      [{ ...full, hash: "other" }, { removeAll: true }, sha256(PAGE)],
+      [{ ...full, laneRows: [5] }, { removeAll: true }, sha256(PAGE)],
+    ] as [unknown, { removeAll?: boolean }, string][]) {
+      const a = mount();
+      await enhanceStepChecks(a, ctx(hash), respond(answerBody), opts);
+      expect(allButtons(a)).toEqual([]);
+    }
+    const a = mount();
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(full), { removeAll: true });
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(full), { removeAll: true });
+    expect(allButtons(a).length).toBe(1);
+  });
+
+  test("a refused preview shows the route's reason and no confirm", async () => {
+    const a = mount();
+    const post = async () => ({ status: 409, data: { error: "«Add the key»: the step holds a nested list", refused: true } });
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    allButtons(a)[0]!.click();
+    await settle();
+    expect(a.querySelector(".wiki-step-done-panel [role=alert]")!.textContent).toBe("«Add the key»: the step holds a nested list");
+    expect(a.querySelector("[data-step-done-all-confirm]")).toBeNull();
+  });
+
+  test("two you lanes: each button counts and sends only its own lane's ok keys", async () => {
+    const TWO = [
+      "---",
+      "title: T",
+      "---",
+      "",
+      "<NextMoves>",
+      "",
+      '<Lane kind="you">',
+      "",
+      '1. A one <Check env="HAVE" />',
+      '2. A two <Check migration="087" />',
+      "",
+      "</Lane>",
+      "",
+      '<Lane kind="you">',
+      "",
+      '1. B one <Check env="HAVE" />',
+      '2. B two <Check migration="087" />',
+      '3. B three <Check env="HAVE" />',
+      "",
+      "</Lane>",
+      "",
+      "</NextMoves>",
+      "",
+    ].join("\n");
+    const a = mount(TWO);
+    const full = await answerStepChecks(TWO, { probes, machine: "laptop", cache: new ProbeCache() });
+    const okOf = (lane: number) => full.steps.filter((s) => s.lane === lane && s.state === "ok").map((s) => s.key);
+    expect([okOf(0).length, okOf(1).length]).toEqual([1, 2]);
+    const { sent, post } = poster(PREVIEW);
+    await enhanceStepChecks(a, ctx(sha256(TWO)), respond(full), { removeAll: true, post });
+    const btns = allButtons(a);
+    expect(btns.map((b) => b.textContent)).toEqual(["Remove 1 checked", "Remove 2 checked"]);
+    expect(btns.map((b) => b.closest(".nm-lane"))).toEqual(Array.from(a.querySelectorAll(".nm-lane")) as never);
+    btns[0]!.click();
+    await settle();
+    btns[1]!.click();
+    await settle();
+    expect(sent.map((s) => s.steps)).toEqual([okOf(0), okOf(1)]);
+    a.querySelector<HTMLButtonElement>("[data-step-done-all-confirm]")!.click();
+    await settle();
+    expect(sent[2]).toEqual({ wiki: "w", relPath: "plans/p.mdx", steps: okOf(1), baseHash: sha256(TWO), previewHash: "ph" });
+  });
+
+  test("opening the all-preview closes any other step-done panel on the article; never two at once", async () => {
+    const a = mount();
+    const { post } = poster(PREVIEW);
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    // A single Done's preview as openPreview leaves it: a panel on another row.
+    const other = a.ownerDocument.createElement("div");
+    other.className = "wiki-step-done-panel";
+    rowLi(a, 2).appendChild(other);
+    allButtons(a)[0]!.click();
+    await settle();
+    expect(other.isConnected).toBe(false);
+    const panels = a.querySelectorAll(".wiki-step-done-panel");
+    expect(panels.length).toBe(1);
+    expect(panels[0]!.closest(".wiki-step-done-allrow")).not.toBeNull();
+  });
+
+  test("two clicks on the confirm while the write is pending send exactly one write", async () => {
+    const a = mount();
+    const sent: Sent[] = [];
+    let release: (v: { status: number; data: Record<string, unknown> }) => void = () => {};
+    const post = async (body: Sent) => {
+      sent.push(body);
+      if (body.preview === true) return { status: 200, data: { ok: true, preview: true, ...PREVIEW } };
+      return new Promise<{ status: number; data: Record<string, unknown> }>((r) => (release = r));
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    allButtons(a)[0]!.click();
+    await settle();
+    const go = a.querySelector<HTMLButtonElement>("[data-step-done-all-confirm]")!;
+    go.click();
+    go.click();
+    await settle();
+    expect(sent.filter((s) => s.preview !== true).length).toBe(1);
+    release({ status: 200, data: { ok: true, committed: true } });
+    await settle();
+    expect(sent.length).toBe(2);
+  });
+
+  /** Escape as a keydown on `el`, bubbling as a key press does; true when something prevented it. */
+  const escape = (el: Element) => {
+    const Kb = (el.ownerDocument.defaultView as unknown as { KeyboardEvent: typeof KeyboardEvent }).KeyboardEvent;
+    const ev = new Kb("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  for (const [how, shut] of [
+    ["Cancel", (a: HTMLElement) => a.querySelector<HTMLButtonElement>(".wiki-step-done-all + .wiki-step-done-panel .wiki-step-done-cancel")!.click()],
+    ["Escape in the preview", (a: HTMLElement) => expect(escape(a.querySelector("[data-step-done-all-confirm]")!)).toBe(true)],
+  ] as [string, (a: HTMLElement) => void][]) {
+    test(`${how} closes the all-preview, sends no write and leaves the page as it was; focus goes back to the button`, async () => {
+      const a = mount();
+      const { sent, post } = poster(PREVIEW);
+      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+      const before = a.innerHTML;
+      const btn = allButtons(a)[0]!;
+      btn.click();
+      await settle();
+      expect(a.querySelector("[data-step-done-all-confirm]")).not.toBeNull();
+      shut(a);
+      await settle();
+      expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+      expect(sent.map((s) => s.preview)).toEqual([true]);
+      expect(a.innerHTML).toBe(before);
+      expect(a.ownerDocument.activeElement).toBe(btn as never);
+    });
+  }
+
+  test("Escape on the button closes a preview still loading; the late answer draws nothing and nothing is written", async () => {
+    const a = mount();
+    const sent: Sent[] = [];
+    let release: (v: { status: number; data: Record<string, unknown> }) => void = () => {};
+    const post = async (body: Sent) => {
+      sent.push(body);
+      return new Promise<{ status: number; data: Record<string, unknown> }>((r) => (release = r));
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    const before = a.innerHTML;
+    const btn = allButtons(a)[0]!;
+    btn.click();
+    await settle();
+    expect(a.querySelector(".wiki-step-done-panel")!.textContent).toBe("Reading what goes…");
+    expect(escape(btn)).toBe(true);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    release({ status: 200, data: { ok: true, preview: true, ...PREVIEW } });
+    await settle();
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    expect(sent.length).toBe(1);
+    expect(a.innerHTML).toBe(before);
+  });
+
+  test("Escape on the button closes a refused preview (no Cancel there); with no panel open, Escape is left to the shell", async () => {
+    const a = mount();
+    const sent: Sent[] = [];
+    const post = async (body: Sent) => {
+      sent.push(body);
+      return { status: 409, data: { error: "«Add the key»: the step holds a nested list", refused: true } };
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    const before = a.innerHTML;
+    const btn = allButtons(a)[0]!;
+    btn.click();
+    await settle();
+    expect(a.querySelector(".wiki-step-done-panel [role=alert]")).not.toBeNull();
+    expect(a.querySelector(".wiki-step-done-panel .wiki-step-done-cancel")).toBeNull();
+    expect(escape(btn)).toBe(true);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    expect(sent.length).toBe(1);
+    expect(a.innerHTML).toBe(before);
+    // Nothing open: the button does not swallow the shell's Escape.
+    expect(escape(btn)).toBe(false);
+  });
+
+  test("the accessible name starts with the visible text, for one checked step and for two (WCAG 2.5.3)", async () => {
+    const full = await answer();
+    for (const [steps, text] of [
+      [full.steps, "Remove 1 checked"],
+      [full.steps.map((s) => (s.row === 3 ? { ...s, state: "ok" as const } : s)), "Remove 2 checked"],
+    ] as const) {
+      const a = mount();
+      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond({ ...full, steps }), { removeAll: true, post: poster(PREVIEW).post });
+      const [btn] = allButtons(a);
+      expect(btn!.textContent).toBe(text);
+      expect(btn!.getAttribute("aria-label")!.startsWith(`${text}:`)).toBe(true);
+    }
+  });
+
+  test("a refusal after the preview closed names «1 checked step», not «1 checked steps»", async () => {
+    const a = mount();
+    let release: (v: { status: number; data: Record<string, unknown> }) => void = () => {};
+    const post = async (body: Sent) => {
+      if (body.preview === true) return { status: 200, data: { ok: true, preview: true, ...PREVIEW } };
+      return new Promise<{ status: number; data: Record<string, unknown> }>((r) => (release = r));
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    allButtons(a)[0]!.click();
+    await settle();
+    a.querySelector<HTMLButtonElement>("[data-step-done-all-confirm]")!.click();
+    await settle();
+    escape(a.querySelector("[data-step-done-all-confirm]")!);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    release({ status: 409, data: { error: "The page changed.", stale: true } });
+    await settle();
+    expect(a.querySelector(".wiki-step-done-note")!.textContent).toBe("Done did not remove «1 checked step»: The page changed.");
+  });
+});
+
 describe("a task-list step takes no check (item 2: the render, the route and lint agree)", () => {
   const TASKS = PAGE.replace('1. Add the key <Check env="HAVE" />', '1. [ ] Add the key <Check env="HAVE" />');
   test("the reader renders no slot on a task-list row, and the route answers no step for it", async () => {

@@ -30,7 +30,11 @@
  *     re-slotted after, the window and document hold the listeners they held
  *     before, and Escape on the page still reaches the shell (focus mode).
  *     (The reasons popover that leaked them was removed; a follow-up.)
- *  6. A `MUNINN_WIKI_READONLY=1` instance draws the chips.
+ *  6. A `MUNINN_WIKI_READONLY=1` instance draws the chips, and no «Remove N checked».
+ *  7. «Remove N checked» (PR 3): one preview names exactly the ✓ steps and
+ *     every renumbering, one confirm removes exactly those with one log entry,
+ *     and the not-yet, unknown and unchecked steps stay. A single Done's
+ *     preview and the all-preview close each other: one panel at a time.
  *
  * CI runs Chromium; WebKit and Firefox run this file by hand (a config with
  * those projects).
@@ -122,6 +126,20 @@ const THIRTY_LOOSE = Array.from({ length: 14 }, (_, i) => {
   return `${n}. Loose ${n}: ${words(2 + ((i * 11) % 31))}. ${tag(i + 1)}\n`;
 });
 PAGES[REL_30] = lanePage("Check fixture thirty", [...THIRTY_TIGHT, "", "Then, when those hold:", "", ...THIRTY_LOOSE]);
+
+/** «Remove N checked»: two checked steps, one not yet, one unknown, one with no check. */
+const REL_R = "plans/e2e-checks-remove.mdx";
+PAGES[REL_R] = lanePage("Check fixture remove", [
+  '1. Apply the first old migration. <Check migration="086" />',
+  '2. Apply the missing one. <Check migration="999" />',
+  "3. Water the plants.",
+  '4. Apply the second old migration. <Check migration="086" />',
+  `5. Restart this muninn. <Check migration="086" restart="${PORT}" />`,
+]);
+
+/** A single Done's preview and the all-preview on one lane: two checked steps, nothing written. */
+const REL_P = "plans/e2e-checks-panels.mdx";
+PAGES[REL_P] = lanePage("Check fixture panels", ['1. Apply the panel step. <Check migration="086" />', '2. Apply the other panel step. <Check migration="086" />']);
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid" };
 const git = (root: string, ...args: string[]) => execFileSync("git", ["-C", root, ...args], { stdio: "ignore", env: GIT_ENV });
@@ -579,7 +597,102 @@ test.describe("owner-step check chips: no listener of their own", () => {
   });
 });
 
+test.describe("«Remove N checked» (owner-step checks PR 3)", () => {
+  test("one preview lists every checked step, one confirm removes exactly those, one log entry; the rest stays", async ({ page: p }) => {
+    await openAt(p, REL_R);
+    await expect(chips(p)).toHaveCount(4);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "○", "✓", "?"]);
+    const btn = p.locator(".wiki-article [data-step-done-all]");
+    await expect(btn).toHaveCount(1);
+    await expect(btn).toHaveText("Remove 2 checked");
+    const logBefore = await readFile(path.join(root, "log.md"), "utf8").catch(() => "");
+    await btn.click();
+    const panel = p.locator(".wiki-article .wiki-step-done-panel");
+    await expect(panel).toHaveCount(1);
+    await expect(panel.locator(".wiki-step-done-steps li")).toHaveText(["Apply the first old migration.", "Apply the second old migration."]);
+    await expect(panel.locator(".wiki-step-done-lines")).toContainText('1. Apply the first old migration. <Check migration="086" />');
+    await expect(panel.locator(".wiki-step-done-lines")).toContainText('4. Apply the second old migration. <Check migration="086" />');
+    await expect(panel).toContainText("3 steps take new numbers: 2 becomes 1, 3 becomes 2, 5 becomes 3.");
+    // Nothing is written by the preview.
+    expect(await readFile(path.join(root, REL_R), "utf8")).toBe(PAGES[REL_R]);
+    await panel.locator("[data-step-done-all-confirm]").click();
+    await expect(p.locator(".wiki-article .wiki-step-done-note")).toHaveText("2 checked steps are removed from the page.");
+    await expect(row(p, "Apply the first old migration")).toHaveCount(0);
+    await expect(row(p, "Apply the second old migration")).toHaveCount(0);
+    expect(await readFile(path.join(root, REL_R), "utf8")).toBe(
+      lanePage("Check fixture remove", ['1. Apply the missing one. <Check migration="999" />', "2. Water the plants.", `3. Restart this muninn. <Check migration="086" restart="${PORT}" />`]),
+    );
+    const logAfter = await readFile(path.join(root, "log.md"), "utf8");
+    // One new entry (log.md's entries are not in append order, so count them).
+    const entries = (s: string) => s.match(/^## \[/gm)?.length ?? 0;
+    expect(entries(logAfter)).toBe(entries(logBefore) + 1);
+    expect(logAfter.split("step-done | Check fixture remove").length - 1).toBe(1);
+    expect(logAfter).toContain("step-done | Check fixture remove\n- Steps done (2): Apply the first old migration; Apply the second old migration.");
+    // The page rendered again: the not-yet and unknown steps keep their chips, and no step is checked, so no button.
+    await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    await expect(chips(p)).toHaveCount(2);
+    expect(await chips(p).allTextContents()).toEqual(["○", "?"]);
+    await expect(btn).toHaveCount(0);
+  });
+});
+
+test.describe("«Remove N checked» and a single Done share one panel", () => {
+  test("opening either preview closes the other: never two panels at once, and nothing is written", async ({ page: p }) => {
+    await openAt(p, REL_P);
+    await expect(chips(p)).toHaveCount(2);
+    const panels = p.locator(".wiki-article .wiki-step-done-panel");
+    const rowPanel = row(p, "Apply the panel step").locator(":scope > .wiki-step-done-panel");
+    const allPanel = p.locator(".wiki-article .wiki-step-done-allrow > .wiki-step-done-panel");
+    const done = row(p, "Apply the panel step").locator("[data-step-done]");
+    const all = p.locator(".wiki-article [data-step-done-all]");
+    await expect(all).toHaveText("Remove 2 checked");
+    await done.click();
+    await expect(rowPanel.locator("[data-step-done-confirm]")).toBeVisible();
+    await expect(panels).toHaveCount(1);
+    await all.click();
+    await expect(allPanel.locator("[data-step-done-all-confirm]")).toBeVisible();
+    await expect(rowPanel).toHaveCount(0);
+    await expect(panels).toHaveCount(1);
+    await done.click();
+    await expect(rowPanel.locator("[data-step-done-confirm]")).toBeVisible();
+    await expect(allPanel).toHaveCount(0);
+    await expect(panels).toHaveCount(1);
+    expect(await readFile(path.join(root, REL_P), "utf8")).toBe(PAGES[REL_P]);
+  });
+
+  test("after a write that left uncommitted edits, the page offers no «Remove N checked», as it offers no Done", async ({ page: p }) => {
+    // The write is answered as a failed commit, so the file stays as it was and both steps stay checked.
+    await p.route("**/api/wiki/step-done", (route) =>
+      route.request().method() === "POST" && route.request().postDataJSON()?.preview !== true
+        ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, committed: false, commitReason: "error", uncommitted: true }) })
+        : route.continue(),
+    );
+    await openAt(p, REL_P);
+    await expect(chips(p)).toHaveCount(2);
+    const all = p.locator(".wiki-article [data-step-done-all]");
+    await expect(all).toHaveText("Remove 2 checked");
+    await all.click();
+    await p.locator(".wiki-article [data-step-done-all-confirm]").click();
+    await expect(p.locator(".wiki-article .wiki-step-done-note")).toContainText("the commit failed");
+    // The page rendered again and its checks were answered: both ✓ are back, and neither control is.
+    await expect(chips(p)).toHaveCount(2);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "✓"]);
+    await expect(all).toHaveCount(0);
+    await expect(dones(p)).toHaveCount(0);
+    expect(await readFile(path.join(root, REL_P), "utf8")).toBe(PAGES[REL_P]);
+  });
+});
+
 test.describe("owner-step check chips on a read-only instance", () => {
+  test("MUNINN_WIKI_READONLY=1 draws the chips and offers no «Remove N checked»", async ({ page: p }) => {
+    const ro = p.waitForResponse((r) => r.url().includes("/api/wiki/step-checks") && r.url().includes(encodeURIComponent(REL_30)));
+    await p.goto(`${RO_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL_30)}`);
+    await answered(p, ro);
+    await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
+    await expect(p.locator(".wiki-article .step-chip[data-state=ok]").first()).toBeVisible();
+    await expect(p.locator(".wiki-article [data-step-done-all]")).toHaveCount(0);
+  });
+
   test("MUNINN_WIKI_READONLY=1 draws the chips", async ({ page: p }) => {
     const got = p.waitForResponse((r) => r.url().includes("/api/wiki/step-checks"));
     await p.goto(`${RO_BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL_B)}`);
