@@ -44,7 +44,12 @@ const gitPaths = (args: readonly string[]) => OK(args.filter((a, i) => args[i - 
 interface World {
   promisor?: GitResult;
   shallow?: GitResult;
-  origin?: GitResult;
+  /** The origin config read: a fixed answer, or {@link cfg}'s, shaped by the call's own args. */
+  origin?: GitResult | ((args: readonly string[]) => GitResult);
+  /** `ls-remote --get-url origin`. */
+  getUrl?: GitResult;
+  /** `rev-parse --path-format=absolute --git-common-dir`, per directory. */
+  commonOf?: (cwd: string) => GitResult;
   gitPath?: (args: readonly string[]) => GitResult;
   index?: GitResult;
   status?: GitResult;
@@ -67,6 +72,17 @@ interface Call {
   stdin?: string;
 }
 
+/**
+ * A `config --get-regexp` answer for `pairs`: git's `-z` form (`key\nvalue\0`, a
+ * key with no value alone) when the call asks for it, else `key value\n`.
+ */
+const cfg =
+  (...pairs: [string, string | null][]) =>
+  (args: readonly string[]): GitResult =>
+    OK(args.includes("-z") ? pairs.map(([k, v]) => (v === null ? `${k}\0` : `${k}\n${v}\0`)).join("") : pairs.map(([k, v]) => (v === null ? `${k}\n` : `${k} ${v}\n`)).join(""));
+/** Real git's common dir for a directory inside DIR, DIR2 or DIR3; anywhere else is no repo. */
+const commonOf = (cwd: string): GitResult => ([DIR, DIR2, DIR3].some((d) => cwd === d || cwd.startsWith(`${d}/`)) ? OK(`${COMMON}\n`) : EXIT(128));
+
 const IDENTITY = "rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel";
 /** What real git says in DIR (the main worktree) and in DIR2 / DIR3 (linked ones). */
 const identityOf = (cwd: string): GitResult => {
@@ -85,7 +101,9 @@ function pushedGit(w: World, log: Call[] = []): GitRun {
     if (a === IDENTITY) return (w.identity ?? identityOf)(cwd);
     if (a === "remote get-url origin") return OK(`${URL}\n`);
     if (a.startsWith("config --get-regexp") && a.includes("promisor")) return w.promisor ?? EXIT(1);
-    if (a.startsWith("config --get-regexp") && a.includes("pushurl")) return w.origin ?? OK(`remote.origin.url ${URL}\n`);
+    if (/^config (-z )?--get-regexp/.test(a) && a.includes("pushinsteadof")) return typeof w.origin === "function" ? w.origin(args) : (w.origin ?? cfg(["remote.origin.url", URL])(args));
+    if (a === "ls-remote --get-url origin") return w.getUrl ?? OK(`${URL}\n`);
+    if (a === "rev-parse --path-format=absolute --git-common-dir") return (w.commonOf ?? commonOf)(cwd);
     if (a === "rev-parse --is-shallow-repository") return w.shallow ?? OK("false\n");
     if (a.startsWith("rev-parse --git-path")) return (w.gitPath ?? gitPaths)(args);
     if (a.startsWith("config --get-regexp ^filter")) return w.filters ?? EXIT(1);
@@ -163,7 +181,8 @@ describe("pushed: the truth table over a fake git", () => {
   test("tracked changes, staged or not: not-yet before anything remote is asked", async () => {
     const log: Call[] = [];
     expect(await run({ status: OK(" M f\0") }, log)).toEqual({ state: "not-yet", why: "skills has uncommitted changes: commit and push" });
-    expect(log.some((c) => c.args[0] === "ls-remote")).toBe(false);
+    // `ls-remote --get-url` reads config only; no other ls-remote runs.
+    expect(log.some((c) => c.args[0] === "ls-remote" && !c.args.includes("--get-url"))).toBe(false);
     expect(log.find((c) => c.args.includes("status"))!.args).toContain("--untracked-files=no");
     expect((await run({ status: { ok: true, stdout: "M  f\0", capped: true } })).state).toBe("not-yet");
   });
@@ -203,21 +222,22 @@ describe("pushed: the truth table over a fake git", () => {
 
   test("finding 6: origin's pushurl, a second url or a pushInsteadOf on its url: unknown", async () => {
     const split = "skills's origin pushes to another URL than the one muninn reads";
-    expect(await run({ origin: OK(`remote.origin.url ${URL}\nremote.origin.pushurl git@elsewhere:x/skills.git\n`) })).toEqual({ state: "unknown", why: split });
-    expect(await run({ origin: OK(`remote.origin.url ${URL}\nremote.origin.url git@b:x/skills.git\n`) })).toEqual({ state: "unknown", why: "skills's origin has 2 URLs" });
-    expect(await run({ origin: OK(`remote.origin.url ${URL}\nurl.git@elsewhere:.pushinsteadof git@github.com:\n`) })).toEqual({ state: "unknown", why: split });
+    const url: [string, string] = ["remote.origin.url", URL];
+    expect(await run({ origin: cfg(url, ["remote.origin.pushurl", "git@elsewhere:x/skills.git"]) })).toEqual({ state: "unknown", why: split });
+    expect(await run({ origin: cfg(url, ["remote.origin.url", "git@b:x/skills.git"]) })).toEqual({ state: "unknown", why: "skills's origin has 2 URLs" });
+    expect(await run({ origin: cfg(url, ["url.git@elsewhere:.pushinsteadof", "git@github.com:"]) })).toEqual({ state: "unknown", why: split });
     // A pushInsteadOf that does not match origin's url changes nothing.
-    expect((await run({ origin: OK(`remote.origin.url ${URL}\nurl.x.pushinsteadof https://gitlab.com/\n`) })).state).toBe("ok");
+    expect((await run({ origin: cfg(url, ["url.x.pushinsteadof", "https://gitlab.com/"]) })).state).toBe("ok");
     expect(await run({ origin: EXIT(1) })).toEqual({ state: "unknown", why: "skills has no origin" });
   });
 
   test("finding A (PR #850 round 2): a push default, a branch pushRemote or a push refspec sending pushes past origin's branches: unknown", async () => {
-    const at = (extra: string) => run({ origin: OK(`remote.origin.url ${URL}\n${extra}\n`) });
-    expect(await at("remote.pushdefault fork")).toEqual({ state: "unknown", why: "skills's remote.pushDefault names a remote other than origin" });
-    expect(await at("branch.wip.pushremote fork")).toEqual({ state: "unknown", why: "a branch of skills pushes to a remote other than origin" });
-    expect(await at("remote.origin.push refs/heads/*:refs/heads/mirror/*")).toEqual({ state: "unknown", why: "skills's origin has a push refspec: muninn does not check where it sends commits" });
+    const at = (...extra: [string, string][]) => run({ origin: cfg(["remote.origin.url", URL], ...extra) });
+    expect(await at(["remote.pushdefault", "fork"])).toEqual({ state: "unknown", why: "skills's remote.pushDefault names a remote other than origin" });
+    expect(await at(["branch.wip.pushremote", "fork"])).toEqual({ state: "unknown", why: "a branch of skills pushes to a remote other than origin" });
+    expect(await at(["remote.origin.push", "refs/heads/*:refs/heads/mirror/*"])).toEqual({ state: "unknown", why: "skills's origin has a push refspec: muninn does not check where it sends commits" });
     // Naming origin itself changes nothing.
-    expect((await at("remote.pushdefault origin\nbranch.main.pushremote origin")).state).toBe("ok");
+    expect((await at(["remote.pushdefault", "origin"], ["branch.main.pushremote", "origin"])).state).toBe("ok");
   });
 
   test("finding C (PR #850 round 2): an origin config read that failed or timed out after printing the url line: unknown, never ok", async () => {
@@ -576,5 +596,68 @@ describe("pushed: the truth table over a fake git", () => {
       writeFileSync(path.join(other, "gitdir"), `${DIR3}/.git\n`);
       expect(await run({ worktrees: TWO, identity: at(other) })).toEqual({ state: "unknown", why: "a worktree of skills is not where git recorded it" });
     });
+  });
+});
+
+describe("pushed: origin reads where it pushes (PR #850 round 3, the class check)", () => {
+  const url: [string, string] = ["remote.origin.url", URL];
+  const split = "skills's origin pushes to another URL than the one muninn reads";
+  const self = "skills's origin is this checkout itself: muninn cannot prove another repo has its commits";
+
+  test("remote.origin.* is an allowlist: any other key is unknown, named when it is a plain word", async () => {
+    for (const key of ["uploadpack", "receivepack", "vcs", "proxy", "proxyauthmethod", "mirror", "serveroption", "somethingnew"]) {
+      expect(await run({ origin: cfg(url, [`remote.origin.${key}`, "x"]) })).toEqual({ state: "unknown", why: `skills's origin has a ${key} setting: muninn cannot prove where its commits go` });
+    }
+    // A key name that is not a plain lower-case word stays out of the sentence; a valueless key is refused too.
+    for (const key of ["gh-resolved", "x2"]) {
+      expect(await run({ origin: cfg(url, [`remote.origin.${key}`, "base"]) })).toEqual({ state: "unknown", why: "skills's origin has a setting muninn does not know: muninn cannot prove where its commits go" });
+    }
+    expect((await run({ origin: cfg(url, ["remote.origin.mirror", null]) })).state).toBe("unknown");
+  });
+
+  test("the allowed origin keys, and another remote whose name starts with origin., leave the answer ok", async () => {
+    const allowed: [string, string][] = [
+      ["remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+      ["remote.origin.prune", "true"],
+      ["remote.origin.prunetags", "true"],
+      ["remote.origin.tagopt", "--no-tags"],
+      ["remote.origin.skipdefaultupdate", "true"],
+      ["remote.origin.skipfetchall", "true"],
+      ["remote.origin.followremotehead", "warn"],
+      ["remote.origin.partialclonefilter", "blob:none"],
+      ["remote.origin.promisor", "false"],
+      ["remote.origin.x.uploadpack", "elsewhere"],
+    ];
+    expect((await run({ origin: cfg(url, ...allowed) })).state).toBe("ok");
+  });
+
+  test("a pushInsteadOf matching by git's own rule: an empty prefix, a url base with a space, a key with no value", async () => {
+    expect(await run({ origin: cfg(url, ["url.git@elsewhere:.pushinsteadof", ""]) })).toEqual({ state: "unknown", why: split });
+    expect(await run({ origin: cfg(url, ["url.git@else where:.pushinsteadof", "git@github.com:"]) })).toEqual({ state: "unknown", why: split });
+    expect(await run({ origin: cfg(url, ["url.x.pushinsteadof", null]) })).toEqual({ state: "unknown", why: split });
+  });
+
+  test("an origin that resolves to this checkout, its git dir or another of its worktrees: unknown", async () => {
+    for (const resolved of [DIR, `${DIR}/`, COMMON, ".", `file://${DIR}`, DIR2]) {
+      expect(await run({ getUrl: OK(`${resolved}\n`) })).toEqual({ state: "unknown", why: self });
+    }
+  });
+
+  test("a local origin muninn cannot place, or a get-url that failed: unknown", async () => {
+    const cannot = "muninn cannot tell where skills's origin is";
+    for (const resolved of ["~/skills", "file://host/srv/skills.git", "file:///srv/a%20b.git", "ext::sh -c x", "", "a\nb"]) {
+      expect(await run({ getUrl: OK(`${resolved}\n`) })).toEqual({ state: "unknown", why: cannot });
+    }
+    expect(await run({ getUrl: EXIT(128) })).toEqual({ state: "unknown", why: "git ls-remote failed on skills" });
+  });
+
+  test("an origin in another local repo, or a network url, reads ok; a network url runs no rev-parse", async () => {
+    expect((await run({ getUrl: OK(`${tmpdir()}\n`) })).state).toBe("ok");
+    expect((await run({ getUrl: OK(`${DIR3}-elsewhere\n`) })).state).toBe("ok");
+    const log: Call[] = [];
+    for (const resolved of [URL, "https://github.com/x/skills.git", "ssh://git@host/x.git"]) {
+      expect((await run({ getUrl: OK(`${resolved}\n`) }, log)).state).toBe("ok");
+    }
+    expect(log.some((c) => c.args.includes("--git-common-dir") && c.args.length === 3)).toBe(false);
   });
 });

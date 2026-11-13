@@ -9,8 +9,11 @@
  * partial clone `unknown` before any object lookup (`refusePartialClone`).
  * `pushed` keeps git from running two kinds of command the config names: the
  * fsmonitor hook (switched off) and content filters (`unknown` before any
- * comparison). Like `checkout`, its `ls-remote` still runs what git runs to
- * reach origin: `remote.origin.uploadpack`, credential helpers, the transport.
+ * comparison). `checkout`'s `ls-remote` still runs what git runs to reach
+ * origin: `remote.origin.uploadpack`, credential helpers, the transport.
+ * `pushed` answers any `remote.origin.*` key outside its allowlist (uploadpack
+ * among them) `unknown` before its `ls-remote`, which then runs only
+ * credential helpers and the transport.
  * Every outside read comes in through {@link ProbeDeps}, so tests never touch
  * the real machine, except `pushed`'s `lstat` of the git-dir files an
  * operation in progress leaves, at paths git names, its `realpath` of each
@@ -334,35 +337,101 @@ async function presentTips(dir: string, name: string, tips: readonly string[], g
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * Origin is where a push goes and where `ls-remote` reads: exactly one
- * `remote.origin.url`, no `remote.origin.pushurl`, no `pushInsteadOf`
- * rewriting that URL, no `remote.origin.push` refspec, and no
- * `remote.pushDefault` or `branch.<x>.pushRemote` naming another remote.
- * Null when that holds; a read that failed, timed out or was capped is `unknown`.
+ * `remote.origin.*` keys that change neither where `ls-remote` reads nor where
+ * a push goes: they steer fetch's local refs only (`promisor` and
+ * `partialclonefilter` are refused as a partial clone first). Every other key
+ * (`uploadpack`, `receivepack`, `vcs`, `proxy`, `mirror`, any future one) is
+ * `unknown`: an allowlist, since a per-key list of redirects twice missed one.
+ */
+const ORIGIN_KEYS_ALLOWED = new Set(["url", "fetch", "prune", "prunetags", "tagopt", "skipdefaultupdate", "skipfetchall", "followremotehead", "promisor", "partialclonefilter"]);
+
+/**
+ * Origin is where a push goes and where `ls-remote` reads, and is not this
+ * checkout: exactly one `remote.origin.url`, no `remote.origin.*` key outside
+ * {@link ORIGIN_KEYS_ALLOWED}, no `pushInsteadOf` prefixing that URL (by git's
+ * rule: an empty prefix matches every URL), no `remote.pushDefault` or
+ * `branch.<x>.pushRemote` naming another remote, and the URL after `insteadOf`
+ * not resolving to this repo ({@link refuseSelfOrigin}). Null when that holds;
+ * a read that failed, timed out or was capped is `unknown`.
  */
 async function refuseSplitOrigin(dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
-  const res = await git(dir, ["config", "--get-regexp", "^(remote\\.origin\\.(url|pushurl|push)|remote\\.pushdefault|branch\\..*\\.pushremote|url\\..*\\.pushinsteadof)$"], { timeoutMs: GIT_LOCAL_MS });
+  // `-z`: a url base may hold a space, which the `key value` form splits at.
+  const res = await git(dir, ["config", "-z", "--get-regexp", "^(remote\\.origin\\.[^.]*|remote\\.pushdefault|branch\\..*\\.pushremote|url\\..*\\.pushinsteadof)$"], { timeoutMs: GIT_LOCAL_MS });
   if (res.exitCode === 1 && !res.stderr?.trim() && !res.timedOut) return unknown(`${name} has no origin`);
   // realGit keeps partial stdout on a timeout: a url line read without the rest proves nothing.
   if (!res.ok || res.capped || res.exitCode !== 0) return unknown(`${gitFailure(res, "git config")} on ${name}`);
+  const split = unknown(`${name}'s origin pushes to another URL than the one muninn reads`);
   const urls: string[] = [];
-  const pushInsteadOf: string[] = [];
-  for (const line of res.stdout.split("\n")) {
-    if (line === "") continue;
-    const space = line.indexOf(" ");
-    const key = space === -1 ? line : line.slice(0, space);
-    const value = space === -1 ? "" : line.slice(space + 1);
-    if (key === "remote.origin.pushurl") return unknown(`${name}'s origin pushes to another URL than the one muninn reads`);
-    if (key === "remote.origin.push") return unknown(`${name}'s origin has a push refspec: muninn does not check where it sends commits`);
-    if (key === "remote.pushdefault") {
+  const pushInsteadOf: (string | null)[] = [];
+  for (const entry of res.stdout.split("\0")) {
+    if (entry === "") continue;
+    const nl = entry.indexOf("\n");
+    const key = nl === -1 ? entry : entry.slice(0, nl);
+    const value = nl === -1 ? null : entry.slice(nl + 1);
+    if (key.startsWith("remote.origin.")) {
+      const k = key.slice("remote.origin.".length);
+      // `remote.origin.x.y` is a remote named `origin.x`.
+      if (k.includes(".")) continue;
+      if (k === "pushurl") return split;
+      if (k === "push") return unknown(`${name}'s origin has a push refspec: muninn does not check where it sends commits`);
+      if (!ORIGIN_KEYS_ALLOWED.has(k)) return unknown(/^[a-z]+$/.test(k) ? `${name}'s origin has a ${k} setting: muninn cannot prove where its commits go` : `${name}'s origin has a setting muninn does not know: muninn cannot prove where its commits go`);
+      if (k === "url") urls.push(value ?? "");
+    } else if (key === "remote.pushdefault") {
       if (value !== "origin") return unknown(`${name}'s remote.pushDefault names a remote other than origin`);
     } else if (key.startsWith("branch.")) {
       if (value !== "origin") return unknown(`a branch of ${name} pushes to a remote other than origin`);
-    } else if (key === "remote.origin.url") urls.push(value);
-    else pushInsteadOf.push(value);
+    } else pushInsteadOf.push(value);
   }
   if (urls.length !== 1) return unknown(`${name}'s origin has ${urls.length} URLs`);
-  if (pushInsteadOf.some((prefix) => prefix !== "" && urls[0]!.startsWith(prefix))) return unknown(`${name}'s origin pushes to another URL than the one muninn reads`);
+  // A valueless pushInsteadOf proves nothing either way.
+  if (pushInsteadOf.some((prefix) => prefix === null || urls[0]!.startsWith(prefix))) return split;
+  return refuseSelfOrigin(dir, name, git);
+}
+
+/**
+ * `unknown` when origin's URL after `insteadOf` (`ls-remote --get-url`, the URL
+ * both fetch and push use once {@link refuseSplitOrigin} passed) names a local
+ * path that is this repo: its toplevel, its common git dir, or any directory
+ * whose git common dir is this repo's (another worktree). `ls-remote` would
+ * then list this checkout's own branches. A local URL muninn cannot place (`~`,
+ * a file URL with a host or an escape, a `<transport>::` helper) is `unknown`
+ * too; a network URL passes.
+ */
+async function refuseSelfOrigin(dir: string, name: string, git: GitRun): Promise<ProbeResult | null> {
+  const res = await git(dir, ["ls-remote", "--get-url", "origin"], { timeoutMs: GIT_LOCAL_MS, maxLines: 2 });
+  if (!res.ok || res.capped || res.exitCode !== 0) return unknown(`${gitFailure(res, "git ls-remote")} on ${name}`);
+  const cannot = unknown(`muninn cannot tell where ${name}'s origin is`);
+  const lines = res.stdout.split("\n").filter((l) => l !== "");
+  if (lines.length !== 1) return cannot;
+  const url = lines[0]!;
+  let local: string;
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//.exec(url);
+  if (scheme) {
+    if (scheme[1]!.toLowerCase() !== "file") return null;
+    const rest = url.slice(scheme[0].length);
+    if (!rest.startsWith("/") || rest.includes("%")) return cannot;
+    local = rest;
+  } else {
+    if (url.includes("::") || url.startsWith("~")) return cannot;
+    const colon = url.indexOf(":");
+    const slash = url.indexOf("/");
+    // git's rule: a colon before any slash is scp-like ssh, `host:path`.
+    if (colon !== -1 && (slash === -1 || colon < slash)) return null;
+    local = url;
+  }
+  const id = await worktreeIdentity(dir, name, git);
+  if ("state" in id) return id;
+  const self = unknown(`${name}'s origin is this checkout itself: muninn cannot prove another repo has its commits`);
+  const target = path.resolve(dir, local);
+  // git tries the path and `<path>.git` (and `/.git` under each, which rev-parse finds).
+  for (const candidate of [target, `${target}.git`]) {
+    const real = await realpath(candidate).catch(() => null);
+    if (real === null) continue;
+    if (real === id.top || real === id.common) return self;
+    const common = await git(real, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { timeoutMs: GIT_LOCAL_MS, maxLines: 1 });
+    if (common.timedOut) return cannot;
+    if (common.ok && common.exitCode === 0 && (await realpath(common.stdout.trim()).catch(() => null)) === id.common) return self;
+  }
   return null;
 }
 
