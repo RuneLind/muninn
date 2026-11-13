@@ -23,7 +23,7 @@ When debugging issues, exhaust the most likely root cause hypothesis thoroughly 
 
 ## Frontend
 
-Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. Client-side code is bundled with `Bun.build()` (the `*-browser.ts` entrypoints through `src/dashboard/views/components/bundle-browser-iife.ts`, the /wiki reader through `wiki-client.ts`); never webpack/vite.
+Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. Client-side code ships as `*-browser.ts` entrypoints bundled with `Bun.build()` into IIFEs (`src/dashboard/views/components/bundle-browser-iife.ts`); never webpack/vite.
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
