@@ -10,13 +10,16 @@
  * - Probes run exactly as the local path runs them (`answerProbesHere`: the
  *   shared cache, git slots and per-probe bounds), within
  *   {@link PEER_ROUTE_BOUND_MS}. It has no peer, so it never forwards.
+ * - At most {@link PEER_ROUTE_MAX_IN_FLIGHT} requests run at once; another is
+ *   answered 429 at once. A probe value or machine name over
+ *   {@link PEER_PROBE_VALUE_MAX} chars is a 400.
  * - It writes nothing, so a `MUNINN_WIKI_READONLY` instance answers too. It
  *   spawns git, so it is on `SIDE_EFFECTING_GETS`; under an authenticating mode
  *   it has no zone entry and falls to the admin default.
  * - Registered in the `wiki` group beside step-checks: a pod has no such route.
  */
 
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { parseCheckAttrs, CHECK_PROBES, type CheckProbe, type CheckProbeKind } from "../../format/check-tag.ts";
 import { getLog } from "../../logging.ts";
@@ -26,6 +29,12 @@ import { realProbeDeps, stepCheckCache } from "../../wiki/step-checks/real-deps.
 import { resolveMachineName } from "../../config.ts";
 
 const log = getLog("dashboard", "checks-answer");
+
+/** Requests to this route running at once; one more is answered 429 and runs nothing. */
+export const PEER_ROUTE_MAX_IN_FLIGHT = 2;
+/** The longest probe value or machine name taken: env keys, migration versions and repo folder names are far shorter. */
+export const PEER_PROBE_VALUE_MAX = 100;
+let inFlight = 0;
 
 export interface ChecksAnswerDeps extends LocalAnswerDeps {
   /** `MUNINN_MACHINE`, or null. */
@@ -48,15 +57,27 @@ export function parseProbeParam(raw: string): CheckProbe | null {
 
 export function registerChecksAnswerRoute(app: Hono, config: Config, depsFor: () => ChecksAnswerDeps = () => realChecksAnswerDeps(config)): void {
   app.get(CHECKS_ANSWER_PATH, async (c) => {
+    // Bounds the probe work any caller can queue behind the shared git slots a local page also waits on.
+    if (inFlight >= PEER_ROUTE_MAX_IN_FLIGHT) return c.json({ error: "busy: too many check requests at once" }, 429);
+    inFlight++;
+    try {
+      return await answer(c);
+    } finally {
+      inFlight--;
+    }
+  });
+
+  const answer = async (c: Context) => {
     if (c.req.query("v") !== String(CHECKS_ANSWER_VERSION)) return c.json({ error: `v must be ${CHECKS_ANSWER_VERSION}` }, 400);
     const machineRaw = c.req.query("machine") ?? "";
     const asked = resolveMachineName(machineRaw);
-    if (!asked || asked !== machineRaw) return c.json({ error: "machine must be a machine name" }, 400);
+    if (!asked || asked !== machineRaw || machineRaw.length > PEER_PROBE_VALUE_MAX) return c.json({ error: "machine must be a machine name" }, 400);
     const raws = c.req.queries("p") ?? [];
     if (raws.length === 0) return c.json({ error: "no probes" }, 400);
     if (raws.length > MAX_PROBES_PER_PAGE) return c.json({ error: `at most ${MAX_PROBES_PER_PAGE} probes` }, 400);
     const probes: CheckProbe[] = [];
     for (const raw of raws) {
+      if (raw.length - raw.indexOf(":") - 1 > PEER_PROBE_VALUE_MAX) return c.json({ error: `a probe value is longer than ${PEER_PROBE_VALUE_MAX}` }, 400);
       const p = parseProbeParam(raw);
       if (!p) return c.json({ error: "a probe is not <kind>:<value> of a known kind and shape" }, 400);
       probes.push(p);
@@ -78,5 +99,5 @@ export function registerChecksAnswerRoute(app: Hono, config: Config, depsFor: ()
       log.error("Checks answer failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "the checks could not be answered" }, 500);
     }
-  });
+  };
 }

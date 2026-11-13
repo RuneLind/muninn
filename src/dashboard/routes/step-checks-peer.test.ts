@@ -16,6 +16,7 @@ import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import { ProbeCache, type StepChecksAnswer } from "../../wiki/step-checks/answer.ts";
 import { createPeerAnswerer } from "../../wiki/step-checks/peer.ts";
 import type { ProbeDeps } from "../../wiki/step-checks/probes.ts";
+import { checkChip } from "../views/components/wiki-step-done.ts";
 import { registerChecksAnswerRoute } from "./checks-answer.ts";
 import { registerWikiStepChecksRoute, STEP_CHECKS_PATH } from "./wiki-step-checks.ts";
 
@@ -166,14 +167,15 @@ describe("step checks across two muninns", () => {
     });
   }
 
-  test("the split step pins each machine's answer to its own probe, and the why names beta", async () => {
+  test("the split step pins each machine's answer to its own probe; the reader, not the why, names beta", async () => {
     const body = await checks(alphaApp().a, "plans/mixed.mdx");
     const split = body.steps[3]!;
     expect(split.machines.map((m) => [m.name, m.probes.map((p) => `${p.kind}=${p.value}:${p.state}`)])).toEqual([
       ["alpha", ["env=HAVE:ok", "migration=086:not-yet"]],
       ["beta", ["env=HAVE:not-yet", "migration=086:ok"]],
     ]);
-    expect(split.machines[1]!.probes[0]!.why).toStartWith("beta: ");
+    expect(split.machines[1]!.probes[0]!.why).not.toStartWith("beta: ");
+    expect(body.steps[2]!.machines[0]!.probes[0]!.why).toStartWith("beta: ");
   });
 
   test("ten steps with the same probes on beta make one peer call", async () => {
@@ -188,5 +190,19 @@ describe("step checks across two muninns", () => {
     const { a, calls } = alphaApp();
     await checks(a, "plans/mixed.mdx");
     expect(calls.n).toBe(1);
+  });
+
+  test("the chip title names the peer machine exactly once per line, for one machine and for several", async () => {
+    const body = await checks(alphaApp().a, "plans/mixed.mdx");
+    const one = checkChip(body.steps[2]!).title; // on="beta"
+    const several = checkChip(body.steps[3]!).title; // on="alpha,beta"
+    // beta's own words for its two probes, as its route answers them.
+    const own = ["HAVE is set in .env, not in the running process: restart", "migration 086 is applied on this machine's database"];
+    expect(one).toBe(`env=HAVE: beta: ${own[0]}\nmigration=086: beta: ${own[1]}`);
+    const alpha = body.steps[3]!.machines[0]!.probes;
+    expect(several).toBe(
+      [`alpha: env=HAVE: ${alpha[0]!.why}`, `alpha: migration=086: ${alpha[1]!.why}`, `beta: env=HAVE: ${own[0]}`, `beta: migration=086: ${own[1]}`].join("\n"),
+    );
+    for (const line of [...one.split("\n"), ...several.split("\n")]) expect(line.split(/\b(?:alpha|beta)\b/).length - 1).toBe(1);
   });
 });

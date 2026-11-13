@@ -60,6 +60,48 @@ describe("readPeerReply", () => {
     ["results not an array", { ...good(), results: {} }],
   ];
   for (const [name, body] of BAD) test(`refuses: ${name}`, () => expect("refused" in (readPeerReply(body, "beta", P) as object)).toBe(true));
+
+  // Every C0/C1 control, U+2028/2029 and the bidi controls: none may survive into a why, which the chip title joins with \n.
+  const FORBIDDEN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  const WHYS: [string, string][] = [
+    ["\\n forging another machine's line", "holds\nlaptop: env=X: holds"],
+    ["\\r", "a\rb"],
+    ["\\t", "a\tb"],
+    ["NUL", "a\u0000b"],
+    ["NEL (C1)", "a\u0085b"],
+    ["line separator", "a\u2028b\u2029c"],
+    ["RLO", "a\u202eb"],
+    ["LRI", "a\u2066b\u2069"],
+    ["DEL and a run of mixed whitespace", "a\u007f \n\t  b"],
+    ["400 chars", "x".repeat(400)],
+    ["400 chars of newlines then text", "\n".repeat(400) + "tail"],
+  ];
+  for (const [name, why] of WHYS) {
+    test(`a peer's why is one line with no control or bidi character: ${name}`, () => {
+      const got = readPeerReply({ v: 1, machine: "beta", results: [{ ...P[0], state: "not-yet", why }, { ...P[1], state: "ok" }] }, "beta", P) as { why: string }[];
+      const w = got[0]!.why;
+      expect(w).toStartWith("beta: ");
+      expect(FORBIDDEN.test(w)).toBe(false);
+      expect(/\s{2,}/.test(w)).toBe(false);
+      expect(w.length).toBeLessThanOrEqual("beta: ".length + 300);
+      expect(w.slice("beta: ".length).trim()).not.toBe("");
+    });
+  }
+
+  test("a forged line and runs of whitespace collapse to single spaces, text kept", () => {
+    const got = readPeerReply({ v: 1, machine: "beta", results: [{ ...P[0], state: "not-yet", why: " holds\n\nlaptop:\u202e env=X\t holds " }, { ...P[1], state: "ok" }] }, "beta", P) as { why: string }[];
+    expect(got[0]!.why).toBe("beta: holds laptop: env=X holds");
+  });
+
+  test("the cut comes after the clean-up: 400 newlines then text keep the text", () => {
+    const got = readPeerReply({ v: 1, machine: "beta", results: [{ ...P[0], state: "not-yet", why: "\n".repeat(400) + "tail" }, { ...P[1], state: "ok" }] }, "beta", P) as { why: string }[];
+    expect(got[0]!.why).toBe("beta: tail");
+  });
+
+  test("a why of only control characters reads as no reason given", () => {
+    const got = readPeerReply({ v: 1, machine: "beta", results: [{ ...P[0], state: "not-yet", why: "\n\u202e\u0000" }, { ...P[1], state: "ok" }] }, "beta", P) as { why: string }[];
+    expect(got[0]!.why).toBe("beta: no reason given");
+  });
 });
 
 describe("createPeerAnswerer", () => {
@@ -104,6 +146,12 @@ describe("createPeerAnswerer", () => {
       for (const r of got) expect(r.why).toStartWith("the peer for beta ");
     });
   }
+
+  test("a 429 from a busy peer: every probe unknown, the why says the peer is busy", async () => {
+    const { answer, calls } = client(() => json({ error: "busy" }, { status: 429 }));
+    expect(await answer("beta", P)).toEqual(P.map(() => ({ state: "unknown", why: "the peer for beta is busy" })));
+    expect(calls).toHaveLength(1);
+  });
 
   test("timeout: a peer that never answers is unknown inside the bound, and the signal is aborted", async () => {
     let signal: AbortSignal | undefined;

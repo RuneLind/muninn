@@ -192,6 +192,9 @@ export function checkedSteps(text: string): { laneRows: number[]; steps: { key: 
   return { laneRows, steps };
 }
 
+/** `r` without the `<name>: ` lead the peer client puts on an answered why (`peer.ts`). */
+const untagged = (name: string, r: ProbeResult): ProbeResult => (r.why.startsWith(`${name}: `) ? { ...r, why: r.why.slice(name.length + 2) } : r);
+
 const machineOf = (name: string | null, probes: ProbeAnswer[], problems: readonly string[]): MachineAnswer => {
   const states = [...probes.map((p) => p.state), ...(problems.length ? (["unknown"] as const) : [])];
   const state = combineStates(states);
@@ -290,6 +293,8 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
   try {
     const steps = await Promise.all(
       found.steps.map(async (s): Promise<StepCheckAnswer> => {
+        // The reader names each machine of a several-machine step itself, so its peer whys drop the client's `<machine>: `.
+        const many = (s.on?.length ?? 0) > 1;
         const answer = async (name: string | null, own: boolean): Promise<MachineAnswer> => {
           const results = own
             ? await Promise.all(s.probes.map(local))
@@ -298,7 +303,7 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
               : await Promise.race([
                   viaPeer(name, s.probes).catch(() => s.probes.map(() => ({ state: "unknown" as const, why: `the peer for ${name} failed` }))),
                   deadline.then((d) => s.probes.map(() => d)),
-                ]);
+                ]).then((rs) => (many ? rs.map((r) => untagged(name, r)) : rs));
           return machineOf(name, s.probes.map((p, k) => ({ kind: p.kind, value: p.value, ...(results[k] ?? { state: "unknown", why: "no answer" }) })), s.problems);
         };
         const machines = s.on === null ? [await answer(deps.machine, true)] : await Promise.all(s.on.map((m) => answer(m, deps.machine !== null && m === deps.machine)));

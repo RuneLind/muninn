@@ -10,7 +10,7 @@ import { __setWikiReadonlyForTest } from "../../wiki/readonly.ts";
 import { MAX_PROBES_PER_PAGE, ProbeCache } from "../../wiki/step-checks/answer.ts";
 import { CHECKS_ANSWER_PATH } from "../../wiki/step-checks/peer.ts";
 import type { ProbeDeps } from "../../wiki/step-checks/probes.ts";
-import { registerChecksAnswerRoute, type ChecksAnswerDeps } from "./checks-answer.ts";
+import { PEER_PROBE_VALUE_MAX, PEER_ROUTE_MAX_IN_FLIGHT, registerChecksAnswerRoute, type ChecksAnswerDeps } from "./checks-answer.ts";
 
 afterEach(() => __setWikiReadonlyForTest());
 
@@ -137,5 +137,97 @@ describe("GET /api/checks/answer", () => {
       if (prev === undefined) delete process.env.MUNINN_PEERS;
       else process.env.MUNINN_PEERS = prev;
     }
+  });
+
+  test("value and machine length: PEER_PROBE_VALUE_MAX accepted, one more is 400 and echoes nothing", async () => {
+    expect(PEER_PROBE_VALUE_MAX).toBe(100);
+    const reads = { n: 0 };
+    const a = app("beta", {}, reads);
+    const at = `K${"A".repeat(PEER_PROBE_VALUE_MAX - 1)}`;
+    const ok = await get(a, `v=1&machine=beta&p=env:${at}`);
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).results[0].value).toBe(at);
+    const n = reads.n;
+    for (const q of [
+      `v=1&machine=beta&p=env:${at}A`,
+      `v=1&machine=beta&p=checkout:${"m".repeat(20_000)}`,
+      `v=1&machine=beta&p=env:HAVE&p=pushed:${"m".repeat(PEER_PROBE_VALUE_MAX + 1)}`,
+      `v=1&machine=${"b".repeat(PEER_PROBE_VALUE_MAX + 1)}&p=env:HAVE`,
+    ]) {
+      const res = await get(a, q);
+      expect([q.slice(0, 40), res.status]).toEqual([q.slice(0, 40), 400]);
+      expect((await res.text()).length).toBeLessThan(200);
+    }
+    expect(reads.n).toBe(n);
+  });
+});
+
+describe("GET /api/checks/answer: requests in flight", () => {
+  /** A Hono app of its own (own cache) whose migration read waits on `hold`; counts the reads. */
+  function heldApp(hold: Promise<Set<string>>, reads: { n: number }, over: Partial<ChecksAnswerDeps> = {}, depsFor?: () => ChecksAnswerDeps) {
+    const probes = {
+      git: async () => {
+        throw new Error("no git");
+      },
+      roots: null,
+      readEnvFile: async () => ({ bytes: new Uint8Array() }),
+      processHasEnv: () => true,
+      appliedMigrations: () => (reads.n++, hold),
+    } as unknown as ProbeDeps;
+    const a = new Hono();
+    registerChecksAnswerRoute(a, {} as Config, depsFor ?? (() => ({ probes, machine: "beta", cache: new ProbeCache(), boundMs: 2_000, ...over })));
+    return a;
+  }
+  const Q = "v=1&machine=beta&p=migration:086";
+  const served = async () => {
+    const res = await get(app("beta"), "v=1&machine=beta&p=env:HAVE");
+    expect(res.status).toBe(200);
+    expect((await res.json()).results[0].state).toBe("ok");
+  };
+
+  test(`cap+1 concurrent requests: exactly one 429 that runs nothing; the count comes back down`, async () => {
+    expect(PEER_ROUTE_MAX_IN_FLIGHT).toBe(2);
+    let release!: (s: Set<string>) => void;
+    const hold = new Promise<Set<string>>((r) => (release = r));
+    const reads = { n: 0 };
+    const pending = Array.from({ length: PEER_ROUTE_MAX_IN_FLIGHT + 1 }, () => get(heldApp(hold, reads), Q));
+    await Bun.sleep(20);
+    release(new Set(["086"]));
+    const res = await Promise.all(pending);
+    const codes = res.map((r) => r.status).sort();
+    expect(codes).toEqual([...Array(PEER_ROUTE_MAX_IN_FLIGHT).fill(200), 429]);
+    expect(reads.n).toBe(PEER_ROUTE_MAX_IN_FLIGHT);
+    const busy = res.find((r) => r.status === 429)!;
+    expect(busy.headers.get("content-type")).toContain("application/json");
+    expect(typeof (await busy.json()).error).toBe("string");
+    for (const r of res.filter((r) => r.status === 200)) expect((await r.json()).results[0].state).toBe("ok");
+    await served();
+  });
+
+  test("the count comes back down after a request that hit the route bound", async () => {
+    const reads = { n: 0 };
+    const never = new Promise<Set<string>>(() => {});
+    const first = await Promise.all(Array.from({ length: PEER_ROUTE_MAX_IN_FLIGHT }, () => get(heldApp(never, reads, { boundMs: 30 }), Q)));
+    for (const r of first) expect((await r.json()).results[0]).toMatchObject({ state: "unknown", why: "timed out" });
+    await served();
+    await served();
+  });
+
+  test("the count comes back down after a 400, a throwing probe and a throw in the handler", async () => {
+    for (let i = 0; i < PEER_ROUTE_MAX_IN_FLIGHT + 1; i++) expect((await get(app("beta"), "v=1&machine=beta&p=nope:x")).status).toBe(400);
+    await served();
+    const throwing = app("beta", {
+      processHasEnv: () => {
+        throw new Error("probe threw");
+      },
+    });
+    for (let i = 0; i < PEER_ROUTE_MAX_IN_FLIGHT + 1; i++) expect((await (await get(throwing, "v=1&machine=beta&p=env:HAVE")).json()).results[0].state).toBe("unknown");
+    await served();
+    const reads = { n: 0 };
+    const boom = heldApp(Promise.resolve(new Set()), reads, {}, () => {
+      throw new Error("deps threw");
+    });
+    for (let i = 0; i < PEER_ROUTE_MAX_IN_FLIGHT + 1; i++) expect((await get(boom, Q)).status).toBe(500);
+    await served();
   });
 });

@@ -11,7 +11,8 @@
  *   {@link PEER_MAX_BYTES}, `v === 1`, `machine` equal to the name asked,
  *   `results` as long as the asked list, each result echoing the asked probe's
  *   kind and value at its index, each `state` one of the three. Anything off
- *   makes every probe of that request `unknown`.
+ *   makes every probe of that request `unknown` (a 429: «is busy»). A why
+ *   comes back as one line, prefixed `<machine>: ` (`oneLineWhy`).
  * - Its own cache, keyed by (machine, kind, value): `ok`/`not-yet` for
  *   {@link PROBE_TTL_MS}; an `unknown` (transport failure, timeout, a rejected
  *   reply, or the peer's own unknown) is not kept, so a slow first answer never
@@ -32,8 +33,15 @@ export const PEER_FETCH_TIMEOUT_MS = 7_000;
 export const PEER_ROUTE_BOUND_MS = 6_000;
 /** A reply for 60 probes is a few KiB. */
 export const PEER_MAX_BYTES = 64 * 1024;
-/** A peer's why is shown verbatim; longer is cut. */
+/** A peer's why is shown as one line; longer is cut. */
 const WHY_MAX = 300;
+/** C0/C1 controls, U+2028/2029 and the bidi controls: a newline in a why would forge a line of the chip title, which joins lines with \n. */
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/** A peer's why as one line of plain text, cut at {@link WHY_MAX}. */
+export function oneLineWhy(why: string): string {
+  return why.replace(UNSAFE, " ").replace(/\s+/g, " ").trim().slice(0, WHY_MAX);
+}
 
 const STATES: ReadonlySet<string> = new Set<ProbeState>(["ok", "not-yet", "unknown"]);
 
@@ -73,7 +81,8 @@ export function readPeerReply(body: unknown, machine: string, asked: readonly Ch
     if (!r || typeof r !== "object" || r.kind !== asked[i]!.kind || r.value !== asked[i]!.value) return { refused: "answered probes out of order" };
     if (typeof r.state !== "string" || !STATES.has(r.state)) return { refused: "answered a state muninn does not know" };
     if (r.why !== undefined && typeof r.why !== "string") return { refused: "answered a why that is not text" };
-    const why = typeof r.why === "string" && r.why.trim() ? r.why.slice(0, WHY_MAX) : r.state === "ok" ? "holds" : "no reason given";
+    const said = typeof r.why === "string" ? oneLineWhy(r.why) : "";
+    const why = said || (r.state === "ok" ? "holds" : "no reason given");
     out.push({ state: r.state as ProbeState, why: `${machine}: ${why}` });
   }
   return out;
@@ -113,6 +122,7 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
         return fail("could not be reached");
       }
       // An unread body is released by the abort in `finally`.
+      if (res.status === 429 && !res.redirected) return fail("is busy");
       if (res.status !== 200 || res.redirected) return fail(`answered HTTP ${res.status}`);
       if (!(res.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return fail("did not answer JSON");
       let body: unknown;
