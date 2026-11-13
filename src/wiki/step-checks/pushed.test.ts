@@ -635,7 +635,7 @@ describe("pushed: origin reads where it pushes (PR #850 round 3, the class check
       expect((await run({ getUrl: OK(`${net}\n`) })).state).toBe("ok");
     }
     const local = "skills's origin is not a network address: muninn cannot prove it is another repository";
-    for (const url of ["/abs/path", "../rel", ".", "file:///x", "file://localhost/x", "FILE:///x", "HTTPS://h/x", "https:///x", "ext::cmd", "foo://h/x", "~/x", "/a/b:c", "h::x", ":x"]) {
+    for (const url of ["/abs/path", "../rel", ".", "file:///x", "file://localhost/x", "FILE:///x", "HTTPS://h/x", "https:///x", "ext::cmd", "foo://h/x", "~/x", "/a/b:c", "h::x", ":x", "file:///a/https://h/x"]) {
       expect(await run({ getUrl: OK(`${url}\n`) })).toEqual({ state: "unknown", why: local });
     }
     const cannot = "muninn cannot tell where skills's origin is";
@@ -647,7 +647,7 @@ describe("pushed: origin reads where it pushes (PR #850 round 3, the class check
   test("core.sshCommand set in any scope with an ssh origin: unknown; with an https or git origin: ignored", async () => {
     const ssh = "skills sets core.sshCommand: muninn's read may reach another host than a push";
     for (const value of ["ssh -i k", "", null]) {
-      for (const getUrl of [URL, "ssh://git@h/x.git"]) {
+      for (const getUrl of [URL, "ssh://git@h/x.git", "ssh://h/https://x"]) {
         expect(await run({ origin: cfg(url, ["core.sshcommand", value]), getUrl: OK(`${getUrl}\n`) })).toEqual({ state: "unknown", why: ssh });
       }
     }
