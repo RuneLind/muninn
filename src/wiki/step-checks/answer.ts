@@ -19,6 +19,7 @@ import { stepCheck, type CheckProbe } from "../../format/check-tag.ts";
 import { listYouSteps, youLaneRows, youListStepLines } from "../../format/step-done.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { combineStates, probeRuns, runProbe, startProbe, type ProbeDeps, type ProbeResult, type ProbeState } from "./probes.ts";
+import { stampSource, within, type Clocks, type Stamp } from "./two-clock.ts";
 
 /** How long one probe answer is reused: opening a page twice runs no git. */
 export const PROBE_TTL_MS = 30_000;
@@ -81,8 +82,8 @@ const probeKey = (p: CheckProbe) => `${p.kind}\u0000${p.value}`;
 interface CacheEntry {
   promise: Promise<unknown>;
   /** Null while a read waits for a slot: it has not started running. */
-  startedAt: number | null;
-  settledAt: number | null;
+  startedAt: Stamp | null;
+  settledAt: Stamp | null;
 }
 
 /**
@@ -92,14 +93,20 @@ interface CacheEntry {
  * and one still unsettled {@link PROBE_TTL_MS} after it started running is no
  * longer shared. A read that first waits for a slot (`startsLater`) is shared
  * while it waits, and its age counts from the `started()` its run calls.
+ * Every age is read on the wall and the monotonic clock at once and must be
+ * inside the limit on both (`within`, `two-clock.ts`).
  */
 export class ProbeCache {
   private readonly entries = new Map<string, CacheEntry>();
+  private readonly now: () => Stamp;
+  /** `clocks`: one function drives both halves of a stamp; none is `Date.now` + `performance.now` (`two-clock.ts`). */
   constructor(
-    private readonly now: () => number = Date.now,
+    clocks?: Clocks,
     private readonly ttlMs = PROBE_TTL_MS,
     private readonly maxEntries = PROBE_CACHE_MAX,
-  ) {}
+  ) {
+    this.now = stampSource(clocks);
+  }
 
   get size(): number {
     return this.entries.size;
@@ -113,7 +120,7 @@ export class ProbeCache {
     const now = this.now();
     const fresh = (e: CacheEntry) => {
       const since = e.settledAt ?? e.startedAt;
-      return since === null || now - since < this.ttlMs;
+      return since === null || within(since, this.ttlMs, now);
     };
     const hit = this.entries.get(key);
     if (hit && fresh(hit)) return hit.promise as Promise<T>;

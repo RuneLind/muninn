@@ -30,6 +30,7 @@ import { getLog } from "../../logging.ts";
 import { readBounded } from "../../utils/bounded-fetch.ts";
 import { MAX_PROBES_PER_PAGE, noPeer, PROBE_TTL_MS, type PeerAnswerer } from "./answer.ts";
 import type { ProbeResult, ProbeState } from "./probes.ts";
+import { stampSource, within, type Stamp } from "./two-clock.ts";
 
 export const CHECKS_ANSWER_PATH = "/api/checks/answer";
 /** The wire version both sides speak. */
@@ -83,12 +84,15 @@ export interface PeerClientDeps {
   ttlMs?: number;
   /** {@link PEER_DOWN_WINDOW_MS} unless set. */
   downMs?: number;
+  /** One clock driving both halves of every stamp; `wall`/`mono` override a half each (`two-clock.ts`). */
   now?: () => number;
+  wall?: () => number;
+  mono?: () => number;
 }
 
 interface Entry {
   promise: Promise<ProbeResult>;
-  settledAt: number | null;
+  settledAt: Stamp | null;
 }
 
 interface Pending {
@@ -127,19 +131,20 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
   const timeoutMs = deps.timeoutMs ?? PEER_FETCH_TIMEOUT_MS;
   const maxBytes = deps.maxBytes ?? PEER_MAX_BYTES;
   const ttlMs = deps.ttlMs ?? PROBE_TTL_MS;
-  const now = deps.now ?? Date.now;
+  const now = stampSource({ wall: deps.wall ?? deps.now, mono: deps.mono ?? deps.now });
   const downMs = deps.downMs ?? PEER_DOWN_WINDOW_MS;
   const cache = new Map<string, Entry>();
   const batches = new Map<string, Pending[]>();
-  /** Per machine: until when its probes answer unknown without a request, and why. Bounded by the configured peers. */
-  const down = new Map<string, { until: number; reason: string }>();
+  /** Per machine: when its window opened, and why. Bounded by the configured peers. */
+  const down = new Map<string, { openedAt: Stamp; reason: string }>();
 
-  // A timer whose start lies ahead of `now()` (the clock stepped back) is expired, never stretched: the worst case is one extra request.
-  const isDown = (machine: string, t: number) => {
+  // Both timers are live only while their age is in [0, limit) on the wall AND the monotonic clock (`within`): a wall step
+  // back or forward and a sleep each expire them early, and nothing makes one outlive its limit on either clock.
+  const isDown = (machine: string, t: Stamp) => {
     const d = down.get(machine);
-    return d && t < d.until && d.until - t <= downMs ? d : null;
+    return d && within(d.openedAt, downMs, t) ? d : null;
   };
-  const fresh = (e: Entry, t: number) => e.settledAt === null || (e.settledAt <= t && t - e.settledAt < ttlMs);
+  const fresh = (e: Entry, t: Stamp) => e.settledAt === null || within(e.settledAt, ttlMs, t);
 
   const settle = (machine: string, outcome: Outcome) => {
     if (!outcome.failure) {
@@ -150,7 +155,7 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
     // Already down: a request that was in flight when the window opened; no second log line.
     if (isDown(machine, t)) return;
     const { reason, err } = outcome.failure;
-    down.set(machine, { until: t + downMs, reason });
+    down.set(machine, { openedAt: t, reason });
     const e = err as { name?: unknown; code?: unknown; message?: unknown } | undefined;
     log.warn("Step-check peer {machine} failed ({reason}); its probes answer unknown for {seconds} s", {
       machine,
