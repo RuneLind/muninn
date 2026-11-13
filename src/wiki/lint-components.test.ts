@@ -10,6 +10,7 @@ import { renderWikiHtml } from "./render.ts";
 import { countedNextMovesLanes, observeComponentTags, parseBlocks, type ObservedComponentTag } from "../format/markdown-ast.ts";
 import { COMPONENT_SPEC } from "../format/component-spec.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { stepCheck } from "../format/check-tag.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 const page = (...lines: string[]) => ["---", "title: X", "---", "", ...lines].join("\n");
@@ -132,6 +133,20 @@ describe("checkComponents — <Check>", () => {
   // Line 9 is the first step line.
   const lane = (...items: string[]) => page("<NextMoves>", "", '<Lane kind="you">', "", ...items, "", "</Lane>", "", "</NextMoves>");
   const found = (content: string) => run(content).map((f) => `${f.check}@${f.line}`);
+
+  test("the check-placement hint's example is a step line stepCheck reads cleanly, with a real probe and on=", () => {
+    const [finding] = run(page(`## Head ${C}`)).filter((f) => f.check === "check-placement");
+    const examples = [...(finding?.detail ?? "").matchAll(/`([^`]*<Check[^`]*)`/g)].map((m) => m[1]!);
+    expect(examples.length).toBeGreaterThan(0);
+    for (const line of examples) {
+      const read = stepCheck(line);
+      expect({ line, read }).toEqual({ line, read: expect.objectContaining({ problems: [] }) });
+      const kinds = read!.probes.map((p) => p.kind);
+      expect(kinds.length).toBeGreaterThan(0);
+      expect(kinds).not.toContain("restart");
+      expect({ line, on: read!.on }).not.toEqual({ line, on: null });
+    }
+  });
 
   test("valid trailing tags, and code spans and fences: nothing", () => {
     expect(run(lane(`1. **Restart.** ${C}`, `2. Run \`x\` ${C}  `, `3. no space${C}`, '4. Migrate <Check migration="086" on="laptop,Mini" />'))).toEqual([]);
