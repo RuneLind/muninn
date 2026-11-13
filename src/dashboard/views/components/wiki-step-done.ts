@@ -229,7 +229,7 @@ const isOff = (b: HTMLElement): boolean => b.getAttribute("aria-disabled") === "
  */
 function showNotice(article: HTMLElement, text: string, role: "status" | "alert"): HTMLElement {
   article.querySelectorAll(`.${STEP_DONE_NOTE_CLASS}`).forEach((n) => n.remove());
-  const note = document.createElement("div");
+  const note = article.ownerDocument.createElement("div");
   note.className = STEP_DONE_NOTE_CLASS;
   note.setAttribute("role", role);
   note.setAttribute("data-reader-only", "");
@@ -472,7 +472,8 @@ function addRemoveAll(lane: HTMLElement, keys: string[], article: HTMLElement, c
   btn.className = "wiki-step-done-all";
   btn.setAttribute(STEP_DONE_ALL_ATTR, String(n));
   btn.textContent = `Remove ${n} checked`;
-  btn.setAttribute("aria-label", `Remove the ${n === 1 ? "checked step" : `${n} checked steps`} from this lane: preview first`);
+  // The name starts with the visible text (WCAG 2.5.3), as Done's «Done: …» does.
+  btn.setAttribute("aria-label", `${btn.textContent}: ${n === 1 ? "the checked step" : `the ${n} checked steps`} of this lane, preview first`);
   row.appendChild(btn);
   body.appendChild(row);
   const close = (panel: Element) => {
@@ -530,7 +531,7 @@ function addRemoveAll(lane: HTMLElement, keys: string[], article: HTMLElement, c
       go.focus({ preventScroll: true });
       const notice = `${n === 1 ? "The checked step is" : `${n} checked steps are`} removed from the page.`;
       go.addEventListener("click", () => {
-        if (!isOff(go)) void write(article, panel, go, { which: { steps: keys }, removedNotice: notice }, `${n} checked steps`, ctx, baseHash, p.previewHash, post);
+        if (!isOff(go)) void write(article, panel, go, { which: { steps: keys }, removedNotice: notice }, `${n} checked step${n === 1 ? "" : "s"}`, ctx, baseHash, p.previewHash, post);
       });
     })();
   });

@@ -375,7 +375,7 @@ describe("/api/wiki/step-done", () => {
       expect(p.body.renumbered).toEqual([{ line: 10, before: "2. Read the second note.", after: "1. Read the second note." }]);
       expect((p.body.steps as { text: string }[]).map((s) => s.text)).toEqual([ALL[0]!, ALL[2]!]);
       expect(p.body).toMatchObject({ laneRemoved: false, nextMovesRemoved: false, lanesRemoved: 0, blocksRemoved: 0 });
-      expect(p.body.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Steps done (2): Restart the server: so the bundle is fresh.; Read the third note.");
+      expect(p.body.logEntry).toBe("## [2026-11-10] step-done | Step fixture\n- Steps done (2): Restart the server: so the bundle is fresh; Read the third note.");
       expect(await pageText()).toBe(PAGE);
 
       const res = await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash });
@@ -385,10 +385,31 @@ describe("/api/wiki/step-done", () => {
       expect(after).toBe(PAGE.replace("1. **Restart the server:** so the bundle is fresh.\n2. Read the second note.\n3. Read the third note.", "1. Read the second note."));
       const entries = await logEntries();
       expect(entries.slice(entriesBefore)).toEqual(["## [2026-11-10] step-done | Step fixture"]);
-      expect(await Bun.file(path.join(root, "log.md")).text()).toContain("- Steps done (2): Restart the server: so the bundle is fresh.; Read the third note.");
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain("- Steps done (2): Restart the server: so the bundle is fresh; Read the third note.");
       expect(Number(git("rev-list", "--count", "HEAD").trim())).toBe(commitsBefore + 1);
       expect(git("log", "-1", "--format=%s")).toBe(`[step-done] 2 steps: ${REL}\n`);
       expect(git("status", "--porcelain")).toBe("");
+    });
+
+    test("a one-key list writes the single form's log entry and commit subject for that step, through its own preview hash", async () => {
+      const single = await previewOf(ALL[0]!);
+      const p = await previewMany([ALL[0]!]);
+      expect(p.status).toBe(200);
+      expect(p.body.logEntry).toBe(single.body.logEntry);
+      const res = await post({ steps: p.steps, baseHash: p.baseHash, previewHash: p.body.previewHash });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, committed: true });
+      const subject = git("log", "-1", "--format=%s");
+      const logged = await Bun.file(path.join(root, "log.md")).text();
+      // The single form on the same page and step, for comparison.
+      git("reset", "-q", "--hard", "HEAD~1");
+      await resetPage();
+      const { body: l } = await list();
+      const s = await previewOf(ALL[0]!);
+      expect((await post({ step: keyOf(l, ALL[0]!), baseHash: l.baseHash, previewHash: s.body.previewHash })).status).toBe(200);
+      expect(subject).toBe(git("log", "-1", "--format=%s"));
+      expect(subject).toBe(`[step-done] Restart the server: so the bundle is fresh.: ${REL}\n`);
+      expect(logged).toBe(await Bun.file(path.join(root, "log.md")).text());
     });
 
     test("every step: the lane goes, the preview says so", async () => {

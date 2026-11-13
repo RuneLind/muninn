@@ -246,7 +246,7 @@ describe("«Remove N checked» on the lane (owner-step checks PR 3)", () => {
     nextMovesRemoved: false,
     lanesRemoved: 0,
     blocksRemoved: 0,
-    logEntry: "## [d] step-done | T\n- Steps done (1): Add the key",
+    logEntry: "## [d] step-done | T\n- Step done: Add the key",
     logNote: "note",
     previewHash: "ph",
   };
@@ -476,6 +476,39 @@ describe("«Remove N checked» on the lane (owner-step checks PR 3)", () => {
     expect(a.innerHTML).toBe(before);
     // Nothing open: the button does not swallow the shell's Escape.
     expect(escape(btn)).toBe(false);
+  });
+
+  test("the accessible name starts with the visible text, for one checked step and for two (WCAG 2.5.3)", async () => {
+    const full = await answer();
+    for (const [steps, text] of [
+      [full.steps, "Remove 1 checked"],
+      [full.steps.map((s) => (s.row === 3 ? { ...s, state: "ok" as const } : s)), "Remove 2 checked"],
+    ] as const) {
+      const a = mount();
+      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond({ ...full, steps }), { removeAll: true, post: poster(PREVIEW).post });
+      const [btn] = allButtons(a);
+      expect(btn!.textContent).toBe(text);
+      expect(btn!.getAttribute("aria-label")!.startsWith(`${text}:`)).toBe(true);
+    }
+  });
+
+  test("a refusal after the preview closed names «1 checked step», not «1 checked steps»", async () => {
+    const a = mount();
+    let release: (v: { status: number; data: Record<string, unknown> }) => void = () => {};
+    const post = async (body: Sent) => {
+      if (body.preview === true) return { status: 200, data: { ok: true, preview: true, ...PREVIEW } };
+      return new Promise<{ status: number; data: Record<string, unknown> }>((r) => (release = r));
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    allButtons(a)[0]!.click();
+    await settle();
+    a.querySelector<HTMLButtonElement>("[data-step-done-all-confirm]")!.click();
+    await settle();
+    escape(a.querySelector("[data-step-done-all-confirm]")!);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    release({ status: 409, data: { error: "The page changed.", stale: true } });
+    await settle();
+    expect(a.querySelector(".wiki-step-done-note")!.textContent).toBe("Done did not remove «1 checked step»: The page changed.");
   });
 });
 

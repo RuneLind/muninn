@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listYouSteps, stepDoneEdit, stepsDoneEdit, stepsDoneLogLine, type StepsDoneEdit } from "./step-done.ts";
+import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepsDoneEdit, stepsDoneLogLine, type StepsDoneEdit } from "./step-done.ts";
 
 const page = (body: string) => `---\ntitle: Fixture\n---\n\n${body}`;
 const moves = (...lanes: string[]) => `<NextMoves>\n\n${lanes.join("\n\n")}\n\n</NextMoves>\n`;
@@ -113,7 +113,7 @@ describe("stepsDoneEdit", () => {
     const text = page(moves(you('1. Run migration 088. <Check migration="088" />\n2. Read the page.\n3. Restart. <Check restart="muninn" />')));
     const r = removeAll(text, 'Run migration 088. <Check migration="088" />', 'Restart. <Check restart="muninn" />');
     expect(r.content).toBe(page(moves(you("1. Read the page."))));
-    expect(stepsDoneLogLine(r)).toBe("Steps done (2): Run migration 088.; Restart.");
+    expect(stepsDoneLogLine(r)).toBe("Steps done (2): Run migration 088; Restart.");
   });
 
   test("[x] rows stay, and keep the lane", () => {
@@ -166,8 +166,8 @@ describe("stepsDoneEdit", () => {
     const steps = Array.from({ length: 11 }, (_, i) => ({ lead: i === 0 ? long : `Step ${i}.` }));
     const line = stepsDoneLogLine({ steps });
     expect(line.startsWith("Steps done (11): ")).toBe(true);
-    expect(line).toContain("…; Step 1.");
-    expect(line.endsWith("; Step 7.; and 3 more")).toBe(true);
+    expect(line).toContain("…; Step 1; ");
+    expect(line.endsWith("; Step 7; and 3 more")).toBe(true);
     expect(line.length).toBeLessThan(220);
   });
 
@@ -185,5 +185,32 @@ describe("stepsDoneEdit", () => {
       n++;
     }
     expect(n).toBe(511);
+  });
+});
+
+describe("stepsDoneLogLine: one step and punctuation (fix round 1, batch 3)", () => {
+  test("a one-step list writes exactly the single form's line", () => {
+    for (const lead of ["Restart the server: so the bundle is fresh.", "Ask O1?", "Done!", "Label:", "No ending", "x".repeat(300)]) {
+      expect(stepsDoneLogLine({ steps: [{ lead }] })).toBe(stepDoneLogLine({ lead }));
+    }
+  });
+
+  // Each ending at a join, and at the line's end: kept there as the single line keeps it, unless «; and K more» follows.
+  const ENDINGS = [".", "!", "?", ":", ""];
+  for (const a of ENDINGS) {
+    for (const b of ENDINGS) {
+      test(`«A${a}» then «B${b}»: no doubled punctuation at the join, the end kept`, () => {
+        expect(stepsDoneLogLine({ steps: [{ lead: `A${a}` }, { lead: `B${b}` }] })).toBe(`Steps done (2): A; B${b}`);
+      });
+    }
+    test(`nine leads ending «${a}»: every join and «; and 1 more» take no doubled punctuation`, () => {
+      const steps = Array.from({ length: 9 }, (_, i) => ({ lead: `Step ${i}${a}` }));
+      expect(stepsDoneLogLine({ steps })).toBe(`Steps done (9): ${Array.from({ length: 8 }, (_, i) => `Step ${i}`).join("; ")}; and 1 more`);
+    });
+  }
+
+  test("the 100-char cap still cuts a long lead, and the cut lead keeps its ellipsis at a join", () => {
+    const line = stepsDoneLogLine({ steps: [{ lead: `${"y".repeat(150)}.` }, { lead: "Short." }] });
+    expect(line).toBe(`Steps done (2): ${"y".repeat(99)}…; Short.`);
   });
 });

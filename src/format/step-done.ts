@@ -439,12 +439,21 @@ const capped = (s: string, n: number) => {
   return cs.length > n ? `${cs.slice(0, n - 1).join("").trimEnd()}…` : s;
 };
 
-/** The `log.md` bullet a list Done writes: the count and each step's lead, bounded. */
+/** A lead's closing `.`, `!`, `?` or `:` dropped where `; ` follows it, so a join never reads `.;`. */
+const beforeJoin = (s: string) => s.replace(/[.!?:]+$/u, "").trimEnd();
+
+/**
+ * The `log.md` bullet a list Done writes: the count and each step's lead,
+ * bounded. One step writes the single Done's line. The last lead ends as the
+ * single line ends, unless «; and N more» follows it.
+ */
 export function stepsDoneLogLine(edit: { steps: readonly { lead: string }[] }): string {
   const n = edit.steps.length;
+  if (n === 1) return stepDoneLogLine(edit.steps[0]!);
   const named = edit.steps.slice(0, LOG_LEADS).map((s) => capped(s.lead, LOG_LEAD_CHARS));
   const more = n > LOG_LEADS ? `; and ${n - LOG_LEADS} more` : "";
-  return `Steps done (${n}): ${named.join("; ")}${more}`;
+  const last = more ? beforeJoin(named.at(-1)!) : named.at(-1)!;
+  return `Steps done (${n}): ${[...named.slice(0, -1).map(beforeJoin), last].join("; ")}${more}`;
 }
 
 /**

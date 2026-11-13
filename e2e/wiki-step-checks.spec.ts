@@ -627,7 +627,7 @@ test.describe("«Remove N checked» (owner-step checks PR 3)", () => {
     const entries = (s: string) => s.match(/^## \[/gm)?.length ?? 0;
     expect(entries(logAfter)).toBe(entries(logBefore) + 1);
     expect(logAfter.split("step-done | Check fixture remove").length - 1).toBe(1);
-    expect(logAfter).toContain("step-done | Check fixture remove\n- Steps done (2): Apply the first old migration.; Apply the second old migration.");
+    expect(logAfter).toContain("step-done | Check fixture remove\n- Steps done (2): Apply the first old migration; Apply the second old migration.");
     // The page rendered again: the not-yet and unknown steps keep their chips, and no step is checked, so no button.
     await p.locator(".wiki-article .nm-lane.nm-you").evaluate((d) => ((d as HTMLDetailsElement).open = true));
     await expect(chips(p)).toHaveCount(2);

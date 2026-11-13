@@ -253,7 +253,8 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
       logKind: STEP_DONE_LOG_KIND,
       logTitle: title,
       logLine: () => line,
-      commitMessage: () => (keys === null ? `[step-done] ${line.replace(/^Step done: /, "")}: ${target.relPath}` : `[step-done] ${keys.length} steps: ${target.relPath}`),
+      // A one-key list logs the single form's line, so it takes the single form's subject too.
+      commitMessage: () => (keys === null || keys.length === 1 ? `[step-done] ${line.replace(/^Step done: /, "")}: ${target.relPath}` : `[step-done] ${keys.length} steps: ${target.relPath}`),
       now: deps.now,
       proceed: async () => {
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
