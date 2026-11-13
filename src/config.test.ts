@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig, resolveMachineName } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile, resolveWikiAnswerRetention, ConfigError, parseAnswerGroups, answerGroupsBootLines, resolveWikiAnswerConfig, resolveMachineName, parsePeers } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -536,5 +536,77 @@ describe("resolveMachineName (MUNINN_MACHINE)", () => {
       const m = /const (\w+) = machineBootWarning\(\);\s*if \(\1\) log\.warn\("\{line\}", \{ line: \1 \}\);/.exec(src);
       expect(m?.[1]).toBe("machineLine");
     });
+  });
+});
+
+describe("parsePeers (MUNINN_PEERS)", () => {
+  test("unset or blank: no peers, no warnings", () => {
+    for (const raw of [undefined, "", "  ", " , "]) expect(parsePeers(raw, "laptop")).toEqual({ peers: new Map(), warnings: [] });
+  });
+
+  test("name=url pairs: names lower-cased, urls stored as their origin", () => {
+    const { peers, warnings } = parsePeers(" Mini=https://mini.example.ts.net/ , box=http://10.0.0.2:3010", "laptop");
+    expect([...peers]).toEqual([
+      ["mini", "https://mini.example.ts.net"],
+      ["box", "http://10.0.0.2:3010"],
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  const DROPPED: [string, string][] = [
+    ["no =", "mini"],
+    ["empty name", "=https://mini.test"],
+    ["bad name", "my mini=https://mini.test"],
+    ["name starting with -", "-mini=https://mini.test"],
+    ["empty url", "mini="],
+    ["not a url", "mini=mini.test"],
+    ["ftp", "mini=ftp://mini.test"],
+    ["file", "mini=file:///etc/passwd"],
+    ["javascript", "mini=javascript:alert(1)"],
+    ["credentials", "mini=https://user:pw@mini.test"],
+    ["user only", "mini=https://user@mini.test"],
+    ["a path", "mini=https://mini.test/api"],
+    ["a query", "mini=https://mini.test/?x=1"],
+    ["an empty query", "mini=https://mini.test?"],
+    ["a fragment", "mini=https://mini.test/#x"],
+    ["names this machine", "laptop=https://laptop.test"],
+    ["names this machine, other case", "Laptop=https://laptop.test"],
+  ];
+  for (const [name, raw] of DROPPED) {
+    test(`dropped with one warning that echoes no url: ${name}`, () => {
+      const { peers, warnings } = parsePeers(`${raw},ok=https://ok.test`, "laptop");
+      expect([...peers.keys()]).toEqual(["ok"]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith("MUNINN_PEERS entry 1");
+      expect(warnings[0]).not.toContain(".test");
+      expect(warnings[0]).not.toContain("pw");
+    });
+  }
+
+  test("a duplicate name keeps the first and warns about the second", () => {
+    const { peers, warnings } = parsePeers("mini=https://a.test,mini=https://b.test", null);
+    expect([...peers]).toEqual([["mini", "https://a.test"]]);
+    expect(warnings).toEqual(["MUNINN_PEERS entry 2 (mini) is skipped: duplicate name"]);
+  });
+
+  test("with no MUNINN_MACHINE, no entry can be this machine", () => {
+    expect([...parsePeers("laptop=https://laptop.test", null).peers.keys()]).toEqual(["laptop"]);
+  });
+
+  test("loadConfig carries the parsed map; index.ts logs the warnings after setupLogging", async () => {
+    const prev = process.env.MUNINN_PEERS;
+    const prevDb = process.env.DATABASE_URL;
+    process.env.MUNINN_PEERS = "mini=https://mini.test";
+    process.env.DATABASE_URL ??= "postgresql://x@127.0.0.1:5432/x";
+    try {
+      expect([...loadConfig().peers]).toEqual([["mini", "https://mini.test"]]);
+    } finally {
+      if (prev === undefined) delete process.env.MUNINN_PEERS;
+      else process.env.MUNINN_PEERS = prev;
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+    }
+    const src = await Bun.file(new URL("./index.ts", import.meta.url)).text();
+    const at = src.indexOf("parsePeers().warnings");
+    expect(at).toBeGreaterThan(src.indexOf("await setupLogging("));
   });
 });

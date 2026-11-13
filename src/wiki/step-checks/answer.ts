@@ -59,8 +59,8 @@ export interface StepChecksAnswer {
 }
 
 /**
- * Answers the probes for one machine other than this one. PR 4 plugs a peer
- * call in here; it is given the probes, never a step key.
+ * Answers the probes for one machine other than this one: `createPeerAnswerer`
+ * (`peer.ts`) over `MUNINN_PEERS`. It is given the probes, never a step key.
  */
 export type PeerAnswerer = (machine: string, probes: readonly CheckProbe[]) => Promise<ProbeResult[]>;
 
@@ -207,24 +207,19 @@ const machineOf = (name: string | null, probes: ProbeAnswer[], problems: readonl
   return { name, state, why, probes };
 };
 
-/**
- * The answer for page `text`. A page with no checked step answers `steps: []`
- * and runs nothing.
- */
-export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<StepChecksAnswer> {
-  const hash = sha256(text);
-  const found = checkedSteps(text);
-  if (!found || found.steps.length === 0) return { hash, machine: deps.machine, laneRows: found?.laneRows ?? [], steps: [] };
-  const { laneRows } = found;
+/** What running probes on this machine needs: no machine name and no peer, so it can never forward. */
+export type LocalAnswerDeps = Pick<AnswerDeps, "probes" | "cache" | "gitSlots" | "boundMs">;
+
+const boundAnswer = (boundMs: number | undefined) => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<ProbeResult>((resolve) => {
-    timer = setTimeout(() => resolve({ state: "unknown", why: "timed out" }), deps.boundMs ?? ANSWER_BOUND_MS);
+    timer = setTimeout(() => resolve({ state: "unknown", why: "timed out" }), boundMs ?? ANSWER_BOUND_MS);
   });
-  // The page's first MAX_PROBES_PER_PAGE distinct probes run; the rest are capped.
-  // `restart` runs nothing, so it takes no seat and is never capped.
-  const allowed = new Set<string>();
-  for (const s of found.steps) for (const p of s.probes) if (probeRuns(p.kind) && allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
-  const capped = (p: CheckProbe) => probeRuns(p.kind) && !allowed.has(probeKey(p));
+  return { deadline, timer };
+};
+
+/** One probe run on this machine: the shared cache, the git slots, the migration read, raced against `deadline`. */
+function localRunner(deps: LocalAnswerDeps, deadline: Promise<ProbeResult>): (p: CheckProbe) => Promise<ProbeResult> {
   // One applied-set read per cache window, shared by every `migration=` probe.
   const probeDeps: ProbeDeps = { ...deps.probes, appliedMigrations: () => deps.cache.getKey(MIGRATIONS_KEY, () => deps.probes.appliedMigrations()) };
   const slots = deps.gitSlots ?? sharedGitSlots;
@@ -242,17 +237,49 @@ export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<
         .catch(() => resolve({ state: "unknown", why: "the probe failed" }));
     });
   // A migration answer is not cached on its own: it would outlive the set it was read from.
-  const local = (p: CheckProbe): Promise<ProbeResult> =>
-    capped(p)
-      ? Promise.resolve(TOO_MANY)
-      : Promise.race([
-          p.kind === "migration"
-            ? runProbe(p, probeDeps)
-            : GIT_KINDS.has(p.kind)
-              ? deps.cache.get(p, (started) => slotted(p, started), { startsLater: true })
-              : deps.cache.get(p, () => runProbe(p, probeDeps)),
-          deadline,
-        ]);
+  return (p) =>
+    Promise.race([
+      p.kind === "migration"
+        ? runProbe(p, probeDeps)
+        : GIT_KINDS.has(p.kind)
+          ? deps.cache.get(p, (started) => slotted(p, started), { startsLater: true })
+          : deps.cache.get(p, () => runProbe(p, probeDeps)),
+      deadline,
+    ]);
+}
+
+/**
+ * `probes` answered on this machine, in order, exactly as a page's own steps
+ * are (same cache, slots and per-probe bounds), the whole within `boundMs`.
+ * `GET /api/checks/answer` runs this; it takes no peer, so it never forwards.
+ */
+export async function answerProbesHere(probes: readonly CheckProbe[], deps: LocalAnswerDeps): Promise<ProbeResult[]> {
+  const { deadline, timer } = boundAnswer(deps.boundMs);
+  try {
+    const run = localRunner(deps, deadline);
+    return await Promise.all(probes.map(run));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The answer for page `text`. A page with no checked step answers `steps: []`
+ * and runs nothing.
+ */
+export async function answerStepChecks(text: string, deps: AnswerDeps): Promise<StepChecksAnswer> {
+  const hash = sha256(text);
+  const found = checkedSteps(text);
+  if (!found || found.steps.length === 0) return { hash, machine: deps.machine, laneRows: found?.laneRows ?? [], steps: [] };
+  const { laneRows } = found;
+  const { deadline, timer } = boundAnswer(deps.boundMs);
+  // The page's first MAX_PROBES_PER_PAGE distinct probes run; the rest are capped.
+  // `restart` runs nothing, so it takes no seat and is never capped.
+  const allowed = new Set<string>();
+  for (const s of found.steps) for (const p of s.probes) if (probeRuns(p.kind) && allowed.size < MAX_PROBES_PER_PAGE) allowed.add(probeKey(p));
+  const capped = (p: CheckProbe) => probeRuns(p.kind) && !allowed.has(probeKey(p));
+  const run = localRunner(deps, deadline);
+  const local = (p: CheckProbe): Promise<ProbeResult> => (capped(p) ? Promise.resolve(TOO_MANY) : run(p));
   const peer = deps.peer ?? noPeer;
   const viaPeer = async (name: string, probes: readonly CheckProbe[]): Promise<ProbeResult[]> => {
     const asked = probes.filter((p) => !capped(p));

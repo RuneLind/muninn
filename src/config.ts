@@ -964,6 +964,50 @@ export function machineBootWarning(raw: string | undefined = process.env.MUNINN_
     : null;
 }
 
+export interface PeersParse {
+  /** Machine name → the peer's origin (`https://host[:port]`, no trailing slash). */
+  peers: ReadonlyMap<string, string>;
+  /** One line per dropped entry, by position; never echoes a URL. */
+  warnings: string[];
+}
+
+/**
+ * `MUNINN_PEERS` — the other machines' muninns that answer owner-step checks for
+ * themselves (`GET /api/checks/answer`): comma-separated `name=url`, e.g.
+ * `mini=https://mini.example.ts.net`. Names take {@link resolveMachineName}'s
+ * grammar; a url must be `http:`/`https:` with no credentials, no path beyond
+ * `/`, no query and no fragment. A malformed entry, a duplicate name and an
+ * entry naming `ownMachine` are each dropped with a warning (the `SYNC_REPOS`
+ * rule: never guess), never a boot failure: a dropped peer only leaves that
+ * machine's checks `unknown`. Pure: the boot line logs the warnings.
+ */
+export function parsePeers(raw: string | undefined = process.env.MUNINN_PEERS, ownMachine: string | null = resolveMachineName()): PeersParse {
+  const peers = new Map<string, string>();
+  const warnings: string[] = [];
+  const entries = (raw ?? "").split(",").map((s) => s.trim());
+  entries.forEach((entry, i) => {
+    if (!entry) return;
+    const at = `MUNINN_PEERS entry ${i + 1}`;
+    const eq = entry.indexOf("=");
+    const name = eq > 0 ? resolveMachineName(entry.slice(0, eq)) : null;
+    if (!name) return void warnings.push(`${at} is skipped: expected name=url with a machine name (lower-case letters, digits, . _ -)`);
+    const urlRaw = entry.slice(eq + 1).trim();
+    let url: URL | null = null;
+    try {
+      url = new URL(urlRaw);
+    } catch {
+      url = null;
+    }
+    if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.pathname !== "/" || /[?#]/.test(urlRaw)) {
+      return void warnings.push(`${at} (${name}) is skipped: the url must be http(s)://host[:port] with no credentials, path, query or fragment`);
+    }
+    if (name === ownMachine) return void warnings.push(`${at} (${name}) is skipped: it names this machine (MUNINN_MACHINE)`);
+    if (peers.has(name)) return void warnings.push(`${at} (${name}) is skipped: duplicate name`);
+    peers.set(name, url.origin);
+  });
+  return { peers, warnings };
+}
+
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
@@ -1038,6 +1082,8 @@ export function loadConfig() {
     decisionTriageRepoRoots: (process.env.DECISION_TRIAGE_REPO_ROOTS ?? "").trim() || null,
     // Which machine this is, for owner-step checks that name machines (`on=`).
     machine: resolveMachineName(),
+    // The other machines' muninns that answer step checks for themselves (`MUNINN_PEERS`).
+    peers: parsePeers().peers,
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

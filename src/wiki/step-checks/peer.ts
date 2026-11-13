@@ -1,0 +1,187 @@
+/**
+ * The peer client (mimir plan muninn-wiki-owner-step-checks, PR 4): asks the
+ * other machine's muninn (`MUNINN_PEERS`) to answer probes for itself through
+ * `GET /api/checks/answer`, and trusts the reply only through a closed grammar.
+ *
+ * - Calls a page makes in one pass are batched per machine: every
+ *   `viaPeer` of one `answerStepChecks` runs in the same synchronous pass, so
+ *   one microtask later the distinct probes go out in one request (chunks of
+ *   {@link MAX_PROBES_PER_PAGE}). A probe already in flight joins that request.
+ * - The reply is checked whole: status 200, a JSON content type, at most
+ *   {@link PEER_MAX_BYTES}, `v === 1`, `machine` equal to the name asked,
+ *   `results` as long as the asked list, each result echoing the asked probe's
+ *   kind and value at its index, each `state` one of the three. Anything off
+ *   makes every probe of that request `unknown`.
+ * - Its own cache, keyed by (machine, kind, value): `ok`/`not-yet` for
+ *   {@link PROBE_TTL_MS}; an `unknown` (transport failure, timeout, a rejected
+ *   reply, or the peer's own unknown) is not kept, so a slow first answer never
+ *   sticks.
+ */
+
+import type { CheckProbe } from "../../format/check-tag.ts";
+import { readBounded } from "../../utils/bounded-fetch.ts";
+import { MAX_PROBES_PER_PAGE, noPeer, PROBE_TTL_MS, type PeerAnswerer } from "./answer.ts";
+import type { ProbeResult, ProbeState } from "./probes.ts";
+
+export const CHECKS_ANSWER_PATH = "/api/checks/answer";
+/** The wire version both sides speak. */
+export const CHECKS_ANSWER_VERSION = 1;
+/** The whole request, body included: under the asking page's 8 s bound, above the answering side's {@link PEER_ROUTE_BOUND_MS}. */
+export const PEER_FETCH_TIMEOUT_MS = 7_000;
+/** The answering route's own bound: it must answer before the asker's {@link PEER_FETCH_TIMEOUT_MS} gives up. */
+export const PEER_ROUTE_BOUND_MS = 6_000;
+/** A reply for 60 probes is a few KiB. */
+export const PEER_MAX_BYTES = 64 * 1024;
+/** A peer's why is shown verbatim; longer is cut. */
+const WHY_MAX = 300;
+
+const STATES: ReadonlySet<string> = new Set<ProbeState>(["ok", "not-yet", "unknown"]);
+
+type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
+
+export interface PeerClientDeps {
+  peers: ReadonlyMap<string, string>;
+  fetch?: FetchLike;
+  timeoutMs?: number;
+  maxBytes?: number;
+  ttlMs?: number;
+  now?: () => number;
+}
+
+interface Entry {
+  promise: Promise<ProbeResult>;
+  settledAt: number | null;
+}
+
+interface Pending {
+  probe: CheckProbe;
+  resolve: (r: ProbeResult) => void;
+}
+
+const keyOf = (machine: string, p: CheckProbe) => `${machine}\u0000${p.kind}\u0000${p.value}`;
+
+/** The reply for `asked`, or a reason it is refused. Pure. */
+export function readPeerReply(body: unknown, machine: string, asked: readonly CheckProbe[]): ProbeResult[] | { refused: string } {
+  if (!body || typeof body !== "object") return { refused: "not a JSON object" };
+  const b = body as Record<string, unknown>;
+  if (b.v !== CHECKS_ANSWER_VERSION) return { refused: "speaks another version" };
+  if (b.machine !== machine) return { refused: "answered as another machine" };
+  if (!Array.isArray(b.results) || b.results.length !== asked.length) return { refused: "answered a different number of probes" };
+  const out: ProbeResult[] = [];
+  for (let i = 0; i < asked.length; i++) {
+    const r = b.results[i] as Record<string, unknown> | null;
+    if (!r || typeof r !== "object" || r.kind !== asked[i]!.kind || r.value !== asked[i]!.value) return { refused: "answered probes out of order" };
+    if (typeof r.state !== "string" || !STATES.has(r.state)) return { refused: "answered a state muninn does not know" };
+    if (r.why !== undefined && typeof r.why !== "string") return { refused: "answered a why that is not text" };
+    const why = typeof r.why === "string" && r.why.trim() ? r.why.slice(0, WHY_MAX) : r.state === "ok" ? "holds" : "no reason given";
+    out.push({ state: r.state as ProbeState, why: `${machine}: ${why}` });
+  }
+  return out;
+}
+
+/**
+ * A {@link PeerAnswerer} over `deps.peers`. One instance per process: its
+ * cache and in-flight batches are what keep a page from fanning out.
+ */
+export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
+  const doFetch: FetchLike = deps.fetch ?? ((input, init) => fetch(input, init));
+  const timeoutMs = deps.timeoutMs ?? PEER_FETCH_TIMEOUT_MS;
+  const maxBytes = deps.maxBytes ?? PEER_MAX_BYTES;
+  const ttlMs = deps.ttlMs ?? PROBE_TTL_MS;
+  const now = deps.now ?? Date.now;
+  const cache = new Map<string, Entry>();
+  const batches = new Map<string, Pending[]>();
+
+  const request = async (machine: string, base: string, asked: readonly CheckProbe[]): Promise<ProbeResult[]> => {
+    const fail = (why: string) => asked.map((): ProbeResult => ({ state: "unknown", why: `the peer for ${machine} ${why}` }));
+    const qs = new URLSearchParams({ v: String(CHECKS_ANSWER_VERSION), machine });
+    for (const p of asked) qs.append("p", `${p.kind}:${p.value}`);
+    const url = `${base}${CHECKS_ANSWER_PATH}?${qs}`;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ctl = new AbortController();
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
+        ctl.abort();
+        resolve("timeout");
+      }, timeoutMs);
+    });
+    const exchange = async (): Promise<ProbeResult[]> => {
+      let res: Response;
+      try {
+        res = await doFetch(url, { redirect: "error", signal: ctl.signal, headers: { accept: "application/json" } });
+      } catch {
+        return fail("could not be reached");
+      }
+      // An unread body is released by the abort in `finally`.
+      if (res.status !== 200 || res.redirected) return fail(`answered HTTP ${res.status}`);
+      if (!(res.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return fail("did not answer JSON");
+      let body: unknown;
+      try {
+        body = JSON.parse(await readBounded(res, maxBytes, base));
+      } catch {
+        return fail("sent a reply muninn cannot read");
+      }
+      const read = readPeerReply(body, machine, asked);
+      return "refused" in read ? fail(read.refused) : read;
+    };
+    try {
+      const got = await Promise.race([exchange(), timeout]);
+      return got === "timeout" ? fail("timed out") : got;
+    } finally {
+      clearTimeout(timer);
+      // Releases the connection and any body left unread; a no-op once the body was read.
+      ctl.abort();
+    }
+  };
+
+  const flush = (machine: string, base: string) => {
+    const batch = batches.get(machine) ?? [];
+    batches.delete(machine);
+    for (let i = 0; i < batch.length; i += MAX_PROBES_PER_PAGE) {
+      const chunk = batch.slice(i, i + MAX_PROBES_PER_PAGE);
+      void request(machine, base, chunk.map((c) => c.probe)).then(
+        (results) => chunk.forEach((c, k) => c.resolve(results[k] ?? { state: "unknown", why: `the peer for ${machine} sent no answer` })),
+        () => chunk.forEach((c) => c.resolve({ state: "unknown", why: `the peer for ${machine} failed` })),
+      );
+    }
+  };
+
+  const one = (machine: string, base: string, probe: CheckProbe): Promise<ProbeResult> => {
+    const key = keyOf(machine, probe);
+    const t = now();
+    const hit = cache.get(key);
+    if (hit && (hit.settledAt === null || t - hit.settledAt < ttlMs)) return hit.promise;
+    let resolve!: (r: ProbeResult) => void;
+    const entry: Entry = { promise: new Promise<ProbeResult>((r) => (resolve = r)), settledAt: null };
+    cache.set(key, entry);
+    void entry.promise.then((r) => {
+      if (r.state === "unknown") {
+        if (cache.get(key) === entry) cache.delete(key);
+      } else entry.settledAt = now();
+    });
+    for (const [k, e] of cache) if (e.settledAt !== null && t - e.settledAt >= ttlMs) cache.delete(k);
+    let batch = batches.get(machine);
+    if (!batch) {
+      batch = [];
+      batches.set(machine, batch);
+      queueMicrotask(() => flush(machine, base));
+    }
+    batch.push({ probe, resolve });
+    return entry.promise;
+  };
+
+  return async (machine, probes) => {
+    const base = deps.peers.get(machine);
+    if (!base) return noPeer(machine, probes);
+    return Promise.all(probes.map((p) => one(machine, base, p)));
+  };
+}
+
+/** The process's one client, rebuilt only when the configured peers change. */
+let shared: { sig: string; answer: PeerAnswerer } | null = null;
+export function sharedPeerAnswerer(peers: ReadonlyMap<string, string>): PeerAnswerer | undefined {
+  if (peers.size === 0) return undefined;
+  const sig = JSON.stringify([...peers]);
+  if (shared?.sig !== sig) shared = { sig, answer: createPeerAnswerer({ peers }) };
+  return shared.answer;
+}
