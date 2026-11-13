@@ -165,25 +165,46 @@ describe("answerStepChecks", () => {
 });
 
 describe("a tag lint reports is never ok", () => {
-  // Every surviving probe answers ok on this machine. Rows 1-4 reach the
-  // answer with a problem; rows 5-7 are no trailing tag at all, so no check.
-  const malformed = [
-    ["duplicate env", '<Check env="MISSING" env="HAVE" on="laptop" />', "component-attr"],
-    ["duplicate on", '<Check env="HAVE" on="mini" on="laptop" />', "component-attr"],
-    ["wrong-case ON", '<Check env="HAVE" ON="mini" />', "component-attr"],
-    ["unknown envs", '<Check envs="MISSING" env="HAVE" />', "component-attr"],
-    ["single-quoted value", `<Check env="HAVE" on='mini' />`, "check-placement"],
-    ["unquoted value", '<Check env="HAVE" on=mini />', "check-placement"],
-    ["stray text", '<Check env="HAVE" please on="laptop" />', "check-placement"],
+  // Every surviving probe answers ok on this machine.
+  const reachesAnswer = [
+    ["duplicate env", '<Check env="MISSING" env="HAVE" on="laptop" />'],
+    ["duplicate on", '<Check env="HAVE" on="mini" on="laptop" />'],
+    ["wrong-case ON", '<Check env="HAVE" ON="mini" />'],
+    ["unknown envs", '<Check envs="MISSING" env="HAVE" />'],
+  ] as const;
+  // Placement refuses these runs, so the step has no trailing tag at all.
+  const noTrailingTag = [
+    ["single-quoted value", `<Check env="HAVE" on='mini' />`],
+    ["unquoted value", '<Check env="HAVE" on=mini />'],
+    ["stray text", '<Check env="HAVE" please on="laptop" />'],
   ] as const;
   const controls = ['<Check env="HAVE" on="laptop" />', '<Check env="HAVE" migration="086" />', '<Check env="HAVE" />'];
 
-  test.each(malformed)("%s: lint reports it, and the step is not ok", async (_n, tag, check) => {
+  test.each(reachesAnswer)("%s: lint reports component-attr, and the answer holds one unknown step with problems", async (_n, tag) => {
     const text = page(`1. **Do it.** ${tag}`);
-    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain(check);
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain("component-attr");
+    const steps = checkedSteps(text)!.steps;
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.problems).not.toEqual([]);
     const a = await answerStepChecks(text, deps({ machine: "laptop" }));
-    expect(a.steps.filter((s) => s.state === "ok")).toEqual([]);
-    for (const s of checkedSteps(text)!.steps) expect(s.problems).not.toEqual([]);
+    expect(a.steps).toHaveLength(1);
+    expect(a.steps[0]!.state).toBe("unknown");
+    expect(a.steps[0]!.problems).not.toEqual([]);
+  });
+
+  test.each(noTrailingTag)("%s: lint reports check-placement, and the answer holds no step", async (_n, tag) => {
+    const text = page(`1. **Do it.** ${tag}`);
+    expect(checkComponents("plans/x.mdx", text).map((f) => f.check)).toContain("check-placement");
+    expect(checkedSteps(text)!.steps).toEqual([]);
+    expect((await answerStepChecks(text, deps({ machine: "laptop" }))).steps).toEqual([]);
+  });
+
+  test("a step's problem lines come in order: the run's grammar, then the attributes, then another tag", async () => {
+    const text = page('1. **Do.** <Check env="HAVE" migration="86" bogus="1" on="laptop" />', '   <Check env="MISSING" />');
+    const want = ['bogus="1" is not a Check attribute; it is not read', 'migration="86" is not a schema_migrations version, zero-padded to at least 3 digits (086); the probe is dropped', ANOTHER_CHECK];
+    expect(checkedSteps(text)!.steps.map((s) => s.problems)).toEqual([want]);
+    const a = await answerStepChecks(text, deps({ machine: "laptop" }));
+    expect(a.steps.map((s) => [s.state, s.problems])).toEqual([["unknown", want]]);
   });
 
   test("well-formed controls keep no problems and read ok", async () => {

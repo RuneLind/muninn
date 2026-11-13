@@ -87,6 +87,7 @@ export function readCheckRun(raw: string): { attrs: Record<string, string>; prob
   const attrs: Record<string, string> = {};
   const problems: string[] = [];
   const seen = new Set<string>();
+  const repeated = new Set<string>();
   let at = 0;
   let m: RegExpExecArray | null;
   PAIR.lastIndex = 0;
@@ -98,7 +99,11 @@ export function readCheckRun(raw: string): { attrs: Record<string, string>; prob
       problems.push(`${name}=${JSON.stringify(value)} is not a Check attribute; it is not read`);
       continue;
     }
-    if (seen.has(name)) problems.push(`${name} is given more than once; only the last is read`);
+    // One line per repeated name, however often it repeats.
+    if (seen.has(name) && !repeated.has(name)) {
+      repeated.add(name);
+      problems.push(`${name} is given more than once; only the last is read`);
+    }
     seen.add(name);
     attrs[name] = value;
   }
@@ -109,8 +114,9 @@ export function readCheckRun(raw: string): { attrs: Record<string, string>; prob
 
 /** The one validly placed check on a step's first line, or null: the tag must
  *  be the last thing on that line (`check-trailing.ts`). An earlier tag on the
- *  line, or one on a later line, is no check (lint `check-placement`). The
- *  run's grammar problems ({@link readCheckRun}) come first. */
+ *  line, or one on a later line, is no check (lint `check-placement`). Its
+ *  problems: the run's grammar lines ({@link readCheckRun}), then
+ *  `parseCheckAttrs`'s; `checkedSteps` appends `ANOTHER_CHECK` after both. */
 export function stepCheck(stepFirstLine: string): CheckAttrs | null {
   const t = trailingCheck(stepFirstLine.split("\n")[0]!);
   if (!t) return null;

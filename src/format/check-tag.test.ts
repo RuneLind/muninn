@@ -91,6 +91,13 @@ describe("readCheckRun", () => {
     }
     expect(readCheckRun(` env="A" env="B"`).attrs).toEqual({ env: "B" });
   });
+  test("a name given three times is one problem line, and the last value is read", () => {
+    expect(readCheckRun(` env="A" env="B" env="C"`)).toEqual({ attrs: { env: "C" }, problems: ["env is given more than once; only the last is read"] });
+    expect(readCheckRun(` on="a" env="A" on="b" env="B" on="c"`)).toEqual({
+      attrs: { on: "c", env: "B" },
+      problems: ["on is given more than once; only the last is read", "env is given more than once; only the last is read"],
+    });
+  });
   // Placement (`check-trailing.ts`) allows only spaces or tabs between pairs
   // and no `"`, backtick or newline in a value: the grammar reads that alphabet
   // and no wider one, so a run placement refuses is never a clean run.
