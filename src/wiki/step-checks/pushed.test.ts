@@ -193,7 +193,6 @@ describe("pushed: the truth table over a fake git", () => {
   test("finding 5: each operation's file in the git dir git names: unknown, naming the operation", async () => {
     const expected: [string, string][] = [
       ["MERGE_HEAD", "merge"],
-      ["REBASE_HEAD", "rebase"],
       ["rebase-merge", "rebase"],
       ["rebase-apply", "rebase or am"],
       ["CHERRY_PICK_HEAD", "cherry-pick"],

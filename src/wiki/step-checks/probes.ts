@@ -13,13 +13,17 @@
  * origin: `remote.origin.uploadpack`, credential helpers, the transport.
  * `pushed` answers any `remote.origin.*` key outside its allowlist (uploadpack
  * among them) `unknown` before its `ls-remote`, which then runs only
- * credential helpers and the transport, and reads only a network origin: a
- * local one is `unknown`, since a path cannot be proven another repository.
+ * credential helpers and the transport. Both read only a network origin: a
+ * local one is `unknown`, since a path cannot be proven another repository;
+ * both answer an operation in progress `unknown`, and a named roots entry
+ * that is not the repo `unknown` rather than trying another clone.
  * Every outside read comes in through {@link ProbeDeps}, so tests never touch
- * the real machine, except `pushed`'s `lstat` of the git-dir files an
- * operation in progress leaves, at paths git names, its `realpath` of each
- * worktree and git dir, its read of each linked git dir's `gitdir` file, and
- * its scratch index, a temp file outside the repo removed after use.
+ * the real machine, except: both probes' `realpath` of each candidate folder and
+ * of the toplevel git names in it (`findRepo`), and their `lstat` of the git-dir
+ * files an operation in progress leaves, at paths git names; `pushed`'s `realpath`
+ * of each worktree, of the git dir, common dir and toplevel git names in it and of
+ * the directory a linked git dir's `gitdir` file names, its read of that file,
+ * and its scratch index, a temp file outside the repo removed after use.
  *
  * A `why` is one short sentence for the reader: it names keys, repos,
  * branches, versions and short shas, never an env value, file contents or a
@@ -178,12 +182,19 @@ async function refusePartialClone(dir: string, label: string, git: GitRun): Prom
  * Whether `dir`'s HEAD contains origin's default-branch tip as origin has it
  * NOW, never the local `origin/<branch>` ref, which is only as fresh as the
  * last fetch. A partial clone is `unknown` before anything else
- * ({@link refusePartialClone}).
+ * ({@link refusePartialClone}), then an operation in progress (a stopped
+ * `pull --rebase` leaves HEAD on origin's tip: {@link refuseInProgress}) and a
+ * local origin ({@link refuseLocalOrigin}).
  */
 export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun): Promise<ProbeResult> {
   const git = checkoutGit(rawGit);
   const partial = await refusePartialClone(dir, label, git);
   if (partial) return partial;
+  const busy = await refuseInProgress(dir, label, git);
+  if (busy) return busy;
+  // `false`: checkout proves what origin's URL serves, not where a push goes, so core.sshCommand is not refused.
+  const local = await refuseLocalOrigin(dir, label, false, git);
+  if (local) return local;
   const remote = await git(dir, ["ls-remote", "--symref", "origin", "HEAD"], { timeoutMs: LS_REMOTE_MS, maxLines: 20 });
   if (!remote.ok || remote.capped) return unknown(`${gitFailure(remote, "git ls-remote")}: origin's default branch is unknown`);
   const head = parseSymrefHead(remote.stdout);
@@ -202,6 +213,12 @@ export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun
 
 async function repoDir(name: string, deps: ProbeDeps): Promise<{ dir: string } | ProbeResult> {
   if (!deps.roots) return unknown(`DECISION_TRIAGE_REPO_ROOTS is not set, so ${name} cannot be found`);
+  // A named entry is the only candidate, and one in another letter case is unknown: findRepo would fall through to another clone under the root dirs.
+  if (deps.roots.named.has(name)) {
+    const found = await findRepo(name, { dirs: [], named: deps.roots.named }, deps.git);
+    return "reason" in found ? unknown(`${name}'s entry in the repo roots is not that repo: ${found.reason}`) : found;
+  }
+  if ([...deps.roots.named.keys()].some((k) => k.toLowerCase() === name.toLowerCase())) return unknown(`the repo roots name ${name} in another letter case: muninn cannot tell whether that entry is this repo`);
   const found = await findRepo(name, deps.roots, deps.git);
   return "reason" in found ? unknown(`${name} not found under the repo roots: ${found.reason}`) : found;
 }
@@ -233,10 +250,14 @@ export const PUSHED_MAX_WORKTREES = 12;
  */
 const NO_FSMONITOR = ["-c", "core.fsmonitor=false"] as const;
 
-/** What an operation in progress leaves in a worktree's git dir, and the operation's name for the `why`. */
+/**
+ * What an operation in progress leaves in a worktree's git dir, and the operation's name for the `why`.
+ * Not `REBASE_HEAD`: it can outlive the rebase (`git rebase --quit` leaves it). A rebase stopped on a
+ * conflict leaves its backend's directory, `rebase-merge` or `rebase-apply`, which `git status` reads as
+ * a rebase (both measured in `checkout-git.test.ts`, git 2.54).
+ */
 const IN_PROGRESS: readonly (readonly [string, string])[] = [
   ["MERGE_HEAD", "merge"],
-  ["REBASE_HEAD", "rebase"],
   ["rebase-merge", "rebase"],
   ["rebase-apply", "rebase or am"],
   ["CHERRY_PICK_HEAD", "cherry-pick"],
@@ -406,12 +427,12 @@ function isNetworkUrl(url: string): boolean {
 }
 
 /**
- * `unknown` unless origin's URL after `insteadOf` (`ls-remote --get-url`, the
- * URL fetch and push both use once {@link refuseSplitOrigin} passed) is a
+ * `unknown` unless origin's URL after `insteadOf` (`ls-remote --get-url`) is a
  * network URL ({@link isNetworkUrl}): a local path, gitfile or bundle can be
- * this checkout's own objects under another name, which no check closes. An ssh
- * URL with `core.sshCommand` set is `unknown` too: realGit's `GIT_SSH_COMMAND`
- * overrides it for the probe, while a push honours it.
+ * this checkout's own objects under another name, which no check closes. With
+ * `sshCommand` (`pushed`, from {@link refuseSplitOrigin}; `checkout` passes
+ * false) a URL that is not `https`, `http` or `git` is `unknown` too: realGit's
+ * `GIT_SSH_COMMAND` overrides `core.sshCommand` for the probe, a push honours it.
  */
 async function refuseLocalOrigin(dir: string, name: string, sshCommand: boolean, git: GitRun): Promise<ProbeResult | null> {
   const res = await git(dir, ["ls-remote", "--get-url", "origin"], { timeoutMs: GIT_LOCAL_MS, maxLines: 2 });

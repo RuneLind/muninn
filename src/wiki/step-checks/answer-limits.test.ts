@@ -241,6 +241,9 @@ describe("git-spawning probes run at most 4 at a time", () => {
         if (a === "rev-parse --show-toplevel") return ok(`${cwd}\n`);
         if (a === "remote get-url origin") return ok(`https://github.com/x/${path.basename(cwd)}.git\n`);
         if (a === "ls-remote --symref origin HEAD") return ok(`ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`);
+        if (a === "ls-remote --get-url origin") return ok(`https://github.com/x/${path.basename(cwd)}.git\n`);
+        // No operation in progress: git names paths that do not exist.
+        if (a.startsWith("rev-parse --git-path")) return ok(args.filter((_, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""));
         // No partial-clone key (git config exits 1 on no match).
         if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
         return ok();
@@ -302,6 +305,8 @@ describe("property: capped, cached and slotted answers are never ok where the di
     if (a === "rev-parse --show-toplevel") return { ok: true, stdout: `${cwd}\n`, exitCode: 0 };
     if (a === "remote get-url origin") return { ok: true, stdout: `https://github.com/x/${path.basename(cwd)}.git\n`, exitCode: 0 };
     if (a.startsWith("config --get-regexp")) return { ok: false, stdout: "", exitCode: 1 };
+    if (a === "ls-remote --get-url origin") return { ok: true, stdout: `https://github.com/x/${path.basename(cwd)}.git\n`, exitCode: 0 };
+    if (a.startsWith("rev-parse --git-path")) return { ok: true, stdout: args.filter((_, i) => args[i - 1] === "--git-path").map((f) => `.git/${f}\n`).join(""), exitCode: 0 };
     if (a.startsWith("ls-remote")) return kind === "failing" ? { ok: false, stdout: "", exitCode: 128 } : { ok: true, stdout: `ref: refs/heads/main\tHEAD\n${tip}\tHEAD\n`, exitCode: 0 };
     if (a.startsWith("cat-file")) return kind === "not-yet" ? { ok: false, stdout: "", exitCode: 1 } : { ok: true, stdout: "", exitCode: 0 };
     return { ok: true, stdout: "", exitCode: 0 };
@@ -329,6 +334,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
     });
     let w = newWorld();
     const probeWorld = () => world({ env: w.env, git: repoGit(w.kinds), roots: { dirs: [], named }, applyRead: async () => (w.dbDown ? Promise.reject(new Error("down")) : w.applied) });
+    let checkoutOks = 0;
     for (let trial = 0; trial < 250; trial++) {
       // Up to 120 steps over 125 distinct probes: past the cap of 60 on many pages.
       const n = 1 + Math.floor(rand() * 120);
@@ -341,6 +347,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
       const a = await answerStepChecks(page(...items), deps(probeWorld(), { cache, gitSlots }));
       for (const got of probesOf(a)) {
         if (got.state !== "ok") continue;
+        if (got.kind === "checkout") checkoutOks++;
         const direct = await runProbe({ kind: got.kind, value: got.value } as CheckProbe, probeWorld());
         expect([trial, got.kind, got.value, direct.state]).toEqual([trial, got.kind, got.value, "ok"]);
       }
@@ -349,5 +356,7 @@ describe("property: capped, cached and slotted answers are never ok where the di
         w = newWorld();
       } else now += 100;
     }
+    // The loop checks only ok answers: a fake that stopped answering would pass it vacuously.
+    expect(checkoutOks).toBeGreaterThan(0);
   }, 30_000);
 });
