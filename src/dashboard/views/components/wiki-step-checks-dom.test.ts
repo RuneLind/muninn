@@ -402,6 +402,81 @@ describe("«Remove N checked» on the lane (owner-step checks PR 3)", () => {
     await settle();
     expect(sent.length).toBe(2);
   });
+
+  /** Escape as a keydown on `el`, bubbling as a key press does; true when something prevented it. */
+  const escape = (el: Element) => {
+    const Kb = (el.ownerDocument.defaultView as unknown as { KeyboardEvent: typeof KeyboardEvent }).KeyboardEvent;
+    const ev = new Kb("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  for (const [how, shut] of [
+    ["Cancel", (a: HTMLElement) => a.querySelector<HTMLButtonElement>(".wiki-step-done-all + .wiki-step-done-panel .wiki-step-done-cancel")!.click()],
+    ["Escape in the preview", (a: HTMLElement) => expect(escape(a.querySelector("[data-step-done-all-confirm]")!)).toBe(true)],
+  ] as [string, (a: HTMLElement) => void][]) {
+    test(`${how} closes the all-preview, sends no write and leaves the page as it was; focus goes back to the button`, async () => {
+      const a = mount();
+      const { sent, post } = poster(PREVIEW);
+      await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+      const before = a.innerHTML;
+      const btn = allButtons(a)[0]!;
+      btn.click();
+      await settle();
+      expect(a.querySelector("[data-step-done-all-confirm]")).not.toBeNull();
+      shut(a);
+      await settle();
+      expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+      expect(sent.map((s) => s.preview)).toEqual([true]);
+      expect(a.innerHTML).toBe(before);
+      expect(a.ownerDocument.activeElement).toBe(btn as never);
+    });
+  }
+
+  test("Escape on the button closes a preview still loading; the late answer draws nothing and nothing is written", async () => {
+    const a = mount();
+    const sent: Sent[] = [];
+    let release: (v: { status: number; data: Record<string, unknown> }) => void = () => {};
+    const post = async (body: Sent) => {
+      sent.push(body);
+      return new Promise<{ status: number; data: Record<string, unknown> }>((r) => (release = r));
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    const before = a.innerHTML;
+    const btn = allButtons(a)[0]!;
+    btn.click();
+    await settle();
+    expect(a.querySelector(".wiki-step-done-panel")!.textContent).toBe("Reading what goes…");
+    expect(escape(btn)).toBe(true);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    release({ status: 200, data: { ok: true, preview: true, ...PREVIEW } });
+    await settle();
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    expect(sent.length).toBe(1);
+    expect(a.innerHTML).toBe(before);
+  });
+
+  test("Escape on the button closes a refused preview (no Cancel there); with no panel open, Escape is left to the shell", async () => {
+    const a = mount();
+    const sent: Sent[] = [];
+    const post = async (body: Sent) => {
+      sent.push(body);
+      return { status: 409, data: { error: "«Add the key»: the step holds a nested list", refused: true } };
+    };
+    await enhanceStepChecks(a, ctx(sha256(PAGE)), respond(await answer()), { removeAll: true, post });
+    const before = a.innerHTML;
+    const btn = allButtons(a)[0]!;
+    btn.click();
+    await settle();
+    expect(a.querySelector(".wiki-step-done-panel [role=alert]")).not.toBeNull();
+    expect(a.querySelector(".wiki-step-done-panel .wiki-step-done-cancel")).toBeNull();
+    expect(escape(btn)).toBe(true);
+    expect(a.querySelectorAll(".wiki-step-done-panel").length).toBe(0);
+    expect(sent.length).toBe(1);
+    expect(a.innerHTML).toBe(before);
+    // Nothing open: the button does not swallow the shell's Escape.
+    expect(escape(btn)).toBe(false);
+  });
 });
 
 describe("a task-list step takes no check (item 2: the render, the route and lint agree)", () => {

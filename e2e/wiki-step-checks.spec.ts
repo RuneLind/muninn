@@ -659,6 +659,28 @@ test.describe("«Remove N checked» and a single Done share one panel", () => {
     await expect(panels).toHaveCount(1);
     expect(await readFile(path.join(root, REL_P), "utf8")).toBe(PAGES[REL_P]);
   });
+
+  test("after a write that left uncommitted edits, the page offers no «Remove N checked», as it offers no Done", async ({ page: p }) => {
+    // The write is answered as a failed commit, so the file stays as it was and both steps stay checked.
+    await p.route("**/api/wiki/step-done", (route) =>
+      route.request().method() === "POST" && route.request().postDataJSON()?.preview !== true
+        ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, committed: false, commitReason: "error", uncommitted: true }) })
+        : route.continue(),
+    );
+    await openAt(p, REL_P);
+    await expect(chips(p)).toHaveCount(2);
+    const all = p.locator(".wiki-article [data-step-done-all]");
+    await expect(all).toHaveText("Remove 2 checked");
+    await all.click();
+    await p.locator(".wiki-article [data-step-done-all-confirm]").click();
+    await expect(p.locator(".wiki-article .wiki-step-done-note")).toContainText("the commit failed");
+    // The page rendered again and its checks were answered: both ✓ are back, and neither control is.
+    await expect(chips(p)).toHaveCount(2);
+    expect(await chips(p).allTextContents()).toEqual(["✓", "✓"]);
+    await expect(all).toHaveCount(0);
+    await expect(dones(p)).toHaveCount(0);
+    expect(await readFile(path.join(root, REL_P), "utf8")).toBe(PAGES[REL_P]);
+  });
 });
 
 test.describe("owner-step check chips on a read-only instance", () => {

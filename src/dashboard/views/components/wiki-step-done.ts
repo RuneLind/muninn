@@ -479,6 +479,14 @@ function addRemoveAll(lane: HTMLElement, keys: string[], article: HTMLElement, c
     panel.remove();
     btn.focus({ preventScroll: true });
   };
+  // As on a single Done: focus stays here while the preview loads or after a refusal, so Escape here closes it.
+  btn.addEventListener("keydown", (e) => {
+    const open = row.querySelector(`:scope > .${STEP_DONE_PANEL_CLASS}`);
+    if (e.key !== "Escape" || !open) return;
+    e.preventDefault();
+    e.stopPropagation();
+    close(open);
+  });
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();

@@ -159,7 +159,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves down to 862,000.
 // 2026-11-13, «Remove N checked» (the lane button, its list preview, the shared write): 861,919 (293,484)
 // -> 865,897 (294,423), so the pin moves to 866,000.
-const WIKI_CLIENT_MAX_BYTES = 866_000;
+// 2026-11-13, its fix round 1 batch 2 (Escape on the lane button closes its panel): 866,050 (294,463),
+// so the pin moves to 866,200.
+const WIKI_CLIENT_MAX_BYTES = 866_200;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
