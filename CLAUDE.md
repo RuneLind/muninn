@@ -23,7 +23,7 @@ When debugging issues, exhaust the most likely root cause hypothesis thoroughly 
 
 ## Frontend
 
-Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. If a client bundle is ever needed, use Bun HTML imports (`Bun.serve({ routes: { "/": index } })`), never webpack/vite.
+Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. Client-side code ships as `*-browser.ts` entrypoints bundled with `Bun.build()` into IIFEs (`src/dashboard/views/components/bundle-browser-iife.ts`); never webpack/vite.
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
 
@@ -55,7 +55,7 @@ Each bot lives in `bots/<name>/` with its own:
 - `.mcp.json` — MCP tools (Gmail, Calendar, etc.)
 - `.claude/settings.json` — tool permissions
 
-Each bot selects its AI connector via `config.json` (`"connector"`: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. See "Switching chat connector" below for what each connector does and when to pick it; the Conventions section covers their internal mechanics.
+Each bot selects its AI connector via `config.json` (`"connector"`: `"claude-cli"`, `"copilot-sdk"`, `"openai-compat"`, or `"claude-sdk"`). Claude CLI is spawned with `cwd: bots/<name>/` so it auto-discovers all config and stores conversation history separately. See "Switching Haiku backend and chat connector" below for what each connector does and when to pick it; the Conventions section covers their internal mechanics.
 
 A bot is active if its folder has a `CLAUDE.md` and at least one platform token: `TELEGRAM_BOT_TOKEN_<NAME>`, or `SLACK_BOT_TOKEN_<NAME>` plus `SLACK_APP_TOKEN_<NAME>`.
 

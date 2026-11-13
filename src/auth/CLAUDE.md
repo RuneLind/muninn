@@ -135,13 +135,14 @@ request's jar with no expiry — precisely what `session.ts` exists to prevent.
 The cookie is a signed `{userId, expiry}`, not the secret. Rotating
 `MUNINN_LOCAL_TOKEN` invalidates every session.
 
-**A note for PR C, with its scope stated honestly:** `SameSite=Lax` blocks the
+**What `SameSite=Lax` covers:** it blocks the
 cross-site *POST* half of the CSRF surface **for requests arriving through the
 proxy** — so a CSRF test written against a proxied POST is green whether or not
-PR C's origin check exists. Two halves it does not cover: the side-effecting
+the origin check exists. Two halves it does not cover: the side-effecting
 top-level **GET** (`GET /chat/pending/:threadId`, `GET /api/research/ask`), and
 **anything at all from a browser on the muninn host**, which the loopback bypass
-authenticates before the cookie is read. PR C's tests belong on those.
+authenticates before the cookie is read. The origin check's tests target those
+(*Why the tests are where they are*, below).
 
 ## Roles
 
@@ -1171,9 +1172,8 @@ operator auditing themselves on their own feed.
   are in the user zone (the chat page fetches them) but take ANY collection name,
   so role `user` reads every huginn collection's document bodies — internal
   Confluence included — not just the selected bot's `wikiCollections`. The user
-  zone is wider than the chat-page fetch it was derived from. This is a
-  pre-existing exposure, not a regression vs `main`, and v1 is dev-only /
-  chat-only; scoping these two routes to the caller's bot is a follow-up.
+  zone is wider than the chat-page fetch it was derived from, and the exposure
+  predates the zone model; scoping these two routes to the caller's bot is a follow-up.
 - **`GET /chat/bots` (user zone) discloses filesystem layout and the prompt
   corpus.** It returns each bot's absolute server `dir` path and full prompt
   bodies, so any colleague on `entra` reads muninn's directory layout and every

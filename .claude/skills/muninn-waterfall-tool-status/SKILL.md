@@ -28,7 +28,7 @@ Server                          Browser (chat page)
 
 - **SSE** sends cached state on connect — on page refresh you get the last `request_progress`. This powers the waterfall.
 - **WebSocket** is ephemeral — events are only received while connected. On refresh, all intent/tool_status events are lost.
-- This is why tool use lines disappear on refresh: they came via WebSocket and were never stored. The `trace_id` persistence layer (section 5) addresses this.
+- This is why tool use lines disappear on refresh: they came via WebSocket and were never stored. The `trace_id` persistence layer (section 6) addresses this.
 
 ## 2. Request Progress Data Flow
 

@@ -16,8 +16,8 @@ Three files, one job:
 Surface: `POST /api/sync/run` (the ONE code path both triggers use — a 15-minute
 launchd `curl` and the `/models` **Repo sync** card) and `GET /api/sync/status`
 (the card's fetch-free poll). Route contract: the `sync-routes.ts` row in
-`src/dashboard/CLAUDE.md`. Config reference: the `SYNC_REPOS` row in the repo
-`CLAUDE.md`.
+`src/dashboard/reference/notes.md`. Config reference: the `SYNC_REPOS` section
+at the end of this file.
 
 ## The locking contract (stated ONCE, here)
 
