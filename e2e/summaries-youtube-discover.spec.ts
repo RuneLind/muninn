@@ -1156,3 +1156,64 @@ test("a successful re-read clears the refresh warning (fix round 2 batch 4)", as
   await expect(page.locator("#dscSeedFilter")).toBeVisible();
   await expect(page.locator("#dscSeedPanel")).not.toContainText("Could not refresh");
 });
+
+test("a re-read keeps every pick and the category the new listing still has (fix round 2 batch 7)", async ({ page }) => {
+  await page.clock.install();
+  await routeSeeds(page, [
+    { id: "a/One.md", category: "a" },
+    { id: "a/Two.md", category: "a" },
+    { id: "b/Three.md", category: "b" },
+    { id: "b/Gone.md", category: "b" },
+  ]);
+  await page.goto(`${BASE}/summaries/discover`);
+  const panel = page.locator("#dscSeedPanel");
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  for (const id of ["a/One.md", "a/Two.md", "b/Three.md", "b/Gone.md"]) await panel.locator(`[data-pick="${id}"]`).check();
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await panel.locator("#dscSeedCat").selectOption("b");
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  // The new listing orders "a" first and drops two picks: the kept category and the two kept picks stay.
+  await routeSeeds(page, [
+    { id: "a/One.md", category: "a" },
+    { id: "a/New.md", category: "a" },
+    { id: "a/Newer.md", category: "a" },
+    { id: "b/Three.md", category: "b" },
+  ]);
+  await page.clock.fastForward("11:00");
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await expect(panel.locator("#dscSeedCat")).toHaveValue("b");
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(panel.locator("#dscPickCount")).toHaveText("2 of 5 chosen");
+  await expect(panel.locator('[data-pick="a/One.md"]')).toBeChecked();
+  await expect(panel.locator('[data-pick="b/Three.md"]')).toBeChecked();
+});
+
+test("the listing is not read again at 9 min 59 s, and is at 10 min 1 s (fix round 2 batch 7)", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  page.on("request", (r) => {
+    if (r.url().includes("/api/summaries/discover/seeds")) reads++;
+  });
+  await page.goto(`${BASE}/summaries/discover`);
+  const pick = page.getByRole("button", { name: "+ Pick summaries…" });
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await pick.click();
+  await page.clock.fastForward("09:59");
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  expect(reads).toBe(1);
+  await pick.click();
+  await page.clock.fastForward("00:02");
+  await pick.click();
+  await expect.poll(() => reads).toBe(2);
+});
+
+test("the announcer stays outside the drawer's inert set (fix round 2 batch 7)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
+  await expect(page.locator("#dscDrawer")).toBeVisible();
+  expect(await page.evaluate(() => !document.getElementById("dscAnnounce")?.closest("[inert]"))).toBe(true);
+  expect(await page.evaluate(() => !!document.getElementById("dscProgress")?.closest("[inert]"))).toBe(true);
+});
