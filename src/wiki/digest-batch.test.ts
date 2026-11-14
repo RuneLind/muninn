@@ -101,12 +101,11 @@ describe("selectBatchEntries", () => {
   });
 });
 
-describe("entry line ranges", () => {
-  test("each entry runs from its header to the line before the next header", () => {
+describe("entry header lines", () => {
+  test("each entry records the 1-based line of its header", () => {
     const log = "# Log\n\n## [2026-11-01] update | Sync A\n\nbody\n\n## [2026-11-01] update | Sync B\nlast";
     const [a, b] = parseLogEntries(log);
-    expect([a!.line, a!.endLine]).toEqual([3, 6]);
-    expect([b!.line, b!.endLine]).toEqual([7, 8]);
+    expect([a!.line, b!.line]).toEqual([3, 7]);
   });
 });
 
@@ -132,6 +131,13 @@ describe("reading git's output", () => {
     expect(entryCommitFromLineLog(block(A, "## [2026-10-31] update | S", "## [2026-11-01] update | S") + block(B, null, "x"))).toBe(A);
     expect(entryCommitFromLineLog(block(A, "plain text", "## [2026-11-01] update | S") + block(B, null, "plain text"))).toBe(A);
   });
+  test("sha256 repositories: 64-hex commits are read", () => {
+    const H = "d".repeat(64);
+    const G = "e".repeat(64);
+    expect(blameOrigin(`${H} 3 21 1\nauthor x\n\t## [2026-11-01] update | S`)).toEqual({ sha: H, line: 3 });
+    expect(entryCommitFromLineLog(block(H, "## [2026-11-01] update | A", "## [2026-11-01] update | B") + block(G, null, "## [2026-11-01] update | A"))).toBe(G);
+  });
+
   test("a walk that never stops takes the oldest commit; no commit is null", () => {
     const keep = (sha: string) => block(sha, "## [2026-11-01] update | S", "## [2026-11-01] update | S2");
     expect(entryCommitFromLineLog(keep(A) + keep(B) + keep(C))).toBe(C);
@@ -348,6 +354,13 @@ describe("an entry's commit is the one that wrote its lines", () => {
       "rename sweep",
     );
     expect(await syncsOf()).toEqual([["Sync of [[New]]", ["c/a.md"]]]);
+  });
+
+  test("a sha256 repository lists the entry's pages", async () => {
+    await rm(path.join(repo, ".git"), { recursive: true, force: true });
+    git(repo, "init", "-q", "--object-format=sha256");
+    await commit({ "c/a.md": "# a\n", "log.md": "# Log\n\n## [2026-11-01] update | Sync\n\nBody.\n\n## [2026-10-20] note | Older\n" }, "sync");
+    expect(await syncsOf()).toEqual([["Sync", ["c/a.md"]]]);
   });
 
   test("an entry written while resolving a merge lists the pages the merge brought in", async () => {

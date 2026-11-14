@@ -60,10 +60,8 @@ export interface LogEntry {
   title: string;
   /** Free-markdown body under the header, trimmed (may be empty). */
   body: string;
-  /** 1-based line of the header in `log.md`, and the last line before the
-   *  next header (or the file's end). Set by {@link parseLogEntries}. */
+  /** 1-based line of the header in `log.md`. Set by {@link parseLogEntries}. */
   line?: number;
-  endLine?: number;
 }
 
 /** The digest returned to the route + persisted by a future scheduler. `bullets`
@@ -107,7 +105,7 @@ export function parseLogEntries(logText: string): LogEntry[] {
   const entries: LogEntry[] = [];
   let current: { date: string; kind: string; title: string; body: string[]; line: number } | null = null;
 
-  const flush = (endLine: number) => {
+  const flush = () => {
     if (current) {
       entries.push({
         date: current.date,
@@ -115,7 +113,6 @@ export function parseLogEntries(logText: string): LogEntry[] {
         title: current.title,
         body: current.body.join("\n").trim(),
         line: current.line,
-        endLine,
       });
     }
   };
@@ -124,7 +121,7 @@ export function parseLogEntries(logText: string): LogEntry[] {
     const line = lines[i]!;
     const m = line.match(ENTRY_HEADER_RE);
     if (m) {
-      flush(i);
+      flush();
       const remainder = m[2]!.trim();
       const pipe = remainder.indexOf("|");
       const kind = pipe === -1 ? "" : remainder.slice(0, pipe).trim();
@@ -134,7 +131,7 @@ export function parseLogEntries(logText: string): LogEntry[] {
       current.body.push(line);
     }
   }
-  flush(lines.length);
+  flush();
   return entries;
 }
 

@@ -6,9 +6,17 @@
  * touched the line and where it sat then, and `git log -L` walks the line's
  * history back from there. A later edit that keeps the header's date and kind
  * (a page-rename sweep over `log.md`) is walked past; a commit that wrote the
- * line fresh, or wrote it over another entry's header (huginn-nav did both on
- * 2026-05-10 and 2026-05-11), is the entry's commit. Sweep commits count here,
- * on purpose — the opposite of `git-dates.ts`.
+ * line fresh, or wrote it over a header with another date or kind (huginn-nav
+ * did so on 2026-05-10 and 2026-05-11), is the entry's commit. Sweep commits
+ * count here, on purpose — the opposite of `git-dates.ts`.
+ *
+ * Known limits, left for a follow-up: an entry written over a header with the
+ * same date and kind, and a sweep that changes a header's date or kind, are
+ * both read wrongly (the first walks past the entry's commit, the second
+ * stops at the sweep); a merge whose resolution edited the header reads as the
+ * entry's commit; an entry whose `log.md` lived at another path in its commit
+ * (the wiki folder moved) and one whose header has an uncommitted edit get no
+ * list; a reordered log maps a moved entry to the reorder commit.
  */
 
 import { runWikiGit } from "./git-dates.ts";
@@ -37,7 +45,7 @@ function headerKey(line: string): string | null {
 /** The commit and original line number on the first line of `git blame
  *  --porcelain` output. Null for an uncommitted line or unreadable output. */
 export function blameOrigin(porcelain: string): { sha: string; line: number } | null {
-  const m = porcelain.match(/^([0-9a-f]{40}) (\d+) \d+/);
+  const m = porcelain.match(/^([0-9a-f]{40}|[0-9a-f]{64}) (\d+) \d+/);
   if (!m || UNCOMMITTED.test(m[1]!)) return null;
   return { sha: m[1]!, line: Number(m[2]) };
 }
@@ -53,13 +61,15 @@ export function entryCommitFromLineLog(output: string): string | null {
   for (const block of output.split("\x01").slice(1)) {
     const [head, ...rest] = block.split("\n");
     const sha = head!.trim();
-    if (!/^[0-9a-f]{40}$/.test(sha)) continue;
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) continue;
     last = sha;
     const removed = rest.find((l) => l.startsWith("-") && !l.startsWith("---"));
     const added = rest.find((l) => l.startsWith("+") && !l.startsWith("+++"));
     if (removed === undefined) return sha;
-    // A removed line that is not a header has key null, which no header's
-    // key equals, so it stops the walk too.
+    // Keys compare the first removed and added lines. While `-L` follows one
+    // header line those are the header's two versions, and a removed line
+    // that is not a header (key null) stops the walk; a range grown to
+    // several lines is not handled.
     if (headerKey(removed.slice(1)) !== headerKey((added ?? "+").slice(1))) return sha;
   }
   return last;
