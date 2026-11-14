@@ -935,3 +935,52 @@ test("at 390px a long category name never widens the page (fix round 1 batch 4)"
   await expect(page.locator("#dscSeedCat")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+test("a pick run clears the picks (fix round 1 batch 5)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  const panel = page.locator("#dscSeedPanel");
+  await panel.locator(`[data-pick="${CAPTURED_DOC}"]`).check();
+  await panel.getByRole("button", { name: "Search from 1 summary" }).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(panel.locator("#dscPickCount")).toHaveText("0 of 5 chosen");
+  await expect(panel.locator(`[data-pick="${CAPTURED_DOC}"]`)).not.toBeChecked();
+});
+
+test("a failed shelves re-read is said, with no link to a shelf that is not on the page (fix round 1 batch 5)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.route("**/api/summaries/discover/shelves", (route) => route.fulfill({ status: 500, json: { error: "down" } }));
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  const progress = page.locator("#dscProgress");
+  await expect(progress).toContainText("Done", { timeout: 20_000 });
+  await expect(progress).toContainText("could not be shown");
+  await expect(progress.getByRole("link", { name: "Show the first" })).toHaveCount(0);
+});
+
+test("the seed listing is read again when it is over 10 minutes old (fix round 1 batch 5)", async ({ page }) => {
+  await page.clock.install();
+  let reads = 0;
+  page.on("request", (r) => {
+    if (r.url().includes("/api/summaries/discover/seeds")) reads++;
+  });
+  await page.goto(`${BASE}/summaries/discover`);
+  // The age counts from the read, not from the page load: read 9 minutes in, reopen 2 minutes later.
+  await page.clock.fastForward("09:00");
+  const pick = page.getByRole("button", { name: "+ Pick summaries…" });
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await pick.click();
+  await page.clock.fastForward("02:00");
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  expect(reads).toBe(1);
+  await pick.click();
+  await page.clock.fastForward("11:00");
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await expect.poll(() => reads).toBe(2);
+});

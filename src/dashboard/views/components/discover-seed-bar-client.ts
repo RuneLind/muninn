@@ -19,6 +19,8 @@ export type SeedMode = "category" | "week" | "pick";
 
 /** The pick list shows at most this many matches; the filter narrows the rest. */
 export const PICK_LIST_MAX = 50;
+/** A listing older than this is read again when a panel opens (new captures, a new day). */
+export const LISTING_MAX_AGE_MS = 10 * 60_000;
 
 /** Docs whose title or category holds every word of `query` (any case), in listing order, at most `limit`. */
 export function dscFilterSeeds(docs: readonly SeedDoc[], query: string, limit = PICK_LIST_MAX): SeedDoc[] {
@@ -41,6 +43,8 @@ interface SeedListing {
 interface BarState {
   mode: SeedMode | null;
   listing: SeedListing | null;
+  /** When the listing was read (`performance.now()`). */
+  listedAt: number;
   loading: boolean;
   loadError: string | null;
   category: string;
@@ -52,6 +56,7 @@ interface BarState {
 const bar: BarState = {
   mode: null,
   listing: null,
+  listedAt: 0,
   loading: false,
   loadError: null,
   category: "",
@@ -155,6 +160,7 @@ async function loadListing(): Promise<void> {
     const data = (await res.json().catch(() => ({}))) as Partial<SeedListing> & { error?: string };
     if (!res.ok || !Array.isArray(data.docs)) throw new Error(data.error ?? `HTTP ${res.status}`);
     bar.listing = { docs: data.docs, categories: data.categories ?? [], now: typeof data.now === "number" ? data.now : Date.now() };
+    bar.listedAt = performance.now();
     bar.category ||= bar.listing.categories[0]?.category ?? "";
   } catch (err) {
     bar.loadError = `Could not list your YouTube summaries: ${err instanceof Error ? err.message : String(err)}`;
@@ -167,7 +173,8 @@ async function loadListing(): Promise<void> {
 function openMode(mode: SeedMode): void {
   if (bar.running) return;
   bar.mode = bar.mode === mode ? null : mode;
-  if (bar.mode && !bar.listing && !bar.loading) {
+  const stale = bar.listing !== null && performance.now() - bar.listedAt > LISTING_MAX_AGE_MS;
+  if (bar.mode && (!bar.listing || stale) && !bar.loading) {
     void loadListing();
     return;
   }
@@ -206,6 +213,7 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
   const failed: string[] = [];
   let firstRun: string | null = null;
   let landed = 0;
+  let unshown = false;
   for (const [i, seed] of seeds.entries()) {
     progress(`Searching ${i + 1} of ${seeds.length}: <b>${escHtml(seed.title)}</b>…`);
     try {
@@ -227,15 +235,22 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
       firstRun ??= data.runId;
       const read = await readShelves();
       if (read) onShelves(read.shelves, read.requestedAt);
+      else unshown = true;
     } catch {
       failed.push(`${seed.title}: the server did not answer`);
     }
   }
   bar.running = false;
+  // The picks were searched: a second Run would search them again.
+  bar.picked.clear();
   syncModeButtons();
   const parts = [`${landed} new shel${landed === 1 ? "f" : "ves"}`];
   if (failed.length) parts.push(`${failed.length} failed`);
-  const show = firstRun ? ` · <a href="#run-${escHtml(firstRun)}">Show the first</a>` : "";
+  const show = unshown
+    ? " · the new shelves could not be shown: reload the page"
+    : firstRun
+      ? ` · <a href="#run-${escHtml(firstRun)}">Show the first</a>`
+      : "";
   const why = failed.length ? `<ul class="dsc-fail-list">${failed.map((f) => `<li>${escHtml(f)}</li>`).join("")}</ul>` : "";
   progress(`Done: ${parts.join(", ")}${show}${why}`);
   // The drawer inerts the progress line's live region: say the outcome through the page's toast instead.
