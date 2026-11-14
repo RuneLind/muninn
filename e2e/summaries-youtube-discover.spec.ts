@@ -1102,3 +1102,57 @@ test("picks stay when another mode runs, and a pick that failed stays for a retr
   await page.getByRole("button", { name: "+ Pick summaries…" }).click();
   await expect(panel.locator("#dscPickCount")).toHaveText("1 of 5 chosen");
 });
+
+/** The seeds route answers `docs` (one category each) on the next read: a listing that changed. */
+async function routeSeeds(page: Page, docs: { id: string; category: string }[]): Promise<void> {
+  await page.unroute("**/api/summaries/discover/seeds");
+  await page.route("**/api/summaries/discover/seeds", (route) =>
+    route.fulfill({
+      json: {
+        docs: docs.map((d) => ({ id: d.id, title: d.id.split("/").pop()!.replace(/\.md$/, ""), category: d.category, date: "2026-11-14" })),
+        categories: [...new Set(docs.map((d) => d.category))].map((category) => ({ category, count: docs.filter((d) => d.category === category).length })),
+        now: Date.parse("2026-11-14T12:00:00Z"),
+      },
+    }),
+  );
+}
+
+test("a re-read drops picks and a category the new listing no longer has (fix round 2 batch 4)", async ({ page }) => {
+  await page.clock.install();
+  await routeSeeds(page, [
+    { id: "old/Gone talk.md", category: "old" },
+    { id: "new/Kept talk.md", category: "new" },
+  ]);
+  await page.goto(`${BASE}/summaries/discover`);
+  const panel = page.locator("#dscSeedPanel");
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await panel.locator('[data-pick="old/Gone talk.md"]').check();
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await panel.locator("#dscSeedCat").selectOption("old");
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await routeSeeds(page, [{ id: "new/Kept talk.md", category: "new" }]);
+  await page.clock.fastForward("11:00");
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await expect(panel.locator("#dscSeedCat")).toHaveValue("new");
+  await expect(panel.getByRole("button", { name: "Search from 1 summary" })).toBeEnabled();
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(panel.locator("#dscPickCount")).toHaveText("0 of 5 chosen");
+});
+
+test("a successful re-read clears the refresh warning (fix round 2 batch 4)", async ({ page }) => {
+  await page.clock.install();
+  await page.goto(`${BASE}/summaries/discover`);
+  const pick = page.getByRole("button", { name: "+ Pick summaries…" });
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await pick.click();
+  await page.route("**/api/summaries/discover/seeds", (route) => route.fulfill({ status: 500, json: { error: "down" } }));
+  await page.clock.fastForward("11:00");
+  await pick.click();
+  await expect(page.locator("#dscSeedPanel")).toContainText("Could not refresh");
+  await pick.click();
+  await page.unroute("**/api/summaries/discover/seeds");
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await expect(page.locator("#dscSeedPanel")).not.toContainText("Could not refresh");
+});

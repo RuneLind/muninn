@@ -169,6 +169,11 @@ async function loadListing(): Promise<void> {
     if (!res.ok || !Array.isArray(data.docs)) throw new Error(data.error ?? `HTTP ${res.status}`);
     bar.listing = { docs: data.docs, categories: data.categories ?? [], now: typeof data.now === "number" ? data.now : Date.now() };
     bar.listedAt = performance.now();
+    // The state derived from a listing is the category and the picks (the filter is free text):
+    // keep only what the new listing still has.
+    const ids = new Set(bar.listing.docs.map((d) => d.id));
+    for (const id of [...bar.picked.keys()]) if (!ids.has(id)) bar.picked.delete(id);
+    if (!bar.listing.categories.some((c) => c.category === bar.category)) bar.category = "";
     bar.category ||= bar.listing.categories[0]?.category ?? "";
     bar.refreshError = null;
   } catch (err) {
