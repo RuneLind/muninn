@@ -8,9 +8,11 @@
  * Two steps, because the endpoint answers after the render and `linkRefs`
  * runs during it:
  *  1. {@link wrapXrefRuns}, BEFORE `linkRefs`: every candidate run (an id run
- *     whose next sibling is an `a.wiki-link[data-relpath]`, read out of inline
- *     wrappers and across a `.fact-chip`) goes into a `span.wiki-xref-run`,
- *     which `linkRefs` skips (`REF_SKIP`). No candidate, no wrapper, no call.
+ *     whose next sibling is an `a.wiki-link[data-relpath]` or a
+ *     `span.wiki-link-missing`, read out of inline wrappers and across a
+ *     `.fact-chip`) goes into a `span.wiki-xref-run`, which `linkRefs` skips
+ *     (`REF_SKIP`). No candidate, no wrapper, no call; a run before a missing
+ *     page is wrapped (so it never links in-page) but asks no page.
  *  2. {@link resolveXrefRuns} when the answers arrive: the ids the page
  *     defines become `a.wiki-xref` links, and every wrapper is unwrapped.
  *
@@ -41,12 +43,16 @@ const BARRIER = `a, code, kbd, .${XREF_RUN_CLASS}`;
 
 export interface XrefCandidate {
   wrapper: HTMLElement;
-  /** The wikilink's `data-relpath`. */
+  /** The wikilink's `data-relpath`; `""` before a `wiki-link-missing` span. */
   relPath: string;
   /** The ids of the run, in order. */
   ids: string[];
-  link: HTMLAnchorElement;
+  link: HTMLElement;
 }
+
+/** The elements a run can stand before: a resolved wikilink, or a missing
+ *  one (its run stays plain text, and no page is asked). */
+const RUN_END = `a.wiki-link[${NAV_RELPATH_ATTR}], span.wiki-link-missing`;
 
 interface Piece {
   node: Node;
@@ -107,10 +113,11 @@ function pieceAt(pieces: Piece[], off: number, forEnd: boolean): Piece {
  */
 export function wrapXrefRuns(article: Element, trackerProjects: readonly string[] = []): XrefCandidate[] {
   const out: XrefCandidate[] = [];
-  const links = Array.from(article.querySelectorAll<HTMLAnchorElement>(`a.wiki-link[${NAV_RELPATH_ATTR}]`));
+  const links = Array.from(article.querySelectorAll<HTMLElement>(RUN_END));
   for (const link of links) {
-    const relPath = link.getAttribute(NAV_RELPATH_ATTR) ?? "";
-    if (!relPath) continue;
+    const missing = link.matches("span.wiki-link-missing");
+    const relPath = missing ? "" : (link.getAttribute(NAV_RELPATH_ATTR) ?? "");
+    if (!missing && !relPath) continue;
     const before = piecesBefore(link, article);
     if (!before || !before.pieces.length) continue;
     const { pieces } = before;
@@ -147,7 +154,7 @@ interface LinkInfo {
 const linkInfo = new WeakMap<HTMLAnchorElement, LinkInfo>();
 
 /** The wikilink's own href (`/wiki?wiki=…&relPath=…`) with the item's anchor. */
-function hrefFor(link: HTMLAnchorElement, relPath: string, anchor: string): string {
+function hrefFor(link: HTMLElement, relPath: string, anchor: string): string {
   const base = link.getAttribute("href") || `/wiki?relPath=${encodeURIComponent(relPath)}`;
   return `${base.split("#")[0]}#${encodeURIComponent(anchor)}`;
 }
@@ -222,13 +229,14 @@ export function xrefFetchVia(withWiki: (url: string) => string): XrefFetch {
 /** Ask each linked page once for the ids its runs name, then resolve. */
 export async function fetchAndResolveXrefs(cands: readonly XrefCandidate[], fetchRef: XrefFetch, language = "en"): Promise<number> {
   if (!cands.length) return 0;
-  installXrefPeek();
   const byPage = new Map<string, Set<string>>();
   for (const c of cands) {
+    if (!c.relPath) continue;
     const set = byPage.get(c.relPath) ?? new Set<string>();
     for (const id of c.ids) set.add(id);
     byPage.set(c.relPath, set);
   }
+  if (byPage.size) installXrefPeek();
   const answers = new Map<string, XrefAnswer | null>();
   await Promise.all(
     [...byPage].map(async ([relPath, ids]) => {

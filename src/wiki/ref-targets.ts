@@ -15,25 +15,51 @@
 import { leadSentence } from "../format/lead-sentence.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { DECISION_ID_RE, parseQuestionPage, type QuestionState } from "../format/question.ts";
+import { decodeBasicCharRefs } from "../format/safe-link-href.ts";
 import type { XrefKind, XrefTarget } from "./core/cross-ref.ts";
 import { decisionText } from "./decision-text.ts";
-
-/** `escapeHtml`'s entities and numeric references back to text. */
-function decode(s: string): string {
-  return s.replace(/&(amp|lt|gt|quot|#39|#x[0-9a-f]+|#[0-9]+);/gi, (_m, e: string) => {
-    const k = e.toLowerCase();
-    if (k === "amp") return "&";
-    if (k === "lt") return "<";
-    if (k === "gt") return ">";
-    if (k === "quot") return '"';
-    if (k.startsWith("#x")) return String.fromCodePoint(parseInt(k.slice(2), 16));
-    return String.fromCodePoint(Number(k.slice(1)));
-  });
-}
+import { stripMarkdownSyntax } from "./walkthrough.ts";
 
 /** An HTML fragment's text, whitespace collapsed. */
 function plain(html: string): string {
-  return decode(html.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+  return decodeBasicCharRefs(html.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+}
+
+/** The element whose open tag starts at `at`, to its balanced `</tag>`:
+ *  where its content starts, where its close tag starts and ends. */
+function balanced(html: string, at: number, tag: string): { inner: number; close: number; end: number } {
+  const inner = html.indexOf(">", at) + 1;
+  const re = new RegExp(`<(/?)${tag}\\b[^>]*>`, "gi");
+  re.lastIndex = inner;
+  let depth = 1;
+  for (let m = re.exec(html); m; m = re.exec(html)) {
+    if (!m[1]) depth++;
+    else if (--depth === 0) return { inner, close: m.index, end: m.index + m[0].length };
+  }
+  return { inner, close: html.length, end: html.length };
+}
+
+/** The inner HTML of the first `<tag class="cls">` in `html`, balanced; null when there is none. */
+function innerOf(html: string, tag: string, cls: string): string | null {
+  const at = html.indexOf(`<${tag} class="${cls}"`);
+  if (at === -1) return null;
+  const b = balanced(html, at, tag);
+  return html.slice(b.inner, b.close);
+}
+
+/** `html` without its glossary definitions (`.gl-tip`): hidden tooltip text. */
+function withoutTips(html: string): string {
+  for (let at = html.indexOf('<span class="gl-tip"'); at !== -1; at = html.indexOf('<span class="gl-tip"', at)) {
+    html = html.slice(0, at) + html.slice(balanced(html, at, "span").end);
+  }
+  return html;
+}
+
+/** A DecisionLog item's lead sentence as plain text. Code and emphasis syntax
+ *  (`~~`, `*`, `_`, `**`) go first, so a bold opening is part of the sentence
+ *  rather than all of it; `leadSentence` flattens the links. */
+function itemLead(itemText: string): string {
+  return leadSentence(stripMarkdownSyntax(itemText.split("\n")[0]!, { emphasis: true }));
 }
 
 /** The in-page linker's id test (`isRefId`): two or more characters, one a letter. */
@@ -96,7 +122,7 @@ export function pageRefTargets(html: string, markdown: string, ids: readonly str
       const li = segment(html, c.at, "</li>");
       const date = /data-item-date="(\d{4}-\d{2}-\d{2})"/.exec(li)?.[1];
       const isDecision = DECISION_ID_RE.test(id) || /\bdl-decision\b/.test(li.slice(0, li.indexOf(">")));
-      const text = entry ? leadSentence(entry.itemText) : plain(li.replace(/^[\s\S]*?<\/a>/, ""));
+      const text = entry ? itemLead(entry.itemText) : plain(li.replace(/^[\s\S]*?<\/a>/, ""));
       out[id] = {
         kind: "decision",
         anchor: c.anchor,
@@ -105,14 +131,16 @@ export function pageRefTargets(html: string, markdown: string, ids: readonly str
         ...(date ? { date } : {}),
       };
     } else if (c.kind === "query") {
-      const sec = segment(html, c.at, '<details class="query-sql"');
-      const question = /<span class="query-question">([\s\S]*?)<\/span>/.exec(sec)?.[1];
-      const answer = /<div class="query-answer">([\s\S]*?)<\/div>/.exec(sec)?.[1];
+      // The card's own head (every card renders one), so a card without a
+      // question or an answer never reads the next card's.
+      const head = innerOf(html.slice(c.at), "div", "query-head") ?? "";
+      const question = innerOf(head, "span", "query-question");
+      const answer = innerOf(head, "div", "query-answer");
       out[id] = {
         kind: "query",
         anchor: c.anchor,
-        text: question ? plain(question) : "",
-        ...(answer ? { answer: plain(answer) } : {}),
+        text: question ? plain(withoutTips(question)) : "",
+        ...(answer ? { answer: plain(withoutTips(answer)) } : {}),
       };
     } else {
       const row = segment(html, c.at, "</div>");

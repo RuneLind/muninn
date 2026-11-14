@@ -100,3 +100,76 @@ describe("pageRefTargets — Query cards and CaseBoard rows", () => {
     expect(t.C7!.text).toContain("Held out for now");
   });
 });
+
+describe("pageRefTargets — hover text is the item's own plain text", () => {
+  const log = (...items: string[]) => ["# A", "", "<DecisionLog>", "", ...items, "", "</DecisionLog>"].join("\n");
+
+  test("a DecisionLog item: strike, emphasis, code and links flattened; a bold opening does not end the sentence", () => {
+    const t = targets(
+      log(
+        "- **S4** — ~~Is the widget shipped in 2024?~~ Closed 2026-10-07 (D1).",
+        "- **D1** — **Bold** text with `code` here. Second.",
+        "- **D2** — An *em* and _u_ word, see [[Page B|B]] and [docs](https://example.com).",
+      ),
+      ["S4", "D1", "D2"],
+    );
+    expect(t.S4!.text).toBe("Is the widget shipped in 2024?");
+    expect(t.D1!.text).toBe("Bold text with code here.");
+    expect(t.D2!.text).toBe("An em and u word, see B and docs.");
+  });
+
+  test("a Query card without a question or an answer never reads the next card's", () => {
+    const md = [
+      '<Query id="Q-1">',
+      "",
+      "Body one.",
+      "",
+      "</Query>",
+      "",
+      '<Query id="Q-2" question="Second question?" answer="Second answer.">',
+      "",
+      "Body two.",
+      "",
+      "</Query>",
+    ].join("\n");
+    const t = targets(md, ["Q-1", "Q-2"]);
+    expect(t["Q-1"]).toEqual({ kind: "query", anchor: "q-1", text: "" });
+    expect(t["Q-2"]).toMatchObject({ text: "Second question?", answer: "Second answer." });
+  });
+
+  test("a glossary term or a missing wikilink inside the question keeps the whole question, without the hidden definition", () => {
+    const md = [
+      '<Query id="Q-5" question="How many Hold cases per [[Nope]] month and theme?" answer="Twelve Holds in all months.">',
+      "",
+      "Body.",
+      "",
+      "</Query>",
+      "",
+      "<Glossary>",
+      "",
+      "- **Hold:** a case kept back secretdefinition",
+      "",
+      "</Glossary>",
+    ].join("\n");
+    const html = render(md);
+    expect(html).toContain('class="gl-tip"');
+    expect(html).toContain("wiki-link-missing");
+    const t = pageRefTargets(html, md, ["Q-5"])["Q-5"]!;
+    expect(t.text).toBe("How many Hold cases per Nope month and theme?");
+    expect(t.answer).toBe("Twelve Holds in all months.");
+  });
+
+  test("an answer with a nested div is read whole", () => {
+    const html =
+      '<section class="query" id="q-8"><div class="query-head"><div class="query-title"><a class="query-id" href="#q-8">Q-8</a></div>' +
+      '<div class="query-answer">Twelve <div class="x">nested</div> in all.</div></div></section>';
+    expect(pageRefTargets(html, "", ["Q-8"])["Q-8"]!.answer).toBe("Twelve nested in all.");
+  });
+
+  test("an out-of-range character reference in a question does not throw", () => {
+    const html =
+      '<section class="query" id="q-9"><div class="query-head"><div class="query-title"><a class="query-id" href="#q-9">Q-9</a>' +
+      '<span class="query-question">Big &#9999999; ref?</span></div></div></section>';
+    expect(pageRefTargets(html, "", ["Q-9"])["Q-9"]!.text).toBe("Big � ref?");
+  });
+});

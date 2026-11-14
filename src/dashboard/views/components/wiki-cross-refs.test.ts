@@ -50,8 +50,8 @@ describe("wrapXrefRuns — the candidates", () => {
     expect(out.every((c) => c.relPath === "plans/a.md")).toBe(true);
   });
 
-  test("no candidate, no wrapper: a word, plain text after the connector, a missing page, a tracker key", () => {
-    for (const md of ["omtalt i [[A]]", "Q-1 i prod, se [[A]]", "D1 i [[Nope]]", "MELOSYS-8308 på [[A]]"]) {
+  test("no candidate, no wrapper: a word, plain text after the connector, a tracker key", () => {
+    for (const md of ["omtalt i [[A]]", "Q-1 i prod, se [[A]]", "MELOSYS-8308 på [[A]]"]) {
       const { out, article } = withB(md, (a) => wrapXrefRuns(a, ["MELOSYS"]));
       expect(ids(out), md).toEqual([]);
       expect(article.querySelectorAll(".wiki-xref-run").length, md).toBe(0);
@@ -143,6 +143,28 @@ describe("the two steps around linkRefs", () => {
     const a = article.querySelector("a.wiki-xref")!;
     expect(a.classList.contains("wiki-ref")).toBe(false);
     expect(navTargetFrom(a)).toEqual({ kind: "relPath", relPath: "plans/a.md", anchor: "d1-2" });
+  });
+});
+
+describe("a run before a missing page (`wiki-link-missing`)", () => {
+  test("stays plain where B defines the id: no in-page link, no call, no wrapper left", async () => {
+    const calls: string[] = [];
+    const fetchRef = async (relPath: string, ids: string[]) => {
+      calls.push(`${relPath}:${ids.join(",")}`);
+      return null;
+    };
+    let pending: Promise<number> = Promise.resolve(0);
+    const { article } = withB("Se D7 i [[Nope]].\n" + B_LOG, (a) => {
+      const cands = wrapXrefRuns(a);
+      linkRefs(a);
+      pending = fetchAndResolveXrefs(cands, fetchRef);
+    });
+    expect(await pending).toBe(0);
+    expect(calls).toEqual([]);
+    const prose = Array.from(article.querySelectorAll("a.wiki-ref")).filter((x) => !x.closest(".decision-log"));
+    expect(prose.map((x) => x.outerHTML)).toEqual([]);
+    expect(article.querySelectorAll(".wiki-xref-run").length).toBe(0);
+    expect(article.textContent).toContain("Se D7 i Nope");
   });
 });
 
