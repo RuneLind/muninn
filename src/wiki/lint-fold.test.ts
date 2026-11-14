@@ -26,8 +26,46 @@ test("foldedIntoNamed: no key, a bare key, an empty list, a comment and another 
   expect(foldedIntoNamed('folded_into: ""')).toBe(false);
   expect(foldedIntoNamed("folded_into: # todo")).toBe(false);
   expect(foldedIntoNamed("folded_into:\n  # todo\ntags:\n  - a")).toBe(false);
-  expect(foldedIntoNamed("  folded_into: none")).toBe(false);
+  expect(foldedIntoNamed("title: P\n  folded_into: none")).toBe(false);
   expect(foldedIntoNamed("not_folded_into: none")).toBe(false);
+});
+
+test("foldedIntoNamed reads the key as YAML does: the last of two keys wins, and an entry that holds nothing names nothing", () => {
+  // Review finding 2: YAML keeps the last duplicate.
+  expect(foldedIntoNamed("folded_into:\nfolded_into: none")).toBe(true);
+  expect(foldedIntoNamed("folded_into: none\nfolded_into:")).toBe(false);
+  // Review finding 3: forms that hold no page.
+  for (const empty of ["folded_into:\n  -", 'folded_into:\n  - ""', 'folded_into: [""]', "folded_into: [\n]", "folded_into: null", "folded_into: ~", "folded_into: >\ntags: [a]", "folded_into: {}"]) {
+    expect(foldedIntoNamed(empty), JSON.stringify(empty)).toBe(false);
+  }
+  expect(foldedIntoNamed('folded_into:\n  - ""\n  - "[[projects/x]]"')).toBe(true);
+  expect(foldedIntoNamed("folded_into: [[projects/x]]")).toBe(true);
+});
+
+test("when the frontmatter is not YAML, the key's own entry is still read: last key, its block list, CRLF, a quoted key", () => {
+  const broken = "status_note: PR 1: merged";
+  expect(() => Bun.YAML.parse(broken)).toThrow();
+  expect(foldedIntoNamed(`${broken}\nfolded_into: none`)).toBe(true);
+  expect(foldedIntoNamed(`folded_into:\n  - "[[projects/x]]"\n${broken}`)).toBe(true);
+  expect(foldedIntoNamed(`${broken}\r\nfolded_into: none\r`)).toBe(true);
+  expect(foldedIntoNamed(`${broken}\n"folded_into": none`)).toBe(true);
+  expect(foldedIntoNamed(`folded_into:\n${broken}\nfolded_into: none`)).toBe(true);
+  expect(foldedIntoNamed(`folded_into: none\n${broken}\nfolded_into:`)).toBe(false);
+  expect(foldedIntoNamed(`${broken}\nfolded_into:\ntags: [a]`)).toBe(false);
+  expect(foldedIntoNamed(`${broken}\n  folded_into: none`)).toBe(false);
+  expect(foldedIntoNamed(broken)).toBe(false);
+});
+
+test("a CRLF plan whose frontmatter ends with the key is read like an LF one", async () => {
+  // Review finding 1: `splitFrontmatter` leaves the `\r` on the frontmatter's last line.
+  const root = await testTempDir(path.join(tmpdir(), "wiki-lint-fold-crlf-"));
+  const page = (last: string) => ["---", "title: P", "updated: 2026-11-14", "plan_status: shipped", "status_date: 2026-11-14", last, "---", "", "# P", "", "Body.", "", "## Sources", "", "- x", ""].join("\r\n");
+  await Bun.write(path.join(root, "plans/crlf-none.md"), page("folded_into: none"));
+  await Bun.write(path.join(root, "plans/crlf-link.md"), page('folded_into: ["[[plans/crlf-none]]"]'));
+  await Bun.write(path.join(root, "plans/crlf-bare.md"), page("folded_into:"));
+  await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ foldCheck: { since: "2026-11-14" } }));
+  const got = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.check === "plan-not-folded").map((f) => f.relPath);
+  expect(got).toEqual(["plans/crlf-bare.md"]);
 });
 
 test("checkPlanFold: only a shipped plan under plans/, dated on or after the cutoff, with no entry", () => {

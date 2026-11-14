@@ -33,31 +33,47 @@ export function parseFoldCheck(value: unknown): { config: FoldCheckConfig | null
   return { config: null, warnings: [`since ${JSON.stringify(since)} is not a YYYY-MM-DD day — ignoring the block`] };
 }
 
-const KEY_RE = /^folded_into[ \t]*:(.*)$/;
+/** The key's own line, bare or quoted. */
+const KEY_RE = /^(["']?)folded_into\1[ \t]*:/;
 /** A line that starts a new top-level key: column 0, not a comment or a list item. */
 const TOP_LEVEL_RE = /^[^\s#-]/;
 
+/** A YAML mapping, or `null` when the text does not parse to one. */
+function yamlMap(text: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = Bun.YAML.parse(text);
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A value that names a page: a non-empty string, or a list holding one (an
+ *  unquoted `[[link]]` is a list in a list). Null, a number and a mapping do not. */
+function names(value: unknown): boolean {
+  if (typeof value === "string") return value.trim() !== "";
+  return Array.isArray(value) && value.some(names);
+}
+
 /**
- * Whether the frontmatter's `folded_into:` names something: text after the
- * colon, or a line under the key before the next top-level key (a block list).
- * Read from the raw lines because `parseFrontmatter` returns no key for a bare
- * `folded_into:` or a block list.
+ * Whether the frontmatter's `folded_into:` names something. The frontmatter is
+ * read as YAML, as `owns:` and `related:` are (`frontmatter-lists.ts`), not
+ * through `parseFrontmatter`, which returns no key for a bare `folded_into:` or
+ * a block list. When the whole frontmatter does not parse (a hand-written page
+ * may break it anywhere), the key's own entry is parsed alone: its last
+ * top-level line and the lines under it up to the next top-level key.
  */
 export function foldedIntoNamed(frontmatter: string | null): boolean {
   if (frontmatter === null) return false;
-  const lines = frontmatter.split(/\r?\n/);
-  const at = lines.findIndex((l) => KEY_RE.test(l));
+  const whole = yamlMap(frontmatter);
+  if (whole) return names(whole.folded_into);
+  // A CRLF line keeps its `\r`: neither pattern reads a line's end, and YAML takes it.
+  const lines = frontmatter.split("\n");
+  const at = lines.findLastIndex((l) => KEY_RE.test(l));
   if (at === -1) return false;
-  // An empty list or an empty string names nothing; a comment is not an entry.
-  const entry = (text: string) => {
-    const t = text.replace(/(^|\s)#.*$/, "").trim();
-    return t !== "" && !/^(\[\s*\]|""|'')$/.test(t);
-  };
-  if (entry(KEY_RE.exec(lines[at]!)![1]!)) return true;
-  for (let i = at + 1; i < lines.length && !TOP_LEVEL_RE.test(lines[i]!); i++) {
-    if (entry(lines[i]!)) return true;
-  }
-  return false;
+  let end = at + 1;
+  while (end < lines.length && !TOP_LEVEL_RE.test(lines[end]!)) end++;
+  return names(yamlMap(lines.slice(at, end).join("\n"))?.folded_into);
 }
 
 export interface FoldPage {
