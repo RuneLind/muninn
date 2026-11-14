@@ -990,7 +990,7 @@ Like the X watcher, the single Anthropic row is split into three rows that share
 | `lookbackDays` | 7 | How far back to read each feed (a candidate-set bound, not the dedup key) |
 | `tier2` | `false` | Enable the llms.txt + blog slug-set diff |
 | `llmsTxtUrl` | `platform.claude.com/llms.txt` | Override the doc index URL |
-| `blogSections` | news/engineering/research | anthropic.com listings to diff. Since ~2026-10-20 the engineering listing links `/research/<slug>` (`/engineering/<slug>` 308-redirects there): `BLOG_ARTICLE_PREFIXES` widens its match and `canonicalBlogUrl` stores `/research/` on fetch and on the baseline read, so engineering and research share URLs and Tier-2 candidates are deduped by id (#857) |
+| `blogSections` | news/engineering/research | anthropic.com listings to diff. Since ~2026-10-20 the engineering listing links `/research/<slug>` (`/engineering/<slug>` 308-redirects there): `BLOG_ARTICLE_PREFIXES` widens its match and `canonicalBlogUrl` canonicalizes to `/research/` on fetch and when reading the baseline (the stored row is rewritten only when `persistTier2` runs), so engineering and research share URLs and Tier-2 candidates are deduped by id (#857) |
 | `gate` | `false` | Score new candidates with Haiku (Highlights/per-item path) |
 | `digest` | `false` | Roll the window's candidates into ONE digest message (Daily/Weekly path; mutually exclusive with `gate`) |
 | `minScore` | 0.5 | Drop scored candidates below this 0–1 threshold (gate path) |

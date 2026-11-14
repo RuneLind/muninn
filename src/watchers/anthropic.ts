@@ -69,7 +69,8 @@ const DEFAULT_BLOG_SECTIONS: readonly string[] = ["news", "engineering", "resear
  * Article path prefixes a listing links to, when not just its own section. Since ~2026-10-20
  * the /engineering listing links its posts as `/research/<slug>` and `/engineering/<slug>`
  * 308-redirects there; matching only `/engineering/` parsed 0 links and skipped the source
- * 173 runs in a row.
+ * 173 runs in a row. Each extra prefix must be a redirect alias that `canonicalBlogUrl`
+ * maps to its real address: `parseBlogSlugs` builds every URL from the listing's own section.
  */
 const BLOG_ARTICLE_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   engineering: ["engineering", "research"],
