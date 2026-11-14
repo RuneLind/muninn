@@ -10,6 +10,7 @@ import { getDb } from "./client.ts";
 import {
   getDiscoverKnownVideoIds,
   getDiscoverVideoDetails,
+  getLatestDiscoverRunTimes,
   listDiscoverShelves,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
@@ -167,5 +168,25 @@ describe("per-video state and details", () => {
   test("the state CHECK refuses an unknown state", async () => {
     await saveDiscoverRun(run(), [hit("vidAAAAAAA1", 0.9)]);
     await expect(setDiscoverVideoState("vidAAAAAAA1", "summarized" as never)).rejects.toThrow();
+  });
+});
+
+describe("getLatestDiscoverRunTimes (PR 3)", () => {
+  test("the newest run per asked seed, of the asked source only", async () => {
+    const a1 = await saveDiscoverRun(run({ seedDocId: "a/One.md" }), [hit("vidAAAAAAA1", 0.9)]);
+    const a2 = await saveDiscoverRun(run({ seedDocId: "a/One.md" }), [hit("vidAAAAAAA1", 0.9)]);
+    const b = await saveDiscoverRun(run({ seedDocId: "a/Two.md" }), [hit("vidBBBBBBB2", 0.9)]);
+    const other = await saveDiscoverRun(run({ seedDocId: "a/Three.md", seedSource: "vimeo" }), [hit("vidCCCCCCC3", 0.9)]);
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-01T10:00:00Z' WHERE id = ${a1}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-08T10:00:00Z' WHERE id = ${a2}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-05T10:00:00Z' WHERE id = ${b}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-09T10:00:00Z' WHERE id = ${other}`;
+
+    const got = await getLatestDiscoverRunTimes(["a/One.md", "a/Two.md", "a/Three.md", "a/Never.md"]);
+    expect([...got.entries()].sort()).toEqual([
+      ["a/One.md", Date.parse("2026-11-08T10:00:00Z")],
+      ["a/Two.md", Date.parse("2026-11-05T10:00:00Z")],
+    ]);
+    expect(await getLatestDiscoverRunTimes([])).toEqual(new Map());
   });
 });

@@ -13,6 +13,7 @@
  */
 
 import { escHtml } from "./escape.ts";
+import { bootSeedBar } from "./discover-seed-bar-client.ts";
 import type { DiscoverHit, DiscoverHitState, DiscoverShelf, DiscoverVideoDetails } from "../../../db/youtube-discover.ts";
 
 export type DiscoverSort = "score" | "new" | "long" | "short";
@@ -294,7 +295,7 @@ function render(): void {
   });
   main.innerHTML =
     st.shelves.length === 0
-      ? `<div class="dsc-empty">No shelves yet. Open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
+      ? `<div class="dsc-empty">No shelves yet. Use Search from above, or open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
       : st.shelves.map(shelfHtml).join("");
   main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
     const left = sh.dataset.run ? scroll.get(sh.dataset.run) : undefined;
@@ -565,6 +566,16 @@ export function bootDiscoverPage(): void {
     }
   });
   window.addEventListener("hashchange", focusHashShelf);
+  bootSeedBar((shelves) => {
+    st.shelves = shelves;
+    // A newer run of the open video's seed replaces its shelf: follow the video to it.
+    const open = st.open;
+    if (open && !shelves.some((s) => s.runId === open.runId)) {
+      const shelf = shelves.find((s) => s.hits.some((h) => h.videoId === open.videoId));
+      st.open = shelf ? { runId: shelf.runId, videoId: open.videoId } : null;
+    }
+    render();
+  });
   render();
   focusHashShelf();
 }

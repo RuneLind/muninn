@@ -25,6 +25,7 @@ Scheduler tick (every 60s)
 | `wiki-linter` | `wiki-linter.ts` | The bot's on-disk wiki tree (no AI) | — |
 | `wiki-committer` | `wiki-committer.ts` | The bot's wiki git repo (no AI) | — |
 | `consolidation-gardener` | `consolidation-gardener.ts` | The wiki's OWN pages via the Atlas semantic overlay (knowledge API) | Bot-connector synthesis draft (`draftAndPersistSynthesis`) |
+| `youtube-discovery` | `youtube-discovery.ts` | The last 7 days' `youtube-summaries` (knowledge API) + yt-dlp search | Haiku router (the row's bot): queries + rank |
 
 ## Interest-profile personalization (gate/capture prompts)
 
@@ -1800,6 +1801,17 @@ the wiki's OWN pages into saga-style `type: blog` narrative pages under `blogs/`
   — bot-keyed `getDraftCounts` never sees them (they're keyed by `wiki_name`).
 - Schema: the `watchers.type` CHECK gains `'consolidation-gardener'` (migration
   `066`, mirrored in `db/init.sql`).
+
+## YouTube Discovery (youtube-discovery.ts)
+
+Weekly (plan muninn-youtube-discovery, PR 3). Each run lists `youtube-summaries` with dates, takes the last 7 days' documents (`lastWeekSeeds`, `src/youtube/discover-seeds.ts`), drops any seed with a run in the last 6 days (`RECENT_RUN_SKIP_MS`, any origin: the reader's own Find on YouTube counts), caps at `config.maxSeeds` (1–10, default 5), and runs `runDiscovery` once per seed. Each run is saved as a shelf with `origin: 'watcher'`; the watcher returns no alert of its own, only `health.finish()`.
+
+- **Health keys:** `youtube:huginn` (the listing, then each seed's raw read: ok when the listing answered and no read ran, error when every read that ran failed; a seed deleted since the listing, `not_found`, is not counted), `youtube:model` (queries + rank calls), `youtube:search` (yt-dlp). A key is `ok` when one run passed its step, `error` when every run that reached it failed, carried when none reached it. A failed listing marks huginn error and carries the other two. `tallyOutcome` reads `DiscoverRunOutcome.stage`.
+- **Known set:** captured ids from the listing's urls ∪ dismissed/queued (`getDiscoverKnownVideoIds`), re-read before each seed so this run's own state writes count.
+- **Profile:** `loadInterestProfile(watcher.userId, botName)`, the owner's.
+- **Model:** the two calls go through `callHaikuWithFallback` (sources `youtube-discover-queries`, `youtube-discover-rank`), so they follow the row's bot `haikuBackend`; `/models` reads usage of the rank source.
+- **Seed:** `bun scripts/setup-youtube-discovery.ts [--apply]` — weekly interval, `{hour: 12, timeoutMs: 300000, maxSeeds: 5}`.
+- **Tests:** `youtube-discovery.test.ts` injects every seam (`YouTubeDiscoveryDeps`), no `mock.module`.
 
 ## Configurable prompts
 

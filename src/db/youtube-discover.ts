@@ -249,3 +249,16 @@ export async function saveDiscoverVideoDetails(videoId: string, details: Discove
     `;
   });
 }
+
+/** When each of these seeds was last searched (epoch ms), any origin; a seed never searched is absent. */
+export async function getLatestDiscoverRunTimes(seedDocIds: readonly string[], seedSource = "youtube"): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (seedDocIds.length === 0) return out;
+  const rows = await getDb()`
+    SELECT seed_doc_id, max(created_at) AS at FROM youtube_discover_runs
+    WHERE seed_source = ${seedSource} AND seed_doc_id = ANY(${seedDocIds as string[]}::text[])
+    GROUP BY seed_doc_id
+  `;
+  for (const r of rows) out.set(r.seed_doc_id as string, new Date(r.at as string).getTime());
+  return out;
+}

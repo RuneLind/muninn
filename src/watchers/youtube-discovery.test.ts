@@ -1,0 +1,223 @@
+/**
+ * The weekly `youtube-discovery` watcher with every seam injected (no
+ * mock.module): the listing, the raw reads, the two model calls, the search,
+ * the store and the health recorder. Invented ids and titles only (public repo).
+ */
+import { beforeEach, describe, expect, test } from "bun:test";
+import type { Watcher } from "../types.ts";
+import type { BotConfig } from "../bots/config.ts";
+import type { YouTubeHit } from "../youtube/discover.ts";
+import type { CapturedDoc } from "../youtube/discover-deps.ts";
+import type { DiscoverHitInput, DiscoverRunInput } from "../db/youtube-discover.ts";
+import type { SourceHealthRecorder, SourceOutcome } from "./source-health.ts";
+import {
+  checkYouTubeDiscovery,
+  HEALTH_HUGINN,
+  HEALTH_MODEL,
+  HEALTH_SEARCH,
+  RECENT_RUN_SKIP_MS,
+  resolveMaxSeeds,
+  type YouTubeDiscoveryDeps,
+} from "./youtube-discovery.ts";
+
+const NOW = Date.parse("2026-11-14T12:00:00Z");
+const bot = { name: "invented-bot", dir: "/tmp/invented", connector: "claude-sdk" } as unknown as BotConfig;
+const watcher = (config: Record<string, unknown> = {}): Watcher =>
+  ({ id: "w1", userId: "owner-1", botName: "invented-bot", name: "YouTube discovery", type: "youtube-discovery", config }) as unknown as Watcher;
+
+const vid = (n: number) => `vid${String(n).padStart(8, "0")}`;
+const seedVid = (n: number) => `sed${String(n).padStart(8, "0")}`;
+const raw = (n: number) =>
+  `---\ndate: "2026-11-1${n}"\nurl: "https://www.youtube.com/watch?v=${seedVid(n)}"\ncategory: "ai"\n---\n\nInvented summary ${n}.\n`;
+const doc = (n: number, date: string): CapturedDoc => ({ id: `ai/Seed ${n}.md`, url: `https://www.youtube.com/watch?v=${seedVid(n)}`, date });
+const hit = (id: string): YouTubeHit => ({ videoId: id, title: `Video ${id}`, channel: "Invented", durationSec: 600, viewCount: 10, url: `https://www.youtube.com/watch?v=${id}` });
+
+let listed: CapturedDoc[] | Error;
+let raws: Map<string, string | Error>;
+let queriesAnswer: (prompt: string) => Promise<string>;
+let rankAnswer: (prompt: string) => Promise<string>;
+let searchAnswer: (q: string) => Promise<YouTubeHit[] | null>;
+let recent: Map<string, number>;
+let stored: Set<string>;
+let saved: { run: DiscoverRunInput; hits: readonly DiscoverHitInput[] }[];
+let profileCalls: string[];
+let marks: Map<string, { outcome: SourceOutcome; detail?: string }>;
+let carried: string[];
+let rankPrompts: string[];
+
+function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
+  return {
+    services: {
+      listCaptured: async () => {
+        if (listed instanceof Error) throw listed;
+        return listed;
+      },
+      readRaw: async (_c, id) => {
+        const r = raws.get(id);
+        if (r instanceof Error) throw r;
+        return r ?? null;
+      },
+      queriesCall: (p) => queriesAnswer(p),
+      rankCall: (p) => {
+        rankPrompts.push(p);
+        return rankAnswer(p);
+      },
+      search: (q) => searchAnswer(q),
+    },
+    saveRun: async (run, hits) => {
+      saved.push({ run, hits });
+      return `run-${saved.length}`;
+    },
+    storedKnownIds: async () => stored,
+    latestRunTimes: async (ids) => new Map([...recent].filter(([id]) => ids.includes(id))),
+    profile: async (userId, botName) => {
+      profileCalls.push(`${userId}|${botName}`);
+      return null;
+    },
+    health: async (): Promise<SourceHealthRecorder> => ({
+      mark: (key, outcome, detail) => void marks.set(key, { outcome, detail }),
+      carry: (key) => void carried.push(key),
+      finish: async () => [],
+    }),
+    tracer: () => null,
+    now: () => NOW,
+    ...over,
+  };
+}
+
+beforeEach(() => {
+  listed = [doc(1, "2026-11-13"), doc(2, "2026-11-12"), doc(3, "2026-11-11"), doc(4, "2026-10-01")];
+  raws = new Map([1, 2, 3, 4].map((n) => [`ai/Seed ${n}.md`, raw(n)]));
+  queriesAnswer = async () => JSON.stringify([{ query: "agent evals", why: "same topic" }]);
+  rankAnswer = async () => JSON.stringify([{ n: 1, score: 0.8, why: "fits" }]);
+  searchAnswer = async () => [hit(vid(1)), hit(vid(2))];
+  recent = new Map();
+  stored = new Set();
+  saved = [];
+  profileCalls = [];
+  marks = new Map();
+  carried = [];
+  rankPrompts = [];
+});
+
+describe("checkYouTubeDiscovery", () => {
+  test("searches each of the last week's seeds as its own watcher run; health all ok", async () => {
+    const alerts = await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(alerts).toEqual([]);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 1.md", "ai/Seed 2.md", "ai/Seed 3.md"]);
+    expect(saved.every((s) => s.run.origin === "watcher" && s.run.seedSource === "youtube" && s.run.botName === "invented-bot")).toBe(true);
+    expect(saved[0]!.run.seedVideoId).toBe(seedVid(1));
+    expect(profileCalls).toEqual(["owner-1|invented-bot", "owner-1|invented-bot", "owner-1|invented-bot"]);
+    expect(Object.fromEntries([...marks].map(([k, v]) => [k, v.outcome]))).toEqual({
+      [HEALTH_HUGINN]: "ok",
+      [HEALTH_MODEL]: "ok",
+      [HEALTH_SEARCH]: "ok",
+    });
+    expect(carried).toEqual([]);
+  });
+
+  test("a seed searched within 6 days is skipped; one searched earlier is searched again", async () => {
+    recent = new Map([
+      ["ai/Seed 1.md", NOW - RECENT_RUN_SKIP_MS + 60_000],
+      ["ai/Seed 2.md", NOW - RECENT_RUN_SKIP_MS - 60_000],
+    ]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md", "ai/Seed 3.md"]);
+  });
+
+  test("config.maxSeeds caps the seeds; out-of-range values fall back to 5", async () => {
+    await checkYouTubeDiscovery(watcher({ maxSeeds: 2 }), bot, undefined, deps());
+    expect(saved).toHaveLength(2);
+    expect(resolveMaxSeeds({ maxSeeds: 0 })).toBe(5);
+    expect(resolveMaxSeeds({ maxSeeds: 11 })).toBe(5);
+    expect(resolveMaxSeeds({ maxSeeds: "3" })).toBe(5);
+    expect(resolveMaxSeeds({ maxSeeds: 10 })).toBe(10);
+    expect(resolveMaxSeeds(undefined)).toBe(5);
+  });
+
+  test("captured, dismissed and queued videos are never ranked", async () => {
+    listed = [doc(1, "2026-11-13"), { id: "ai/Old.md", url: `https://youtu.be/${vid(1)}`, date: "2026-01-01" }];
+    stored = new Set([vid(2)]);
+    searchAnswer = async () => [hit(vid(1)), hit(vid(2)), hit(vid(3))];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(rankPrompts).toHaveLength(1);
+    expect(rankPrompts[0]).toContain(vid(3));
+    expect(rankPrompts[0]).not.toContain(vid(1));
+    expect(rankPrompts[0]).not.toContain(vid(2));
+    expect(saved[0]!.hits.map((h) => h.videoId)).toEqual([vid(3)]);
+  });
+
+  test("a failed listing marks huginn error and carries the other two, searching nothing", async () => {
+    listed = new Error("huginn down");
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_HUGINN)).toEqual({ outcome: "error", detail: "listing failed: huginn down" });
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+    expect(saved).toEqual([]);
+  });
+
+  test("every search failing marks search error, model and huginn ok", async () => {
+    searchAnswer = async () => null;
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("error");
+    expect(marks.get(HEALTH_MODEL)?.outcome).toBe("ok");
+    expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
+    expect(saved).toEqual([]);
+  });
+
+  test("every rank call failing marks model error with the cause", async () => {
+    rankAnswer = async () => {
+      throw new Error("429 overloaded");
+    };
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "rank call: 429 overloaded" });
+    expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("ok");
+  });
+
+  test("one seed passing a step is enough for ok", async () => {
+    let n = 0;
+    queriesAnswer = async () => {
+      n++;
+      if (n === 2) throw new Error("timeout");
+      return JSON.stringify([{ query: "agent evals", why: "same topic" }]);
+    };
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_MODEL)?.outcome).toBe("ok");
+    expect(saved).toHaveLength(2);
+  });
+
+  test("a seed deleted since the listing is not a huginn failure; a failed read is", async () => {
+    listed = [doc(1, "2026-11-13")];
+    raws = new Map();
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+
+    marks = new Map();
+    carried = [];
+    raws = new Map([["ai/Seed 1.md", new Error("socket hang up")]]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("error");
+  });
+
+  test("no seeds this week: huginn ok, model and search carried", async () => {
+    listed = [doc(4, "2026-10-01")];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+    expect(saved).toEqual([]);
+  });
+
+  test("a failed save is logged and the next seed still runs", async () => {
+    let n = 0;
+    const d = deps({
+      saveRun: async (run, hits) => {
+        n++;
+        if (n === 1) throw new Error("db down");
+        saved.push({ run, hits });
+        return "run-x";
+      },
+    });
+    await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md", "ai/Seed 3.md"]);
+  });
+});

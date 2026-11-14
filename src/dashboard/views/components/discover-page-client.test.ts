@@ -2,6 +2,8 @@
 import { describe, expect, test } from "bun:test";
 import { dscAge, dscCount, dscDuration, dscVisibleHits } from "./discover-page-client.ts";
 import type { DiscoverHit } from "../../../db/youtube-discover.ts";
+import { dscFilterSeeds } from "./discover-seed-bar-client.ts";
+import type { SeedDoc } from "../../../youtube/discover-seeds.ts";
 
 const hit = (videoId: string, over: Partial<DiscoverHit> = {}): DiscoverHit => ({
   videoId,
@@ -77,5 +79,25 @@ describe("dscVisibleHits", () => {
   });
   test("later and queued videos still show", () => {
     expect(ids(dscVisibleHits([hit("x", { state: "later" }), hit("y", { state: "queued", rank: 2 })], "score", 0))).toEqual(["x", "y"]);
+  });
+});
+
+describe("dscFilterSeeds (PR 3 pick list)", () => {
+  const seed = (id: string, title: string, category: string | null): SeedDoc => ({ id, title, category, date: null });
+  const docs = [
+    seed("ai/agents/1.md", "Agent Evals in Practice", "ai/agents"),
+    seed("ai/claude/2.md", "Claude Code hooks", "ai/claude"),
+    seed("music/3.md", "Jazz agents of change", "music"),
+    seed("4.md", "Root talk", null),
+  ];
+  test("every word must match title or category, any case, in listing order", () => {
+    expect(dscFilterSeeds(docs, "AGENT").map((d) => d.id)).toEqual(["ai/agents/1.md", "music/3.md"]);
+    expect(dscFilterSeeds(docs, "agents ai").map((d) => d.id)).toEqual(["ai/agents/1.md"]);
+    expect(dscFilterSeeds(docs, "claude hooks").map((d) => d.id)).toEqual(["ai/claude/2.md"]);
+    expect(dscFilterSeeds(docs, "nothing")).toEqual([]);
+  });
+  test("an empty filter lists everything, up to the limit", () => {
+    expect(dscFilterSeeds(docs, "  ")).toHaveLength(4);
+    expect(dscFilterSeeds(docs, "", 2).map((d) => d.id)).toEqual(["ai/agents/1.md", "ai/claude/2.md"]);
   });
 });

@@ -79,6 +79,8 @@ export type DiscoverRunOutcome =
       error: string;
       /** The underlying error's text, for the caller's log (a read or model-call failure). */
       cause?: string;
+      /** The step that failed: the watcher's health keys judge each step on its own. */
+      stage: "read" | "queries" | "search" | "rank";
     };
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -103,11 +105,11 @@ export async function runDiscovery(
     raw = await deps.readRaw(collection, docId);
   } catch (err) {
     tracer?.finish("error", { error: `read failed: ${errText(err)}` });
-    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document.", cause: errText(err) };
+    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document.", cause: errText(err), stage: "read" };
   }
   if (raw === null) {
     tracer?.finish("error", { error: "not found" });
-    return { ok: false, status: 404, code: "not_found", error: "No such document." };
+    return { ok: false, status: 404, code: "not_found", error: "No such document.", stage: "read" };
   }
   const stored = readStoredCapture(raw);
   const seed: DiscoverSeed = {
@@ -135,11 +137,12 @@ export async function runDiscovery(
       code: "model_failed",
       error: "The call that writes the search queries failed. Try again.",
       cause: `queries call: ${errText(err)}`,
+      stage: "queries",
     };
   }
   if (!queries || queries.length === 0) {
     tracer?.finish("error", { error: "no queries" });
-    return { ok: false, status: 502, code: "model_unparseable", error: "The model answered no usable search queries. Try again." };
+    return { ok: false, status: 502, code: "model_unparseable", error: "The model answered no usable search queries. Try again.", stage: "queries" };
   }
   const qs = queries;
 
@@ -150,7 +153,7 @@ export async function runDiscovery(
   tracer?.end("search", { failed }, failed === answers.length ? "error" : "ok");
   if (failed === answers.length) {
     tracer?.finish("error", { error: "every search failed" });
-    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?" };
+    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search" };
   }
   const union = new Map<string, { hit: YouTubeHit; query: string }>();
   answers.forEach((hits, i) => {
@@ -185,13 +188,13 @@ export async function runDiscovery(
     } catch {
       tracer?.end("rank", { error: "unparseable" }, "error");
       tracer?.finish("error");
-      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again." };
+      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again.", stage: "rank" };
     }
     tracer?.end("rank", { scored: scores.size });
   } catch (err) {
     tracer?.end("rank", { error: errText(err) }, "error");
     tracer?.finish("error");
-    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}` };
+    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}`, stage: "rank" };
   }
   const results: DiscoverResult[] = fresh
     .map((f, i) => ({ f, s: scores.get(i + 1), i }))

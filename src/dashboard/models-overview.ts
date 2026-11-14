@@ -779,6 +779,21 @@ export async function assembleModelsOverview(
       }
       continue;
     }
+    if (w.type === "youtube-discovery") {
+      // Two `callHaikuWithFallback` calls per seed (queries, rank) on the bot's Haiku router.
+      pipeline.push({
+        job: `Watcher: ${w.name} · ${w.botName}`,
+        backend: `Haiku router (${w.botName})`,
+        model: { value: HAIKU_DEFAULT_MODEL, origin: "default" },
+        note: "per seed: queries + rank",
+        used: usedHaikuForSource("youtube-discover-rank", w.botName),
+        matchKind: "watcher",
+        matchBot: w.botName,
+        matchName: w.name,
+        matchRecentName: w.type,
+      });
+      continue;
+    }
     pipeline.push({
       job: `Watcher: ${w.name} · ${w.botName}`,
       backend: "Claude CLI (Gmail MCP)",

@@ -12,6 +12,7 @@ import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
+import { checkYouTubeDiscovery } from "./youtube-discovery.ts";
 import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
 import { markRunHealth, handleWatcherFailure } from "./run-health.ts";
 import { HEALTH_ALERT_SOURCE } from "./source-health.ts";
@@ -479,6 +480,10 @@ export function watcherConnectorInfo(
         label: getConnectorLabel(botConfig.connector ?? "claude-cli"),
         model: botConfig.model ?? botFallbackModel,
       };
+    case "youtube-discovery":
+      // Two `callHaikuWithFallback` calls per seed: the bot's Haiku router picks the
+      // backend at call time, so no single connector or model is truthful here.
+      return { label: "Haiku router" };
     default:
       // news, wiki-linter, wiki-committer — no AI model runs.
       return null;
@@ -838,6 +843,7 @@ export interface WatcherCheckers {
   checkWikiLinter: typeof checkWikiLinter;
   checkWikiCommitter: typeof checkWikiCommitter;
   checkConsolidationGardener: typeof checkConsolidationGardener;
+  checkYouTubeDiscovery: typeof checkYouTubeDiscovery;
 }
 
 export const DEFAULT_WATCHER_CHECKERS: WatcherCheckers = {
@@ -849,6 +855,7 @@ export const DEFAULT_WATCHER_CHECKERS: WatcherCheckers = {
   checkWikiLinter,
   checkWikiCommitter,
   checkConsolidationGardener,
+  checkYouTubeDiscovery,
 };
 
 /**
@@ -936,6 +943,10 @@ async function dispatchChecker(
       // under it (like wiki-gardener). Resolves the wiki + synthesis bot itself from
       // `watcher.config.wiki`.
       return await checkers.checkConsolidationGardener(watcher, botConfig, telemetry);
+    case "youtube-discovery":
+      // Weekly: the last 7 days' YouTube summaries, each searched as its own
+      // discovery run and stored as a Discover shelf. Health alerts only.
+      return await checkers.checkYouTubeDiscovery(watcher, botConfig, telemetry);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];

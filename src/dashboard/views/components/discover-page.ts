@@ -19,6 +19,32 @@ export function discoverPageStyles(): string {
       font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px;
       background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary);
     }
+    .dsc-seeds { padding: 0 0 14px; border-bottom: 1px solid var(--border-primary); margin-bottom: 18px; display: flex; flex-direction: column; gap: 10px; }
+    .dsc-seed-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .dsc-chip {
+      font: inherit; font-size: 12.5px; cursor: pointer; padding: 3px 11px; border-radius: 999px;
+      background: transparent; color: var(--text-secondary); border: 1px dashed var(--border-secondary);
+    }
+    .dsc-chip:hover:not([disabled]), .dsc-chip[aria-expanded="true"] { color: var(--text-primary); border-color: var(--accent); border-style: solid; }
+    .dsc-chip[disabled] { cursor: default; opacity: .6; }
+    .dsc-seed-panel { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; max-width: 720px; }
+    .dsc-seed-panel[hidden] { display: none; }
+    .dsc-seed-panel select, .dsc-seed-panel input[type="search"] {
+      font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px; max-width: 100%;
+      background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary);
+    }
+    .dsc-pick-filter, .dsc-pick-filter input { width: 100%; }
+    .dsc-seed-list { margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-primary); }
+    .dsc-seed-title { overflow-wrap: anywhere; }
+    .dsc-seed-date { color: var(--text-soft); font-size: 12px; }
+    .dsc-pick-list { list-style: none; margin: 0; padding: 0; width: 100%; max-height: 300px; overflow-y: auto; font-size: 13px; }
+    .dsc-pick-list li { padding: 2px 0; }
+    .dsc-pick-list label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+    .dsc-pick-foot { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .dsc-progress { font-size: 13px; color: var(--text-secondary); }
+    .dsc-progress:empty { display: none; }
+    .dsc-progress a { color: var(--accent-light); }
+    .dsc-fail-list { margin: 4px 0 0; padding-left: 20px; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
     .dsc-error { margin: 0 0 14px; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
     .dsc-empty { color: var(--text-soft); padding: 26px; text-align: center; border: 1px dashed var(--border-secondary); border-radius: 10px; font-size: 13px; }
     .dsc-empty a { color: var(--accent-light); }

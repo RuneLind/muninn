@@ -20,6 +20,10 @@
  * and a transcript fetch for an invented id, and it has its own tests — this
  * spec proves what the panel sends and how it reads the answer. Invented ids
  * and titles only (public repo). Ports come from `e2e/ports.ts`.
+ *
+ * PR 3's seed bar runs last (it replaces the reader's shelf): Last 7 days over
+ * the fake listing's two documents, both dated today, runs one search per seed
+ * in turn, and the pick list caps a hand-picked set at five.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -102,6 +106,9 @@ const FIXTURE = {
   },
 };
 
+/** The listing's second YouTube document: a seed for the seed bar (PR 3). */
+const CAPTURED_DOC = "ai/e2e/E2E already captured.md";
+
 /** A shelf seeded straight into the DB with five cards: the reader flow only ever makes two. */
 const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
 const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"] as const;
@@ -111,7 +118,7 @@ async function clearStoredRuns(): Promise<void> {
   const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
   try {
     await sql`DELETE FROM youtube_discover_hits WHERE video_id IN (${NEW_A}, ${NEW_B}, ${NEW_C})`;
-    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${YT_DOC.id}, ${FOCUS_SEED})`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${YT_DOC.id}, ${FOCUS_SEED}, ${CAPTURED_DOC})`;
     await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eFocus%'`;
   } finally {
     await sql.end();
@@ -726,3 +733,69 @@ for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
     if (width >= 1280) expect(m.rows).toBe(1);
   });
 }
+
+test("the seed bar searches from the last 7 days one seed at a time, and each lands as its own shelf (PR 3)", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  const week = page.getByRole("button", { name: "+ Last 7 days" });
+  await week.click();
+  await expect(week).toHaveAttribute("aria-expanded", "true");
+  const panel = page.locator("#dscSeedPanel");
+  await expect(panel.locator(".dsc-seed-list li")).toHaveCount(2);
+  await expect(panel).toContainText("E2E discover seed");
+  await expect(panel).toContainText("E2E already captured");
+
+  const posts: { docId: string; origin: string }[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/summaries/discover") && r.method() === "POST") posts.push(r.postDataJSON());
+  });
+  await panel.getByRole("button", { name: "Search from 2 summaries" }).click();
+  await expect(panel).toBeHidden();
+  const progress = page.locator("#dscProgress");
+  await expect(progress).toContainText("Searching 1 of 2");
+  await expect(progress).toContainText("Done: 2 new shelves", { timeout: 20_000 });
+  expect(posts.map((p) => p.origin)).toEqual(["page", "page"]);
+  expect(posts.map((p) => p.docId).sort()).toEqual([CAPTURED_DOC, YT_DOC.id].sort());
+  await expect(week).toBeEnabled();
+
+  // Both shelves re-rendered from the stored runs without a reload.
+  await expect(page.locator(".dsc-shelf", { hasText: "E2E already captured" })).toHaveCount(1);
+  await expect(page.locator(".dsc-shelf", { hasText: "E2E discover seed" })).toHaveCount(1);
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    const rows = await sql`SELECT seed_doc_id, origin FROM youtube_discover_runs WHERE seed_doc_id = ${CAPTURED_DOC}`;
+    expect(rows.map((r) => r.origin)).toEqual(["page"]);
+  } finally {
+    await sql.end();
+  }
+
+  // "Show the first" goes to a stored shelf.
+  await progress.getByRole("link", { name: "Show the first" }).click();
+  await expect(page.locator(".dsc-shelf.dsc-target")).toHaveCount(1);
+});
+
+test("the category and pick seed panels: newest per category, and a filter that keeps the pick (PR 3)", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  const panel = page.locator("#dscSeedPanel");
+  await expect(panel.locator("#dscSeedCat")).toBeFocused();
+  await expect(panel.locator("#dscSeedCat option")).toHaveText(["ai/e2e (2)"]);
+  await expect(panel.getByRole("button", { name: "Search from 2 summaries" })).toBeEnabled();
+
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(page.getByRole("button", { name: "+ A category…" })).toHaveAttribute("aria-expanded", "false");
+  const filter = panel.locator("#dscSeedFilter");
+  await expect(filter).toBeFocused();
+  await expect(panel.getByRole("button", { name: "Search", exact: true })).toBeDisabled();
+  await filter.fill("already");
+  await expect(panel.locator("[data-pick]")).toHaveCount(1);
+  await panel.locator("[data-pick]").check();
+  await expect(panel.locator("#dscPickCount")).toHaveText("1 of 5 chosen");
+  await expect(panel.getByRole("button", { name: "Search from 1 summary" })).toBeEnabled();
+  // The pick survives a filter change.
+  await filter.fill("");
+  await expect(panel.locator("[data-pick]")).toHaveCount(2);
+  await expect(panel.locator(`[data-pick="${CAPTURED_DOC}"]`)).toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(page.getByRole("button", { name: "+ Pick summaries…" })).toBeFocused();
+});

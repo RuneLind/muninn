@@ -28,7 +28,8 @@ import { Tracer } from "../../tracing/tracer.ts";
 import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { extractYouTubeVideoId } from "../../youtube/url.ts";
 import type { YouTubeHit } from "../../youtube/discover.ts";
-import { defaultDiscoverServices, discoverTestSeam } from "../../youtube/discover-deps.ts";
+import { defaultDiscoverServices, discoverTestSeam, type CapturedDoc } from "../../youtube/discover-deps.ts";
+import { seedCategories, toSeedDocs } from "../../youtube/discover-seeds.ts";
 import { runDiscovery, type DiscoverResult, type DiscoverTracer } from "../../youtube/discover-run.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId } from "../../summaries/frames.ts";
 import {
@@ -60,6 +61,9 @@ export const UNAVAILABLE_TTL_MS = 6 * 60 * 60_000;
 /** How long the captured-video set is reused (the Stats tab's TTL). */
 export const KNOWN_IDS_TTL_MS = 5 * 60_000;
 
+/** The seed bar lists at most this many summaries (1,640 on 2026-11-14). */
+const SEEDS_LISTED_MAX = 5000;
+
 /** Where a stored run's shelf is. */
 export const discoverShelfUrl = (runId: string): string => `/summaries/discover#run-${runId}`;
 
@@ -73,6 +77,8 @@ export interface SummariesDiscoverDeps {
   search: (query: string, n: number) => Promise<YouTubeHit[] | null>;
   /** Every `url` the `youtube-summaries` listing carries. Throws on failure. */
   listKnownUrls: () => Promise<string[]>;
+  /** Every `youtube-summaries` document with its date, for the seed bar. Throws on failure. */
+  listCaptured: () => Promise<CapturedDoc[]>;
   /** The interest profile to rank with, or `null`. */
   profile: (bot: BotConfig) => Promise<string | null>;
   tracer?: (bot: BotConfig) => DiscoverTracer | null;
@@ -115,6 +121,7 @@ export function defaultSummariesDiscoverDeps(
     rankCall: services.rankCall,
     search: services.search,
     listKnownUrls: async () => (await services.listCaptured()).map((d) => d.url ?? "").filter(Boolean),
+    listCaptured: services.listCaptured,
     // An authenticating instance has many readers: a bot-wide profile is someone else's interests.
     profile: async (bot) => (authMode() === "off" ? loadProfile(bot.name) : null),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discover" }),
@@ -198,6 +205,27 @@ export function registerSummariesDiscoverRoutes(
       return c.html(await renderSummariesDiscoverPage({ shelves: [], error: "Could not read the stored shelves." }), 500);
     }
     return c.html(await renderSummariesDiscoverPage({ shelves }));
+  });
+
+  /** The seed bar's choices: every YouTube summary, newest first, and the categories. */
+  app.get("/api/summaries/discover/seeds", async (c) => {
+    try {
+      const docs = toSeedDocs(await deps.listCaptured()).slice(0, SEEDS_LISTED_MAX);
+      return c.json({ docs, categories: seedCategories(docs), now: now() });
+    } catch (err) {
+      log.warn("Discover: seed listing failed: {error}", { error: errText(err) });
+      return fail(c, 502, "upstream", "Could not list the YouTube summaries.");
+    }
+  });
+
+  /** The stored shelves, for the page to re-render after a run. */
+  app.get("/api/summaries/discover/shelves", async (c) => {
+    try {
+      return c.json({ shelves: await deps.store.listShelves() });
+    } catch (err) {
+      log.error("Discover: shelves read failed: {error}", { error: errText(err) });
+      return c.json({ error: "Could not read the stored shelves.", code: "internal" }, 500);
+    }
   });
 
   app.post("/api/summaries/discover", async (c) => {

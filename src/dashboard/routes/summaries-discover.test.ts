@@ -16,6 +16,7 @@ import {
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
 import { runDiscovery } from "../../youtube/discover-run.ts";
 import type { YouTubeHit } from "../../youtube/discover.ts";
+import type { CapturedDoc } from "../../youtube/discover-deps.ts";
 import type {
   DiscoverHitInput,
   DiscoverHitState,
@@ -48,6 +49,7 @@ let searchHits: Record<string, YouTubeHit[] | null>;
 let searches: string[];
 let knownUrls: string[];
 let listings: number;
+let captured: CapturedDoc[];
 let profile: string | null;
 let prompts: { queries: string[]; rank: string[] };
 let clock: number;
@@ -108,6 +110,7 @@ function deps(over: Partial<SummariesDiscoverDeps> = {}): SummariesDiscoverDeps 
       listings++;
       return knownUrls;
     },
+    listCaptured: async () => captured,
     profile: async () => profile,
     tracer: () => null,
     now: () => clock,
@@ -145,6 +148,7 @@ beforeEach(() => {
     "eval harness talk": [hit(ID(2)), hit(ID(3)), hit(ID(4))],
   };
   searches = [];
+  captured = [];
   knownUrls = [`https://www.youtube.com/watch?v=${ID(1)}`, "https://youtu.be/" + ID(4), "not a url", "https://vimeo.com/1"];
   listings = 0;
   profile = null;
@@ -666,5 +670,59 @@ describe("details: the aborted probe settling later (fix round 2)", () => {
     releases[1]!();
     expect((await second).status).toBe(200);
     expect((await third).status).toBe(200);
+  });
+});
+
+describe("GET /api/summaries/discover/seeds (PR 3)", () => {
+  test("lists the summaries newest first with their categories", async () => {
+    captured = [
+      { id: "ai/agents/Old talk.md", url: null, date: "2026-11-01" },
+      { id: "ai/agents/New talk.md", url: null, date: "2026-11-12" },
+      { id: "music/Loose.md", url: null, date: null },
+      { id: "Root talk.md", url: null, date: "2026-11-10" },
+    ];
+    const res = await app().request("/api/summaries/discover/seeds");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { docs: { id: string; title: string; category: string | null }[]; categories: unknown; now: number };
+    expect(body.docs.map((d) => d.id)).toEqual(["ai/agents/New talk.md", "Root talk.md", "ai/agents/Old talk.md", "music/Loose.md"]);
+    expect(body.docs[0]).toMatchObject({ title: "New talk", category: "ai/agents", date: "2026-11-12" });
+    expect(body.docs[1]!.category).toBeNull();
+    expect(body.categories).toEqual([
+      { category: "ai/agents", count: 2 },
+      { category: "music", count: 1 },
+    ]);
+    expect(body.now).toBe(clock);
+  });
+
+  test("a failed listing is 502", async () => {
+    const res = await app(
+      deps({
+        listCaptured: async () => {
+          throw new Error("huginn down");
+        },
+      }),
+    ).request("/api/summaries/discover/seeds");
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { code: string }).code).toBe("upstream");
+  });
+});
+
+describe("GET /api/summaries/discover/shelves (PR 3)", () => {
+  test("answers the stored shelves", async () => {
+    const shelf = { runId: "r1" } as unknown as DiscoverShelf;
+    const d = deps();
+    d.store.listShelves = async () => [shelf];
+    const res = await app(d).request("/api/summaries/discover/shelves");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ shelves: [shelf] });
+  });
+
+  test("a failed read is 500", async () => {
+    const d = deps();
+    d.store.listShelves = async () => {
+      throw new Error("db down");
+    };
+    const res = await app(d).request("/api/summaries/discover/shelves");
+    expect(res.status).toBe(500);
   });
 });
