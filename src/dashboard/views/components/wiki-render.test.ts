@@ -167,7 +167,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // and core/cross-ref.ts): 866,440 -> 873,139 (296,789 gzipped), so the pin moves to 873,400.
 // Its fix round 1 batch 2 (one peek card for both kinds; the copied card and its listeners gone):
 // 873,251 -> 871,770 (296,543 gzipped), so the pin moves down to 872,000.
-const WIKI_CLIENT_MAX_BYTES = 872_000;
+// 2026-11-14, live chips (wiki-live-facts.ts and core/live-facts-chip.ts): 871,770 -> 874,661
+// (297,665 gzipped), so the pin moves to 875,000.
+const WIKI_CLIENT_MAX_BYTES = 875_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
@@ -268,6 +270,9 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // status date line it paints in the slot after the pill's (one const, one call,
 // the line's own paint). The
 // line's request and state are in `wiki-status-date.ts`, so no new let.
+// 2026-11-14, living facts PR 3b: the article controller 1,182 → 1,185, for
+// the page payload's `facts` field, its import, and the call that hands the
+// provenance rows' Jira status to the live chips (`wiki-live-facts.ts`).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
@@ -277,7 +282,7 @@ const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][]
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
   ["wiki-ask-controller.ts", 2_503, 10],
-  ["wiki-article-controller.ts", 1_182, 10],
+  ["wiki-article-controller.ts", 1_185, 10],
   ["wiki-series-controller.ts", 548, 3],
 ];
 

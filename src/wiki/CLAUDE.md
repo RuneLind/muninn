@@ -48,7 +48,7 @@ Read-only, two independent switches, neither implying the other:
 - Non-HTTP surfaces carry the same check, since a scheduled run spends exactly what a route would. A wiki-drafting watcher type joins `WIKI_DRAFTING_WATCHER_TYPES`, which both guards read.
 - Neither switch gates git: `commitWikiChange` and the `wiki-committer` stay open, or the repo-sync loop stops on the read-only instance.
 - Enforcement never reads `WikiRegistryEntry.readonly`: that flag is for the `/models` card, and a stale memo must not be able to open the guard.
-- A write guard lives in the environment, never in `.wiki-reader.json`: that file degrades to `null`, which for a guard means writable. The file carries cosmetics, the environment carries safety.
+- A write guard lives in the environment, never in `.wiki-reader.json`: that file degrades to `null`, which for a guard means writable.
 - Compare roots through `sameWikiRoot`, never a re-spelling. Matching is root-exact, never a prefix: a wiki at a subdirectory of a listed root is NOT covered, so list each root you mean.
 - A root muninn should only READ must ALSO be listed in `WIKI_READONLY_ROOTS`: registration alone makes it writable and model-reachable over HTTP.
 - A refusal's copy never names a filesystem path: it lands verbatim in a 403 body on a reader-facing API.
@@ -148,6 +148,7 @@ Pages and routes:
 - Walk me through (`POST /api/wiki/walkthrough`) [trap]
 - Provenance (`provenance.ts`, `provenance-service.ts`, `session-ledger.ts`, `lockfile.ts`) [trap]
 - Tracker inference (`src/wiki/trackers/`, `.wiki-reader.json` `trackers`) [trap]
+- Live chips (`live-facts.ts`, `.wiki-facts.json`) [trap]
 - Connections and Link (`trackers/rows.ts`, `trackers/jira-lookup.ts`, `views/components/wiki-issue-rows.ts`) [trap]
 - Graph mode (`graph.ts`, `GET /api/wiki/graph`, `views/components/wiki-graph-view.ts`) [trap]
 - Issue board (`/wiki/issues`, `graph-board.ts`, `views/components/wiki-board-view.ts`) [trap]

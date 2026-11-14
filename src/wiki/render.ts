@@ -42,6 +42,7 @@ import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts"
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
+import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
@@ -127,6 +128,11 @@ export function renderWikiHtml(
     /** With `views`: the index's `plan_status` is `proposed`, so a page with
      *  no ledger draws its at-a-glance slate (`pageLedgers`). */
     proposedPlan?: boolean;
+    /** The live chips' pass (`live-facts.ts`): an empty `.fact-chip` after each
+     *  PR or key mention the wiki's facts file covers. Set by `GET /api/wiki/page`
+     *  alone: the walkthrough, the gardener preview, the component lint and
+     *  `GET /api/wiki/ref` read the page without chips. */
+    liveFacts?: LiveFactsInput;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -148,7 +154,22 @@ export function renderWikiHtml(
   const literal: string[] = [];
   // The text each link shows: a lane's plain-text peek reads a link as this.
   const linkTexts: string[] = [];
-  const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
+  // A chip rides the wikilink sentinel with an empty literal and an empty link
+  // text, so code, an attribute value and every plain-text reader of a
+  // sentinel give nothing for it. Inserted first: its offsets are `body`'s.
+  let marked = body;
+  if (opts?.liveFacts) {
+    const plan = planLiveChips(body, markdown, opts.liveFacts);
+    marked = applyChipInsertions(body, plan.insertions, (html) => {
+      literal.push("");
+      linkTexts.push("");
+      rendered.push(html);
+      return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
+    });
+    opts.liveFacts.collect?.(plan.facts);
+    chipPassCollected();
+  }
+  const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
     const text = wikiLinkText(target, label);
     linkTexts.push(text);
@@ -208,8 +229,8 @@ export function renderWikiHtml(
   const parked: ParkedPicture[] = [];
   const guarded = parkDiagramPictures(html, parked);
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
-  const marked = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
-  return restoreDiagramPictures(marked, parked);
+  const glossed = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
+  return restoreDiagramPictures(glossed, parked);
 }
 
 /** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared
