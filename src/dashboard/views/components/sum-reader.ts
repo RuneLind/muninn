@@ -213,6 +213,11 @@ export function sumReaderStyles(): string {
     .sum-col-right a.sum-wiki-link:hover .sum-wiki-page { text-decoration: underline; }
     .sum-col-right a.sum-wiki-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
     .sum-wiki-meta { font-size: 11px; color: var(--text-soft); }
+    /* The header's controls wrap under the title at any width: a YouTube
+       document shows every button, and at 701–1000 px they squeezed the
+       title to 0 px. The basis keeps the title, the buttons take a line. */
+    .doc-panel-header { flex-wrap: wrap; row-gap: 8px; }
+    .doc-panel-title { flex: 1 1 14rem; min-width: 0; }
     @media (max-width: 1000px) {
       /* Below the breakpoint the rail sits after the article, where an
          outline of what is above it has nothing left to jump to. */
@@ -225,8 +230,7 @@ export function sumReaderStyles(): string {
     @media (max-width: 700px) {
       .sum-hero { flex-direction: column; }
       .sum-hero-thumb { width: 100%; max-width: 360px; }
-      /* The header's controls wrap under Back and the title. */
-      .doc-panel-header { flex-wrap: wrap; row-gap: 8px; }
+      /* The title takes its own line beside Back. */
       .doc-panel-title { flex: 1 1 calc(100% - 90px); }
     }
   `;
