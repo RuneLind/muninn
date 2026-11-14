@@ -10,14 +10,13 @@ import type { YouTubeHit } from "../youtube/discover.ts";
 import type { CapturedDoc } from "../youtube/discover-deps.ts";
 import type { DiscoverHitInput, DiscoverRunInput } from "../db/youtube-discover.ts";
 import type { SourceHealthRecorder, SourceOutcome } from "./source-health.ts";
-import { computeWatcherTimeoutMs, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
+import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import {
   checkYouTubeDiscovery,
   HEALTH_HUGINN,
   HEALTH_MODEL,
   HEALTH_SEARCH,
   HEALTH_STORE,
-  RECENT_RUN_SKIP_MS,
   resolveMaxSeeds,
   type YouTubeDiscoveryDeps,
 } from "./youtube-discovery.ts";
@@ -46,6 +45,7 @@ let profileCalls: string[];
 let marks: Map<string, { outcome: SourceOutcome; detail?: string }>;
 let carried: string[];
 let rankPrompts: string[];
+let lastWatcherRun: number | null;
 
 function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
   return {
@@ -72,6 +72,7 @@ function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
     },
     storedKnownIds: async () => stored,
     latestRunTimes: async (ids) => new Map([...recent].filter(([id]) => ids.includes(id))),
+    lastWatcherRunAt: async () => lastWatcherRun,
     profile: async (userId, botName) => {
       profileCalls.push(`${userId}|${botName}`);
       return null;
@@ -100,6 +101,7 @@ beforeEach(() => {
   marks = new Map();
   carried = [];
   rankPrompts = [];
+  lastWatcherRun = null;
 });
 
 describe("checkYouTubeDiscovery", () => {
@@ -125,13 +127,13 @@ describe("checkYouTubeDiscovery", () => {
     expect(carried).toEqual([]);
   });
 
-  test("a seed searched within 6 days is skipped; one searched earlier is searched again", async () => {
+  test("a seed already searched (any origin, any time) is skipped", async () => {
     recent = new Map([
-      ["ai/Seed 1.md", NOW - RECENT_RUN_SKIP_MS + 60_000],
-      ["ai/Seed 2.md", NOW - RECENT_RUN_SKIP_MS - 60_000],
+      ["ai/Seed 1.md", NOW - 60_000],
+      ["ai/Seed 2.md", NOW - 3 * 86_400_000],
     ]);
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
-    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md", "ai/Seed 3.md"]);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 3.md"]);
   });
 
   test("config.maxSeeds caps the seeds; out-of-range values fall back to 5", async () => {
@@ -294,8 +296,9 @@ describe("fix round 1 batch 1", () => {
 describe("fix round 1 batch 2", () => {
   test("a capture dated on the last run's day, after that run, is still a seed a week later", async () => {
     listed = [doc(1, "2026-11-07"), doc(2, "2026-11-13")];
-    const w = { ...watcher(), lastSuccessAt: Date.parse("2026-11-07T12:00:00Z") } as Watcher;
-    await checkYouTubeDiscovery(w, bot, undefined, deps());
+    // The anchor is the newest stored watcher run (the runner writes last_success_at for email only).
+    lastWatcherRun = Date.parse("2026-11-07T12:00:00Z");
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(saved.map((s) => s.run.seedDocId).sort()).toEqual(["ai/Seed 1.md", "ai/Seed 2.md"]);
   });
 
@@ -312,5 +315,28 @@ describe("fix round 1 batch 2", () => {
     };
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Many 42.md", "ai/Many 43.md", "ai/Many 44.md"]);
+  });
+});
+
+describe("fix round 2 batch 1", () => {
+  test("the deadline is bounded by the scheduler tick, not only the runner's net", async () => {
+    let seen: number | undefined;
+    const d = deps();
+    d.services.queriesCall = async (_p, _b, _t, opts) => {
+      seen = opts?.deadlineAt;
+      return JSON.stringify([{ query: "agent evals", why: "same topic" }]);
+    };
+    const w = watcher({ timeoutMs: 900_000 });
+    expect(computeWatcherTimeoutMs(w)).toBeGreaterThan(TICK_TIMEOUT_MS);
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(seen).toBe(NOW + TICK_TIMEOUT_MS - WATCHER_TIMEOUT_MARGIN_MS);
+  });
+
+  test("a seed on last run's day that the run searched is not searched again in the widened band", async () => {
+    lastWatcherRun = Date.parse("2026-11-07T12:00:00Z");
+    listed = [doc(1, "2026-11-07"), doc(2, "2026-11-13")];
+    recent = new Map([["ai/Seed 1.md", Date.parse("2026-11-07T12:00:30Z")]]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
   });
 });

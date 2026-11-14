@@ -1,7 +1,7 @@
 /**
  * The weekly `youtube-discovery` watcher (plan muninn-youtube-discovery, PR 3):
- * the last 7 days' YouTube summaries (widened back to the last successful run's
- * day, `seedWindowStart`), the newest not yet searched, at most `maxSeeds` (5), each searched as
+ * the last 7 days' YouTube summaries (widened back to the day of this bot's newest
+ * stored watcher run, `seedWindowStart`), the newest not yet searched, at most `maxSeeds` (5), each searched as
  * its own discovery run and stored as a shelf on `/summaries/discover`
  * (`origin = 'watcher'`). It sends no alert of its own: the shelves are the
  * output (D5). Its failures go to `source-health.ts`, so a broken yt-dlp search
@@ -16,8 +16,9 @@
  * A key is `ok` when at least one run passed its step, `error` when every run
  * that reached it failed there, carried when no run reached it.
  *
- * A seed searched in the last 6 days (by any origin) is skipped: the reader's
- * own Find on YouTube already made its shelf.
+ * A seed already searched (by any origin) is skipped: the reader's own Find on
+ * YouTube, or an earlier weekly run, already made its shelf. The window is
+ * anchored on this bot's newest stored watcher run (`seedWindowStart`).
  *
  * The run keeps inside the runner's net: every model call carries one run-wide
  * `deadlineAt` (the net minus its margin, so `health.finish()` still runs), and
@@ -36,6 +37,7 @@ import { seedsSince, seedWindowStart, toSeedDocs, DISCOVER_SEED_CAP } from "../y
 import { readIntKnob } from "./config-knobs.ts";
 import {
   getDiscoverKnownVideoIds,
+  getLatestDiscoverRunAt,
   getLatestDiscoverRunTimes,
   saveDiscoverRun,
   type DiscoverHitInput,
@@ -43,7 +45,7 @@ import {
 } from "../db/youtube-discover.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { openSourceHealth, type SourceHealthRecorder } from "./source-health.ts";
-import { computeWatcherTimeoutMs, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
+import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "youtube-discovery");
@@ -52,8 +54,6 @@ export const HEALTH_HUGINN = "youtube:huginn";
 export const HEALTH_MODEL = "youtube:model";
 export const HEALTH_SEARCH = "youtube:search";
 export const HEALTH_STORE = "youtube:store";
-/** A seed searched more recently than this is not searched again. */
-export const RECENT_RUN_SKIP_MS = 6 * 86_400_000;
 const MAX_SEEDS_LIMIT = 10;
 /** A seed needs this much of the run's budget left to start (a healthy one takes about 25 s). */
 export const MIN_SEED_MS = 60_000;
@@ -63,6 +63,8 @@ export interface YouTubeDiscoveryDeps {
   saveRun: (run: DiscoverRunInput, hits: readonly DiscoverHitInput[]) => Promise<string>;
   storedKnownIds: () => Promise<Set<string>>;
   latestRunTimes: (docIds: readonly string[]) => Promise<Map<string, number>>;
+  /** When this bot's newest watcher run was stored, or null: the window's anchor. */
+  lastWatcherRunAt: (botName: string) => Promise<number | null>;
   profile: (userId: string, botName: string) => Promise<string | null>;
   health: (watcher: Watcher) => Promise<SourceHealthRecorder>;
   tracer?: (bot: BotConfig) => DiscoverTracer | null;
@@ -75,6 +77,7 @@ export function defaultYouTubeDiscoveryDeps(): YouTubeDiscoveryDeps {
     saveRun: saveDiscoverRun,
     storedKnownIds: getDiscoverKnownVideoIds,
     latestRunTimes: (ids) => getLatestDiscoverRunTimes(ids),
+    lastWatcherRunAt: (botName) => getLatestDiscoverRunAt("watcher", botName),
     profile: (userId, botName) => loadInterestProfile(userId, botName),
     health: (w) => openSourceHealth(w.id, w.name),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discovery" }),
@@ -155,7 +158,8 @@ export async function checkYouTubeDiscovery(
   deps: YouTubeDiscoveryDeps = defaultYouTubeDiscoveryDeps(),
 ): Promise<WatcherAlert[]> {
   const now = deps.now ?? Date.now;
-  const deadlineAt = now() + computeWatcherTimeoutMs(watcher) - WATCHER_TIMEOUT_MARGIN_MS;
+  // The tick is the true ceiling: a net above it (a large `timeoutMs`) never fires first (`timeout.ts`).
+  const deadlineAt = now() + Math.min(computeWatcherTimeoutMs(watcher), TICK_TIMEOUT_MS) - WATCHER_TIMEOUT_MARGIN_MS;
   const health = await deps.health(watcher);
   const botName = botConfig.name;
 
@@ -171,7 +175,12 @@ export async function checkYouTubeDiscovery(
     return health.finish();
   }
 
-  const week = seedsSince(toSeedDocs(listed), seedWindowStart(now(), watcher.lastSuccessAt ?? null), Infinity);
+  // Anchored on the newest STORED watcher run: the runner writes `last_success_at` for email only.
+  const lastRun = await deps.lastWatcherRunAt(botName).catch((err) => {
+    log.warn("YouTube discovery: reading the last watcher run failed, using the last 7 days: {error}", { botName, error: errText(err) });
+    return null;
+  });
+  const week = seedsSince(toSeedDocs(listed), seedWindowStart(now(), lastRun), Infinity);
   let recent = new Map<string, number>();
   try {
     recent = await deps.latestRunTimes(week.map((s) => s.id));
@@ -179,7 +188,9 @@ export async function checkYouTubeDiscovery(
     log.warn("YouTube discovery: reading earlier runs failed, searching every seed: {error}", { botName, error: errText(err) });
   }
   const seeds = week
-    .filter((s) => (recent.get(s.id) ?? 0) < now() - RECENT_RUN_SKIP_MS)
+    // Searched once is enough: a doc in the window was captured inside it, so any search of it is
+    // this window's, and the band widened back to the last run is not searched twice.
+    .filter((s) => !recent.has(s.id))
     .slice(0, resolveMaxSeeds(watcher.config, { botName, watcherId: watcher.id }));
 
   const tally = { huginn: { reached: 0, passed: 0 } as StepTally, model: { reached: 0, passed: 0 } as StepTally, search: { reached: 0, passed: 0 } as StepTally };

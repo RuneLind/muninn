@@ -262,3 +262,11 @@ export async function getLatestDiscoverRunTimes(seedDocIds: readonly string[], s
   for (const r of rows) out.set(r.seed_doc_id as string, new Date(r.at as string).getTime());
   return out;
 }
+
+/** When `botName`'s newest run of `origin` was stored (epoch ms), or null when it has none. */
+export async function getLatestDiscoverRunAt(origin: DiscoverRunOrigin, botName: string): Promise<number | null> {
+  const [row] = await getDb()`
+    SELECT max(created_at) AS at FROM youtube_discover_runs WHERE origin = ${origin} AND bot_name = ${botName}
+  `;
+  return row?.at ? new Date(row.at as string).getTime() : null;
+}

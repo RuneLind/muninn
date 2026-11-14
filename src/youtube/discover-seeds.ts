@@ -76,14 +76,14 @@ export function lastWeekSeeds(docs: readonly SeedDoc[], now: number, cap = DISCO
 
 /**
  * The first day a weekly run looks back to: the last 7 days, widened back to the
- * day of the last successful run (at most {@link DISCOVER_MAX_WINDOW_DAYS}), so a
- * capture made after that run on its day, or in a week the run slipped, is still
- * a seed. Seeds already searched are skipped by the caller.
+ * day of the last run (at most {@link DISCOVER_MAX_WINDOW_DAYS}), so a capture made
+ * after that run on its day, or in a week the run slipped, is still a seed. The
+ * caller skips seeds already searched.
  */
-export function seedWindowStart(now: number, lastSuccessAt: number | null): string {
+export function seedWindowStart(now: number, lastRunAt: number | null): string {
   const week = dayMinus(now, DISCOVER_WEEK_DAYS - 1);
-  if (lastSuccessAt === null) return week;
-  const last = new Date(lastSuccessAt).toISOString().slice(0, 10);
+  if (lastRunAt === null) return week;
+  const last = new Date(lastRunAt).toISOString().slice(0, 10);
   const floor = dayMinus(now, DISCOVER_MAX_WINDOW_DAYS - 1);
   return last >= week ? week : last < floor ? floor : last;
 }

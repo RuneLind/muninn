@@ -11,6 +11,7 @@ import {
   getDiscoverKnownVideoIds,
   getDiscoverVideoDetails,
   getLatestDiscoverRunTimes,
+  getLatestDiscoverRunAt,
   listDiscoverShelves,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
@@ -188,5 +189,20 @@ describe("getLatestDiscoverRunTimes (PR 3)", () => {
       ["a/Two.md", Date.parse("2026-11-05T10:00:00Z")],
     ]);
     expect(await getLatestDiscoverRunTimes([])).toEqual(new Map());
+  });
+});
+
+describe("getLatestDiscoverRunAt (fix round 2 batch 1)", () => {
+  test("the newest run of one origin for one bot", async () => {
+    const a = await saveDiscoverRun(run({ seedDocId: "w/One.md", origin: "watcher", botName: "bot-a" }), [hit("vidWWWWWWW1", 0.9)]);
+    const b = await saveDiscoverRun(run({ seedDocId: "w/Two.md", origin: "watcher", botName: "bot-a" }), [hit("vidWWWWWWW2", 0.9)]);
+    const page = await saveDiscoverRun(run({ seedDocId: "w/Three.md", origin: "page", botName: "bot-a" }), [hit("vidWWWWWWW3", 0.9)]);
+    const other = await saveDiscoverRun(run({ seedDocId: "w/Four.md", origin: "watcher", botName: "bot-b" }), [hit("vidWWWWWWW4", 0.9)]);
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-01T12:00:00Z' WHERE id = ${a}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-07T12:00:00Z' WHERE id = ${b}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-09T12:00:00Z' WHERE id = ${page}`;
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-10T12:00:00Z' WHERE id = ${other}`;
+    expect(await getLatestDiscoverRunAt("watcher", "bot-a")).toBe(Date.parse("2026-11-07T12:00:00Z"));
+    expect(await getLatestDiscoverRunAt("watcher", "bot-none")).toBeNull();
   });
 });
