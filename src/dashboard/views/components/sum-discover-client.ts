@@ -38,6 +38,8 @@ interface DocState {
   searched: number;
   known: number;
   error: string | null;
+  /** The stored shelf on `/summaries/discover`, or null when the run was not saved. */
+  shelfUrl: string | null;
   summarize: Map<string, Summarize>;
 }
 
@@ -50,7 +52,7 @@ const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 function stateFor(key: string): DocState {
   let s = states.get(key);
   if (!s) {
-    s = { open: false, loading: false, results: null, queries: [], searched: 0, known: 0, error: null, summarize: new Map() };
+    s = { open: false, loading: false, results: null, queries: [], searched: 0, known: 0, error: null, shelfUrl: null, summarize: new Map() };
     states.set(key, s);
   }
   return s;
@@ -121,6 +123,7 @@ export function sumDiscoverStart(): void {
   if (s.loading) return;
   s.loading = true;
   s.error = null;
+  s.shelfUrl = null;
   render();
   void (async () => {
     try {
@@ -134,6 +137,7 @@ export function sumDiscoverStart(): void {
         queries?: { query: string; why: string }[];
         searched?: number;
         known?: number;
+        shelfUrl?: string | null;
         error?: string;
       };
       if (!res.ok || !Array.isArray(data.results)) {
@@ -144,6 +148,7 @@ export function sumDiscoverStart(): void {
       s.queries = Array.isArray(data.queries) ? data.queries : [];
       s.searched = data.searched ?? 0;
       s.known = data.known ?? 0;
+      s.shelfUrl = typeof data.shelfUrl === "string" && data.shelfUrl.startsWith("/summaries/discover#") ? data.shelfUrl : null;
     } catch {
       s.error = "The search failed: the server did not answer.";
     } finally {
@@ -214,8 +219,11 @@ function render(): void {
   else if (s.results) {
     const qs = s.queries.map((q) => escHtml(q.query)).join(" · ");
     const counts = `${s.searched} found, ${s.known} already summarized`;
+    const shelf = s.shelfUrl
+      ? ` <a class="sum-discover-shelf" href="${escHtml(s.shelfUrl)}">Saved as a shelf on Discover →</a>`
+      : "";
     body =
-      `<div class="sum-discover-note">${counts}${qs ? `. Searched: ${qs}` : ""}</div>` +
+      `<div class="sum-discover-note">${counts}${qs ? `. Searched: ${qs}` : ""}.${shelf}</div>` +
       (s.results.length === 0
         ? `<div class="sum-discover-note">Nothing new worth watching came up.</div>`
         : `<ul class="sum-discover-list">${s.results.map((r) => rowHtml(r, s.summarize.get(r.videoId))).join("")}</ul>`);

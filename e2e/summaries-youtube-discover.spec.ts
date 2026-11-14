@@ -28,6 +28,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
@@ -83,7 +84,39 @@ const FIXTURE = {
     "coding agent benchmarks": [hit(KNOWN, "Already captured", "K", 60, 1), hit(NEW_B, "Invented benchmark tour", "Channel B", 3723, 2_400_000), hit(NEW_C, "Invented clickbait", "C", 30, 5)],
     "broken search": null,
   },
+  // The drawer's details probe, per video (`null` = the probe failed).
+  details: {
+    [NEW_B]: {
+      description: "An invented description of the benchmark tour.",
+      chapters: [
+        { start: 0, title: "Invented intro" },
+        { start: 125, title: "Invented results" },
+      ],
+      likeCount: 4321,
+      viewCount: 2_400_100,
+      uploadDate: "20250619",
+      channelFollowerCount: 22_400,
+      tags: ["benchmarks"],
+    },
+    [NEW_A]: null,
+  },
 };
+
+/** A shelf seeded straight into the DB with five cards: the reader flow only ever makes two. */
+const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
+const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"] as const;
+
+/** Rows an earlier run of this spec left: a dismissed or queued video would join the known set. */
+async function clearStoredRuns(): Promise<void> {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id IN (${NEW_A}, ${NEW_B}, ${NEW_C})`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${YT_DOC.id}, ${FOCUS_SEED})`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eFocus%'`;
+  } finally {
+    await sql.end();
+  }
+}
 
 let server: ChildProcess | undefined;
 let fake: Server | undefined;
@@ -158,6 +191,7 @@ const onSigterm = () => handleSignal("SIGTERM");
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async () => {
+  await clearStoredRuns();
   fake = await startFake();
   const { botsRoot, fixture } = writeFixtures();
   process.on("SIGINT", onSigint);
@@ -278,6 +312,364 @@ test("lists the ranked new videos, then Summarize posts once per click, and an e
     { body: bodyA, ct: "application/json" },
     { body: bodyA, ct: "application/json" },
   ]);
+});
+
+test("the reader links its stored run; the Discover page shows it as a shelf with a details drawer", async ({ page }) => {
+  await openDoc(page, "youtube", YT_DOC.id, "evaluating coding agents");
+  await page.locator("#docPanelDiscover").click();
+  const panel = page.locator("#sumDiscover");
+  await expect(panel.locator(".sum-discover-row")).toHaveCount(2, { timeout: 15_000 });
+  const shelfLink = panel.locator("a.sum-discover-shelf");
+  await expect(shelfLink).toHaveText("Saved as a shelf on Discover →");
+  const href = await shelfLink.getAttribute("href");
+  expect(href).toMatch(/^\/summaries\/discover#run-[0-9a-f-]{36}$/);
+  await shelfLink.click();
+  await expect(page).toHaveURL(`${BASE}${href}`);
+
+  const shelf = page.locator(`section.dsc-shelf${href!.slice(href!.indexOf("#"))}`);
+  await expect(shelf).toHaveClass(/dsc-target/);
+  await expect(shelf.locator(".dsc-because")).toHaveText("Because you captured · ai/e2e · 2026-03-22");
+  await expect(shelf.locator("h3 a")).toHaveText("E2E discover seed");
+  await expect(shelf.locator("h3 a")).toHaveAttribute("href", `/summaries?doc=${encodeURIComponent(YT_DOC.id)}&source=youtube`);
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("5 videos searched · 2 you already have · 2 shown");
+  await expect(shelf.locator(".dsc-q")).toHaveText(["agent evals deep dive", "coding agent benchmarks", "broken search"]);
+  const cards = shelf.locator(".dsc-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0).locator(".dsc-title")).toHaveText("Invented benchmark tour");
+  await expect(cards.nth(0).locator(".dsc-thumb img")).toHaveAttribute("src", `https://i.ytimg.com/vi/${NEW_B}/mqdefault.jpg`);
+  await expect(cards.nth(0).locator(".dsc-dur")).toHaveText("1:02:03");
+  await expect(cards.nth(0).locator(".dsc-score")).toHaveText("95% match");
+  await expect(cards.nth(0).locator(".dsc-why")).toHaveText("Invented reason B");
+
+  // Sort: Shortest puts the 30:34 talk first.
+  await page.locator("#dscSort").selectOption("short");
+  await expect(cards.nth(0).locator(".dsc-title")).toHaveText("Invented eval talk");
+  await page.locator("#dscSort").selectOption("score");
+
+  // The drawer: details load once, play swaps in the no-cookie embed.
+  await cards.nth(0).click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator("h3")).toHaveText("Invented benchmark tour");
+  await expect(drawer.locator(".dsc-chapters li")).toHaveText(["0:00Invented intro", "2:05Invented results"], { timeout: 10_000 });
+  await expect(drawer.locator(".dsc-desc")).toHaveText("An invented description of the benchmark tour.");
+  await expect(drawer.locator(".dsc-stats")).toContainText("4K likes");
+  await expect(drawer.locator(".dsc-stats")).toContainText("22K subscribers");
+  await expect(drawer.locator(".dsc-box")).toContainText("Invented reason B");
+  await expect(drawer.locator("iframe")).toHaveCount(0);
+  await drawer.getByRole("button", { name: "Play here" }).click();
+  await expect(drawer.locator("iframe")).toHaveAttribute("src", `https://www.youtube-nocookie.com/embed/${NEW_B}?autoplay=1`);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
+  // A failed probe says so and offers a retry.
+  await cards.nth(1).click();
+  await expect(drawer.locator(".dsc-warn")).toContainText("YouTube did not answer", { timeout: 10_000 });
+  await expect(drawer.getByRole("button", { name: "Try again" })).toBeVisible();
+  await drawer.getByRole("button", { name: "✕ Close" }).click();
+  await expect(drawer).toBeHidden();
+
+  // The cached details come back after a reload without a second probe.
+  await page.reload();
+  await shelf.locator(".dsc-card").nth(0).click();
+  await expect(drawer.locator(".dsc-chapters li")).toHaveCount(2);
+});
+
+test("one Undo restores every dismissal its toast covers", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+  for (const title of ["Invented benchmark tour", "Invented eval talk"]) {
+    await card(title).hover();
+    await card(title).getByRole("button", { name: "Not interested" }).click();
+    await expect(card(title)).toHaveCount(0);
+  }
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+  await expect(card("Invented eval talk")).toHaveCount(1);
+  await page.reload();
+  await expect(shelf.locator(".dsc-card")).toHaveCount(2);
+});
+
+test("re-renders keep the row's scroll, the playing video and focus; the drawer is a modal dialog; counts and layout agree", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${BASE}/summaries/discover`);
+  const runId = await page
+    .locator("section.dsc-shelf")
+    .filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) })
+    .getAttribute("data-run");
+  // By id: the title is rewritten below.
+  const shelf = page.locator(`section.dsc-shelf[data-run="${runId}"]`);
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+  const row = shelf.locator(".dsc-row");
+
+  // The live region is in the page before any toast, so screen readers announce the first one.
+  await expect(page.locator("#dscToast")).toHaveAttribute("role", "status");
+  await expect(page.locator("#dscToast")).not.toHaveAttribute("hidden", /.*/);
+
+  // A long unbroken seed title does not widen the page at phone width.
+  await shelf.locator("h3 a").evaluate((a) => (a.textContent = "x".repeat(200)));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Scroll the row to its end, press Later on the last card: the row stays where it was, focus stays on the button.
+  await row.evaluate((r) => (r.scrollLeft = r.scrollWidth));
+  const before = await row.evaluate((r) => r.scrollLeft);
+  expect(before).toBeGreaterThan(0);
+  await card("Invented eval talk").getByRole("button", { name: "☆ Later" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  expect(await row.evaluate((r) => r.scrollLeft)).toBe(before);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-act"))).toBe("later");
+  await page.keyboard.press("Enter");
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "false");
+
+  // The drawer is a modal dialog; the page behind it is inert while it is open.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await card("Invented benchmark tour").click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toHaveAttribute("role", "dialog");
+  await expect(drawer).toHaveAttribute("aria-modal", "true");
+  const labelId = await drawer.getAttribute("aria-labelledby");
+  await expect(page.locator(`#${labelId}`)).toHaveText("Invented benchmark tour");
+  expect(await page.locator(".dsc-page").evaluate((el) => (el as HTMLElement).inert)).toBe(true);
+
+  // Play, then let a re-render happen (Later in the drawer): the same iframe keeps playing.
+  await drawer.getByRole("button", { name: "Play here" }).click();
+  await drawer.locator("iframe").evaluate((f) => ((f as HTMLElement).dataset.mark = "kept"));
+  await drawer.locator('[data-act="later"]').click();
+  await expect(drawer.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(drawer.locator("iframe")).toHaveAttribute("data-mark", "kept");
+  await drawer.locator('[data-act="later"]').click();
+  await expect(drawer.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "false");
+
+  // Dismissing from the drawer closes it and puts focus on a card, not on the page body.
+  await drawer.getByRole("button", { name: "✕ Not interested" }).click();
+  await expect(drawer).toBeHidden();
+  expect(await page.locator(".dsc-page").evaluate((el) => (el as HTMLElement).inert)).toBe(false);
+  expect(await page.evaluate(() => document.activeElement?.classList.contains("dsc-card"))).toBe(true);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+
+  // The shelf's "shown" follows the length filter, and an empty row's note spans the shelf.
+  await page.locator("#dscLen").selectOption("1800");
+  await expect(shelf.locator(".dsc-card")).toHaveCount(2);
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("2 shown");
+  await page.locator("#dscLen").selectOption("600");
+  await page.locator("#dscSort").selectOption("score");
+  await shelf.locator(".dsc-card").first().evaluate(() => undefined);
+  await page.evaluate(() => {
+    const sel = document.getElementById("dscLen") as HTMLSelectElement;
+    sel.add(new Option("Over 2 h", "7200"));
+    sel.value = "7200";
+    sel.dispatchEvent(new Event("change"));
+  });
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("0 shown");
+  const empty = shelf.locator(".dsc-empty");
+  await expect(empty).toHaveText("Nothing at this length.");
+  const widths = await shelf.evaluate((el) => ({ shelf: el.getBoundingClientRect().width, empty: el.querySelector(".dsc-empty")!.getBoundingClientRect().width }));
+  expect(widths.empty).toBeGreaterThan(widths.shelf * 0.8);
+});
+
+test("Later, Dismiss with Undo and Summarize persist, and dismissed and queued videos are never suggested again", async ({ page, request }) => {
+  const posts: unknown[] = [];
+  await page.route("**/api/youtube/summarize", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-2" }) });
+  });
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+
+  // Later toggles and survives a reload.
+  await card("Invented eval talk").getByRole("button", { name: "☆ Later" }).click();
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await page.reload();
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+
+  // Dismiss, Undo, Dismiss again.
+  await card("Invented benchmark tour").hover();
+  await card("Invented benchmark tour").getByRole("button", { name: "Not interested" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+  await expect(page.locator("#dscToast")).toContainText("Dismissed. It won't be suggested again.");
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+  await card("Invented benchmark tour").hover();
+  await card("Invented benchmark tour").getByRole("button", { name: "Not interested" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+
+  // Summarize posts the capture route, then the card reads Queued, after a reload too.
+  await card("Invented eval talk").getByRole("button", { name: "Summarize" }).click();
+  await expect(card("Invented eval talk").getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  expect(posts).toEqual([{ title: "Invented eval talk", url: `https://www.youtube.com/watch?v=${NEW_A}`, video_id: NEW_A }]);
+  await page.reload();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+  await expect(card("Invented eval talk").getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("1 shown");
+
+  // A new run from the same seed: the dismissed and the queued video are known now.
+  const res = await request.post(`${BASE}/api/summaries/discover`, { data: { source: "youtube", docId: YT_DOC.id } });
+  expect(res.status()).toBe(200);
+  const body = (await res.json()) as { results: { videoId: string }[]; known: number };
+  expect(body.known).toBe(4);
+  expect(body.results.map((r) => r.videoId)).toEqual([NEW_C]);
+});
+
+test("a queued card offers no Later; a double click posts once; a failed queued write is said, not hidden", async ({ page }) => {
+  const statePosts: unknown[] = [];
+  let failState = false;
+  await page.route("**/api/summaries/discover/state", async (route) => {
+    statePosts.push(route.request().postDataJSON());
+    if (failState) await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "Invented DB outage.", code: "internal" }) });
+    else await route.continue();
+  });
+  await page.route("**/api/youtube/summarize", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-3" }) }),
+  );
+  await page.goto(`${BASE}/summaries/discover`);
+  // The previous test's last run is this seed's newest shelf: only the clickbait video is left.
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = shelf.locator(".dsc-card").filter({ hasText: "Invented clickbait" });
+  await expect(card).toHaveCount(1);
+
+  await card.getByRole("button", { name: "☆ Later" }).dblclick();
+  await expect(card.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await page.waitForTimeout(300);
+  expect(statePosts).toEqual([{ videoId: NEW_C, state: "later" }]);
+
+  failState = true;
+  await card.getByRole("button", { name: "Summarize" }).click();
+  await expect(page.locator("#dscToast")).toContainText("Invented DB outage.");
+  await expect(card.getByRole("button", { name: "Summarize" })).toBeEnabled();
+
+  failState = false;
+  await card.getByRole("button", { name: "Summarize" }).click();
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(card.locator('[data-act="later"]')).toHaveCount(0);
+  await page.reload();
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(card.locator('[data-act="later"]')).toHaveCount(0);
+});
+
+test("a dismissed card hands focus to its neighbour without scrolling the row back; Play keeps focus in the dialog; closing the drawer cancels its details request", async ({ page }) => {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    const [run] = await sql`
+      INSERT INTO youtube_discover_runs (seed_doc_id, seed_title, seed_video_id, seed_category, queries, searched, known, origin)
+      VALUES (${FOCUS_SEED}, 'E2E focus seed', NULL, 'ai/e2e', '[]'::jsonb, 5, 0, 'reader') RETURNING id`;
+    for (const [i, id] of FOCUS_IDS.entries()) {
+      await sql`
+        INSERT INTO youtube_discover_hits (run_id, video_id, title, channel, duration_sec, view_count, score, why, query, rank)
+        VALUES (${run!.id}, ${id}, ${`Focus card ${i + 1}`}, 'F', 600, 10, ${0.9 - i / 10}, 'invented', 'q', ${i + 1})`;
+    }
+  } finally {
+    await sql.end();
+  }
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E focus seed" }) });
+  const row = shelf.locator(".dsc-row");
+  const card4 = shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[3]}"]`);
+  await card4.scrollIntoViewIfNeeded();
+  const before = await row.evaluate((r) => r.scrollLeft);
+  expect(before).toBeGreaterThan(0);
+  await card4.locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(card4).toHaveCount(0);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-video"))).toBe(FOCUS_IDS[4]);
+  expect(await row.evaluate((r) => r.scrollLeft)).toBeGreaterThan(0);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card4).toHaveCount(1);
+
+  // Play by keyboard: focus lands on the player, inside the dialog.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[0]}"]`).click();
+  const drawer = page.locator("#dscDrawer");
+  await drawer.getByRole("button", { name: "Play here" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(drawer.locator("iframe")).toHaveCount(1);
+  expect(await page.evaluate(() => !!document.activeElement?.closest("#dscDrawer"))).toBe(true);
+  // …and Escape still closes it (focus is not inside the cross-origin frame).
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
+  // Closing the drawer before the details answer cancels the request.
+  const aborted: string[] = [];
+  page.on("requestfailed", (r) => {
+    if (r.url().endsWith("/api/summaries/discover/details") && (r.postDataJSON() as { videoId: string }).videoId === FOCUS_IDS[1])
+      aborted.push(r.failure()?.errorText ?? "");
+  });
+  // Held until the drawer is closed, so the abort never races the 200 ms seam answer.
+  let releaseHeld!: () => void;
+  const held = new Promise<void>((r) => (releaseHeld = r));
+  await page.route("**/api/summaries/discover/details", async (route) => {
+    if ((route.request().postDataJSON() as { videoId: string }).videoId === FOCUS_IDS[1]) await held;
+    await route.continue().catch(() => undefined);
+  });
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[1]}"]`).click();
+  await expect(drawer).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  releaseHeld();
+  await expect.poll(() => aborted.length).toBe(1);
+  await page.unroute("**/api/summaries/discover/details");
+});
+
+test("focus survives the details answer on every drawer control; Undo returns focus to the card; the nav is inert behind the dialog", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E focus seed" }) });
+  const drawer = page.locator("#dscDrawer");
+  const active = () =>
+    page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return a ? a.dataset.act ?? a.dataset.fk ?? a.tagName : null;
+    });
+  // Each drawer control, focused while the details request is held, keeps focus when the answer re-renders the drawer.
+  const controls: { video: string; key: string; focus: () => Promise<void> }[] = [
+    { video: FOCUS_IDS[2], key: "close", focus: () => drawer.getByRole("button", { name: "✕ Close" }).focus() },
+    { video: FOCUS_IDS[3], key: "later", focus: () => drawer.locator('[data-act="later"]').focus() },
+    { video: FOCUS_IDS[4], key: "open", focus: () => drawer.getByRole("link", { name: "Open ↗" }).focus() },
+    {
+      video: FOCUS_IDS[0],
+      key: "player",
+      focus: async () => {
+        await drawer.getByRole("button", { name: "Play here" }).focus();
+        await page.keyboard.press("Enter");
+      },
+    },
+  ];
+  for (const c of controls) {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/summaries/discover/details", async (route) => {
+      await held;
+      await route.continue().catch(() => undefined);
+    });
+    await shelf.locator(`.dsc-card[data-video="${c.video}"]`).click();
+    await expect(drawer.locator(".dsc-note")).toContainText("Loading");
+    await c.focus();
+    expect(await active()).toBe(c.key);
+    release();
+    await expect(drawer.locator(".dsc-note")).not.toContainText("Loading", { timeout: 10_000 });
+    expect(await active(), `focus after the details answer, control ${c.key}`).toBe(c.key);
+    await page.unroute("**/api/summaries/discover/details");
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+  }
+
+  // The site nav is inert while the dialog is open.
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[1]}"]`).click();
+  expect(await page.locator("header").evaluate((h) => (h as HTMLElement).inert)).toBe(true);
+  await page.keyboard.press("Escape");
+  expect(await page.locator("header").evaluate((h) => (h as HTMLElement).inert)).toBe(false);
+
+  // Undo puts focus back on the card it restored.
+  const card = shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[2]}"]`);
+  await card.locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(card).toHaveCount(0);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("data-video"))).toBe(FOCUS_IDS[2]);
 });
 
 test("the route refuses a non-YouTube source and a missing document", async ({ request }) => {

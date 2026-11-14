@@ -15,6 +15,8 @@ const ALL_TABLES = [
   "prompt_snapshots",
   "haiku_usage",
   "summary_candidates",
+  "youtube_discover_hits",
+  "youtube_discover_runs",
   "x_link_amplifiers",
   "watchers",
   "scheduled_tasks",

@@ -8,7 +8,12 @@ import { describe, expect, test } from "bun:test";
 import {
   buildDiscoverQueriesPrompt,
   buildDiscoverRankPrompt,
+  buildDetailsArgs,
   buildSearchArgs,
+  DISCOVER_DETAILS_TEMPLATE,
+  DISCOVER_DETAILS_TIMEOUT_MS,
+  parseDetailsProbe,
+  probeDiscoverDetails,
   DISCOVER_MAX_QUERIES,
   DISCOVER_QUERY_MAX_CHARS,
   DISCOVER_SEARCH_TIMEOUT_MS,
@@ -267,5 +272,110 @@ describe("rank prompt", () => {
     expect(formatDuration(59)).toBe("0:59");
     expect(formatDuration(754)).toBe("12:34");
     expect(formatDuration(3723)).toBe("1:02:03");
+  });
+});
+
+describe("details probe (PR 2)", () => {
+  test("args: the -O field list (never -J / --dump-json), the url built from the gated id; null for a bad id", () => {
+    const args = buildDetailsArgs(ID_A)!;
+    expect(args).toContain("-O");
+    expect(args).toContain(DISCOVER_DETAILS_TEMPLATE);
+    expect(args).toContain("--skip-download");
+    expect(args).not.toContain("-J");
+    expect(args).not.toContain("--dump-json");
+    expect(args.at(-1)).toBe(`https://www.youtube.com/watch?v=${ID_A}`);
+    expect(buildDetailsArgs("--exec=x")).toBeNull();
+    expect(buildDetailsArgs("short")).toBeNull();
+  });
+  test("parses description, chapters, counts, a YYYYMMDD date and tags; drops junk", () => {
+    const line = JSON.stringify({
+      id: ID_A,
+      description: "An invented description",
+      chapters: [{ start_time: 0, title: "Intro" }, { start_time: "x", title: "bad" }, { start_time: 65.5, title: "Part\u0007 two" }, null],
+      like_count: 147,
+      view_count: 6725,
+      upload_date: "20250619",
+      channel_follower_count: 22400,
+      tags: ["one", 2, "", "two"],
+    });
+    expect(parseDetailsProbe(`noise\n${line}\n`, ID_A)).toEqual({
+      description: "An invented description",
+      chapters: [{ start: 0, title: "Intro" }, { start: 65.5, title: "Part  two" }],
+      likeCount: 147,
+      viewCount: 6725,
+      uploadDate: "20250619",
+      channelFollowerCount: 22400,
+      tags: ["one", "two"],
+    });
+  });
+  test("null for another video's record, no JSON, or a non-object; NA fields become null", () => {
+    expect(parseDetailsProbe(JSON.stringify({ id: ID_B }), ID_A)).toBeNull();
+    expect(parseDetailsProbe("not json", ID_A)).toBeNull();
+    expect(parseDetailsProbe("{broken", ID_A)).toBeNull();
+    expect(parseDetailsProbe(JSON.stringify({ id: ID_A, upload_date: "NA", like_count: null, description: "  " }), ID_A)).toEqual({
+      description: null,
+      chapters: [],
+      likeCount: null,
+      viewCount: null,
+      uploadDate: null,
+      channelFollowerCount: null,
+      tags: [],
+    });
+  });
+  test("probes run one at a time process-wide, each under its bound; a failure is null", async () => {
+    let active = 0;
+    let peak = 0;
+    const timeouts: number[] = [];
+    const run = async (cmd: string[], ms: number) => {
+      timeouts.push(ms);
+      active++;
+      peak = Math.max(peak, active);
+      await Bun.sleep(5);
+      active--;
+      const id = cmd.at(-1)!.split("v=")[1]!;
+      if (id === ID_C) return { stdout: "", stderr: "ERROR", exitCode: 1 };
+      return { stdout: JSON.stringify({ id }), stderr: "", exitCode: 0 };
+    };
+    const out = await Promise.all([ID_A, ID_B, ID_C].map((id) => probeDiscoverDetails(id, run)));
+    expect(peak).toBe(1);
+    expect(timeouts).toEqual([DISCOVER_DETAILS_TIMEOUT_MS, DISCOVER_DETAILS_TIMEOUT_MS, DISCOVER_DETAILS_TIMEOUT_MS]);
+    expect(out.map((d) => d === null)).toEqual([false, false, true]);
+    // A throwing runner neither breaks the queue nor throws.
+    expect(await probeDiscoverDetails(ID_A, async () => { throw new Error("spawn failed"); })).toBeNull();
+    expect(await probeDiscoverDetails(ID_B, run)).not.toBeNull();
+  });
+});
+
+describe("details probe: abandoned and unavailable (fix round 1)", () => {
+  test("a probe whose caller aborted before its turn never spawns", async () => {
+    const spawned: string[] = [];
+    const ctl = new AbortController();
+    ctl.abort();
+    const out = await probeDiscoverDetails(ID_A, async (cmd) => (spawned.push(cmd.at(-1)!), { stdout: JSON.stringify({ id: ID_A }), stderr: "", exitCode: 0 }), ctl.signal);
+    expect(out).toBeNull();
+    expect(spawned).toEqual([]);
+  });
+  test("yt-dlp's unavailable/private/removed answer is 'unavailable', not a plain failure", async () => {
+    for (const stderr of [
+      `ERROR: [youtube] ${ID_A}: Video unavailable`,
+      `ERROR: [youtube] ${ID_A}: Private video. Sign in if you've been granted access to this video`,
+      `ERROR: [youtube] ${ID_A}: This video has been removed by the uploader`,
+    ]) {
+      expect(await probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr, exitCode: 1 }))).toBe("unavailable");
+    }
+    expect(await probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr: "ERROR: HTTP Error 429", exitCode: 1 }))).toBeNull();
+  });
+});
+
+describe("details probe: yt-dlp's real wording (fix round 2)", () => {
+  const answer = (stderr: string) => probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr, exitCode: 1 }));
+  test("a missing video's measured answer is 'unavailable'", async () => {
+    // yt-dlp 2026.08.19 on a bogus id (measured 2026-11-14).
+    expect(await answer(`ERROR: [youtube] ${ID_A}: This video is unavailable`)).toBe("unavailable");
+    expect(await answer(`ERROR: [youtube] ${ID_A}: This video is not available`)).toBe("unavailable");
+  });
+  test("YouTube's throttle answer is a plain failure, never 'unavailable'", async () => {
+    expect(await answer(`ERROR: [youtube] ${ID_A}: Video unavailable. This content isn't available, try again later.`)).toBeNull();
+    expect(await answer(`ERROR: [youtube] ${ID_A}: Sign in to confirm you're not a bot`)).toBeNull();
   });
 });

@@ -42,7 +42,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
   ["/api/wiki/ref", "renders one page from disk and reads its id targets: no outbound call, spawn, search or model spend"],
   ...[
     "/", "/docs", "/traces", "/memsearch", "/logs", "/search", "/search/document/:collection/*",
-    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/youtube",
+    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/summaries/discover", "/youtube",
     "/x-articles", "/tiktok", "/vimeo", "/graph", "/wiki", "/wiki/issues", "/wiki/gardener",
     "/benchmark", "/benchmark/retrieval", "/benchmark/run-live/:traceId", "/benchmark/runs/:id",
     "/models", "/indexing", "/agents", "/plans", "/jira", "/chat",
