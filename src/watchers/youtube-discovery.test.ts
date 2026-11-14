@@ -340,3 +340,49 @@ describe("fix round 2 batch 1", () => {
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
   });
 });
+
+describe("fix round 2 batch 5 (pins)", () => {
+  test("the profile read once reaches every seed's rank prompt", async () => {
+    let call = 0;
+    searchAnswer = async () => {
+      call++;
+      return [hit(vid(call * 10 + 1))];
+    };
+    const d = deps({ profile: async () => "INVENTED-PROFILE-TEXT" });
+    await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(rankPrompts).toHaveLength(3);
+    expect(rankPrompts.every((p) => p.includes("INVENTED-PROFILE-TEXT"))).toBe(true);
+  });
+
+  test("a video whose shelf failed to save stays rankable for a later seed", async () => {
+    listed = [doc(1, "2026-11-13"), doc(2, "2026-11-12")];
+    searchAnswer = async () => [hit(vid(1)), hit(vid(2))];
+    let n = 0;
+    const d = deps({
+      saveRun: async (run, hits) => {
+        n++;
+        if (n === 1) throw new Error("db down");
+        saved.push({ run, hits });
+        return "run-x";
+      },
+    });
+    await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(rankPrompts[1]).toContain(vid(1));
+  });
+
+  test("youtube:store's detail is the first failure, not the last", async () => {
+    let n = 0;
+    await checkYouTubeDiscovery(
+      watcher(),
+      bot,
+      undefined,
+      deps({
+        saveRun: async () => {
+          n++;
+          throw new Error(`failure ${n}`);
+        },
+      }),
+    );
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "failure 1" });
+  });
+});
