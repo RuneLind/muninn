@@ -17,16 +17,23 @@
  *   resolved through the page's `repos:` (kept only when its facts entry's
  *   title carries a key the page names). Jira keys of the wiki's tracker
  *   projects; none without `trackers`.
- * - **Never marked:** code (fences and inline), tags and their attributes,
- *   headings, wikilinks and the state homes (`stateLineRoles`' `home` units).
- *   A markdown link or a bare URL is one mention: every id in it gives one
- *   chip per distinct id after it, so nothing lands inside `[…]`, `(…)` or a URL.
+ * - **Never marked:** code (the reader's fences, backticks only and an
+ *   unclosed one stays prose, and inline spans), tags and their attributes,
+ *   a link's title, headings, wikilinks and the state homes
+ *   (`stateLineRoles`' `home` units).
+ * - A markdown link (inline `[…](…)`, reference `[…][…]`, angle `<https://…>`)
+ *   or a bare URL is one mention: every id in it gives one chip per distinct
+ *   id after it, so nothing lands inside `[…]`, `(…)`, `<…>` or a URL. A
+ *   reference definition (`[r]: https://…`) prints literally, so its URL is a
+ *   bare URL. `_…_` delimiters the reader renders as italics are no word
+ *   characters to the mention patterns, as `*…*` are not.
  */
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { getLog } from "../logging.ts";
-import { markdownCodeRegions, type ProtectedRegion } from "../format/markdown-ast.ts";
+import { readerFencedLines, type ProtectedRegion } from "../format/markdown-ast.ts";
+import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { READER_ONLY_ATTR } from "../format/reader-lens.ts";
@@ -456,10 +463,68 @@ export interface ChipInsertion {
   ids: { id: string; kind: "pr" | "key" }[];
 }
 
-const TAG_RE = /<\/?[A-Za-z][\w.:-]*(?:"[^"]*"|'[^']*'|[^'"<>])*>/g;
+// A tag is a name and attributes in HTML's own grammar (`name`, `name=value`,
+// quoted values on one line), so an apostrophe or a stray `<x` in prose never
+// opens a "tag" that runs on to some later `>`; an angle autolink is no tag.
+const TAG_RE = /<\/?[A-Za-z][\w.:-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`]+))?)*\s*\/?>/g;
 const HEADING_RE = /^ {0,3}#{1,6}(?:\s|$)/;
 const LINK_RE = /\[([^\]\n]+)\]\(([^)\n]+)\)/g;
+/** `[text][label]` and `[text][]`: the renderer prints them literally. */
+const REF_LINK_RE = /\[([^\]\n]+)\]\[([^\]\n]*)\]/g;
+/** The renderer's angle autolinks, `<https://…>` and Slack's `<https://…|label>`. */
+const AUTOLINK_RE = /<https?:\/\/[^>\n]+>/g;
+/** The renderer's underscore italics (`renderInlineWith`), without its lookbehind. */
+const UNDERSCORE_EM_RE = /_([^_\n]+?)_(?!\w)/g;
 const URL_RE = /https?:\/\/[^\s<>()[\]]+/g;
+
+/**
+ * The regions the reader shows as code: its fences (`readerFencedLines`:
+ * backticks only, an unclosed opener stays prose) and the inline code spans
+ * of every other line.
+ */
+function readerCodeRegions(body: string): ProtectedRegion[] {
+  const fenced = readerFencedLines(body);
+  const lines = body.split("\n");
+  const out: ProtectedRegion[] = [];
+  let offset = 0;
+  let runStart = -1;
+  lines.forEach((line, k) => {
+    if (fenced[k]) {
+      if (runStart < 0) runStart = offset;
+    } else {
+      if (runStart >= 0) out.push({ start: runStart, end: offset - 1 });
+      runStart = -1;
+      for (const r of lineCodeSpanRanges(line)) out.push({ start: offset + r.start, end: offset + r.end });
+    }
+    offset += line.length + 1;
+  });
+  if (runStart >= 0) out.push({ start: runStart, end: body.length });
+  return out;
+}
+
+/**
+ * `body` with each `_` the reader renders as an italic delimiter turned into
+ * a space (same length), so the mention patterns see `_api #3538_` as they
+ * see `*api #3538*`. Code is masked first, as the renderer parks it first.
+ */
+function emphasisView(body: string, code: readonly ProtectedRegion[]): string {
+  if (body.indexOf("_") === -1) return body;
+  let masked = "";
+  let cursor = 0;
+  for (const r of [...code].sort((a, b) => a.start - b.start)) {
+    if (r.end <= cursor) continue;
+    const from = Math.max(cursor, r.start);
+    masked += body.slice(cursor, from) + "\x00".repeat(r.end - from);
+    cursor = r.end;
+  }
+  masked += body.slice(cursor);
+  const delims: number[] = [];
+  for (const m of matchesNotAfter(masked, UNDERSCORE_EM_RE, /\w/)) delims.push(m.index, m.index + m[0].length - 1);
+  if (delims.length === 0) return body;
+  const out = body.split("");
+  for (const i of delims) out[i] = " ";
+  return out.join("");
+}
 
 function lineStarts(text: string): number[] {
   const out = [0];
@@ -506,7 +571,11 @@ function markedMentionsWithCode(
 ): { mentions: Mention[]; code?: ProtectedRegion[] } {
   const fm = parseFrontmatter(markdown);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
-  const bodyKeys = projects.length ? bodyKeyMentions(body, projects) : [];
+  const code = readerCodeRegions(body);
+  const inCode = codeIntervals(code);
+  // The patterns run on the italics view; the page key set (the sweep's) on `body`.
+  const view = emphasisView(body, code);
+  const bodyKeys = projects.length ? bodyKeyMentions(view, projects) : [];
   // The key set is read only by a bare `#n`, and its answer per id is fixed.
   let keySet: string[] | undefined;
   const belongs = new Map<string, boolean>();
@@ -514,7 +583,7 @@ function markedMentionsWithCode(
     let v = belongs.get(id);
     if (v === undefined) {
       const title = titleOf(id);
-      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers, (stripped) => (projects.length && stripped === body ? bodyKeys : undefined))];
+      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers, (stripped) => (projects.length && stripped === body && view === body ? bodyKeys : undefined))];
       const ks = keySet;
       v = title !== undefined && ks.some((k) => titleCarriesKey(title, k));
       belongs.set(id, v);
@@ -522,17 +591,24 @@ function markedMentionsWithCode(
     return v;
   };
   const all: Mention[] = [];
-  for (const r of prMentions(body, grammar, pageHomeRepo(fm))) {
+  for (const r of prMentions(view, grammar, pageHomeRepo(fm))) {
     if (r.form === "bare" && !bareBelongs(r.id)) continue;
     all.push({ id: r.id, kind: "pr", start: r.start, end: r.end });
   }
   for (const m of bodyKeys) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
   if (all.length === 0) return { mentions: [] };
 
-  const code = markdownCodeRegions(body);
-  const inCode = codeIntervals(code);
   const blockedSpans: [number, number][] = [];
   for (const m of body.matchAll(TAG_RE)) blockedSpans.push([m.index!, m.index! + m[0].length]);
+  // A link's title (`[x](url "title")`) is never shown: the target past its first space.
+  for (const m of body.matchAll(LINK_RE)) {
+    const target = m[2]!;
+    const space = target.search(/\s/);
+    if (space >= 0) {
+      const at = m.index! + m[0].length - 1 - target.length + space;
+      blockedSpans.push([at, at + target.length - space]);
+    }
+  }
   for (const m of body.matchAll(WIKILINK_WITH_LABEL_RE)) blockedSpans.push([m.index!, m.index! + m[0].length]);
   const blocked = new Intervals(blockedSpans);
   const starts = lineStarts(body);
@@ -556,24 +632,34 @@ function markedMentionsWithCode(
  */
 export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
   if (mentions.length === 0) return [];
-  const inCode = codeIntervals(code ?? markdownCodeRegions(body));
+  const inCode = codeIntervals(code ?? readerCodeRegions(body));
   // Each list is in text order and pairwise disjoint (one regex's matches; a
   // URL's end only trimmed), so a lookup is a binary search; links first, as
   // a URL inside a link belongs to the link.
   const links: [number, number][] = [];
   for (const m of body.matchAll(LINK_RE)) if (!inCode.contains(m.index!) && body[m.index! - 1] !== "[") links.push([m.index!, m.index! + m[0].length]);
+  // Reference links and angle autolinks: spans of their own, as either can
+  // hold an inline link's text or sit next to one.
+  const others: [number, number][] = [];
+  for (const re of [REF_LINK_RE, AUTOLINK_RE])
+    for (const m of body.matchAll(re)) {
+      const span: [number, number] = [m.index!, m.index! + m[0].length];
+      if (!inCode.contains(span[0]) && body[span[0] - 1] !== "[" && !links.some(([a, b]) => a < span[1] && b > span[0])) others.push(span);
+    }
+  others.sort((a, b) => a[0] - b[0]);
+  const refs = others.filter((s, i) => i === 0 || s[0] >= others[i - 1]![1]);
   const urls: [number, number][] = [];
   for (const m of body.matchAll(URL_RE)) {
     const start = m.index!;
     // An earlier URL ends at or before this match starts, so only a link can hold it.
-    if (holdingSpan(links, start, start + 1)) continue;
+    if (holdingSpan(links, start, start + 1) || holdingSpan(refs, start, start + 1)) continue;
     const end = start + m[0].replace(/[.,;:!?'"*_]+$/, "").length;
     urls.push([start, end]);
   }
   const sites = new Map<number, ChipInsertion>();
   for (const m of mentions) {
     if (!has(m)) continue;
-    const span = holdingSpan(links, m.start, m.end) ?? holdingSpan(urls, m.start, m.end);
+    const span = holdingSpan(links, m.start, m.end) ?? holdingSpan(refs, m.start, m.end) ?? holdingSpan(urls, m.start, m.end);
     const at = span ? span[1] : m.end;
     let site = sites.get(at);
     if (!site) sites.set(at, (site = { at, ids: [] }));

@@ -1,7 +1,7 @@
 /**
- * Live chips in the /wiki reader (living facts PR 3b), over three temp wikis
+ * Live chips in the /wiki reader (living facts PR 3b), over four temp wikis
  * of one synthetic page each: one with a `.wiki-facts.json`, one with none,
- * one with a malformed file. What a unit test cannot show: the real bundle
+ * one of another version and one that is not JSON. What a unit test cannot show: the real bundle
  * filling each server-rendered `span.fact-chip` from the page's `facts`, the
  * chip landing as the `<a>`'s next sibling with the href untouched, and no
  * chip text inside a home, a fence or inline code.
@@ -99,7 +99,8 @@ let base = "";
 
 test.beforeAll(async () => {
   base = await mkdtemp(path.join(tmpdir(), "muninn-e2e-chips-"));
-  const wikis = { facts: JSON.stringify(FACTS), nofacts: null, broken: JSON.stringify({ ...FACTS, version: 2 }) };
+  // `broken` is valid JSON of another version; `notjson` is cut off mid-object.
+  const wikis = { facts: JSON.stringify(FACTS), nofacts: null, broken: JSON.stringify({ ...FACTS, version: 2 }), notjson: '{"version": 1, "prs": {' };
   for (const [name, facts] of Object.entries(wikis)) {
     const root = path.join(base, name);
     await mkdir(path.join(root, "plans"), { recursive: true });
@@ -194,8 +195,8 @@ test.describe("Wiki reader: live chips", () => {
     expect(await page.locator('.wiki-article .fact-chip[data-live-fact="acme/acme-api#101"]').count()).toBe(2);
   });
 
-  test("a wiki with no facts file, and one with a malformed file: no chip, page opens", async ({ page }) => {
-    for (const wiki of ["e2e-chips-nofacts", "e2e-chips-broken"]) {
+  test("a wiki with no facts file, one of another version and one that is not JSON: no chip, page opens", async ({ page }) => {
+    for (const wiki of ["e2e-chips-nofacts", "e2e-chips-broken", "e2e-chips-notjson"]) {
       await open(page, wiki);
       await expect(page.locator(".wiki-article")).toContainText("Bare: PR #101 landed.");
       await expect(page.locator(".wiki-article .fact-chip")).toHaveCount(0);

@@ -245,6 +245,45 @@ describe("the chip pass in renderWikiHtml", () => {
   });
 });
 
+describe("mention forms the reader renders (fix round 1, k5)", () => {
+  const chipFor = (id: string) => `<span class="fact-chip" data-live-fact="${id}" data-reader-only></span>`;
+
+  test("an angle autolink is marked, its chip after the link", () => {
+    const { html } = render(page("See <https://github.com/acme/acme-api/pull/101> now."));
+    expect(html).toContain(`rel="noopener">https://github.com/acme/acme-api/pull/101</a>${chipFor("acme/acme-api#101")} now`);
+  });
+
+  test("a stray `<b` in prose opens no tag that hides a later mention", () => {
+    const { html } = render(page("if a <b and it's x then acme/acme-api#101 ok ' b>"));
+    expect(chipIds(html)).toEqual(["acme/acme-api#101"]);
+  });
+
+  test("fences are the reader's: an unclosed backtick fence and a `~~~` block stay prose and get chips", () => {
+    expect(chipIds(render(page("```\nnever closed\n\nacme/acme-api#101 here.")).html)).toEqual(["acme/acme-api#101"]);
+    expect(chipIds(render(page("~~~\nacme/acme-api#102\n~~~")).html)).toEqual(["acme/acme-api#102"]);
+  });
+
+  test("a reference link prints literally: its chip after `[…][…]`, and the definition's URL is a bare URL", () => {
+    const { html } = render(page("See [api #101][r] now.\n\n[r]: https://github.com/acme/acme-api/pull/102"));
+    expect(html).toContain(`[api #101][r]${chipFor("acme/acme-api#101")} now`);
+    expect(html).toContain(`pull/102${chipFor("acme/acme-api#102")}`);
+  });
+
+  test("an id only in a link's title gets no chip", () => {
+    const out = render(page('[lenke](https://example.com "api #103") here.'));
+    expect(chipIds(out.html)).toEqual([]);
+    expect(out.facts).toBeUndefined();
+  });
+
+  test("underscore italics read as `*…*` do: `_api #103_` and `_DEMO-12_` get chips inside the em", () => {
+    const { html } = render(page("Both _api #103_ and _DEMO-12_ merged."));
+    expect(html).toContain(`<em>api #103${chipFor("acme/acme-api#103")}</em>`);
+    expect(html).toContain(`<em>DEMO-12${chipFor("DEMO-12")}</em>`);
+    // Not italics in the reader (a word character outside), so no mention.
+    expect(chipIds(render(page("x_DEMO-12_ y")).html)).toEqual([]);
+  });
+});
+
 describe("a repo or alias form the grammar cannot qualify (no owner)", () => {
   const OWNERLESS = { owner: null, aliases: { web: "acme-web", other: "acme/other" }, noProd: [] };
   const home = "acme/acme-api";
