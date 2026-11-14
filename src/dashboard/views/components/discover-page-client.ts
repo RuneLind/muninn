@@ -502,8 +502,8 @@ async function dismiss(videoId: string): Promise<void> {
     void setState(videoId, before).then((undoErr) => {
       if (undoErr) toast(undoErr);
       render();
-      // The Undo button is gone: focus the card it brought back.
-      if (!undoErr) cardEl(runId, videoId)?.focus();
+      // The Undo button is gone: focus the card it brought back, on its shelf or (replaced since) any shelf.
+      if (!undoErr) (cardEl(runId, videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`))?.focus();
     });
   });
 }
@@ -589,7 +589,8 @@ export function bootDiscoverPage(): void {
     }
   });
   window.addEventListener("hashchange", focusHashShelf);
-  bootSeedBar((shelves, requestedAt) => {
+  bootSeedBar(
+    (shelves, requestedAt) => {
     // The drawer is a modal over the shelves: swap them in when it closes, not under it.
     if (st.open) {
       pendingShelves = { shelves, requestedAt };
@@ -597,7 +598,9 @@ export function bootDiscoverPage(): void {
     }
     applyShelves(shelves, requestedAt);
     render();
-  });
+    },
+    (msg) => toast(msg),
+  );
   render();
   focusHashShelf();
 }

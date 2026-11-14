@@ -33,6 +33,8 @@ export function discoverPageStyles(): string {
       font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px; max-width: 100%;
       background: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--border-primary);
     }
+    .dsc-seed-panel .dsc-ctl { display: flex; max-width: 100%; min-width: 0; }
+    .dsc-seed-panel .dsc-ctl select, .dsc-seed-panel .dsc-ctl input { flex: 1 1 auto; min-width: 0; }
     .dsc-pick-filter, .dsc-pick-filter input { width: 100%; }
     .dsc-seed-list { margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-primary); }
     .dsc-seed-title { overflow-wrap: anywhere; }

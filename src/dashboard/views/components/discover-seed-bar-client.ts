@@ -195,7 +195,7 @@ async function readShelves(): Promise<{ shelves: DiscoverShelf[]; requestedAt: n
 export type OnShelves = (shelves: DiscoverShelf[], requestedAt: number) => void;
 
 /** Search from each seed in turn; `onShelves` gets the stored shelves after each run that landed. */
-async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves): Promise<void> {
+async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg: string) => void): Promise<void> {
   if (bar.running || !seeds.length) return;
   bar.running = true;
   bar.mode = null;
@@ -238,10 +238,12 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves): Promise<void> {
   const show = firstRun ? ` · <a href="#run-${escHtml(firstRun)}">Show the first</a>` : "";
   const why = failed.length ? `<ul class="dsc-fail-list">${failed.map((f) => `<li>${escHtml(f)}</li>`).join("")}</ul>` : "";
   progress(`Done: ${parts.join(", ")}${show}${why}`);
+  // The drawer inerts the progress line's live region: say the outcome through the page's toast instead.
+  if (announce && $("dscProgress")?.closest("[inert]")) announce(`Done: ${parts.join(", ")}.`);
 }
 
 /** Wire the seed bar; `onShelves` replaces the page's shelves and re-renders. */
-export function bootSeedBar(onShelves: OnShelves): void {
+export function bootSeedBar(onShelves: OnShelves, announce?: (msg: string) => void): void {
   const root = $("dscSeeds");
   if (!root) return;
   root.addEventListener("click", (e) => {
@@ -250,7 +252,7 @@ export function bootSeedBar(onShelves: OnShelves): void {
     const modeBtn = t.closest<HTMLButtonElement>("[data-seedmode]");
     if (modeBtn) return openMode(modeBtn.dataset.seedmode as SeedMode);
     if (t.closest("#dscSeedRetry")) return void loadListing();
-    if (t.closest("#dscSeedRun")) return void runSeeds(chosenSeeds(), onShelves);
+    if (t.closest("#dscSeedRun")) return void runSeeds(chosenSeeds(), onShelves, announce);
   });
   root.addEventListener("change", (e) => {
     const t = e.target as HTMLElement | null;

@@ -884,3 +884,54 @@ test("shelves that land while the drawer is open wait until it closes; focus ret
   await expect(captured).toHaveCount(1);
   await expect(card).toBeFocused();
 });
+
+test("Undo after a run replaced the card's shelf focuses the restored card (fix round 1 batch 4)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  // The re-read answers the batch shelf under a new run id: a newer run of its seed replaced it.
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { shelves: { runId: string; seedDocId: string }[] };
+    for (const s of body.shelves) if (s.seedDocId === BATCH_SEED) s.runId = "00000000-0000-4000-8000-0000000000b4";
+    await route.fulfill({ response: res, json: body });
+  });
+  const card = (p: Page) => batchShelf(p).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`);
+  await card(page).locator('[data-act="dismiss"]').click();
+  await expect(card(page)).toHaveCount(0);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await expect(batchShelf(page)).toHaveAttribute("data-run", "00000000-0000-4000-8000-0000000000b4");
+  await page.locator("#dscToast [data-undo]").click();
+  await expect(card(page)).toBeFocused();
+});
+
+test("a run that ends while the drawer is open is announced through the toast (fix round 1 batch 4)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await holdShelves(page, 500);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
+  await expect(page.locator("#dscDrawer")).toBeVisible();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await expect(page.locator("#dscToast")).toContainText("2 new shelves");
+});
+
+test("at 390px a long category name never widens the page (fix round 1 batch 4)", async ({ page }) => {
+  const LONG = "ai/an-invented-category-name-that-is-far-too-long-for-a-phone/and-a-sub-folder";
+  await page.route("**/api/summaries/discover/seeds", (route) =>
+    route.fulfill({
+      json: {
+        docs: [{ id: `${LONG}/Invented.md`, title: "Invented", category: LONG, date: "2026-11-14" }],
+        categories: [{ category: LONG, count: 1 }],
+        now: Date.parse("2026-11-14T12:00:00Z"),
+      },
+    }),
+  );
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await expect(page.locator("#dscSeedCat")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
