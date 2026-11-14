@@ -386,6 +386,85 @@ test("one Undo restores every dismissal its toast covers", async ({ page }) => {
   await expect(shelf.locator(".dsc-card")).toHaveCount(2);
 });
 
+test("re-renders keep the row's scroll, the playing video and focus; the drawer is a modal dialog; counts and layout agree", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${BASE}/summaries/discover`);
+  const runId = await page
+    .locator("section.dsc-shelf")
+    .filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) })
+    .getAttribute("data-run");
+  // By id: the title is rewritten below.
+  const shelf = page.locator(`section.dsc-shelf[data-run="${runId}"]`);
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+  const row = shelf.locator(".dsc-row");
+
+  // The live region is in the page before any toast, so screen readers announce the first one.
+  await expect(page.locator("#dscToast")).toHaveAttribute("role", "status");
+  await expect(page.locator("#dscToast")).not.toHaveAttribute("hidden", /.*/);
+
+  // A long unbroken seed title does not widen the page at phone width.
+  await shelf.locator("h3 a").evaluate((a) => (a.textContent = "x".repeat(200)));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  // Scroll the row to its end, press Later on the last card: the row stays where it was, focus stays on the button.
+  await row.evaluate((r) => (r.scrollLeft = r.scrollWidth));
+  const before = await row.evaluate((r) => r.scrollLeft);
+  expect(before).toBeGreaterThan(0);
+  await card("Invented eval talk").getByRole("button", { name: "☆ Later" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  expect(await row.evaluate((r) => r.scrollLeft)).toBe(before);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-act"))).toBe("later");
+  await page.keyboard.press("Enter");
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "false");
+
+  // The drawer is a modal dialog; the page behind it is inert while it is open.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await card("Invented benchmark tour").click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toHaveAttribute("role", "dialog");
+  await expect(drawer).toHaveAttribute("aria-modal", "true");
+  const labelId = await drawer.getAttribute("aria-labelledby");
+  await expect(page.locator(`#${labelId}`)).toHaveText("Invented benchmark tour");
+  expect(await page.locator(".dsc-page").evaluate((el) => (el as HTMLElement).inert)).toBe(true);
+
+  // Play, then let a re-render happen (Later in the drawer): the same iframe keeps playing.
+  await drawer.getByRole("button", { name: "Play here" }).click();
+  await drawer.locator("iframe").evaluate((f) => ((f as HTMLElement).dataset.mark = "kept"));
+  await drawer.locator('[data-act="later"]').click();
+  await expect(drawer.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(drawer.locator("iframe")).toHaveAttribute("data-mark", "kept");
+  await drawer.locator('[data-act="later"]').click();
+  await expect(drawer.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "false");
+
+  // Dismissing from the drawer closes it and puts focus on a card, not on the page body.
+  await drawer.getByRole("button", { name: "✕ Not interested" }).click();
+  await expect(drawer).toBeHidden();
+  expect(await page.locator(".dsc-page").evaluate((el) => (el as HTMLElement).inert)).toBe(false);
+  expect(await page.evaluate(() => document.activeElement?.classList.contains("dsc-card"))).toBe(true);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+
+  // The shelf's "shown" follows the length filter, and an empty row's note spans the shelf.
+  await page.locator("#dscLen").selectOption("1800");
+  await expect(shelf.locator(".dsc-card")).toHaveCount(2);
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("2 shown");
+  await page.locator("#dscLen").selectOption("600");
+  await page.locator("#dscSort").selectOption("score");
+  await shelf.locator(".dsc-card").first().evaluate(() => undefined);
+  await page.evaluate(() => {
+    const sel = document.getElementById("dscLen") as HTMLSelectElement;
+    sel.add(new Option("Over 2 h", "7200"));
+    sel.value = "7200";
+    sel.dispatchEvent(new Event("change"));
+  });
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("0 shown");
+  const empty = shelf.locator(".dsc-empty");
+  await expect(empty).toHaveText("Nothing at this length.");
+  const widths = await shelf.evaluate((el) => ({ shelf: el.getBoundingClientRect().width, empty: el.querySelector(".dsc-empty")!.getBoundingClientRect().width }));
+  expect(widths.empty).toBeGreaterThan(widths.shelf * 0.8);
+});
+
 test("Later, Dismiss with Undo and Summarize persist, and dismissed and queued videos are never suggested again", async ({ page, request }) => {
   const posts: unknown[] = [];
   await page.route("**/api/youtube/summarize", async (route) => {

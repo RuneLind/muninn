@@ -117,17 +117,17 @@ function toast(msg: string, undo?: () => void): void {
   const t = $("dscToast");
   if (!t) return;
   if (undo) pendingUndos.push(undo);
+  // The live region stays in the page and only its text changes, so the change is announced.
   t.innerHTML = escHtml(msg) + (pendingUndos.length ? ` <button type="button" data-undo>Undo</button>` : "");
-  t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
-    t.hidden = true;
+    t.innerHTML = "";
     pendingUndos = [];
   }, 5000);
   const btn = t.querySelector<HTMLButtonElement>("[data-undo]");
   if (btn)
     btn.onclick = () => {
-      t.hidden = true;
+      t.innerHTML = "";
       const all = pendingUndos;
       pendingUndos = [];
       for (const u of all) u();
@@ -210,13 +210,56 @@ function shelfHtml(shelf: DiscoverShelf): string {
     (shelf.seedVideoId ? `<img src="${escHtml(thumb(shelf.seedVideoId))}" alt="">` : "") +
     `<div><div class="dsc-because">${escHtml(because)}</div>` +
     `<h3><a href="${escHtml(seedHref)}">${escHtml(shelf.seedTitle)}</a></h3>` +
-    `<div class="dsc-meta">${shelf.searched} videos searched · ${shelf.known} you already have · ${shelf.hits.length - dismissed} shown · ${escHtml(new Date(shelf.createdAt).toISOString().slice(0, 10))}</div>` +
+    `<div class="dsc-meta">${shelf.searched} videos searched · ${shelf.known} you already have · ${rows.length} shown · ${escHtml(new Date(shelf.createdAt).toISOString().slice(0, 10))}</div>` +
     `<div class="dsc-qs">${shelf.queries.map((q) => `<span class="dsc-q" title="${escHtml(q.why)}">${escHtml(q.query)}</span>`).join("")}</div>` +
     `</div></div>` +
-    `<div class="dsc-row">${rows.map((h) => cardHtml(h, shelf)).join("") || `<div class="dsc-empty">${empty}</div>`}</div>` +
+    (rows.length ? `<div class="dsc-row">${rows.map((h) => cardHtml(h, shelf)).join("")}</div>` : `<div class="dsc-empty">${empty}</div>`) +
     `</section>`
   );
 }
+
+/** What has focus, by identity rather than node: a render replaces the nodes. */
+interface FocusKey {
+  inDrawer: boolean;
+  run?: string;
+  video?: string;
+  act?: string;
+}
+function focusKey(): FocusKey | null {
+  const a = document.activeElement as HTMLElement | null;
+  if (!a || a === document.body) return null;
+  return {
+    inDrawer: !!a.closest("#dscDrawer"),
+    run: a.closest<HTMLElement>("[data-run]")?.dataset.run,
+    video: a.closest<HTMLElement>("[data-video]")?.dataset.video,
+    act: a.dataset.act,
+  };
+}
+function cardEl(run: string, video: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`.dsc-card[data-run="${CSS.escape(run)}"][data-video="${CSS.escape(video)}"]`);
+}
+function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
+  if (!k) return;
+  const dr = $("dscDrawer");
+  if (k.inDrawer && dr && !dr.hidden) {
+    (dr.querySelector<HTMLElement>(k.act ? `[data-act="${CSS.escape(k.act)}"]` : ".dsc-close") ?? dr.querySelector<HTMLElement>(".dsc-close"))?.focus();
+    return;
+  }
+  // The drawer closed under the focus (a dismiss from it): go back to its shelf.
+  const run = k.inDrawer ? prevOpen?.runId : k.run;
+  const video = k.inDrawer ? prevOpen?.videoId : k.video;
+  if (!run) return;
+  const card = video ? cardEl(run, video) : null;
+  const target =
+    (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(`[data-act="${CSS.escape(k.act)}"]`) : null) ??
+    card ??
+    document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
+    document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] h3 a`);
+  target?.focus();
+}
+
+/** The open drawer's shelf and video at the last render, for focus after it closes. */
+let renderedOpen: PageState["open"] = null;
 
 function render(): void {
   const main = $("dscMain");
@@ -224,14 +267,29 @@ function render(): void {
   const shown = st.shelves.reduce((n, s) => n + dscVisibleHits(s.hits, st.sort, st.minLen).length, 0);
   const count = $("dscCount");
   if (count) count.textContent = `${shown} suggestion${shown === 1 ? "" : "s"} on ${st.shelves.length} shel${st.shelves.length === 1 ? "f" : "ves"}`;
+  const focus = focusKey();
+  const scroll = new Map<string, number>();
+  main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
+    const row = sh.querySelector<HTMLElement>(".dsc-row");
+    if (row && sh.dataset.run) scroll.set(sh.dataset.run, row.scrollLeft);
+  });
   main.innerHTML =
     st.shelves.length === 0
       ? `<div class="dsc-empty">No shelves yet. Open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
       : st.shelves.map(shelfHtml).join("");
+  main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
+    const left = sh.dataset.run ? scroll.get(sh.dataset.run) : undefined;
+    const row = sh.querySelector<HTMLElement>(".dsc-row");
+    if (row && left) row.scrollLeft = left;
+  });
+  const prevOpen = renderedOpen;
   renderDrawer();
+  renderedOpen = st.open;
+  restoreFocus(focus, prevOpen);
 }
 
-function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf): string {
+/** The drawer's HTML; `bodyOnly` leaves the player out, so a playing video survives a re-render. */
+function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf, bodyOnly = false): string {
   const d: DiscoverVideoDetails | null = hit.details;
   const player = st.playing
     ? `<div class="dsc-player"><iframe src="https://www.youtube-nocookie.com/embed/${escHtml(hit.videoId)}?autoplay=1" title="${escHtml(hit.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
@@ -260,17 +318,31 @@ function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf): string {
   } else {
     more = `<div class="dsc-note" role="status">Loading the description and chapters…</div>`;
   }
+  const bodyHtml = detailBodyHtml(hit, shelf, stats, more);
+  if (bodyOnly) return bodyHtml;
   return (
-    `<div class="dsc-detail">${player}<div class="dsc-detail-body">` +
-    `<h3>${escHtml(hit.title || hit.videoId)}</h3>` +
+    `<div class="dsc-detail">${player}${bodyHtml}</div>`
+  );
+}
+
+function detailBodyHtml(hit: DiscoverHit, shelf: DiscoverShelf, stats: string[], more: string): string {
+  return (
+    `<div class="dsc-detail-body">` +
+    `<h3 id="dscDrawerTitle">${escHtml(hit.title || hit.videoId)}</h3>` +
     (hit.channel ? `<div class="dsc-meta">${escHtml(hit.channel)}</div>` : "") +
     `<div class="dsc-stats">${stats.join("")}</div>` +
     (hit.why ? `<div class="dsc-box"><div class="dsc-lbl">Why it was picked</div>${escHtml(hit.why)}</div>` : "") +
     `<div class="dsc-from">Found from <b>${escHtml(shelf.seedTitle)}</b>${hit.query ? ` by the search <span class="dsc-q">${escHtml(hit.query)}</span>` : ""}</div>` +
     actionsHtml(hit, true) +
     more +
-    `</div></div>`
+    `</div>`
   );
+}
+
+function setModal(open: boolean): void {
+  const page = document.querySelector<HTMLElement>(".dsc-page");
+  if (page) page.inert = open;
+  document.body.style.overflow = open ? "hidden" : "";
 }
 
 function renderDrawer(): void {
@@ -282,13 +354,21 @@ function renderDrawer(): void {
     dr.hidden = true;
     bg.hidden = true;
     dr.innerHTML = "";
+    delete dr.dataset.video;
+    setModal(false);
     return;
   }
-  dr.innerHTML =
-    `<button type="button" class="dsc-btn dsc-close" data-act="close">✕ Close</button>` + detailHtml(found.hit, found.shelf);
+  const body = dr.querySelector(".dsc-detail-body");
+  const sameVideo = dr.dataset.video === found.hit.videoId && dr.dataset.playing === String(st.playing);
+  if (sameVideo && body) body.outerHTML = detailHtml(found.hit, found.shelf, true);
+  else
+    dr.innerHTML =
+      `<button type="button" class="dsc-btn dsc-close" data-act="close">✕ Close</button>` + detailHtml(found.hit, found.shelf);
   dr.dataset.video = found.hit.videoId;
+  dr.dataset.playing = String(st.playing);
   dr.hidden = false;
   bg.hidden = false;
+  setModal(true);
 }
 
 async function loadDetails(videoId: string): Promise<void> {

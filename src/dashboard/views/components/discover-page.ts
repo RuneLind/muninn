@@ -27,7 +27,8 @@ export function discoverPageStyles(): string {
     .dsc-shelf.dsc-target { outline: 2px solid var(--accent); outline-offset: 6px; }
     .dsc-shelf-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
     .dsc-shelf-head img { width: 96px; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; background: var(--border-primary); }
-    .dsc-shelf-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+    .dsc-shelf-head > div { min-width: 0; }
+    .dsc-shelf-head h3 { margin: 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
     .dsc-shelf-head h3 a { color: var(--text-primary); text-decoration: none; }
     .dsc-shelf-head h3 a:hover { color: var(--accent-light); }
     .dsc-because { font-size: 12px; color: var(--text-soft); text-transform: uppercase; letter-spacing: .06em; }
@@ -35,7 +36,6 @@ export function discoverPageStyles(): string {
     .dsc-qs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .dsc-q { font-size: 11.5px; border: 1px dashed var(--border-secondary); border-radius: 4px; padding: 0 6px; color: var(--text-soft); }
     .dsc-row { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 260px); gap: 14px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x mandatory; }
-    .dsc-row > .dsc-empty { grid-column: 1 / -1; min-width: 240px; }
 
     .dsc-card { background: var(--bg-card); border: 1px solid var(--border-primary); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; cursor: pointer; scroll-snap-align: start; transition: border-color .15s; }
     .dsc-card:hover, .dsc-card.dsc-sel, .dsc-card:focus-visible { border-color: var(--accent); }
@@ -89,7 +89,7 @@ export function discoverPageStyles(): string {
     .dsc-note.dsc-warn { font-style: normal; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
 
     .dsc-toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text-primary); color: var(--bg-page); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 60; max-width: calc(100% - 32px); }
-    .dsc-toast[hidden] { display: none; }
+    .dsc-toast:empty { padding: 0; background: transparent; }
     .dsc-toast button { margin-left: 10px; background: transparent; border: 1px solid currentColor; color: inherit; border-radius: 5px; cursor: pointer; padding: 1px 8px; font: inherit; }
 
     @media (max-width: 760px) {
