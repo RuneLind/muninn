@@ -175,7 +175,7 @@ function actionsHtml(h: DiscoverHit, inDrawer: boolean): string {
       : h.state === "later"
       ? `<button type="button" class="dsc-btn dsc-done" data-act="later" aria-pressed="true" title="Saved for later">★${inDrawer ? " Saved" : ""}</button>`
       : `<button type="button" class="dsc-btn" data-act="later" aria-pressed="false" title="Save for later">☆ Later</button>`;
-  const open = `<a class="dsc-btn" href="${escHtml(watchUrl(h.videoId))}" target="_blank" rel="noopener" title="Open on YouTube">${inDrawer ? "Open ↗" : "↗"}</a>`;
+  const open = `<a class="dsc-btn" data-fk="open" href="${escHtml(watchUrl(h.videoId))}" target="_blank" rel="noopener" title="Open on YouTube">${inDrawer ? "Open ↗" : "↗"}</a>`;
   const dismiss = inDrawer ? `<button type="button" class="dsc-btn" data-act="dismiss">✕ Not interested</button>` : "";
   return `<div class="dsc-actions">${sum}${later}${open}${dismiss}</div>`;
 }
@@ -243,7 +243,8 @@ function focusKey(): FocusKey | null {
     inDrawer,
     run: a.closest<HTMLElement>("[data-run]")?.dataset.run,
     video: a.closest<HTMLElement>("[data-video]")?.dataset.video,
-    act: a.dataset.act,
+    // Every focusable the page renders carries `data-act` or `data-fk`: a render finds it again by that key.
+    act: a.dataset.act ?? a.dataset.fk,
     next: (card?.nextElementSibling as HTMLElement | null)?.dataset.video,
     prev: (card?.previousElementSibling as HTMLElement | null)?.dataset.video,
   };
@@ -251,11 +252,13 @@ function focusKey(): FocusKey | null {
 function cardEl(run: string, video: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`.dsc-card[data-run="${CSS.escape(run)}"][data-video="${CSS.escape(video)}"]`);
 }
+const byKey = (key: string) => `[data-act="${CSS.escape(key)}"], [data-fk="${CSS.escape(key)}"]`;
+
 function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
   if (!k) return;
   const dr = $("dscDrawer");
   if (k.inDrawer && dr && !dr.hidden) {
-    (dr.querySelector<HTMLElement>(k.act ? `[data-act="${CSS.escape(k.act)}"]` : ".dsc-close") ?? dr.querySelector<HTMLElement>(".dsc-close"))?.focus();
+    (dr.querySelector<HTMLElement>(k.act ? byKey(k.act) : ".dsc-close") ?? dr.querySelector<HTMLElement>(".dsc-close"))?.focus();
     return;
   }
   // The drawer closed under the focus (a dismiss from it): go back to its shelf.
@@ -266,7 +269,7 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
   // A gone card hands focus to its neighbour, never the row's first card: focusing that scrolls the row back.
   const neighbour = (k.next ? cardEl(run, k.next) : null) ?? (k.prev ? cardEl(run, k.prev) : null);
   const target =
-    (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(`[data-act="${CSS.escape(k.act)}"]`) : null) ??
+    (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(byKey(k.act)) : null) ??
     card ??
     neighbour ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
@@ -308,7 +311,7 @@ function render(): void {
 function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf, bodyOnly = false): string {
   const d: DiscoverVideoDetails | null = hit.details;
   const player = st.playing
-    ? `<div class="dsc-player" tabindex="-1"><iframe src="https://www.youtube-nocookie.com/embed/${escHtml(hit.videoId)}?autoplay=1" title="${escHtml(hit.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
+    ? `<div class="dsc-player" tabindex="-1" data-fk="player" role="group" aria-label="Video player"><iframe src="https://www.youtube-nocookie.com/embed/${escHtml(hit.videoId)}?autoplay=1" title="${escHtml(hit.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
     : `<div class="dsc-player"><img src="${escHtml(thumb(hit.videoId, "hqdefault"))}" alt=""><button type="button" class="dsc-play" data-act="play" aria-label="Play here">▶</button></div>`;
   const stats: string[] = [];
   if (hit.durationSec !== null) stats.push(`<span class="dsc-stat"><b>${escHtml(dscDuration(hit.durationSec))}</b> long</span>`);
@@ -355,9 +358,12 @@ function detailBodyHtml(hit: DiscoverHit, shelf: DiscoverShelf, stats: string[],
   );
 }
 
+/** Everything but the dialog, its backdrop and the toast is inert while the dialog is open (the nav included). */
 function setModal(open: boolean): void {
-  const page = document.querySelector<HTMLElement>(".dsc-page");
-  if (page) page.inert = open;
+  const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast"]);
+  for (const el of Array.from(document.body.children)) {
+    if (el instanceof HTMLElement && !keep.has(el.id) && el.tagName !== "SCRIPT") el.inert = open;
+  }
   document.body.style.overflow = open ? "hidden" : "";
 }
 
@@ -461,6 +467,7 @@ async function dismiss(videoId: string): Promise<void> {
   const found = findHit(videoId);
   if (!found || writing.has(videoId)) return;
   const before = found.hit.state;
+  const runId = found.shelf.runId;
   writing.add(videoId);
   const err = await setState(videoId, "dismissed");
   writing.delete(videoId);
@@ -471,6 +478,8 @@ async function dismiss(videoId: string): Promise<void> {
     void setState(videoId, before).then((undoErr) => {
       if (undoErr) toast(undoErr);
       render();
+      // The Undo button is gone: focus the card it brought back.
+      if (!undoErr) cardEl(runId, videoId)?.focus();
     });
   });
 }

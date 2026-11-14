@@ -104,7 +104,7 @@ const FIXTURE = {
 
 /** A shelf seeded straight into the DB with five cards: the reader flow only ever makes two. */
 const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
-const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"];
+const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"] as const;
 
 /** Rows an earlier run of this spec left: a dismissed or queued video would join the known set. */
 async function clearStoredRuns(): Promise<void> {
@@ -598,11 +598,78 @@ test("a dismissed card hands focus to its neighbour without scrolling the row ba
     if (r.url().endsWith("/api/summaries/discover/details") && (r.postDataJSON() as { videoId: string }).videoId === FOCUS_IDS[1])
       aborted.push(r.failure()?.errorText ?? "");
   });
+  // Held until the drawer is closed, so the abort never races the 200 ms seam answer.
+  let releaseHeld!: () => void;
+  const held = new Promise<void>((r) => (releaseHeld = r));
+  await page.route("**/api/summaries/discover/details", async (route) => {
+    if ((route.request().postDataJSON() as { videoId: string }).videoId === FOCUS_IDS[1]) await held;
+    await route.continue().catch(() => undefined);
+  });
   await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[1]}"]`).click();
   await expect(drawer).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(drawer).toBeHidden();
+  releaseHeld();
   await expect.poll(() => aborted.length).toBe(1);
+  await page.unroute("**/api/summaries/discover/details");
+});
+
+test("focus survives the details answer on every drawer control; Undo returns focus to the card; the nav is inert behind the dialog", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E focus seed" }) });
+  const drawer = page.locator("#dscDrawer");
+  const active = () =>
+    page.evaluate(() => {
+      const a = document.activeElement as HTMLElement | null;
+      return a ? a.dataset.act ?? a.dataset.fk ?? a.tagName : null;
+    });
+  // Each drawer control, focused while the details request is held, keeps focus when the answer re-renders the drawer.
+  const controls: { video: string; key: string; focus: () => Promise<void> }[] = [
+    { video: FOCUS_IDS[2], key: "close", focus: () => drawer.getByRole("button", { name: "✕ Close" }).focus() },
+    { video: FOCUS_IDS[3], key: "later", focus: () => drawer.locator('[data-act="later"]').focus() },
+    { video: FOCUS_IDS[4], key: "open", focus: () => drawer.getByRole("link", { name: "Open ↗" }).focus() },
+    {
+      video: FOCUS_IDS[0],
+      key: "player",
+      focus: async () => {
+        await drawer.getByRole("button", { name: "Play here" }).focus();
+        await page.keyboard.press("Enter");
+      },
+    },
+  ];
+  for (const c of controls) {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/summaries/discover/details", async (route) => {
+      await held;
+      await route.continue().catch(() => undefined);
+    });
+    await shelf.locator(`.dsc-card[data-video="${c.video}"]`).click();
+    await expect(drawer.locator(".dsc-note")).toContainText("Loading");
+    await c.focus();
+    expect(await active()).toBe(c.key);
+    release();
+    await expect(drawer.locator(".dsc-note")).not.toContainText("Loading", { timeout: 10_000 });
+    expect(await active(), `focus after the details answer, control ${c.key}`).toBe(c.key);
+    await page.unroute("**/api/summaries/discover/details");
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+  }
+
+  // The site nav is inert while the dialog is open.
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[1]}"]`).click();
+  expect(await page.locator("header").evaluate((h) => (h as HTMLElement).inert)).toBe(true);
+  await page.keyboard.press("Escape");
+  expect(await page.locator("header").evaluate((h) => (h as HTMLElement).inert)).toBe(false);
+
+  // Undo puts focus back on the card it restored.
+  const card = shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[2]}"]`);
+  await card.locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(card).toHaveCount(0);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card).toHaveCount(1);
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("data-video"))).toBe(FOCUS_IDS[2]);
 });
 
 test("the route refuses a non-YouTube source and a missing document", async ({ request }) => {
