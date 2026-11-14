@@ -94,6 +94,7 @@ Pages and routes:
 - Ask tab, Similar articles (`wikiCollections`)
 - Ask → chat escalation (`ask-chat.ts`, `POST /api/wiki/ask/chat`, `GET /api/wiki/chat-target`) [trap]
 - Synthesis-bot routing (`resolveWikiSynthesisBot`)
+- What's new — batch mode (`digest.ts`, `digest-changed-pages.ts`, `.wiki-reader.json` `whatsNew`) [trap]
 - Fact-check claim retry (`GET /api/wiki/factcheck/claim`) [trap]
 - Waiting on you (`next-moves.ts`, `WikiPageMeta.movesYou`) [trap]
 - Line-ref chips (`code-refs.ts`)

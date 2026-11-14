@@ -2399,8 +2399,30 @@ export function registerWikiToolRoutes(
     if (!digest) return c.json({ digest: null });
     // Render the stored markdown bullets to reader HTML (wikilinks → in-reader
     // page anchors) at response time — cheap, and keeps the cached form plain.
+    // Batch mode: each sync's changed pages as a list of path-form wikilinks,
+    // which resolve by relPath even where two pages share a stem. `resolve`
+    // reads a target as a path only when it holds a `/`, so a root page
+    // (`CLAUDE.md`) is written `./CLAUDE.md`.
+    const syncs = digest.syncs?.map((s) => ({
+      date: s.date,
+      title: s.title,
+      count: s.pages?.length ?? null,
+      html: s.pages?.length
+        ? renderWikiHtml(
+            s.pages
+              .map((p) => `- [[${p.relPath.includes("/") ? p.relPath : "./" + p.relPath}|${p.title.replace(/[\[\]|]/g, " ")}]]`)
+              .join("\n"),
+            index.resolve,
+            { wiki: entry.name },
+          )
+        : "",
+    }));
     return c.json({
-      digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }) },
+      digest: {
+        ...digest,
+        html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }),
+        ...(syncs ? { syncs } : {}),
+      },
     });
   });
 

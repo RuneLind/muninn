@@ -199,6 +199,9 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   }
 }
 
+/** The same helper for `digest-batch.ts`, which reads one commit's file list. */
+export { git as runWikiGit };
+
 /** A commit line: `%H %at`, then a TAB and the subject (`%x09%s`). The
  *  bare-integer form (`%at` alone) and a subject-less line are still read, so a
  *  hash-less log parses as before — it just records no {@link TouchRecord}s.

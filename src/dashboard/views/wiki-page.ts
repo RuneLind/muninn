@@ -2775,6 +2775,10 @@ function buildWikiPageCss(): string {
     .wiki-wn-bullets ul { margin: 4px 0 4px 20px; }
     .wiki-wn-bullets li { margin: 3px 0; }
     .wiki-wn-bullets p { margin: 4px 0; }
+    .wiki-wn-bullets h3 { font-size: 12.5px; font-weight: 600; color: var(--text-primary); margin: 10px 0 2px; }
+    .wiki-wn-changed { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+    .wiki-wn-changed summary { cursor: pointer; }
+    .wiki-wn-changed ul { margin: 4px 0 4px 20px; columns: 2 220px; }
     .wiki-wn-gen { font-size: 10.5px; color: var(--text-faint); margin-top: 8px; }
     .wiki-wn-error { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
     .wiki-wn-retry {
