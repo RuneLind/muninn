@@ -370,6 +370,22 @@ test("the reader links its stored run; the Discover page shows it as a shelf wit
   await expect(drawer.locator(".dsc-chapters li")).toHaveCount(2);
 });
 
+test("one Undo restores every dismissal its toast covers", async ({ page }) => {
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+  for (const title of ["Invented benchmark tour", "Invented eval talk"]) {
+    await card(title).hover();
+    await card(title).getByRole("button", { name: "Not interested" }).click();
+    await expect(card(title)).toHaveCount(0);
+  }
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+  await expect(card("Invented eval talk")).toHaveCount(1);
+  await page.reload();
+  await expect(shelf.locator(".dsc-card")).toHaveCount(2);
+});
+
 test("Later, Dismiss with Undo and Summarize persist, and dismissed and queued videos are never suggested again", async ({ page, request }) => {
   const posts: unknown[] = [];
   await page.route("**/api/youtube/summarize", async (route) => {
@@ -412,6 +428,42 @@ test("Later, Dismiss with Undo and Summarize persist, and dismissed and queued v
   const body = (await res.json()) as { results: { videoId: string }[]; known: number };
   expect(body.known).toBe(4);
   expect(body.results.map((r) => r.videoId)).toEqual([NEW_C]);
+});
+
+test("a queued card offers no Later; a double click posts once; a failed queued write is said, not hidden", async ({ page }) => {
+  const statePosts: unknown[] = [];
+  let failState = false;
+  await page.route("**/api/summaries/discover/state", async (route) => {
+    statePosts.push(route.request().postDataJSON());
+    if (failState) await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "Invented DB outage.", code: "internal" }) });
+    else await route.continue();
+  });
+  await page.route("**/api/youtube/summarize", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-3" }) }),
+  );
+  await page.goto(`${BASE}/summaries/discover`);
+  // The previous test's last run is this seed's newest shelf: only the clickbait video is left.
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = shelf.locator(".dsc-card").filter({ hasText: "Invented clickbait" });
+  await expect(card).toHaveCount(1);
+
+  await card.getByRole("button", { name: "☆ Later" }).dblclick();
+  await expect(card.locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await page.waitForTimeout(300);
+  expect(statePosts).toEqual([{ videoId: NEW_C, state: "later" }]);
+
+  failState = true;
+  await card.getByRole("button", { name: "Summarize" }).click();
+  await expect(page.locator("#dscToast")).toContainText("Invented DB outage.");
+  await expect(card.getByRole("button", { name: "Summarize" })).toBeEnabled();
+
+  failState = false;
+  await card.getByRole("button", { name: "Summarize" }).click();
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(card.locator('[data-act="later"]')).toHaveCount(0);
+  await page.reload();
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(card.locator('[data-act="later"]')).toHaveCount(0);
 });
 
 test("the route refuses a non-YouTube source and a missing document", async ({ request }) => {

@@ -111,18 +111,26 @@ function findHit(videoId: string): { hit: DiscoverHit; shelf: DiscoverShelf } | 
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
+/** Undos the visible toast covers: a second dismissal joins the first's Undo instead of replacing it. */
+let pendingUndos: (() => void)[] = [];
 function toast(msg: string, undo?: () => void): void {
   const t = $("dscToast");
   if (!t) return;
-  t.innerHTML = escHtml(msg) + (undo ? ` <button type="button" data-undo>Undo</button>` : "");
+  if (undo) pendingUndos.push(undo);
+  t.innerHTML = escHtml(msg) + (pendingUndos.length ? ` <button type="button" data-undo>Undo</button>` : "");
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 5000);
+  toastTimer = setTimeout(() => {
+    t.hidden = true;
+    pendingUndos = [];
+  }, 5000);
   const btn = t.querySelector<HTMLButtonElement>("[data-undo]");
-  if (btn && undo)
+  if (btn)
     btn.onclick = () => {
       t.hidden = true;
-      undo();
+      const all = pendingUndos;
+      pendingUndos = [];
+      for (const u of all) u();
     };
 }
 
@@ -132,21 +140,20 @@ async function postJson(url: string, body: unknown): Promise<{ ok: boolean; stat
   return { ok: res.ok, status: res.status, data };
 }
 
-/** Write a state; on success apply it to every shelf. Answers whether it stuck. */
-async function setState(videoId: string, state: DiscoverHitState): Promise<boolean> {
+/** Write a state; on success apply it to every shelf. Answers the error text, or null when it stuck. */
+async function setState(videoId: string, state: DiscoverHitState): Promise<string | null> {
   try {
     const r = await postJson("/api/summaries/discover/state", { videoId, state });
-    if (!r.ok) {
-      toast(typeof r.data.error === "string" ? r.data.error : `Could not save (HTTP ${r.status}).`);
-      return false;
-    }
+    if (!r.ok) return typeof r.data.error === "string" ? r.data.error : `Could not save (HTTP ${r.status}).`;
   } catch {
-    toast("Could not save: the server did not answer.");
-    return false;
+    return "Could not save: the server did not answer.";
   }
   eachHit(videoId, (h) => (h.state = state));
-  return true;
+  return null;
 }
+
+/** Videos with a Later or Dismiss write in flight: a second click waits for the first. */
+const writing = new Set<string>();
 
 function scoreHtml(h: DiscoverHit): string {
   return `<div class="dsc-score"><span class="dsc-bar"><i style="width:${pct(h.score)}%"></i></span>${pct(h.score)}% match</div>`;
@@ -157,8 +164,11 @@ function actionsHtml(h: DiscoverHit, inDrawer: boolean): string {
     h.state === "queued"
       ? `<button type="button" class="dsc-btn dsc-done" disabled>✓ Queued</button>`
       : `<button type="button" class="dsc-btn dsc-primary" data-act="sum"${st.summarizing.has(h.videoId) ? " disabled" : ""}>Summarize</button>`;
+  // A queued video is summarized: Later would take it out of the known set.
   const later =
-    h.state === "later"
+    h.state === "queued"
+      ? ""
+      : h.state === "later"
       ? `<button type="button" class="dsc-btn dsc-done" data-act="later" aria-pressed="true" title="Saved for later">★${inDrawer ? " Saved" : ""}</button>`
       : `<button type="button" class="dsc-btn" data-act="later" aria-pressed="false" title="Save for later">☆ Later</button>`;
   const open = `<a class="dsc-btn" href="${escHtml(watchUrl(h.videoId))}" target="_blank" rel="noopener" title="Open on YouTube">${inDrawer ? "Open ↗" : "↗"}</a>`;
@@ -325,8 +335,9 @@ async function summarize(videoId: string): Promise<void> {
     const r = await postJson("/api/youtube/summarize", { title: found.hit.title, url: watchUrl(videoId), video_id: videoId });
     if (!r.ok) toast(typeof r.data.error === "string" ? r.data.error : `Could not start (HTTP ${r.status}).`);
     else {
-      await setState(videoId, "queued");
-      toast(r.data.duplicate ? "Already summarized." : r.data.in_flight ? "Already running." : "Summary started.");
+      const started = r.data.duplicate ? "Already summarized." : r.data.in_flight ? "Already running." : "Summary started.";
+      const err = await setState(videoId, "queued");
+      toast(err ? `${started} Marking it queued failed: ${err}` : started);
     }
   } catch {
     toast("Could not start: the server did not answer.");
@@ -337,20 +348,29 @@ async function summarize(videoId: string): Promise<void> {
 
 async function dismiss(videoId: string): Promise<void> {
   const found = findHit(videoId);
-  if (!found) return;
+  if (!found || writing.has(videoId)) return;
   const before = found.hit.state;
-  if (!(await setState(videoId, "dismissed"))) return;
+  writing.add(videoId);
+  const err = await setState(videoId, "dismissed");
+  writing.delete(videoId);
+  if (err) return toast(err);
   if (st.open?.videoId === videoId) st.open = null;
   render();
   toast("Dismissed. It won't be suggested again.", () => {
-    void setState(videoId, before).then(() => render());
+    void setState(videoId, before).then((undoErr) => {
+      if (undoErr) toast(undoErr);
+      render();
+    });
   });
 }
 
 async function toggleLater(videoId: string): Promise<void> {
   const found = findHit(videoId);
-  if (!found) return;
-  await setState(videoId, found.hit.state === "later" ? "new" : "later");
+  if (!found || found.hit.state === "queued" || writing.has(videoId)) return;
+  writing.add(videoId);
+  const err = await setState(videoId, found.hit.state === "later" ? "new" : "later");
+  writing.delete(videoId);
+  if (err) toast(err);
   render();
 }
 
