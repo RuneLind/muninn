@@ -90,6 +90,18 @@ describe("GET /api/wiki/page — live chips", () => {
     }
   });
 
+  test("a throw after the payload was collected: the plain page, and the collected facts are dropped", async () => {
+    __setChipPassFaultForTest(new Error("injected fault after collect"), "collected");
+    try {
+      const data = await get("chips");
+      expect(data.html).not.toContain("fact-chip");
+      expect(data.html).toContain("DEMO-11");
+      expect(data.facts).toBeUndefined();
+    } finally {
+      __setChipPassFaultForTest(null);
+    }
+  });
+
   test("a wiki with no facts file: no chip, no facts field", async () => {
     const data = await get("nochips");
     expect(data.html).not.toContain("fact-chip");

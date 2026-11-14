@@ -195,6 +195,8 @@ test.describe("Wiki reader: live chips", () => {
     expect(await page.locator('.wiki-article .fact-chip[data-live-fact="acme/acme-api#101"]').count()).toBe(2);
   });
 
+  // The page opens chipless on each. Which branch read the file (the not-JSON
+  // reason) is pinned in live-facts.test.ts: the server's warning is not visible here.
   test("a wiki with no facts file, one of another version and one that is not JSON: no chip, page opens", async ({ page }) => {
     for (const wiki of ["e2e-chips-nofacts", "e2e-chips-broken", "e2e-chips-notjson"]) {
       await open(page, wiki);

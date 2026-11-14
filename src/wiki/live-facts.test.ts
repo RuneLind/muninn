@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
-import { chmod, rm, stat, utimes, writeFile, unlink } from "node:fs/promises";
+import { chmod, rename, rm, stat, utimes, writeFile, unlink } from "node:fs/promises";
 import { testTempDir } from "../test/temp-dir.ts";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -30,6 +30,7 @@ import {
   planLiveChips,
   readWikiFacts,
   resetWikiFactsCache,
+  __setWikiFactsStatForTest,
   type WikiFacts,
 } from "./live-facts.ts";
 import { chipView, countedKeyPrs, keySummary, prChipParts, repoOfPr, type LiveFactsPayload } from "./core/live-facts-chip.ts";
@@ -49,6 +50,7 @@ function grammarOf(readerConfig: Record<string, unknown>) {
 }
 
 const distinct = (xs: string[]) => [...new Set(xs)];
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 describe("the shared reference-form fixture (copied from plan-status-sweep)", async () => {
   const data = await json("live-facts-reference-forms.json");
@@ -284,6 +286,72 @@ describe("mention forms the reader renders (fix round 1, k5)", () => {
   });
 });
 
+describe("link spans and emphasis (fix round 2)", () => {
+  const chipFor = (id: string) => `<span class="fact-chip" data-live-fact="${id}" data-reader-only></span>`;
+  const pull = (n: number) => `https://github.com/acme/acme-api/pull/${n}`;
+
+  test("autolinks inside a reference link are the reference link's: every chip after `][r]`, in text order", () => {
+    const { html } = render(page(`See [<${pull(101)}> <${pull(102)}> <${pull(103)}>][r] now.`));
+    expect(html).toContain(`][r]${chipFor("acme/acme-api#101")}${chipFor("acme/acme-api#102")}${chipFor("acme/acme-api#103")} now`);
+    expect(chipIds(html)).toEqual(["acme/acme-api#101", "acme/acme-api#102", "acme/acme-api#103"]);
+  });
+
+  test("a bare URL ending in emphasis the reader opens inside it: the chip after the `</em>`, never inside", () => {
+    expect(render(page(`At ${pull(101)}?x=_a_ now.`)).html).toContain(`?x=<em>a</em>${chipFor("acme/acme-api#101")} now`);
+    expect(render(page(`At ${pull(101)}?x=**a** now.`)).html).toContain(`?x=<strong>a</strong>${chipFor("acme/acme-api#101")} now`);
+    // Emphasis opened before the URL holds the chip, and trailing punctuation stays out.
+    expect(render(page(`_see ${pull(101)}_ ok`)).html).toContain(`pull/101${chipFor("acme/acme-api#101")}</em> ok`);
+    expect(render(page(`At ${pull(101)}. Done`)).html).toContain(`pull/101${chipFor("acme/acme-api#101")}. Done`);
+  });
+});
+
+describe("pinned edges (fix round 2: each kills a named mutant)", () => {
+  test("a mention followed directly by a tag is not inside it: both mentions chip", () => {
+    expect(chipIds(render(page("See acme/acme-api#101<br/> and acme/acme-api#102")).html)).toEqual(["acme/acme-api#101", "acme/acme-api#102"]);
+  });
+
+  test("a mention inside a tag that also holds a wikilink gets no chip", () => {
+    expect(chipIds(render(page('<T a="[[p|x]] acme/acme-api#101 z"> ok')).html)).toEqual([]);
+  });
+
+  test("adjacent claims are both accepted", () => {
+    const url = (n: number) => `github.com/acme/acme-api/pull/${n}`;
+    expect(prMentions(`${url(101)}${url(102)}`, GRAMMAR, null).map((m) => m.id)).toEqual(["acme/acme-api#101", "acme/acme-api#102"]);
+  });
+
+  test("a digit run past 2^53 is looked up by the id it rounds to", () => {
+    const big = "acme/acme-api#9007199254740992";
+    const loaded = loadFacts({ version: 1, prs: { [big]: FACTS.prs["acme/acme-api#101"]! }, keys: {} });
+    const md = page("Then acme/acme-api#9007199254740993 landed.");
+    const r = planLiveChips(readerBody(md), md, { loaded, grammar: GRAMMAR, trackers: TRACKERS, relPath: "plans/demo.mdx" });
+    expect(r.insertions.flatMap((s) => s.ids.map((x) => x.id))).toEqual([big]);
+  });
+
+  test("a quoted attribute value never spans lines: a multi-line `<Fold summary=…` prints literally and keeps its chip", () => {
+    const { html } = render(page('<Fold summary="see acme/acme-api#101\nmore">\n\nInside.\n\n</Fold>'));
+    expect(html).toContain("&lt;Fold summary=&quot;see acme/acme-api#101<span");
+    expect(chipIds(html)).toEqual(["acme/acme-api#101"]);
+  });
+
+  test("an `_` inside inline code is no italic delimiter: `_api #103 `x_y` z_` keeps its chip", () => {
+    expect(render(page("Both _api #103 `x_y` z_ ok")).html).toContain('<em>api #103<span class="fact-chip" data-live-fact="acme/acme-api#103"');
+  });
+
+  test("the page key set is the sweep's, read on the body: `_DEMO-12_` does not admit a bare #103", () => {
+    // #103's title carries DEMO-12; the sweep's key pattern does not see it between underscores.
+    expect(chipIds(render(page("Both _DEMO-12_ and #103")).html)).toEqual(["DEMO-12"]);
+  });
+
+  test("a reference link overlapping an inline link is no span: the link stays intact, the chip after the mention", () => {
+    const { html } = render(page("[api #101][b](https://e.com)"));
+    expect(html).toContain('[api #101<span class="fact-chip" data-live-fact="acme/acme-api#101" data-reader-only></span>]<a href="https://e.com" target="_blank" rel="noopener">b</a>');
+  });
+
+  test("an `_` followed by a word character closes no italics: `_api #103_x` and `_DEMO-12_y` get no chip", () => {
+    expect(chipIds(render(page("_api #103_x and _DEMO-12_y")).html)).toEqual([]);
+  });
+});
+
 describe("a repo or alias form the grammar cannot qualify (no owner)", () => {
   const OWNERLESS = { owner: null, aliases: { web: "acme-web", other: "acme/other" }, noProd: [] };
   const home = "acme/acme-api";
@@ -439,13 +507,62 @@ describe("readWikiFacts", () => {
     expect(await readWikiFacts(root, warn)).not.toBeNull();
   });
 
-  test("a chmod is a change of the file: unreadable gives null, readable again loads", async () => {
+  test.skipIf(isRoot)("a chmod is a change of the file: unreadable gives null, readable again loads", async () => {
     await writeFile(file(), JSON.stringify(FACTS));
     expect(await readWikiFacts(root, warn)).not.toBeNull();
     await chmod(file(), 0o000);
     expect(await readWikiFacts(root, warn)).toBeNull();
     await chmod(file(), 0o644);
     expect(await readWikiFacts(root, warn)).not.toBeNull();
+  });
+
+  describe("with ctime pinned (a test cannot set it), each other part of the signature alone is a change", () => {
+    afterAll(() => __setWikiFactsStatForTest(null));
+    const pinCtime = () => {
+      let ctimeNs: bigint | undefined;
+      __setWikiFactsStatForTest(async (real, f) => {
+        const st = await real(f);
+        ctimeNs ??= st.ctimeNs;
+        return { ino: st.ino, mtimeNs: st.mtimeNs, size: st.size, ctimeNs };
+      });
+    };
+    const T = 1_767_000_000;
+
+    test("a new inode with the same size and mtime (renamed over) is re-read", async () => {
+      pinCtime();
+      await writeFile(file(), JSON.stringify({ ...FACTS, version: 2 }));
+      await utimes(file(), T, T);
+      expect(await readWikiFacts(root, warn)).toBeNull();
+      const next = path.join(root, "next.json");
+      await writeFile(next, JSON.stringify({ ...FACTS, version: 1 }));
+      await utimes(next, T, T);
+      const before = await stat(file());
+      await rename(next, file());
+      const after = await stat(file());
+      expect([after.size, after.mtimeMs]).toEqual([before.size, before.mtimeMs]);
+      expect(after.ino).not.toBe(before.ino);
+      expect(await readWikiFacts(root, warn)).not.toBeNull();
+    });
+
+    test("an mtime moved by less than a millisecond is re-read", async () => {
+      pinCtime();
+      await writeFile(file(), JSON.stringify({ ...FACTS, version: 2 }));
+      await utimes(file(), T + 0.0001, T + 0.0001);
+      expect(await readWikiFacts(root, warn)).toBeNull();
+      // Same size, same file, mtime 0.1 ms later: the same whole millisecond.
+      await writeFile(file(), JSON.stringify({ ...FACTS, version: 1 }));
+      await utimes(file(), T + 0.0002, T + 0.0002);
+      const st = await stat(file(), { bigint: true });
+      expect(st.mtimeNs / 1_000_000n).toBe(BigInt(T) * 1000n);
+      expect(await readWikiFacts(root, warn)).not.toBeNull();
+    });
+  });
+
+  test("a not-JSON file: null, and the warning is the not-JSON reason", async () => {
+    await writeFile(file(), '{"version": 1, "prs": {');
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(warnings).toEqual([expect.stringMatching(/^not JSON: /)]);
+    expect(parseWikiFacts("{ not json")).toEqual({ error: expect.stringMatching(/^not JSON: /) });
   });
 
   test("page opens that miss together share one read: one warning per change", async () => {

@@ -1820,10 +1820,12 @@ export function registerWikiReadRoutes(
     // LIVE CHIPS (living facts PR 3b): only on a wiki with a readable
     // `.wiki-facts.json`, and only after a mention that has an entry in it.
     // `facts` carries the entries the page's chips read; absent with no chip.
-    // Never a failed page open: a throw anywhere in the chip pass renders the
-    // page without chips and logs one warning.
+    // Never a failed page open: a throw in the chip render renders the page
+    // without chips and warns (on every open: nothing dedupes it). When the
+    // plain render throws too, the cause is no chip's: its error surfaces.
     let liveFacts: LiveFactsPayload | undefined;
     let html: string | undefined;
+    let chipError: unknown;
     try {
       const loadedFacts = await readWikiFacts(index.root);
       if (loadedFacts) {
@@ -1836,11 +1838,13 @@ export function registerWikiReadRoutes(
         });
       }
     } catch (err) {
-      log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+      // `html` is still unset: the render's return is the try's last step.
+      chipError = err;
       liveFacts = undefined;
-      html = undefined;
     }
     html ??= await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined);
+    if (chipError !== undefined)
+      log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])

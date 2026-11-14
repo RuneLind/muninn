@@ -42,7 +42,7 @@ import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts"
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
-import { applyChipInsertions, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
+import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
@@ -167,6 +167,7 @@ export function renderWikiHtml(
       return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
     });
     opts.liveFacts.collect?.(plan.facts);
+    chipPassCollected();
   }
   const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);

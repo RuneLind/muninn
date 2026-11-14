@@ -124,6 +124,16 @@ export function resetWikiFactsCache(): void {
   factsCache.clear();
 }
 
+type FactsStat = Pick<import("node:fs").BigIntStats, "ino" | "ctimeNs" | "mtimeNs" | "size">;
+const realFactsStat = (file: string): Promise<FactsStat> => fs.stat(file, { bigint: true });
+let factsStat = realFactsStat;
+
+/** For tests: wrap the facts file's stat (null restores it), so a test can pin
+ *  ctime, which it cannot set, and show each other part of the signature alone. */
+export function __setWikiFactsStatForTest(wrap: ((real: typeof realFactsStat, file: string) => Promise<FactsStat>) | null): void {
+  factsStat = wrap ? (file) => wrap(realFactsStat, file) : realFactsStat;
+}
+
 /**
  * The wiki's facts, or null: no file, an unreadable one, a malformed one or a
  * `version` other than 1. Re-read only when the file's signature changed
@@ -137,7 +147,7 @@ export async function readWikiFacts(root: string, warn: (reason: string) => void
   try {
     // Nanoseconds: Bun's `ctimeMs` is whole milliseconds, and two writes in one
     // millisecond are a change too.
-    const st = await fs.stat(file, { bigint: true });
+    const st = await factsStat(file);
     sig = `${st.ino}:${st.ctimeNs}:${st.mtimeNs}:${st.size}`;
   } catch {
     factsCache.delete(root);
@@ -526,6 +536,22 @@ function emphasisView(body: string, code: readonly ProtectedRegion[]): string {
   return out.join("");
 }
 
+/** The spans the renderer turns into `<strong>`/`<em>` (`renderInlineWith`'s
+ *  three passes, in its order, each on what the earlier ones left), delimiters included. */
+function readerEmphasisSpans(body: string): [number, number][] {
+  const out: [number, number][] = [];
+  let text = body;
+  for (const re of [/\*\*(.+?)\*\*/g, /(?<!\w)\*([^*\n]+?)\*(?!\w)/g, /(?<!\w)_([^_\n]+?)_(?!\w)/g]) {
+    // Each pass sees the earlier passes' tags, never their delimiters: blank them (same length).
+    text = text.replace(re, (whole, _inner, at: number) => {
+      out.push([at, at + whole.length]);
+      const d = whole.startsWith("**") ? 2 : 1;
+      return " ".repeat(d) + whole.slice(d, -d) + " ".repeat(d);
+    });
+  }
+  return out;
+}
+
 function lineStarts(text: string): number[] {
   const out = [0];
   for (let i = 0; i < text.length; i++) if (text[i] === "\n") out.push(i + 1);
@@ -633,8 +659,8 @@ function markedMentionsWithCode(
 export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
   if (mentions.length === 0) return [];
   const inCode = codeIntervals(code ?? readerCodeRegions(body));
-  // Each list is in text order and pairwise disjoint (one regex's matches; a
-  // URL's end only trimmed), so a lookup is a binary search; links first, as
+  // Each list is in text order and pairwise disjoint (one regex's matches,
+  // or the kept ones; a URL's end stays within its match), so a lookup is a binary search; links first, as
   // a URL inside a link belongs to the link.
   const links: [number, number][] = [];
   for (const m of body.matchAll(LINK_RE)) if (!inCode.contains(m.index!) && body[m.index! - 1] !== "[") links.push([m.index!, m.index! + m[0].length]);
@@ -646,14 +672,24 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
       const span: [number, number] = [m.index!, m.index! + m[0].length];
       if (!inCode.contains(span[0]) && body[span[0] - 1] !== "[" && !links.some(([a, b]) => a < span[1] && b > span[0])) others.push(span);
     }
-  others.sort((a, b) => a[0] - b[0]);
-  const refs = others.filter((s, i) => i === 0 || s[0] >= others[i - 1]![1]);
+  others.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  // Compared with the last KEPT span: an autolink inside a reference link is the link's.
+  const refs: [number, number][] = [];
+  for (const s of others) if (refs.length === 0 || s[0] >= refs[refs.length - 1]![1]) refs.push(s);
   const urls: [number, number][] = [];
+  let emphasis: [number, number][] | undefined;
   for (const m of body.matchAll(URL_RE)) {
     const start = m.index!;
     // An earlier URL ends at or before this match starts, so only a link can hold it.
     if (holdingSpan(links, start, start + 1) || holdingSpan(refs, start, start + 1)) continue;
-    const end = start + m[0].replace(/[.,;:!?'"*_]+$/, "").length;
+    const full = start + m[0].length;
+    let end = start + m[0].replace(/[.,;:!?'"*_]+$/, "").length;
+    // A trimmed `_`/`*` that closes emphasis the reader opens inside the URL
+    // (`?x=_a_`) stays in it, so the chip never lands inside that `<em>`.
+    if (end < full && /[*_]/.test(body.slice(end, full))) {
+      emphasis ??= readerEmphasisSpans(body);
+      for (const [a, b] of emphasis) if (a >= start && a < end && b > end && b <= full) end = b;
+    }
     urls.push([start, end]);
   }
   const sites = new Map<number, ChipInsertion>();
@@ -699,12 +735,19 @@ function mayPlaceChip(body: string, loaded: LoadedFacts): boolean {
   return false;
 }
 
-let chipPassFault: Error | null = null;
+let chipPassFault: { err: Error; stage: "plan" | "collected" } | null = null;
 
 /** For tests: make every chip pass throw `err` (null clears it), so a route
- *  can prove a failed chip pass still opens the page. */
-export function __setChipPassFaultForTest(err: Error | null): void {
-  chipPassFault = err;
+ *  can prove a failed chip pass still opens the page. `stage: "collected"`
+ *  throws after the payload's `collect` has run ({@link chipPassCollected}). */
+export function __setChipPassFaultForTest(err: Error | null, stage: "plan" | "collected" = "plan"): void {
+  chipPassFault = err && { err, stage };
+}
+
+/** The render calls this right after `collect`; it throws only under the
+ *  test fault's `"collected"` stage. */
+export function chipPassCollected(): void {
+  if (chipPassFault?.stage === "collected") throw chipPassFault.err;
 }
 
 /**
@@ -717,7 +760,7 @@ export function planLiveChips(
   markdown: string,
   input: Pick<LiveFactsInput, "loaded" | "grammar" | "trackers" | "relPath">,
 ): { insertions: ChipInsertion[]; facts: LiveFactsPayload | undefined } {
-  if (chipPassFault) throw chipPassFault;
+  if (chipPassFault?.stage === "plan") throw chipPassFault.err;
   if (!mayPlaceChip(body, input.loaded)) return { insertions: [], facts: undefined };
   const { facts, prIds } = input.loaded;
   const prEntry = (id: string): [string, FactsPrEntry] | undefined => {
