@@ -1,7 +1,9 @@
 /**
  * Two frontmatter list readers with no IO: `owns:` (lint check 14's homes) and
  * `related:` (work-thread grouping, plan `muninn-wiki-work-thread-grouping`
- * D18), plus the resolver that turns `related:` entries into pages.
+ * D18), plus the resolver that turns `related:` entries into pages. The
+ * `related:` reader also reads another key of wikilinks ({@link readLinkList},
+ * for lint check 28's `folded_into:`).
  *
  * Its own module so `store.ts` and `lint-state.ts` both import it and
  * `store.ts → lint-state.ts → lint-drift.ts → store.ts` never becomes a cycle.
@@ -214,8 +216,10 @@ export function readRelated(content: string): RelatedRead {
   return fm ? relatedFrom(fm) : NO_RELATED;
 }
 
-/** Another top-level key that holds wikilinks (`folded_into:`), read exactly
- *  as {@link readRelated} reads `related:`. `lineRe` finds the key's line. */
+/** Another top-level key that holds wikilinks (`folded_into:`), read by the
+ *  walk {@link readRelated} uses. `lineRe` finds the key's line when the entry
+ *  is read alone, so the caller decides which spellings of the key count there
+ *  (`related:` takes no quoted key). */
 export function readLinkList(content: string, key: string, lineRe: RegExp): RelatedRead {
   const fm = Frontmatter.of(content);
   return fm ? linkListFrom(fm, key, lineRe) : NO_RELATED;

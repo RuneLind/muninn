@@ -30,6 +30,8 @@ test("foldedIntoNamed: no key, a bare key, an empty list, a comment and another 
   expect(named('folded_into: ""')).toBe(false);
   expect(named("folded_into: # todo")).toBe(false);
   expect(named("folded_into:\n  # todo\ntags:\n  - a")).toBe(false);
+  // Under another key: once where YAML reads it as that key's child, once where it is that key's broken continuation.
+  expect(named("parent:\n  folded_into: none")).toBe(false);
   expect(named("title: P\n  folded_into: none")).toBe(false);
   expect(named("not_folded_into: none")).toBe(false);
 });
@@ -61,6 +63,7 @@ test("when the frontmatter is not YAML, the key's own entry is still read: last 
   // A block list at column 0 belongs to the key above it.
   expect(named(`${broken}\nfolded_into:\n- "[[a]]"\ntags: [a]`)).toBe(true);
   expect(named(`${broken}\n"folded_into": none`)).toBe(true);
+  expect(named(`${broken}\nfolded_into : none`)).toBe(true);
   expect(named(`folded_into:\n${broken}\nfolded_into: none`)).toBe(true);
   expect(named(`folded_into: none\n${broken}\nfolded_into:`)).toBe(false);
   expect(named(`${broken}\nfolded_into:\ntags: [a]`)).toBe(false);

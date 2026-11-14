@@ -43,7 +43,8 @@ const KEY_RE = /^(["']?)folded_into\1\s*:/;
  * every form pages write there. It names something when that read holds a
  * link or a text entry (`none`, a path); an entry the reader cannot place (a
  * number, a boolean, a mapping without a link) names nothing, and neither do
- * a bare key, `null`, an empty list or empty strings.
+ * a bare key, `null`, an empty list, empty strings or an empty link (`[[ ]]`).
+ * A mapping that holds a link names that link.
  */
 export function foldedIntoNamed(content: string): boolean {
   return readLinkList(content, "folded_into", KEY_RE).entries.some((e) => e.kind !== "unread");
