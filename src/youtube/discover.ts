@@ -11,6 +11,7 @@ import { YOUTUBE_FRAME_SOURCE, isFrameId } from "../summaries/frames.ts";
 import { youtubeWatchUrl } from "./frames.ts";
 import { extractJson } from "../utils/json-extract.ts";
 import { neutralizePromptTags } from "../utils/prompt-fence.ts";
+import type { DiscoverVideoDetails } from "../db/youtube-discover.ts";
 
 /** Results asked of each search. */
 export const DISCOVER_RESULTS_PER_QUERY = 10;
@@ -220,4 +221,102 @@ export function buildDiscoverRankPrompt(seedTitle: string, hits: readonly YouTub
     "",
     "Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing clears the bar, return [].",
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// The details probe (PR 2): one video's description, chapters, likes and upload
+// date, for the Discover page's drawer. ONE AT A TIME process-wide: in parallel,
+// 11 of 12 probes came back empty (YouTube throttled them, 2026-11-14).
+
+/** A details probe's bound (measured ~3 s). */
+export const DISCOVER_DETAILS_TIMEOUT_MS = 20_000;
+const DETAILS_DESCRIPTION_MAX = 5_000;
+const DETAILS_CHAPTERS_MAX = 100;
+const DETAILS_TAGS_MAX = 20;
+
+/** The `-O` field list: never the full info JSON (11.7 MB on one video, past runProc's cap). */
+export const DISCOVER_DETAILS_TEMPLATE =
+  "%(.{id,description,chapters,like_count,view_count,upload_date,channel_follower_count,tags})j";
+
+export function buildDetailsArgs(videoId: string): string[] | null {
+  if (!isFrameId(YOUTUBE_FRAME_SOURCE, videoId)) return null;
+  return [
+    "yt-dlp",
+    ...YTDLP_ISOLATION_ARGS,
+    "-O",
+    DISCOVER_DETAILS_TEMPLATE,
+    "--skip-download",
+    "--no-playlist",
+    "--no-warnings",
+    youtubeWatchUrl(videoId),
+  ];
+}
+
+/** The probe line → details; `null` when it is not this video's JSON record. */
+export function parseDetailsProbe(stdout: string, videoId: string): DiscoverVideoDetails | null {
+  const line = stdout.split("\n").find((l) => l.trim().startsWith("{"));
+  if (!line) return null;
+  let rec: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    rec = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (rec.id !== videoId) return null;
+  const description =
+    typeof rec.description === "string" && rec.description.trim()
+      ? Array.from(rec.description).slice(0, DETAILS_DESCRIPTION_MAX).join("")
+      : null;
+  const chapters = (Array.isArray(rec.chapters) ? rec.chapters : [])
+    .map((c) => {
+      const o = (c ?? {}) as Record<string, unknown>;
+      const start = finiteOrNull(o.start_time);
+      const title = textOrNull(o.title, 200);
+      return start !== null && title ? { start, title } : null;
+    })
+    .filter((c): c is { start: number; title: string } => c !== null)
+    .slice(0, DETAILS_CHAPTERS_MAX);
+  const tags = (Array.isArray(rec.tags) ? rec.tags : [])
+    .map((t) => textOrNull(t, 60))
+    .filter((t): t is string => t !== null)
+    .slice(0, DETAILS_TAGS_MAX);
+  const uploadDate = typeof rec.upload_date === "string" && /^\d{8}$/.test(rec.upload_date) ? rec.upload_date : null;
+  return {
+    description,
+    chapters,
+    likeCount: finiteOrNull(rec.like_count),
+    viewCount: finiteOrNull(rec.view_count),
+    uploadDate,
+    channelFollowerCount: finiteOrNull(rec.channel_follower_count),
+    tags,
+  };
+}
+
+let detailsChain: Promise<unknown> = Promise.resolve();
+
+/** Run `fn` after every earlier details probe settled: one probe at a time across the process. */
+function inDetailsQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const next = detailsChain.then(fn, fn);
+  detailsChain = next.catch(() => undefined);
+  return next;
+}
+
+/** One video's details. `null` on a bad id, a failed or timed-out yt-dlp, or unreadable output. */
+export async function probeDiscoverDetails(
+  videoId: string,
+  run: ProcRunner = (cmd, ms, label) => runProc(cmd, ms, label, { quietTimeout: true, processGroup: true }),
+): Promise<DiscoverVideoDetails | null> {
+  const args = buildDetailsArgs(videoId);
+  if (!args) return null;
+  return inDetailsQueue(async () => {
+    try {
+      const res = await run(args, DISCOVER_DETAILS_TIMEOUT_MS, "yt-dlp details");
+      if (res.exitCode !== 0) return null;
+      return parseDetailsProbe(res.stdout, videoId);
+    } catch {
+      return null;
+    }
+  });
 }

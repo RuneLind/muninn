@@ -185,6 +185,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
       white-space: nowrap;
     }
     .prompts-link:hover { color: var(--accent-light); }
+    .prompts-link + .prompts-link { margin-left: 0; }
     .paste-toggle {
       display: inline-flex;
       align-items: center;
@@ -248,8 +249,9 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     <div class="sum-page-head">
       <h2>Summaries</h2>
       <span class="sum-presence-slot">${agentPresenceHtml("sumPresence")}</span>
-      <!-- The only entry point to /summaries/prompts: it is a sub-page of this
-           one, and the top-level nav row already carries ten links. -->
+      <!-- The entry points to /summaries/discover and /summaries/prompts: both are
+           sub-pages of this one, and the top-level nav row already carries ten links. -->
+      <a class="prompts-link" id="discoverLink" href="/summaries/discover">Discover</a>
       <a class="prompts-link" id="promptsLink" href="/summaries/prompts">Prompts</a>
       <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
     </div>

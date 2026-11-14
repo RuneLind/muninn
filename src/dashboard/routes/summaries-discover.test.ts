@@ -15,6 +15,13 @@ import {
 } from "./summaries-discover.ts";
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
 import type { YouTubeHit } from "../../youtube/discover.ts";
+import type {
+  DiscoverHitInput,
+  DiscoverHitState,
+  DiscoverRunInput,
+  DiscoverShelf,
+  DiscoverVideoDetails,
+} from "../../db/youtube-discover.ts";
 
 const config = { knowledgeApiUrl: "http://huginn.invalid" } as never;
 const bot = { name: "summarizer", dir: "/tmp/summarizer", connector: "claude-sdk" } as never;
@@ -43,6 +50,42 @@ let listings: number;
 let profile: string | null;
 let prompts: { queries: string[]; rank: string[] };
 let clock: number;
+/** The in-memory store: saved runs, per-video state and details. */
+let saved: { run: DiscoverRunInput; hits: DiscoverHitInput[] }[];
+let states: Map<string, DiscoverHitState>;
+let detailsCache: Map<string, DiscoverVideoDetails | null>;
+let probes: string[];
+let probeAnswer: (id: string) => Promise<DiscoverVideoDetails | null>;
+let saveFails: boolean;
+
+const DETAILS: DiscoverVideoDetails = {
+  description: "Invented description",
+  chapters: [{ start: 0, title: "Intro" }],
+  likeCount: 12,
+  viewCount: 1000,
+  uploadDate: "20260301",
+  channelFollowerCount: 500,
+  tags: ["evals"],
+};
+
+function store(): SummariesDiscoverDeps["store"] {
+  return {
+    saveRun: async (run, hits) => {
+      if (saveFails) throw new Error("db down");
+      saved.push({ run, hits: [...hits] });
+      for (const h of hits) {
+        if (!states.has(h.videoId)) states.set(h.videoId, "new");
+        if (!detailsCache.has(h.videoId)) detailsCache.set(h.videoId, null);
+      }
+      return `00000000-0000-4000-8000-${String(saved.length).padStart(12, "0")}`;
+    },
+    knownIds: async () => new Set([...states].filter(([, st]) => st === "dismissed" || st === "queued").map(([id]) => id)),
+    setState: async (id, st) => (states.has(id) ? (states.set(id, st), 1) : 0),
+    getDetails: async (id) => (detailsCache.has(id) ? detailsCache.get(id)! : undefined),
+    saveDetails: async (id, d) => void detailsCache.set(id, d),
+    listShelves: async () => [] as DiscoverShelf[],
+  };
+}
 
 function deps(over: Partial<SummariesDiscoverDeps> = {}): SummariesDiscoverDeps {
   return {
@@ -67,6 +110,11 @@ function deps(over: Partial<SummariesDiscoverDeps> = {}): SummariesDiscoverDeps 
     profile: async () => profile,
     tracer: () => null,
     now: () => clock,
+    store: store(),
+    probeDetails: async (id) => {
+      probes.push(id);
+      return probeAnswer(id);
+    },
     ...over,
   };
 }
@@ -101,6 +149,12 @@ beforeEach(() => {
   profile = null;
   prompts = { queries: [], rank: [] };
   clock = 1_000_000;
+  saved = [];
+  states = new Map();
+  detailsCache = new Map();
+  probes = [];
+  probeAnswer = async () => DETAILS;
+  saveFails = false;
 });
 
 describe("refusals", () => {
@@ -248,7 +302,14 @@ describe("search and dedup", () => {
   test("nothing new: no rank call, empty results", async () => {
     knownUrls.push(`https://www.youtube.com/watch?v=${ID(2)}`, `https://www.youtube.com/watch?v=${ID(3)}`);
     const res = await post(app(), { source: "youtube", docId: DOC });
-    expect(await res.json()).toEqual({ queries: expect.any(Array), results: [], searched: 5, known: 5 });
+    expect(await res.json()).toEqual({
+      queries: expect.any(Array),
+      results: [],
+      searched: 5,
+      known: 5,
+      runId: expect.any(String),
+      shelfUrl: expect.stringMatching(/^\/summaries\/discover#run-/),
+    });
     expect(prompts.rank).toHaveLength(0);
   });
   test("omitted and out-of-range gate items are not shown; at most 8", async () => {
@@ -328,5 +389,160 @@ describe("interest profile", () => {
     } finally {
       __setAuthPolicyForTest(null);
     }
+  });
+});
+
+describe("stored runs (PR 2)", () => {
+  test("a run is saved as a shelf: seed fields, origin reader, the shown results in order; the answer links it", async () => {
+    const res = await post(app(), { source: "youtube", docId: DOC });
+    const body = (await res.json()) as { runId: string; shelfUrl: string };
+    expect(saved).toHaveLength(1);
+    const { run, hits } = saved[0]!;
+    expect(run).toMatchObject({
+      seedSource: "youtube",
+      seedDocId: DOC,
+      seedTitle: "Invented seed talk",
+      seedVideoId: SEED,
+      seedCategory: "ai/agents",
+      seedDate: "2026-03-22",
+      searched: 5,
+      known: 3,
+      origin: "reader",
+      botName: "summarizer",
+    });
+    expect(run.queries.map((q) => q.query)).toEqual(["agent evals", "eval harness talk"]);
+    expect(hits.map((h) => [h.videoId, h.score])).toEqual([
+      [ID(3), 0.9],
+      [ID(2), 0.6],
+    ]);
+    expect(body.shelfUrl).toBe(`/summaries/discover#run-${body.runId}`);
+  });
+  test("origin page is accepted; any other origin is 400 before a model call", async () => {
+    expect((await post(app(), { source: "youtube", docId: DOC, origin: "page" })).status).toBe(200);
+    expect(saved[0]!.run.origin).toBe("page");
+    const bad = await post(app(), { source: "youtube", docId: DOC, origin: "watcher" });
+    expect(bad.status).toBe(400);
+    expect(((await bad.json()) as { code: string }).code).toBe("bad_origin");
+    expect(prompts.queries).toHaveLength(1);
+  });
+  test("a failed save still answers the results, with no shelf", async () => {
+    saveFails = true;
+    const res = await post(app(), { source: "youtube", docId: DOC });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: unknown[]; runId: unknown; shelfUrl: unknown };
+    expect(body.results).toHaveLength(2);
+    expect(body.runId).toBeNull();
+    expect(body.shelfUrl).toBeNull();
+  });
+  test("dismissed and queued videos join the known set; later and new ones do not", async () => {
+    states.set(ID(2), "dismissed");
+    states.set(ID(3), "later");
+    rankAnswer = JSON.stringify([{ n: 1, score: 0.9, why: "x" }]);
+    let body = (await (await post(app(), { source: "youtube", docId: DOC })).json()) as { results: { videoId: string }[]; known: number };
+    expect(body.known).toBe(4);
+    expect(body.results.map((r) => r.videoId)).toEqual([ID(3)]);
+    states.set(ID(3), "queued");
+    body = (await (await post(app(), { source: "youtube", docId: DOC })).json()) as { results: { videoId: string }[]; known: number };
+    expect(body.known).toBe(5);
+    expect(body.results).toEqual([]);
+  });
+  test("a failed dismissed/queued read degrades to the huginn listing alone", async () => {
+    const d = deps();
+    d.store = { ...d.store, knownIds: async () => { throw new Error("db down"); } };
+    const res = await post(app(d), { source: "youtube", docId: DOC });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { known: number }).known).toBe(3);
+  });
+});
+
+const postTo = (a: Hono, path: string, body: unknown, ct = "application/json") =>
+  a.request(path, { method: "POST", headers: { "content-type": ct }, body: JSON.stringify(body) });
+
+describe("POST /api/summaries/discover/state", () => {
+  test("415, a bad id and a bad state are refused", async () => {
+    const a = app();
+    expect((await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "later" }, "text/plain")).status).toBe(415);
+    const badId = await postTo(a, "/api/summaries/discover/state", { videoId: "../x", state: "later" });
+    expect(((await badId.json()) as { code: string }).code).toBe("bad_video_id");
+    const badState = await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "summarized" });
+    expect(badState.status).toBe(400);
+    expect(((await badState.json()) as { code: string }).code).toBe("bad_state");
+  });
+  test("404 for a video no shelf has; 200 sets the state", async () => {
+    const a = app();
+    expect((await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "later" })).status).toBe(404);
+    states.set(ID(1), "new");
+    const res = await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "dismissed" });
+    expect(await res.json()).toEqual({ videoId: ID(1), state: "dismissed" });
+    expect(states.get(ID(1))).toBe("dismissed");
+  });
+});
+
+describe("POST /api/summaries/discover/details", () => {
+  test("404 and no probe for a video no shelf has", async () => {
+    const res = await postTo(app(), "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { code: string }).code).toBe("unknown_video");
+    expect(probes).toEqual([]);
+  });
+  test("probes once, caches, and answers from the cache afterwards", async () => {
+    detailsCache.set(ID(1), null);
+    const a = app();
+    let res = await postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(await res.json()).toEqual({ videoId: ID(1), details: DETAILS, cached: false });
+    res = await postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(await res.json()).toEqual({ videoId: ID(1), details: DETAILS, cached: true });
+    expect(probes).toEqual([ID(1)]);
+  });
+  test("two concurrent opens of one video share one probe", async () => {
+    detailsCache.set(ID(1), null);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    probeAnswer = async () => (await held, DETAILS);
+    const a = app();
+    const p1 = postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    const p2 = postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    await Bun.sleep(5);
+    release();
+    expect((await p1).status).toBe(200);
+    expect((await p2).status).toBe(200);
+    expect(probes).toEqual([ID(1)]);
+  });
+  test("a failed probe is 502 and caches nothing", async () => {
+    detailsCache.set(ID(1), null);
+    probeAnswer = async () => null;
+    const res = await postTo(app(), "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { code: string }).code).toBe("probe_failed");
+    expect(detailsCache.get(ID(1))).toBeNull();
+  });
+});
+
+describe("GET /summaries/discover", () => {
+  test("renders the stored shelves into the page's JSON, with every < escaped", async () => {
+    const shelf: DiscoverShelf = {
+      runId: "00000000-0000-4000-8000-000000000001",
+      seedSource: "youtube",
+      seedDocId: DOC,
+      seedTitle: "Invented </script><b>seed</b>",
+      seedVideoId: SEED,
+      seedCategory: "ai/agents",
+      seedDate: "2026-03-22",
+      queries: [{ query: "agent evals", why: "same" }],
+      searched: 5,
+      known: 1,
+      origin: "reader",
+      createdAt: 0,
+      hits: [],
+    };
+    const d = deps();
+    d.store = { ...d.store, listShelves: async () => [shelf] };
+    const res = await app(d).request("/summaries/discover");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const json = /<script type="application\/json" id="dscData">([^<]*)<\/script>/.exec(html)?.[1];
+    expect(json).toBeDefined();
+    expect(JSON.parse(json!).shelves[0].seedTitle).toBe("Invented </script><b>seed</b>");
+    expect(html).not.toContain("</script><b>seed");
   });
 });

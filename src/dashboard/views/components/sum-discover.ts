@@ -39,5 +39,6 @@ export function sumDiscoverStyles(): string {
     .sum-discover-status.error, .sum-discover-msg.error { color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
     .sum-discover-status a { color: var(--accent-light); font-weight: 400; }
     .sum-discover-msg { margin-top: 8px; font-size: 13px; }
+    .sum-discover-shelf { color: var(--accent-light); white-space: nowrap; }
   `;
 }

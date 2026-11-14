@@ -1,16 +1,23 @@
 /**
- * ▶ Find on YouTube for `/summaries` (plan muninn-youtube-discovery, PR 1).
+ * ▶ Find on YouTube and the Discover page for `/summaries` (plan
+ * muninn-youtube-discovery, PRs 1–2).
  *
- * `POST /api/summaries/discover` `{source: "youtube", docId}` — one Haiku-tier
- * call turns the stored summary into 3–5 queries, each runs one yt-dlp search
- * (10 results, concurrently), the union drops the seed and every video
- * `youtube-summaries` already holds, and a second Haiku-tier call (the YouTube
- * gate) ranks the rest; the top {@link DISCOVER_MAX_SHOWN} by score come back.
- * Writes nothing and captures nothing (D2): the panel's Summarize is a click on
- * the existing `POST /api/youtube/summarize`.
+ * `POST /api/summaries/discover` `{source: "youtube", docId}` runs one discovery
+ * from that summary (`runDiscovery`, `src/youtube/discover-run.ts`: queries,
+ * yt-dlp searches, known-video dedup, the YouTube gate) and STORES it as a shelf
+ * (`src/db/youtube-discover.ts`); the answer carries the run id and the shelf's
+ * address. A failed save still answers the results, with `runId: null`.
+ * Captures nothing (D2): Summarize is a click on `POST /api/youtube/summarize`.
  *
- * `application/json` required (415). Errors are `{error, code}`. Pure half and
- * the search: `src/youtube/discover.ts`.
+ * `GET /summaries/discover` — the page: the newest run of each seed as a shelf.
+ * `POST /api/summaries/discover/state` `{videoId, state}` — Later, Dismiss, Undo,
+ * and `queued` after a Summarize started; a dismissed or queued video joins the
+ * known set and is never suggested again.
+ * `POST /api/summaries/discover/details` `{videoId}` — the drawer's details: one
+ * yt-dlp probe for a STORED video (a POST because it spawns a process), one at a
+ * time process-wide, cached on its hit rows.
+ *
+ * `application/json` required on every POST (415). Errors are `{error, code}`.
  */
 
 import type { Context, Hono } from "hono";
@@ -21,37 +28,42 @@ import { fetchKnowledgeApi, fetchKnowledgeApiText, KnowledgeApiError } from "../
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { Tracer } from "../../tracing/tracer.ts";
 import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
-import { readStoredCapture, titleFromDocId } from "../../summaries/summary-save.ts";
-import { stripSummaryFactcheckBlock } from "../../summaries/factcheck-block.ts";
-import { readerSimilarQuery } from "../../summaries/reader-article.ts";
 import { extractYouTubeVideoId } from "../../youtube/url.ts";
+import { probeDiscoverDetails, searchYouTube, type YouTubeHit } from "../../youtube/discover.ts";
+import { runDiscovery, type DiscoverResult, type DiscoverTracer } from "../../youtube/discover-run.ts";
+import { YOUTUBE_FRAME_SOURCE, isFrameId } from "../../summaries/frames.ts";
 import {
-  buildDiscoverQueriesPrompt,
-  buildDiscoverRankPrompt,
-  DISCOVER_MAX_SHOWN,
-  DISCOVER_MIN_SCORE,
-  DISCOVER_RESULTS_PER_QUERY,
-  parseDiscoverQueries,
-  searchYouTube,
-  type DiscoverQuery,
-  type YouTubeHit,
-} from "../../youtube/discover.ts";
-import { indexScoresByN, parseGateScores } from "../../watchers/gate-scores.ts";
-import { withInterestProfile } from "../../profile/inject.ts";
+  getDiscoverKnownVideoIds,
+  getDiscoverVideoDetails,
+  isDiscoverHitState,
+  listDiscoverShelves,
+  saveDiscoverRun,
+  saveDiscoverVideoDetails,
+  setDiscoverVideoState,
+  type DiscoverHitInput,
+  type DiscoverHitState,
+  type DiscoverRunInput,
+  type DiscoverShelf,
+  type DiscoverVideoDetails,
+} from "../../db/youtube-discover.ts";
+import { renderSummariesDiscoverPage } from "../views/summaries-discover-page.ts";
 import { loadInterestProfileForBot } from "../../profile/generator.ts";
 import { authMode } from "../../auth/policy.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { getLog } from "../../logging.ts";
 
+export type { DiscoverResult, DiscoverTracer };
+
 const log = getLog("dashboard", "summaries-discover");
 
 const RAW_READ_TIMEOUT_MS = 10_000;
 const MODEL_TIMEOUT_MS = 60_000;
-/** How long the known-video set is reused (the Stats tab's TTL). */
+/** How long the captured-video set is reused (the Stats tab's TTL). */
 export const KNOWN_IDS_TTL_MS = 5 * 60_000;
 const YOUTUBE_COLLECTION = "youtube-summaries";
 
-export type DiscoverTracer = Pick<Tracer, "start" | "end" | "finish">;
+/** Where a stored run's shelf is. */
+export const discoverShelfUrl = (runId: string): string => `/summaries/discover#run-${runId}`;
 
 export interface SummariesDiscoverDeps {
   /** The raw file, or `null` when huginn has no such document. Throws on any other failure. */
@@ -67,14 +79,34 @@ export interface SummariesDiscoverDeps {
   profile: (bot: BotConfig) => Promise<string | null>;
   tracer?: (bot: BotConfig) => DiscoverTracer | null;
   now?: () => number;
+  /** The store (`src/db/youtube-discover.ts`). */
+  store: {
+    saveRun: (run: DiscoverRunInput, hits: readonly DiscoverHitInput[]) => Promise<string>;
+    knownIds: () => Promise<Set<string>>;
+    setState: (videoId: string, state: DiscoverHitState) => Promise<number>;
+    getDetails: (videoId: string) => Promise<DiscoverVideoDetails | null | undefined>;
+    saveDetails: (videoId: string, details: DiscoverVideoDetails) => Promise<void>;
+    listShelves: () => Promise<DiscoverShelf[]>;
+  };
+  /** One details probe, or `null` when it failed. */
+  probeDetails: (videoId: string) => Promise<DiscoverVideoDetails | null>;
 }
 
 /**
- * Test seam for `e2e/youtube-discover-boot.ts` ONLY: the two model calls and
- * the search, replaced in-process before muninn boots (the `findLinksTestSeam`
- * precedent). Production never sets it.
+ * Test seam for `e2e/youtube-discover-boot.ts` ONLY: the two model calls, the
+ * search and the details probe, replaced in-process before muninn boots (the
+ * `findLinksTestSeam` precedent). Production never sets it.
  */
-export const discoverTestSeam: Partial<Pick<SummariesDiscoverDeps, "queriesCall" | "rankCall" | "search">> = {};
+export const discoverTestSeam: Partial<Pick<SummariesDiscoverDeps, "queriesCall" | "rankCall" | "search" | "probeDetails">> = {};
+
+export const DISCOVER_STORE: SummariesDiscoverDeps["store"] = {
+  saveRun: saveDiscoverRun,
+  knownIds: getDiscoverKnownVideoIds,
+  setState: setDiscoverVideoState,
+  getDetails: getDiscoverVideoDetails,
+  saveDetails: saveDiscoverVideoDetails,
+  listShelves: () => listDiscoverShelves(),
+};
 
 async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, source: string): Promise<string> {
   const res = await callHaikuWithFallback(prompt, {
@@ -123,24 +155,24 @@ export function defaultSummariesDiscoverDeps(
     // An authenticating instance has many readers: a bot-wide profile is someone else's interests.
     profile: async (bot) => (authMode() === "off" ? loadProfile(bot.name) : null),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discover" }),
+    store: DISCOVER_STORE,
+    probeDetails: (videoId) =>
+      discoverTestSeam.probeDetails ? discoverTestSeam.probeDetails(videoId) : probeDiscoverDetails(videoId),
   };
-}
-
-export interface DiscoverResult {
-  videoId: string;
-  title: string;
-  channel: string | null;
-  durationSec: number | null;
-  viewCount: number | null;
-  url: string;
-  score: number;
-  why: string;
-  /** The first query that found it. */
-  query: string;
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const fail = (c: Context, status: 400 | 404 | 409 | 502 | 503, code: string, error: string) => c.json({ error, code }, status);
+
+async function jsonBody(c: Context): Promise<Record<string, unknown>> {
+  const parsed: unknown = await c.req.json().catch(() => null);
+  return (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
+}
+
+const videoIdOf = (body: Record<string, unknown>): string | null => {
+  const id = typeof body.videoId === "string" ? body.videoId.trim() : "";
+  return isFrameId(YOUTUBE_FRAME_SOURCE, id) ? id : null;
+};
 
 export function registerSummariesDiscoverRoutes(
   app: Hono,
@@ -150,151 +182,173 @@ export function registerSummariesDiscoverRoutes(
   const now = deps.now ?? Date.now;
   /** One discovery per document at a time. */
   const running = new Set<string>();
-  let known: { ids: Set<string>; at: number } | null = null;
-  let knownInFlight: Promise<Set<string>> | null = null;
+  /** One details probe per video at a time; a second click joins the first. */
+  const probing = new Map<string, Promise<DiscoverVideoDetails | null>>();
+  let captured: { ids: Set<string>; at: number } | null = null;
+  let capturedInFlight: Promise<Set<string>> | null = null;
 
   /** The video ids `youtube-summaries` holds, cached and single-flighted. A failed listing is not cached. */
-  function knownIds(): Promise<Set<string>> {
-    if (known && now() - known.at < KNOWN_IDS_TTL_MS) return Promise.resolve(known.ids);
-    knownInFlight ??= (async () => {
+  function capturedIds(): Promise<Set<string>> {
+    if (captured && now() - captured.at < KNOWN_IDS_TTL_MS) return Promise.resolve(captured.ids);
+    capturedInFlight ??= (async () => {
       try {
         const ids = new Set<string>();
         for (const url of await deps.listKnownUrls()) {
           const id = extractYouTubeVideoId(url);
           if (id) ids.add(id);
         }
-        known = { ids, at: now() };
+        captured = { ids, at: now() };
         return ids;
       } finally {
-        knownInFlight = null;
+        capturedInFlight = null;
       }
     })();
-    return knownInFlight;
+    return capturedInFlight;
   }
+
+  /** Captured ∪ dismissed ∪ queued. Each half degrades to none on failure; the store half is read fresh. */
+  async function knownIds(): Promise<Set<string>> {
+    const [listed, stored] = await Promise.all([
+      capturedIds().catch((err) => {
+        log.warn("Find on YouTube: known-video listing failed: {error}", { error: errText(err) });
+        return new Set<string>();
+      }),
+      deps.store.knownIds().catch((err) => {
+        log.warn("Find on YouTube: dismissed/queued read failed: {error}", { error: errText(err) });
+        return new Set<string>();
+      }),
+    ]);
+    return new Set([...listed, ...stored]);
+  }
+
+  app.get("/summaries/discover", async (c) => {
+    let shelves: DiscoverShelf[];
+    try {
+      shelves = await deps.store.listShelves();
+    } catch (err) {
+      log.error("Discover page: shelves read failed: {error}", { error: errText(err) });
+      return c.html(await renderSummariesDiscoverPage({ shelves: [], error: "Could not read the stored shelves." }), 500);
+    }
+    return c.html(await renderSummariesDiscoverPage({ shelves }));
+  });
 
   app.post("/api/summaries/discover", async (c) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
-    const parsed: unknown = await c.req.json().catch(() => null);
-    const body = (parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}) as Record<string, unknown>;
+    const body = await jsonBody(c);
     const sourceId = typeof body.source === "string" ? body.source.trim() : "";
     const docId = typeof body.docId === "string" ? body.docId.trim() : "";
     const source = getSummarySource(sourceId);
     if (!source) return fail(c, 400, "bad_source", `unknown summary source "${sourceId}"`);
     if (sourceId !== "youtube") return fail(c, 400, "not_youtube", "Find on YouTube works on YouTube summaries only.");
     if (!docId || !isSafeDocId(docId)) return fail(c, 400, "bad_doc_id", "docId is not a document path");
+    const origin = body.origin === undefined ? "reader" : body.origin;
+    if (origin !== "reader" && origin !== "page") return fail(c, 400, "bad_origin", "origin is reader or page");
     const bot = resolveSummarizerBot(deps.bots());
     if (!bot) return fail(c, 503, "no_bot", "No bots are configured to run the search.");
 
-    const key = docId;
-    if (running.has(key)) return fail(c, 409, "running", "A search from this summary is already running.");
-    running.add(key);
+    if (running.has(docId)) return fail(c, 409, "running", "A search from this summary is already running.");
+    running.add(docId);
     const tracer = deps.tracer?.(bot) ?? null;
     try {
-      let raw: string | null;
+      const out = await runDiscovery(
+        {
+          readRaw: deps.readRaw,
+          queriesCall: deps.queriesCall,
+          rankCall: deps.rankCall,
+          search: deps.search,
+          knownIds,
+          profile: deps.profile,
+        },
+        bot,
+        tracer,
+        { collection: source.collection, docId },
+      );
+      if (!out.ok) {
+        log.warn("Find on YouTube failed for {doc}: {code}", { doc: docId, code: out.code });
+        return fail(c, out.status, out.code, out.error);
+      }
+      let runId: string | null = null;
       try {
-        raw = await deps.readRaw(source.collection, docId);
+        runId = await deps.store.saveRun(
+          {
+            seedSource: sourceId,
+            seedDocId: docId,
+            seedTitle: out.seed.title,
+            seedVideoId: out.seed.videoId,
+            seedCategory: out.seed.category,
+            seedDate: out.seed.date,
+            queries: out.queries,
+            searched: out.searched,
+            known: out.known,
+            origin,
+            botName: bot.name,
+          },
+          out.results,
+        );
       } catch (err) {
-        log.warn("Find on YouTube: raw read failed for {doc}: {error}", { doc: docId, error: errText(err) });
-        tracer?.finish("error", { error: "read failed" });
-        return fail(c, 502, "upstream", "Could not read the stored document.");
+        // The results are paid for: answer them even when the shelf could not be stored.
+        log.warn("Find on YouTube: saving the run failed for {doc}: {error}", { doc: docId, error: errText(err) });
       }
-      if (raw === null) {
-        tracer?.finish("error", { error: "not found" });
-        return fail(c, 404, "not_found", "No such document.");
-      }
-      const stored = readStoredCapture(raw);
-      const title = titleFromDocId(docId);
-      const seedId = extractYouTubeVideoId(stored.frontmatter.url ?? "");
-      const opening = readerSimilarQuery(stripSummaryFactcheckBlock(stored.body));
-
-      // 1. Queries.
-      let queries: DiscoverQuery[] | null;
-      tracer?.start("queries", { doc: docId });
-      try {
-        const answer = await deps.queriesCall(buildDiscoverQueriesPrompt(title, opening), bot, tracer);
-        queries = parseDiscoverQueries(answer);
-        tracer?.end("queries", { queries: queries?.length ?? 0 });
-      } catch (err) {
-        tracer?.end("queries", { error: errText(err) }, "error");
-        tracer?.finish("error");
-        log.warn("Find on YouTube: queries call failed for {doc}: {error}", { doc: docId, error: errText(err) });
-        return fail(c, 502, "model_failed", "The call that writes the search queries failed. Try again.");
-      }
-      if (!queries || queries.length === 0) {
-        tracer?.finish("error", { error: "no queries" });
-        return fail(c, 502, "model_unparseable", "The model answered no usable search queries. Try again.");
-      }
-
-      // 2. Searches, concurrently; union by id in query order.
-      tracer?.start("search", { queries: queries.length });
-      const answers = await Promise.all(queries.map((q) => deps.search(q.query, DISCOVER_RESULTS_PER_QUERY).catch(() => null)));
-      const failed = answers.filter((a) => a === null).length;
-      tracer?.end("search", { failed }, failed === answers.length ? "error" : "ok");
-      if (failed === answers.length) {
-        tracer?.finish("error", { error: "every search failed" });
-        return fail(c, 503, "search_failed", "Every YouTube search failed. Is yt-dlp installed and up to date?");
-      }
-      const union = new Map<string, { hit: YouTubeHit; query: string }>();
-      answers.forEach((hits, i) => {
-        for (const hit of hits ?? []) if (!union.has(hit.videoId)) union.set(hit.videoId, { hit, query: queries[i]!.query });
+      return c.json({
+        queries: out.queries,
+        results: out.results,
+        searched: out.searched,
+        known: out.known,
+        runId,
+        shelfUrl: runId ? discoverShelfUrl(runId) : null,
       });
-
-      // 3. Drop the seed and everything already captured.
-      let knownSet: Set<string>;
-      try {
-        knownSet = await knownIds();
-      } catch (err) {
-        // Degrade: a result may be a video already captured, and the Summarize answer says `duplicate`.
-        log.warn("Find on YouTube: known-video listing failed: {error}", { error: errText(err) });
-        knownSet = new Set();
-      }
-      const fresh = [...union.values()].filter(({ hit }) => hit.videoId !== seedId && !knownSet.has(hit.videoId));
-      const searched = union.size;
-      const knownDropped = searched - fresh.length;
-      if (fresh.length === 0) {
-        tracer?.finish("ok", { searched, known: knownDropped, shown: 0 });
-        return c.json({ queries, results: [], searched, known: knownDropped });
-      }
-
-      // 4. Rank (the YouTube gate), profile last.
-      const profile = await deps.profile(bot).catch(() => null);
-      const prompt = withInterestProfile(buildDiscoverRankPrompt(title, fresh.map((f) => f.hit)), profile);
-      let scores: ReturnType<typeof indexScoresByN>;
-      tracer?.start("rank", { candidates: fresh.length, profile: profile ? "yes" : "no" });
-      try {
-        const answer = await deps.rankCall(prompt, bot, tracer);
-        try {
-          scores = indexScoresByN(parseGateScores(answer), fresh.length);
-        } catch {
-          tracer?.end("rank", { error: "unparseable" }, "error");
-          tracer?.finish("error");
-          return fail(c, 502, "model_unparseable", "The ranking call answered no list. Try again.");
-        }
-        tracer?.end("rank", { scored: scores.size });
-      } catch (err) {
-        tracer?.end("rank", { error: errText(err) }, "error");
-        tracer?.finish("error");
-        log.warn("Find on YouTube: rank call failed for {doc}: {error}", { doc: docId, error: errText(err) });
-        return fail(c, 502, "model_failed", "The ranking call failed. Try again.");
-      }
-      const results: DiscoverResult[] = fresh
-        .map((f, i) => ({ f, s: scores.get(i + 1), i }))
-        .filter(
-          (x): x is { f: (typeof fresh)[number]; s: NonNullable<typeof x.s>; i: number } =>
-            x.s !== undefined && x.s.score >= DISCOVER_MIN_SCORE,
-        )
-        .sort((a, b) => b.s.score - a.s.score || a.i - b.i)
-        .slice(0, DISCOVER_MAX_SHOWN)
-        .map(({ f, s }) => ({ ...f.hit, score: s.score, why: s.why, query: f.query }));
-      tracer?.finish("ok", { searched, known: knownDropped, shown: results.length });
-      return c.json({ queries, results, searched, known: knownDropped });
     } catch (err) {
       tracer?.finish("error", { error: errText(err) });
       log.error("Find on YouTube failed for {doc}: {error}", { doc: docId, error: errText(err) });
       return c.json({ error: "Find on YouTube failed unexpectedly.", code: "internal" }, 500);
     } finally {
-      running.delete(key);
+      running.delete(docId);
+    }
+  });
+
+  app.post("/api/summaries/discover/state", async (c) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    const body = await jsonBody(c);
+    const videoId = videoIdOf(body);
+    if (!videoId) return fail(c, 400, "bad_video_id", "videoId is not a YouTube video id");
+    if (!isDiscoverHitState(body.state)) return fail(c, 400, "bad_state", "state is new, later, dismissed or queued");
+    try {
+      const changed = await deps.store.setState(videoId, body.state);
+      if (changed === 0) return fail(c, 404, "unknown_video", "No stored suggestion has this video.");
+      return c.json({ videoId, state: body.state });
+    } catch (err) {
+      log.error("Discover: state write failed for {video}: {error}", { video: videoId, error: errText(err) });
+      return c.json({ error: "Could not save the change.", code: "internal" }, 500);
+    }
+  });
+
+  app.post("/api/summaries/discover/details", async (c) => {
+    const notJson = requireJsonRequest(c);
+    if (notJson) return notJson;
+    const body = await jsonBody(c);
+    const videoId = videoIdOf(body);
+    if (!videoId) return fail(c, 400, "bad_video_id", "videoId is not a YouTube video id");
+    try {
+      const cached = await deps.store.getDetails(videoId);
+      // Only a stored suggestion may spend a probe: the route never spawns yt-dlp for an arbitrary id.
+      if (cached === undefined) return fail(c, 404, "unknown_video", "No stored suggestion has this video.");
+      if (cached) return c.json({ videoId, details: cached, cached: true });
+      let pending = probing.get(videoId);
+      if (!pending) {
+        pending = deps.probeDetails(videoId).finally(() => probing.delete(videoId));
+        probing.set(videoId, pending);
+      }
+      const details = await pending;
+      if (!details) return fail(c, 502, "probe_failed", "YouTube did not answer the details lookup. Try again.");
+      await deps.store.saveDetails(videoId, details).catch((err) => {
+        log.warn("Discover: caching details failed for {video}: {error}", { video: videoId, error: errText(err) });
+      });
+      return c.json({ videoId, details, cached: false });
+    } catch (err) {
+      log.error("Discover: details failed for {video}: {error}", { video: videoId, error: errText(err) });
+      return c.json({ error: "The details lookup failed unexpectedly.", code: "internal" }, 500);
     }
   });
 }

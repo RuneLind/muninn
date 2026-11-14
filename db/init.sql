@@ -966,6 +966,49 @@ CREATE TABLE wiki_stale_verdicts (
 CREATE INDEX idx_wiki_stale_verdicts_checked ON wiki_stale_verdicts (checked_at);
 
 -- ============================================================================
+-- YouTube discovery: the Discover page's stored runs and hits (migration 088).
+-- A video's state and details are per video: written to every hit row of that id.
+-- ============================================================================
+CREATE TABLE youtube_discover_runs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seed_source   TEXT NOT NULL DEFAULT 'youtube',
+  seed_doc_id   TEXT NOT NULL,
+  seed_title    TEXT NOT NULL,
+  seed_video_id TEXT,
+  seed_category TEXT,
+  seed_date     TEXT,
+  queries       JSONB NOT NULL DEFAULT '[]'::jsonb,
+  searched      INTEGER NOT NULL DEFAULT 0,
+  known         INTEGER NOT NULL DEFAULT 0,
+  origin        TEXT NOT NULL CHECK (origin IN ('reader', 'page', 'watcher')),
+  bot_name      TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_doc_id, created_at DESC);
+
+CREATE TABLE youtube_discover_hits (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id        UUID NOT NULL REFERENCES youtube_discover_runs(id) ON DELETE CASCADE,
+  video_id      TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  channel       TEXT,
+  duration_sec  INTEGER,
+  view_count    BIGINT,
+  score         REAL NOT NULL,
+  why           TEXT,
+  query         TEXT,
+  rank          INTEGER NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'later', 'dismissed', 'queued')),
+  details       JSONB,
+  details_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (run_id, video_id)
+);
+
+CREATE INDEX idx_youtube_discover_hits_video ON youtube_discover_hits (video_id);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

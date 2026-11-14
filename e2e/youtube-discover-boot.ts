@@ -7,13 +7,16 @@
  *
  * The fixture is a JSON file named by `YOUTUBE_DISCOVER_E2E_FIXTURE` (read here
  * only, never by `src/`): `{queries: string, rank: string, search: {query: YouTubeHit[] | null}}`
- * — the raw model answers and the hits per query (`null` = that search failed).
+ * — the raw model answers and the hits per query (`null` = that search failed),
+ * plus `details: {videoId: DiscoverVideoDetails | null}` for the Discover page's
+ * drawer probe.
  * Run as `bun e2e/youtube-discover-boot.ts`, with the spec's usual env.
  */
 
 import { readFileSync } from "node:fs";
 import { discoverTestSeam } from "../src/dashboard/routes/summaries-discover.ts";
 import type { YouTubeHit } from "../src/youtube/discover.ts";
+import type { DiscoverVideoDetails } from "../src/db/youtube-discover.ts";
 
 const path = process.env.YOUTUBE_DISCOVER_E2E_FIXTURE;
 if (!path) throw new Error("YOUTUBE_DISCOVER_E2E_FIXTURE is not set");
@@ -21,6 +24,7 @@ const fixture = JSON.parse(readFileSync(path, "utf8")) as {
   queries: string;
   rank: string;
   search: Record<string, YouTubeHit[] | null>;
+  details?: Record<string, DiscoverVideoDetails | null>;
 };
 
 discoverTestSeam.queriesCall = async () => {
@@ -30,5 +34,10 @@ discoverTestSeam.queriesCall = async () => {
 };
 discoverTestSeam.rankCall = async () => fixture.rank;
 discoverTestSeam.search = async (query) => (query in fixture.search ? fixture.search[query]! : []);
+discoverTestSeam.probeDetails = async (videoId) => {
+  // Long enough for the drawer to paint its loading line.
+  await new Promise((r) => setTimeout(r, 200));
+  return fixture.details?.[videoId] ?? null;
+};
 
 await import("../src/index.ts");

@@ -28,6 +28,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
@@ -83,7 +84,34 @@ const FIXTURE = {
     "coding agent benchmarks": [hit(KNOWN, "Already captured", "K", 60, 1), hit(NEW_B, "Invented benchmark tour", "Channel B", 3723, 2_400_000), hit(NEW_C, "Invented clickbait", "C", 30, 5)],
     "broken search": null,
   },
+  // The drawer's details probe, per video (`null` = the probe failed).
+  details: {
+    [NEW_B]: {
+      description: "An invented description of the benchmark tour.",
+      chapters: [
+        { start: 0, title: "Invented intro" },
+        { start: 125, title: "Invented results" },
+      ],
+      likeCount: 4321,
+      viewCount: 2_400_100,
+      uploadDate: "20250619",
+      channelFollowerCount: 22_400,
+      tags: ["benchmarks"],
+    },
+    [NEW_A]: null,
+  },
 };
+
+/** Rows an earlier run of this spec left: a dismissed or queued video would join the known set. */
+async function clearStoredRuns(): Promise<void> {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id IN (${NEW_A}, ${NEW_B}, ${NEW_C})`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id = ${YT_DOC.id}`;
+  } finally {
+    await sql.end();
+  }
+}
 
 let server: ChildProcess | undefined;
 let fake: Server | undefined;
@@ -158,6 +186,7 @@ const onSigterm = () => handleSignal("SIGTERM");
 test.describe.configure({ mode: "serial" });
 
 test.beforeAll(async () => {
+  await clearStoredRuns();
   fake = await startFake();
   const { botsRoot, fixture } = writeFixtures();
   process.on("SIGINT", onSigint);
@@ -278,6 +307,111 @@ test("lists the ranked new videos, then Summarize posts once per click, and an e
     { body: bodyA, ct: "application/json" },
     { body: bodyA, ct: "application/json" },
   ]);
+});
+
+test("the reader links its stored run; the Discover page shows it as a shelf with a details drawer", async ({ page }) => {
+  await openDoc(page, "youtube", YT_DOC.id, "evaluating coding agents");
+  await page.locator("#docPanelDiscover").click();
+  const panel = page.locator("#sumDiscover");
+  await expect(panel.locator(".sum-discover-row")).toHaveCount(2, { timeout: 15_000 });
+  const shelfLink = panel.locator("a.sum-discover-shelf");
+  await expect(shelfLink).toHaveText("Saved as a shelf on Discover →");
+  const href = await shelfLink.getAttribute("href");
+  expect(href).toMatch(/^\/summaries\/discover#run-[0-9a-f-]{36}$/);
+  await shelfLink.click();
+  await expect(page).toHaveURL(`${BASE}${href}`);
+
+  const shelf = page.locator(`section.dsc-shelf${href!.slice(href!.indexOf("#"))}`);
+  await expect(shelf).toHaveClass(/dsc-target/);
+  await expect(shelf.locator(".dsc-because")).toHaveText("Because you captured · ai/e2e · 2026-03-22");
+  await expect(shelf.locator("h3 a")).toHaveText("E2E discover seed");
+  await expect(shelf.locator("h3 a")).toHaveAttribute("href", `/summaries?doc=${encodeURIComponent(YT_DOC.id)}&source=youtube`);
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("5 videos searched · 2 you already have · 2 shown");
+  await expect(shelf.locator(".dsc-q")).toHaveText(["agent evals deep dive", "coding agent benchmarks", "broken search"]);
+  const cards = shelf.locator(".dsc-card");
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0).locator(".dsc-title")).toHaveText("Invented benchmark tour");
+  await expect(cards.nth(0).locator(".dsc-thumb img")).toHaveAttribute("src", `https://i.ytimg.com/vi/${NEW_B}/mqdefault.jpg`);
+  await expect(cards.nth(0).locator(".dsc-dur")).toHaveText("1:02:03");
+  await expect(cards.nth(0).locator(".dsc-score")).toHaveText("95% match");
+  await expect(cards.nth(0).locator(".dsc-why")).toHaveText("Invented reason B");
+
+  // Sort: Shortest puts the 30:34 talk first.
+  await page.locator("#dscSort").selectOption("short");
+  await expect(cards.nth(0).locator(".dsc-title")).toHaveText("Invented eval talk");
+  await page.locator("#dscSort").selectOption("score");
+
+  // The drawer: details load once, play swaps in the no-cookie embed.
+  await cards.nth(0).click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator("h3")).toHaveText("Invented benchmark tour");
+  await expect(drawer.locator(".dsc-chapters li")).toHaveText(["0:00Invented intro", "2:05Invented results"], { timeout: 10_000 });
+  await expect(drawer.locator(".dsc-desc")).toHaveText("An invented description of the benchmark tour.");
+  await expect(drawer.locator(".dsc-stats")).toContainText("4K likes");
+  await expect(drawer.locator(".dsc-stats")).toContainText("22K subscribers");
+  await expect(drawer.locator(".dsc-box")).toContainText("Invented reason B");
+  await expect(drawer.locator("iframe")).toHaveCount(0);
+  await drawer.getByRole("button", { name: "Play here" }).click();
+  await expect(drawer.locator("iframe")).toHaveAttribute("src", `https://www.youtube-nocookie.com/embed/${NEW_B}?autoplay=1`);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
+  // A failed probe says so and offers a retry.
+  await cards.nth(1).click();
+  await expect(drawer.locator(".dsc-warn")).toContainText("YouTube did not answer", { timeout: 10_000 });
+  await expect(drawer.getByRole("button", { name: "Try again" })).toBeVisible();
+  await drawer.getByRole("button", { name: "✕ Close" }).click();
+  await expect(drawer).toBeHidden();
+
+  // The cached details come back after a reload without a second probe.
+  await page.reload();
+  await shelf.locator(".dsc-card").nth(0).click();
+  await expect(drawer.locator(".dsc-chapters li")).toHaveCount(2);
+});
+
+test("Later, Dismiss with Undo and Summarize persist, and dismissed and queued videos are never suggested again", async ({ page, request }) => {
+  const posts: unknown[] = [];
+  await page.route("**/api/youtube/summarize", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-2" }) });
+  });
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E discover seed" }) });
+  const card = (title: string) => shelf.locator(".dsc-card").filter({ hasText: title });
+
+  // Later toggles and survives a reload.
+  await card("Invented eval talk").getByRole("button", { name: "☆ Later" }).click();
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+  await page.reload();
+  await expect(card("Invented eval talk").locator('[data-act="later"]')).toHaveAttribute("aria-pressed", "true");
+
+  // Dismiss, Undo, Dismiss again.
+  await card("Invented benchmark tour").hover();
+  await card("Invented benchmark tour").getByRole("button", { name: "Not interested" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+  await expect(page.locator("#dscToast")).toContainText("Dismissed. It won't be suggested again.");
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(1);
+  await card("Invented benchmark tour").hover();
+  await card("Invented benchmark tour").getByRole("button", { name: "Not interested" }).click();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+
+  // Summarize posts the capture route, then the card reads Queued, after a reload too.
+  await card("Invented eval talk").getByRole("button", { name: "Summarize" }).click();
+  await expect(card("Invented eval talk").getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  expect(posts).toEqual([{ title: "Invented eval talk", url: `https://www.youtube.com/watch?v=${NEW_A}`, video_id: NEW_A }]);
+  await page.reload();
+  await expect(card("Invented benchmark tour")).toHaveCount(0);
+  await expect(card("Invented eval talk").getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+  await expect(shelf.locator(".dsc-meta").first()).toContainText("1 shown");
+
+  // A new run from the same seed: the dismissed and the queued video are known now.
+  const res = await request.post(`${BASE}/api/summaries/discover`, { data: { source: "youtube", docId: YT_DOC.id } });
+  expect(res.status()).toBe(200);
+  const body = (await res.json()) as { results: { videoId: string }[]; known: number };
+  expect(body.known).toBe(4);
+  expect(body.results.map((r) => r.videoId)).toEqual([NEW_C]);
 });
 
 test("the route refuses a non-YouTube source and a missing document", async ({ request }) => {
