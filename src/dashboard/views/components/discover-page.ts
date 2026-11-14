@@ -85,10 +85,10 @@ export function discoverPageStyles(): string {
       background: var(--bg-surface); color: var(--text-primary);
       border: 1px solid var(--border-secondary); border-radius: 6px; padding: 3px 9px;
     }
-    .dsc-btn:hover:not([disabled]) { background: var(--bg-hover); }
+    .dsc-btn:hover:not([disabled], [aria-disabled="true"]) { background: var(--bg-hover); }
     .dsc-btn.dsc-primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
     .dsc-btn.dsc-done { color: color-mix(in srgb, var(--status-success) 70%, var(--text-primary)); border-color: var(--status-success); background: transparent; }
-    .dsc-btn[disabled] { cursor: default; opacity: .75; }
+    .dsc-btn[disabled], .dsc-btn[aria-disabled="true"] { cursor: default; opacity: .75; }
 
     .dsc-drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 50; }
     .dsc-drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(560px, 100%); overflow-y: auto; background: var(--bg-page); border-left: 1px solid var(--border-secondary); z-index: 51; padding: 14px; box-sizing: border-box; }

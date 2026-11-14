@@ -217,14 +217,12 @@ export function sumReaderStyles(): string {
        wrap the fixed-width buttons took the title to 0 px at 701–800 px
        (54 px at 1000 px with a YouTube document's extra button). The basis
        keeps the title; a YouTube header takes a second row below ~1180 px.
-       Back, the title and Ask a follow-up come first, so above 700 px a wrap
-       moves the optional buttons, not the primary action (below 700 px the
-       title takes its own line and the follow-up leads the next). CSS order
-       is visual only: Tab still reaches the follow-up last. */
+       Back, the title and Ask a follow-up come first in the DOM (no CSS
+       order, so Tab follows what is seen), so above 700 px a wrap moves the
+       optional buttons, not the primary action (below 700 px the title takes
+       its own line and the follow-up leads the next). */
     .doc-panel-header { flex-wrap: wrap; row-gap: 8px; }
     .doc-panel-title { flex: 1 1 14rem; }
-    .doc-panel-close, .doc-panel-title { order: -2; }
-    #docPanelFollowUp { order: -1; }
     @media (max-width: 1000px) {
       /* Below the breakpoint the rail sits after the article, where an
          outline of what is above it has nothing left to jump to. */

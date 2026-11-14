@@ -350,6 +350,10 @@ export function docPanelHtml(
 ): string {
   const linksHtml = `
         <div class="doc-panel-links" id="docPanelLinks"></div>`;
+  // With the ⋯ More menu (/summaries) Ask a follow-up is the primary action, right after the title in the DOM
+  // as on screen, so Tab reaches it in the order it is seen.
+  const followUpHtml = `
+        <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>`;
   const deleteHtml = moreMenu
     ? `
             <button class="doc-panel-menu-item doc-panel-menu-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button" role="menuitem"
@@ -379,7 +383,7 @@ export function docPanelHtml(
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>${moreMenu ? linksHtml : ""}${rerun ? `
+        <span class="doc-panel-title" id="docPanelTitle"></span>${moreMenu ? `${askFollowUp ? followUpHtml : ""}${linksHtml}` : ""}${rerun ? `
         <span class="doc-panel-menu" id="${DOC_PANEL_RERUN_WRAP_ID}" hidden>
           <button class="doc-panel-followup" id="${DOC_PANEL_RERUN_BTN_ID}" type="button"
             aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
@@ -393,8 +397,7 @@ export function docPanelHtml(
         <button class="doc-panel-followup" id="${DOC_PANEL_FIND_LINKS_BTN_ID}" type="button" hidden
           title="Find the posts, papers, repos and tools this summary names but does not link">&#128270; Find links</button>` : ""}${discover ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_DISCOVER_BTN_ID}" type="button" hidden
-          title="Search YouTube for videos you have not summarized yet, picked from this one">&#9654; Find on YouTube</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp ? `
-        <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}${moreMenu ? "" : linksHtml}
+          title="Search YouTube for videos you have not summarized yet, picked from this one">&#9654; Find on YouTube</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp && !moreMenu ? followUpHtml : ""}${moreMenu ? "" : linksHtml}
       </div>${rerun ? `
       <div class="doc-panel-notice" id="${DOC_PANEL_RERUN_STATUS_ID}" hidden></div>` : ""}
       <div class="doc-panel-body" id="docPanelBody"></div>

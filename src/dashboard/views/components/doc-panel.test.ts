@@ -129,13 +129,14 @@ describe("docPanelHtml moreMenu", () => {
     expect(menu).toContain(DOC_PANEL_COPY_LINK_ID);
   });
 
-  test("the source link moves next to the title and Ask a follow-up is the primary action, last", () => {
+  test("Ask a follow-up, the primary action, and the source link follow the title in the DOM, as on screen", () => {
     const html = docPanelHtml({ askFollowUp: true, share: true, rerun: true, moreMenu: true });
     const at = (needle: string) => html.indexOf(needle);
-    expect(at('id="docPanelTitle"')).toBeLessThan(at('id="docPanelLinks"'));
+    expect(at('id="docPanelTitle"')).toBeLessThan(at('id="docPanelFollowUp"'));
+    expect(at('id="docPanelFollowUp"')).toBeLessThan(at('id="docPanelLinks"'));
     expect(at('id="docPanelLinks"')).toBeLessThan(at(`id="${DOC_PANEL_RERUN_BTN_ID}"`));
     expect(at(`id="${DOC_PANEL_SHARE_BTN_ID}"`)).toBeLessThan(at(`id="${DOC_PANEL_MORE_BTN_ID}"`));
-    expect(at(`id="${DOC_PANEL_MORE_BTN_ID}"`)).toBeLessThan(at('id="docPanelFollowUp"'));
+    expect(html.match(/id="docPanelFollowUp"/g)).toHaveLength(1);
     expect(html).toContain('class="doc-panel-followup doc-panel-primary" id="docPanelFollowUp"');
   });
 

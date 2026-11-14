@@ -195,10 +195,11 @@ function scoreHtml(h: DiscoverHit): string {
 }
 
 function actionsHtml(h: DiscoverHit, inDrawer: boolean): string {
+  // aria-disabled, not disabled: a disabled button drops the focus it holds (summarize() ignores the press).
   const sum =
     h.state === "queued"
-      ? `<button type="button" class="dsc-btn dsc-done" disabled>✓ Queued</button>`
-      : `<button type="button" class="dsc-btn dsc-primary" data-act="sum"${st.summarizing.has(h.videoId) ? " disabled" : ""}>Summarize</button>`;
+      ? `<button type="button" class="dsc-btn dsc-done" data-act="sum" aria-disabled="true">✓ Queued</button>`
+      : `<button type="button" class="dsc-btn dsc-primary" data-act="sum"${st.summarizing.has(h.videoId) ? ` aria-disabled="true"` : ""}>Summarize</button>`;
   // A queued video is summarized: Later would take it out of the known set.
   const later =
     h.state === "queued"
@@ -244,7 +245,7 @@ function shelfHtml(shelf: DiscoverShelf): string {
     `<div class="dsc-shelf-head">` +
     (shelf.seedVideoId ? `<img src="${escHtml(thumb(shelf.seedVideoId))}" alt="">` : "") +
     `<div><div class="dsc-because">${escHtml(because)}</div>` +
-    `<h3><a href="${escHtml(seedHref)}">${escHtml(shelf.seedTitle)}</a></h3>` +
+    `<h3><a data-fk="seed" href="${escHtml(seedHref)}">${escHtml(shelf.seedTitle)}</a></h3>` +
     `<div class="dsc-meta">${shelf.searched} videos searched · ${shelf.known} you already have · ${rows.length} shown · ${escHtml(new Date(shelf.createdAt).toISOString().slice(0, 10))}</div>` +
     `<div class="dsc-qs">${shelf.queries.map((q) => `<span class="dsc-q" title="${escHtml(q.why)}">${escHtml(q.query)}</span>`).join("")}</div>` +
     `</div></div>` +
@@ -300,14 +301,17 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
   const card = video ? cardEl(run, video) : null;
   // A gone card hands focus to its neighbour, never the row's first card: focusing that scrolls the row back.
   const neighbour = (k.next ? cardEl(run, k.next) : null) ?? (k.prev ? cardEl(run, k.prev) : null);
+  const shelfSel = `.dsc-shelf[data-run="${CSS.escape(run)}"]`;
   const target =
     (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(byKey(k.act)) : null) ??
+    // A shelf control outside the cards (the seed link).
+    (!video && k.act ? document.querySelector<HTMLElement>(`${shelfSel} :is(${byKey(k.act)})`) : null) ??
     card ??
     neighbour ??
     // The shelf itself was replaced (a newer run of its seed): the same video on any shelf.
     (video ? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(video)}"]`) : null) ??
-    document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
-    document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] h3 a`);
+    document.querySelector<HTMLElement>(`${shelfSel} .dsc-card`) ??
+    document.querySelector<HTMLElement>(`${shelfSel} h3 a`);
   target?.focus({ preventScroll: true });
 }
 
@@ -364,6 +368,8 @@ function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf, bodyOnly = false): s
   if (age) stats.push(`<span class="dsc-stat">uploaded <b>${escHtml(age)}</b></span>`);
   stats.push(`<span class="dsc-stat"><b>${pct(hit.score)}%</b> match</span>`);
   const load = st.details.get(hit.videoId);
+  // The details slot keeps one focus key (`details`) through loading, Try again and the answer.
+  const slot = ` tabindex="-1" data-fk="details"`;
   let more = "";
   if (d) {
     if (d.chapters.length)
@@ -371,10 +377,11 @@ function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf, bodyOnly = false): s
     if (d.description) more += `<div><h4>Description</h4><div class="dsc-desc">${escHtml(d.description)}</div></div>`;
     if (d.tags.length) more += `<div class="dsc-qs">${d.tags.map((t) => `<span class="dsc-q">#${escHtml(t)}</span>`).join("")}</div>`;
     if (!more) more = `<div class="dsc-note">YouTube lists no chapters or description for this video.</div>`;
+    more = more.replace(/^<div/, `<div${slot}`);
   } else if (load?.state === "error") {
     more = `<div class="dsc-note dsc-warn" role="status">${escHtml(load.text ?? "Could not load the details.")} <button type="button" class="dsc-btn" data-act="details">Try again</button></div>`;
   } else {
-    more = `<div class="dsc-note" role="status">Loading the description and chapters…</div>`;
+    more = `<div class="dsc-note" role="status"${slot}>Loading the description and chapters…</div>`;
   }
   const bodyHtml = detailBodyHtml(hit, shelf, stats, more);
   if (bodyOnly) return bodyHtml;
@@ -502,11 +509,11 @@ async function summarize(videoId: string): Promise<void> {
   render();
 }
 
-async function dismiss(videoId: string): Promise<void> {
+async function dismiss(videoId: string, fromRun?: string): Promise<void> {
   const found = findHit(videoId);
   if (!found || writing.has(videoId)) return;
   const before = found.hit.state;
-  const runId = found.shelf.runId;
+  const runId = fromRun ?? found.shelf.runId;
   writing.add(videoId);
   const err = await setState(videoId, "dismissed");
   writing.delete(videoId);
@@ -518,10 +525,17 @@ async function dismiss(videoId: string): Promise<void> {
       if (undoErr) toast(undoErr);
       render();
       if (undoErr) return;
-      // The Undo button is gone. With the drawer open the card is behind the modal: stay in the drawer.
+      const run = liveRun(runId);
+      const card = cardEl(run, videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`);
+      if (!card && !st.open && st.minLen > 0) toast("Restored, but the length filter hides it.");
+      // The Undo button went with its click: place the focus it dropped, never take focus moved meanwhile.
+      const a = document.activeElement;
+      if (a && a !== document.body) return;
+      // With the drawer open the card is behind the modal: stay in the drawer.
       if (st.open) return $("dscDrawer")?.querySelector<HTMLElement>(".dsc-close")?.focus();
-      // Otherwise focus the card it brought back, on its shelf (or the run that replaced it) or any shelf.
-      (cardEl(liveRun(runId), videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`))?.focus();
+      // Otherwise the card it brought back, on its shelf (or the run that replaced it) or any shelf; a card the
+      // length filter hides leaves its shelf's seed link.
+      (card ?? document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] [data-fk="seed"]`))?.focus();
     });
   });
 }
@@ -536,13 +550,16 @@ async function toggleLater(videoId: string): Promise<void> {
   render();
 }
 
-function act(name: string, videoId: string): void {
+function act(name: string, videoId: string, runId?: string): void {
   if (name === "sum") void summarize(videoId);
   else if (name === "later") void toggleLater(videoId);
-  else if (name === "dismiss") void dismiss(videoId);
+  else if (name === "dismiss") void dismiss(videoId, runId);
   else if (name === "details") {
+    // loadDetails re-renders only the drawer: the Try again button is gone, so follow the slot's key.
+    const focus = focusKey();
     st.details.delete(videoId);
     void loadDetails(videoId);
+    restoreFocus(focus, st.open);
   } else if (name === "play") {
     st.playing = true;
     renderDrawer();
@@ -590,7 +607,8 @@ export function bootDiscoverPage(): void {
       const videoId = host?.dataset.video ?? st.open?.videoId;
       if (videoId) {
         e.stopPropagation();
-        act(actEl.dataset.act ?? "", videoId);
+        // A card's shelf, not the first shelf holding the video (the drawer has none: findHit uses its run).
+        act(actEl.dataset.act ?? "", videoId, actEl.closest<HTMLElement>(".dsc-card")?.dataset.run);
       }
       return;
     }
