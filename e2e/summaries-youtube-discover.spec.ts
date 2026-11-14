@@ -116,6 +116,10 @@ const BATCH_IDS = ["e2eBatch001", "e2eBatch002"] as const;
 const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
 const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"] as const;
 
+/** Two shelves of different seeds that both hold `DUP.shared` (follow-up to #861: its deferred focus defects). */
+const DUP_SEEDS = { a: "ai/e2e/E2E dup seed A.md", b: "ai/e2e/E2E dup seed B.md" } as const;
+const DUP = { shared: "e2eDupl0001", short: "e2eDupl0002", a3: "e2eDupl0003", b4: "e2eDupl0004", b5: "e2eDupl0005" } as const;
+
 /** Rows an earlier run of this spec left: a dismissed or queued video would join the known set. */
 async function clearStoredRuns(): Promise<void> {
   const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
@@ -125,6 +129,8 @@ async function clearStoredRuns(): Promise<void> {
     await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eFocus%'`;
     await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id = ${BATCH_SEED}`;
     await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eBatch%'`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${DUP_SEEDS.a}, ${DUP_SEEDS.b})`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eDupl%'`;
   } finally {
     await sql.end();
   }
@@ -727,6 +733,13 @@ for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
         spill,
         followUpRowGap: Math.abs(mid(followUp) - mid(title)),
         rows: new Set(shown.map((el) => Math.round(mid(el) / 10))).size,
+        // Tab follows the DOM: it must match the order the eye reads (rows top to bottom, then left to right).
+        domOrder: shown.filter((el) => el.getBoundingClientRect().width > 0).map((el) => el.id || el.className),
+        visualOrder: shown
+          .filter((el) => el.getBoundingClientRect().width > 0)
+          .map((el, i) => ({ el, i, mid: mid(el), left: left(el) }))
+          .sort((a, b) => (Math.abs(a.mid - b.mid) > 12 ? a.mid - b.mid : a.left - b.left || a.i - b.i))
+          .map(({ el }) => el.id || el.className),
       };
     });
     expect(m.spill).toEqual([]);
@@ -736,6 +749,7 @@ for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
       expect(m.leftToRight).toBe(true);
     }
     if (width >= 1280) expect(m.rows).toBe(1);
+    expect(m.visualOrder, "focus order follows the visual order (#858 follow-up)").toEqual(m.domOrder);
   });
 }
 
@@ -1238,4 +1252,248 @@ test("closing the drawer from the backdrop after a held run replaced its shelf f
   await page.locator("#dscDrawerBg").click({ position: { x: 10, y: 10 } });
   await expect(page.locator("#dscDrawer")).toBeHidden();
   await expect(page.locator(`.dsc-card[data-run="${NEW_RUN}"][data-video="${BATCH_IDS[0]}"]`)).toBeFocused();
+});
+
+/**
+ * Seed A (older) holds shared, short and a3; seed B (newer, so the FIRST shelf) holds shared, b4 and b5.
+ * Answers the two run ids. Every hit row is new, so no state from an earlier run of the spec carries over.
+ */
+async function seedDupShelves(): Promise<{ a: string; b: string }> {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${DUP_SEEDS.a}, ${DUP_SEEDS.b})`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eDupl%'`;
+    const shelf = async (seed: string, title: string, ageSec: number, hits: [string, string, number][]) => {
+      const [run] = await sql`
+        INSERT INTO youtube_discover_runs (seed_doc_id, seed_title, seed_video_id, seed_category, queries, searched, known, origin, created_at)
+        VALUES (${seed}, ${title}, NULL, 'ai/e2e', '[]'::jsonb, 3, 0, 'reader', now() - make_interval(secs => ${ageSec})) RETURNING id`;
+      for (const [i, [id, t, dur]] of hits.entries()) {
+        await sql`
+          INSERT INTO youtube_discover_hits (run_id, video_id, title, channel, duration_sec, view_count, score, why, query, rank)
+          VALUES (${run!.id}, ${id}, ${t}, 'D', ${dur}, 10, ${0.9 - i / 10}, 'invented', 'q', ${i + 1})`;
+      }
+      return run!.id as string;
+    };
+    const a = await shelf(DUP_SEEDS.a, "E2E dup seed A", 60, [
+      [DUP.shared, "Dup shared card", 900],
+      [DUP.short, "Dup short card", 300],
+      [DUP.a3, "Dup A card 3", 900],
+    ]);
+    const b = await shelf(DUP_SEEDS.b, "E2E dup seed B", 0, [
+      [DUP.shared, "Dup shared card", 900],
+      [DUP.b4, "Dup B card 4", 900],
+      [DUP.b5, "Dup B card 5", 900],
+    ]);
+    return { a, b };
+  } finally {
+    await sql.end();
+  }
+}
+
+/** The focused element, by the keys the page restores focus by. */
+const activeEl = (page: Page) =>
+  page.evaluate(() => {
+    const a = document.activeElement as HTMLElement | null;
+    return {
+      tag: a?.tagName ?? null,
+      id: a?.id || null,
+      key: a?.dataset.act ?? a?.dataset.fk ?? null,
+      run: a?.closest<HTMLElement>("[data-run]")?.dataset.run ?? null,
+      video: a?.closest<HTMLElement>("[data-video]")?.dataset.video ?? null,
+      inDrawer: !!a?.closest("#dscDrawer"),
+    };
+  });
+
+const dupCard = (page: Page, run: string, video: string) => page.locator(`.dsc-card[data-run="${run}"][data-video="${video}"]`);
+
+test("Undo focuses the restored card on the shelf the dismiss came from, not the first shelf holding the video (#861 follow-up 1)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  // The first shelf on the page (seed B) holds the same video.
+  await expect(page.locator("section.dsc-shelf").first()).toHaveAttribute("data-run", runs.b);
+  await expect(dupCard(page, runs.b, DUP.shared)).toHaveCount(1);
+  await dupCard(page, runs.a, DUP.shared).locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.shared)).toHaveCount(0);
+  await page.locator("#dscToast [data-undo]").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.shared)).toHaveCount(1);
+  const a = await activeEl(page);
+  expect({ run: a.run, video: a.video, key: a.key }).toEqual({ run: runs.a, video: DUP.shared, key: null });
+});
+
+test("Undo with the restored card filtered out focuses its shelf's seed link and says why (#861 follow-up 2)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  await dupCard(page, runs.a, DUP.short).locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.short)).toHaveCount(0);
+  await page.locator("#dscLen").selectOption("600");
+  const undone = page.waitForResponse((r) => r.url().endsWith("/api/summaries/discover/state") && (r.request().postDataJSON() as { state: string }).state === "new");
+  await page.locator("#dscToast [data-undo]").focus();
+  await page.keyboard.press("Enter");
+  await undone;
+  await expect.poll(() => activeEl(page).then((a) => `${a.key}@${a.run}`)).toBe(`seed@${runs.a}`);
+  await expect(page.locator("#dscToast")).toContainText("the length filter hides it");
+  await expect(dupCard(page, runs.a, DUP.short)).toHaveCount(0);
+  await page.locator("#dscLen").selectOption("0");
+  await expect(dupCard(page, runs.a, DUP.short)).toHaveCount(1);
+});
+
+test("a slow Undo leaves focus where it was moved meanwhile (#861 follow-up 2)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let reached!: () => void;
+  const atServer = new Promise<void>((r) => (reached = r));
+  await page.route("**/api/summaries/discover/state", async (route) => {
+    if ((route.request().postDataJSON() as { state: string }).state !== "dismissed") {
+      reached();
+      await held;
+    }
+    await route.continue();
+  });
+  await dupCard(page, runs.a, DUP.a3).locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.a3)).toHaveCount(0);
+  await page.locator("#dscToast [data-undo]").focus();
+  await page.keyboard.press("Enter");
+  await atServer;
+  await page.locator("#dscSort").focus();
+  release();
+  await expect(dupCard(page, runs.a, DUP.a3)).toHaveCount(1);
+  expect((await activeEl(page)).id).toBe("dscSort");
+  await page.unroute("**/api/summaries/discover/state");
+});
+
+test("a render keeps focus on the shelf's seed-title link (#861 follow-up 3)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.locator(`section.dsc-shelf[data-run="${runs.a}"] h3 a`).focus();
+  // A re-render that does not move focus itself (as a landing seed run or a filter change does).
+  await page.evaluate(() => document.getElementById("dscSort")!.dispatchEvent(new Event("change")));
+  const a = await activeEl(page);
+  expect({ tag: a.tag, run: a.run, video: a.video }).toEqual({ tag: "A", run: runs.a, video: null });
+});
+
+test("Summarize keeps focus on its button during the request and after, on a card and in the drawer (#861 follow-up 4)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  const posts: string[] = [];
+  let release!: () => void;
+  let reached!: () => void;
+  let held = new Promise<void>((r) => (release = r));
+  let atServer = new Promise<void>((r) => (reached = r));
+  await page.route("**/api/youtube/summarize", async (route) => {
+    posts.push((route.request().postDataJSON() as { video_id: string }).video_id);
+    reached();
+    await held;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-dup" }) });
+  });
+  await page.goto(`${BASE}/summaries/discover`);
+
+  const card = dupCard(page, runs.b, DUP.b4);
+  await card.locator('[data-act="sum"]').focus();
+  await page.keyboard.press("Enter");
+  await atServer;
+  expect(await activeEl(page), "focus while the request runs").toMatchObject({ key: "sum", video: DUP.b4, run: runs.b });
+  await page.keyboard.press("Enter"); // a second press while it runs posts nothing
+  release();
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toHaveCount(1);
+  expect(await activeEl(page), "focus after the request").toMatchObject({ key: "sum", video: DUP.b4, run: runs.b });
+  expect(posts).toEqual([DUP.b4]);
+  await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
+
+  held = new Promise<void>((r) => (release = r));
+  atServer = new Promise<void>((r) => (reached = r));
+  await dupCard(page, runs.b, DUP.b5).click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toBeVisible();
+  await drawer.locator('[data-act="sum"]').focus();
+  await page.keyboard.press("Enter");
+  await atServer;
+  expect(await activeEl(page), "drawer focus while the request runs").toMatchObject({ key: "sum", inDrawer: true });
+  release();
+  await expect(drawer.getByRole("button", { name: "✓ Queued" })).toHaveCount(1);
+  expect(await activeEl(page), "drawer focus after the request").toMatchObject({ key: "sum", inDrawer: true });
+  expect(posts).toEqual([DUP.b4, DUP.b5]);
+  await page.unroute("**/api/youtube/summarize");
+});
+
+test("Try again keeps focus on the details slot through loading, a second failure and success (#861 follow-up 5)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  // The canned probe fails for every invented dup id: the drawer offers Try again.
+  await dupCard(page, runs.a, DUP.a3).click();
+  const drawer = page.locator("#dscDrawer");
+  const retry = drawer.getByRole("button", { name: "Try again" });
+  await expect(retry).toBeVisible({ timeout: 10_000 });
+
+  const answers: (() => Promise<void>)[] = [];
+  let reached!: () => void;
+  let atServer = new Promise<void>((r) => (reached = r));
+  await page.route("**/api/summaries/discover/details", async (route) => {
+    await new Promise<void>((go) => {
+      answers.push(async () => {
+        go();
+      });
+      reached();
+    });
+    const n = answers.length;
+    if (n === 1) await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "Invented probe outage." }) });
+    else
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          videoId: DUP.a3,
+          details: { description: "An invented dup description.", chapters: [], likeCount: null, viewCount: null, uploadDate: null, channelFollowerCount: null, tags: [] },
+          cached: false,
+        }),
+      });
+  });
+
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await atServer;
+  expect(await activeEl(page), "focus while the retry loads").toMatchObject({ key: "details", inDrawer: true });
+  atServer = new Promise<void>((r) => (reached = r));
+  await answers[0]!();
+  await expect(drawer).toContainText("Invented probe outage.");
+  expect(await activeEl(page), "focus after a second failure").toMatchObject({ key: "details", inDrawer: true, tag: "BUTTON" });
+
+  await page.keyboard.press("Enter");
+  await atServer;
+  await answers[1]!();
+  await expect(drawer).toContainText("An invented dup description.");
+  expect(await activeEl(page), "focus after the details land").toMatchObject({ key: "details", inDrawer: true });
+  await page.unroute("**/api/summaries/discover/details");
+});
+
+test("Undo of a video a re-read dropped blames no filter (#861 follow-up 2, fix round 1)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  // The re-read answers seed A's shelf without a3: a newer run of the seed no longer holds it.
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { shelves: { runId: string; hits: { videoId: string }[] }[] };
+    for (const s of body.shelves) if (s.runId === runs.a) s.hits = s.hits.filter((h) => h.videoId !== DUP.a3);
+    await route.fulfill({ response: res, json: body });
+  });
+  await dupCard(page, runs.a, DUP.a3).locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.a3)).toHaveCount(0);
+  await page.locator("#dscLen").selectOption("600");
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  const undone = page.waitForResponse((r) => r.url().endsWith("/api/summaries/discover/state") && (r.request().postDataJSON() as { state: string }).state === "new");
+  await page.locator("#dscToast [data-undo]").click();
+  await undone;
+  // The short card on the same shelf really is hidden by the filter, so the filter is on; a3 is simply gone.
+  await expect(dupCard(page, runs.a, DUP.short)).toHaveCount(0);
+  // Read once: the toast clears itself after 5 s, so a retrying not-assertion would pass on the empty toast.
+  await page.waitForTimeout(300);
+  expect(await page.locator("#dscToast").textContent()).not.toContain("filter");
+  await page.unroute("**/api/summaries/discover/shelves");
 });
