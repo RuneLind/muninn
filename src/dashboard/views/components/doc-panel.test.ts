@@ -10,6 +10,7 @@ import {
   DOC_PANEL_MORE_MENU_ID,
   DOC_PANEL_COPY_LINK_ID,
   DOC_PANEL_EXPORT_LINK_ID,
+  DOC_PANEL_DISCOVER_BTN_ID,
 } from "./doc-panel.ts";
 import { MARKED_CDN_SCRIPT } from "./doc-panel.ts";
 
@@ -53,6 +54,15 @@ describe("docPanelHtml askFollowUp", () => {
     expect(html).toContain("Delete");
     expect(html).not.toContain(DOC_PANEL_SHARE_BTN_ID);
     expect(html).not.toContain("docPanelFollowUp");
+  });
+
+  test("▶ Find on YouTube is opt-in: without the flag every other page's markup is unchanged", () => {
+    expect(docPanelHtml()).not.toContain(DOC_PANEL_DISCOVER_BTN_ID);
+    const everyOther = { askFollowUp: true, share: true, remove: true, exportPage: true, rerun: true, moreMenu: true, factcheck: true, findLinks: true };
+    expect(docPanelHtml(everyOther)).toBe(docPanelHtml({ ...everyOther, discover: false }));
+    expect(docPanelHtml(everyOther)).not.toContain(DOC_PANEL_DISCOVER_BTN_ID);
+    // Hidden until the client sees a youtube document.
+    expect(docPanelHtml({ discover: true })).toMatch(new RegExp(`id="${DOC_PANEL_DISCOVER_BTN_ID}" type="button" hidden`));
   });
 
   test("the re-run control is a real MENU button, so a screen reader announces the popup", () => {

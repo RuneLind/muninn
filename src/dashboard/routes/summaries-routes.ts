@@ -22,6 +22,7 @@ import { registerSummariesContextRoutes } from "./summaries-context.ts";
 import { registerSummariesFactcheckRoutes } from "./summaries-factcheck.ts";
 import { registerSummariesFactcheckWritebackRoutes } from "./summaries-factcheck-writeback.ts";
 import { registerSummariesLinksRoutes } from "./summaries-links.ts";
+import { registerSummariesDiscoverRoutes } from "./summaries-discover.ts";
 
 const log = getLog("dashboard");
 
@@ -221,6 +222,8 @@ export function registerSummariesRoutes(
   registerSummariesFactcheckWritebackRoutes(app, config);
   // 🔎 Find links: candidates, the verified web search and the save into `## Links`.
   registerSummariesLinksRoutes(app, config);
+  // ▶ Find on YouTube: queries → yt-dlp search → known-video dedup → ranked list. Captures nothing.
+  registerSummariesDiscoverRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";
