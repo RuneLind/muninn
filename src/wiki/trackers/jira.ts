@@ -171,7 +171,7 @@ function tagKeys(tags: readonly string[], config: TrackerConfig): string[] {
 }
 
 /** Strings of one frontmatter value, list or scalar. */
-function valueStrings(value: string | string[] | undefined): string[] {
+export function valueStrings(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
 }
 
@@ -322,7 +322,7 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   // One key shape for the index: a stamped key `parseKey` refuses (`X-1`,
   // `DEMO-0145`) stays on the page's `jira` list and its strip, never an issue
   // ref, since the graph and the Stamp route could not take it back.
-  add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]).filter((k) => parseClientKey(k) !== null), "stamped");
+  add(stampedIssueKeys(page.frontmatter[jiraAdapter.frontmatterKey]), "stamped");
   for (const field of config.frontmatterKeys) {
     if (!Object.prototype.hasOwnProperty.call(page.frontmatter, field)) continue;
     add(declaredKeys(page.frontmatter[field], config), "declared");
@@ -355,6 +355,12 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   }
   const rank = (r: IssueRef) => RELATION_STRENGTH.indexOf(r.relations[0]!);
   return refs.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+}
+
+/** The stamped keys (`jira:`) the index takes as issue refs: the ones
+ *  {@link parseClientKey} accepts. The live chips' page key set reads it too. */
+export function stampedIssueKeys(value: string | string[] | undefined): string[] {
+  return stampedKeys(value).filter((k) => parseClientKey(k) !== null);
 }
 
 /** An exact key as a client sends it: ASCII letters and digits only, tested

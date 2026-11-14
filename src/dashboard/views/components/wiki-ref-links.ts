@@ -29,8 +29,8 @@
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
-import { FACT_CHIP_SELECTOR, fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
-import { INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
+import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
+import { FACT_CHIP_SELECTOR, INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
 import { enhanceLiveFacts, type LiveFactsPayload } from "./wiki-live-facts.ts";
 
 export { INLINE, PEEK_CLASS, REF_SKIP };
@@ -823,8 +823,9 @@ export interface CrossRefOptions {
   withWiki: (url: string) => string;
   /** The wiki's language, for the hover card's state words. */
   language?: string;
-  /** The page's live-chip entries (PR 3b): the chips are filled after the
-   *  linker, which reads the article's text. */
+  /** The page's live-chip entries (PR 3b). Filled here rather than in the
+   *  shell to keep `wiki-browser.ts` under its line ratchet; the order against
+   *  the linker does not matter, as both skip the chip (`REF_SKIP`). */
   facts?: LiveFactsPayload;
 }
 

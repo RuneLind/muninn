@@ -5,6 +5,10 @@
  */
 
 import { XREF_RUN_CLASS } from "../../../wiki/core/cross-ref.ts";
+import { FACT_CHIP_CLASS } from "../../../wiki/core/live-facts-chip.ts";
+
+/** PR 3b's live chip beside a key or PR mention. */
+export const FACT_CHIP_SELECTOR = `.${FACT_CHIP_CLASS}`;
 
 export const PEEK_CLASS = "wiki-ref-peek";
 
@@ -14,7 +18,7 @@ export const PEEK_CLASS = "wiki-ref-peek";
 // page's answer: it never links to this page's item. A live chip's text
 // (PR 3b) is reader chrome, never a reference.
 export const REF_SKIP =
-  `a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result, .tl-lanes, .gl-tip, .${XREF_RUN_CLASS}, .fact-chip`;
+  `a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result, .tl-lanes, .gl-tip, .${XREF_RUN_CLASS}, ${FACT_CHIP_SELECTOR}`;
 
 /** The inline elements the text before an id is read back through; any other
  *  element (a heading, a list, a fold, a `<br>`) ends the read-back. */

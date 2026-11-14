@@ -32,10 +32,7 @@ import {
   type XrefTarget,
 } from "../../../wiki/core/cross-ref.ts";
 import { NAV_RELPATH_ATTR } from "../../../wiki/core/wiki-nav.ts";
-import { INLINE, REF_SKIP } from "./wiki-ref-dom.ts";
-
-/** PR 3b's live chip beside a key or PR mention: read as if absent. */
-export const FACT_CHIP_SELECTOR = ".fact-chip";
+import { FACT_CHIP_SELECTOR, INLINE, REF_SKIP } from "./wiki-ref-dom.ts";
 
 /** An element the run text is never read through: a link, code, or another
  *  run's wrapper. An inline element holding one ends the run too. */

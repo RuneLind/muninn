@@ -28,14 +28,16 @@ import path from "node:path";
 import { getLog } from "../logging.ts";
 import { markdownCodeRegions, type ProtectedRegion } from "../format/markdown-ast.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { READER_ONLY_ATTR } from "../format/reader-lens.ts";
+import { pageStemOf } from "./core/wiki-filter.ts";
 import { FACT_CHIP_CLASS, LIVE_FACT_ATTR, repoOfPr, type FactsKeyEntry, type FactsPrEntry, type LiveFactsPayload } from "./core/live-facts-chip.ts";
 import { readOwns } from "./frontmatter-lists.ts";
 import { stateLineRoles } from "./lint-state.ts";
 import { WIKILINK_WITH_LABEL_RE } from "./page-text.ts";
 import { noProdSet, qualifyRepo, type PrGrammar } from "./pr-grammar.ts";
 import { parseFrontmatter, stripFrontmatter } from "./store.ts";
-import { declaredKeys, stampedKeys, stemKeys, titleKeys } from "./trackers/jira.ts";
+import { declaredKeys, stampedIssueKeys, stemKeys, titleKeys, valueStrings } from "./trackers/jira.ts";
 import type { TrackerConfig } from "./trackers/types.ts";
 
 const log = getLog("wiki", "live-facts");
@@ -155,8 +157,6 @@ async function loadWikiFactsFile(file: string, warn: (reason: string) => void): 
 
 // ── A page's keys ────────────────────────────────────────────────────────────
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const CLIENT_KEY_RE = /^[A-Za-z][A-Za-z0-9]{1,15}-[1-9][0-9]{0,7}$/;
 const KEY_IN_PROSE = /\b([A-Z][A-Z0-9]{1,15}-\d{1,8})\b(?!-\d)/g;
 const KEY_DENY = new Set(["UTF", "ISO", "SHA", "RFC", "HTTP", "HTTPS", "AES", "RSA", "TLS", "SSL", "BUC", "SED", "EU", "EF", "EØS", "ISO8601", "UTF8", "SHA256", "MD", "CVE"]);
 
@@ -167,7 +167,7 @@ function bodyKeyRe(projects: readonly string[]): { re: RegExp; notAfter?: RegExp
   // `notAfter` is the pattern's leading lookbehind `(?<![A-Za-z0-9_])`, tested
   // by `matchesNotAfter` (a lookbehind makes JSC try every offset: 9 ms → 0.1
   // ms on a 700 KB page).
-  if (projects.length) return { re: new RegExp(`(?:${projects.map(escapeRe).join("|")})-[1-9][0-9]{0,7}(?![A-Za-z0-9_]|-[0-9])`, "g"), notAfter: /[A-Za-z0-9_]/ };
+  if (projects.length) return { re: new RegExp(`(?:${projects.map(escapeRegExp).join("|")})-[1-9][0-9]{0,7}(?![A-Za-z0-9_]|-[0-9])`, "g"), notAfter: /[A-Za-z0-9_]/ };
   return { re: /\b[A-Z][A-Z0-9]+-\d{2,6}\b/g };
 }
 
@@ -207,9 +207,6 @@ function entryKeys(entry: string): string[] {
   return [...v.matchAll(KEY_IN_PROSE)].map((m) => m[1]!).filter((k) => !KEY_DENY.has(k.slice(0, k.indexOf("-"))));
 }
 
-const strings = (v: string | string[] | undefined) => (Array.isArray(v) ? v : typeof v === "string" ? [v] : []);
-const fileStem = (relPath: string) => relPath.split("/").at(-1)!.replace(/\.mdx?$/i, "");
-
 /** The wiki's jira trackers (`trackers[]` with `id: "jira"`). */
 export const jiraTrackers = (trackers: readonly TrackerConfig[] | undefined): TrackerConfig[] => (trackers ?? []).filter((t) => t.id === "jira");
 
@@ -235,17 +232,17 @@ function pageKeySetOf(
 ): Set<string> {
   const out = new Set<string>(readOwns(markdown).keys);
   const title = typeof fm.title === "string" ? fm.title.trim() : "";
-  const stem = fileStem(relPath);
+  const stem = pageStemOf(relPath);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
   if (trackers.length) {
-    for (const k of stampedKeys(fm.jira)) if (CLIENT_KEY_RE.test(k)) out.add(k);
+    for (const k of stampedIssueKeys(fm.jira)) out.add(k);
     for (const t of trackers) {
       for (const field of t.frontmatterKeys) for (const k of declaredKeys(fm[field], t)) out.add(k);
       if (title) for (const k of titleKeys(title, t)) out.add(k);
       for (const k of stemKeys(stem, t)) out.add(k);
     }
   } else {
-    for (const field of ["jira", "tickets", "issue"]) for (const v of strings(fm[field])) for (const k of entryKeys(v)) out.add(k);
+    for (const field of ["jira", "tickets", "issue"]) for (const v of valueStrings(fm[field])) for (const k of entryKeys(v)) out.add(k);
     for (const m of title.matchAll(/[A-Z][A-Z0-9]+-\d+/g)) out.add(m[0]);
     for (const m of stem.toUpperCase().matchAll(/MELOSYS-\d+/g)) out.add(m[0]);
   }
@@ -263,7 +260,7 @@ export function titleCarriesKey(title: string, key: string): boolean {
   let re = numberRes.get(n);
   if (!re) {
     if (numberRes.size >= 4096) numberRes.clear();
-    numberRes.set(n, (re = new RegExp(`\\b${escapeRe(n)}\\b`)));
+    numberRes.set(n, (re = new RegExp(`\\b${escapeRegExp(n)}\\b`)));
   }
   return re.test(title);
 }
