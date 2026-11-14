@@ -163,8 +163,22 @@ const writes = new Map<string, { state: DiscoverHitState; at: number }>();
 /** Shelves a seed run delivered while the drawer was open: applied when it closes. */
 let pendingShelves: { shelves: DiscoverShelf[]; requestedAt: number } | null = null;
 
+/** A replaced shelf's run id → the run of the same seed that replaced it, for focus and Undo. */
+const runAlias = new Map<string, string>();
+const liveRun = (runId: string): string => {
+  let r = runId;
+  for (let i = 0; i < 10 && runAlias.has(r); i++) r = runAlias.get(r)!;
+  return r;
+};
+
 /** Replace the shelves with a fresh read; a write that committed after the read was asked wins over it. */
 function applyShelves(shelves: DiscoverShelf[], requestedAt: number): void {
+  const seedKey = (s: DiscoverShelf) => `${s.seedSource}\u0000${s.seedDocId}`;
+  const bySeed = new Map(shelves.map((s) => [seedKey(s), s.runId]));
+  for (const old of st.shelves) {
+    const now = bySeed.get(seedKey(old));
+    if (now && now !== old.runId) runAlias.set(old.runId, now);
+  }
   for (const s of shelves)
     for (const h of s.hits) {
       const w = writes.get(h.videoId);
@@ -278,8 +292,9 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
     (dr.querySelector<HTMLElement>(k.act ? byKey(k.act) : ".dsc-close") ?? dr.querySelector<HTMLElement>(".dsc-close"))?.focus();
     return;
   }
-  // The drawer closed under the focus (a dismiss from it): go back to its shelf.
-  const run = k.inDrawer ? prevOpen?.runId : k.run;
+  // The drawer closed under the focus (a dismiss from it): go back to its shelf, or the run that replaced it.
+  const run0 = k.inDrawer ? prevOpen?.runId : k.run;
+  const run = run0 ? liveRun(run0) : run0;
   const video = k.inDrawer ? prevOpen?.videoId : k.video;
   if (!run) return;
   const card = video ? cardEl(run, video) : null;
@@ -384,7 +399,7 @@ function detailBodyHtml(hit: DiscoverHit, shelf: DiscoverShelf, stats: string[],
 
 /** Everything but the dialog, its backdrop and the toast is inert while the dialog is open (the nav included). */
 function setModal(open: boolean): void {
-  const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast"]);
+  const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast", "dscAnnounce"]);
   for (const el of Array.from(document.body.children)) {
     if (el instanceof HTMLElement && !keep.has(el.id) && el.tagName !== "SCRIPT") el.inert = open;
   }
@@ -464,7 +479,7 @@ function closeDrawer(): void {
   st.open = null;
   st.playing = false;
   render();
-  if (prev) document.querySelector<HTMLElement>(`.dsc-card[data-run="${prev.runId}"][data-video="${prev.videoId}"]`)?.focus();
+  if (prev) cardEl(liveRun(prev.runId), prev.videoId)?.focus();
 }
 
 async function summarize(videoId: string): Promise<void> {
@@ -502,8 +517,11 @@ async function dismiss(videoId: string): Promise<void> {
     void setState(videoId, before).then((undoErr) => {
       if (undoErr) toast(undoErr);
       render();
-      // The Undo button is gone: focus the card it brought back, on its shelf or (replaced since) any shelf.
-      if (!undoErr) (cardEl(runId, videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`))?.focus();
+      if (undoErr) return;
+      // The Undo button is gone. With the drawer open the card is behind the modal: stay in the drawer.
+      if (st.open) return $("dscDrawer")?.querySelector<HTMLElement>(".dsc-close")?.focus();
+      // Otherwise focus the card it brought back, on its shelf (or the run that replaced it) or any shelf.
+      (cardEl(liveRun(runId), videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`))?.focus();
     });
   });
 }
@@ -599,7 +617,11 @@ export function bootDiscoverPage(): void {
     applyShelves(shelves, requestedAt);
     render();
     },
-    (msg) => toast(msg),
+    (msg) => {
+      // Its own live region: the toast may be holding someone's Undo.
+      const a = $("dscAnnounce");
+      if (a) a.textContent = msg;
+    },
   );
   render();
   focusHashShelf();

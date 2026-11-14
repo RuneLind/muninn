@@ -915,7 +915,7 @@ test("a run that ends while the drawer is open is announced through the toast (f
   await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
   await expect(page.locator("#dscDrawer")).toBeVisible();
   await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
-  await expect(page.locator("#dscToast")).toContainText("2 new shelves");
+  await expect(page.locator("#dscAnnounce")).toContainText("2 new shelves");
 });
 
 test("at 390px a long category name never widens the page (fix round 1 batch 4)", async ({ page }) => {
@@ -983,4 +983,69 @@ test("the seed listing is read again when it is over 10 minutes old (fix round 1
   await pick.click();
   await expect(page.locator("#dscSeedFilter")).toBeVisible();
   await expect.poll(() => reads).toBe(2);
+});
+
+/** The batch shelf, plus a stored CAPTURED_DOC shelf with two invented cards that a Last 7 days run replaces. */
+async function seedBatchAndCapturedShelves(): Promise<string> {
+  await seedBatchShelf();
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eCapt%'`;
+    const [run] = await sql`
+      INSERT INTO youtube_discover_runs (seed_doc_id, seed_title, seed_video_id, seed_category, queries, searched, known, origin)
+      VALUES (${CAPTURED_DOC}, 'E2E already captured', ${KNOWN}, 'ai/e2e', '[]'::jsonb, 2, 0, 'reader') RETURNING id`;
+    for (const [i, id] of ["e2eCapt0001", "e2eCapt0002"].entries()) {
+      await sql`
+        INSERT INTO youtube_discover_hits (run_id, video_id, title, channel, duration_sec, view_count, score, why, query, rank)
+        VALUES (${run!.id}, ${id}, ${`Captured card ${i + 1}`}, 'C', 600, 10, ${0.9 - i / 10}, 'invented', 'q', ${i + 1})`;
+    }
+    return run!.id as string;
+  } finally {
+    await sql.end();
+  }
+}
+
+test("dismissing from the drawer after a held run replaced its shelf keeps focus on that seed's new shelf (fix round 2 batch 2)", async ({ page }) => {
+  const oldRun = await seedBatchAndCapturedShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  await holdShelves(page, 800);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  const captured = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E already captured" }) });
+  await captured.locator('.dsc-card[data-video="e2eCapt0001"]').click();
+  await expect(page.locator("#dscDrawer")).toBeVisible();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await page.locator("#dscDrawer").getByRole("button", { name: "✕ Not interested" }).click();
+  await expect(page.locator("#dscDrawer")).toBeHidden();
+  // The held shelves were applied by the dismiss's render: the seed's shelf is its new run.
+  await expect(captured).not.toHaveAttribute("data-run", oldRun);
+  expect(await page.evaluate(() => document.activeElement?.closest("section.dsc-shelf")?.querySelector("h3")?.textContent ?? "BODY")).toContain(
+    "E2E already captured",
+  );
+});
+
+test("the run outcome under the drawer leaves a pending Undo alone (fix round 2 batch 2)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await holdShelves(page, 500);
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"] [data-act="dismiss"]`).click();
+  await expect(page.locator("#dscToast")).toContainText("Dismissed");
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await expect(page.locator("#dscAnnounce")).toContainText("2 new shelves");
+  await expect(page.locator("#dscToast")).toContainText("Dismissed");
+  await expect(page.locator("#dscToast")).not.toContainText("new shelves");
+});
+
+test("Undo from the toast while the drawer is open keeps focus in the drawer (fix round 2 batch 2)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"] [data-act="dismiss"]`).click();
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
+  await expect(page.locator("#dscDrawer")).toBeVisible();
+  await page.locator("#dscToast [data-undo]").click();
+  await expect(batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"]`)).toHaveCount(1);
+  expect(await page.evaluate(() => !!document.activeElement?.closest("#dscDrawer"))).toBe(true);
 });

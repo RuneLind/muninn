@@ -116,6 +116,7 @@ export function discoverPageStyles(): string {
     .dsc-note { font-size: 12.5px; color: var(--text-soft); font-style: italic; }
     .dsc-note.dsc-warn { font-style: normal; color: color-mix(in srgb, var(--status-warning) 55%, var(--text-primary)); }
 
+    .dsc-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
     .dsc-toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--text-primary); color: var(--bg-page); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 60; max-width: calc(100% - 32px); }
     .dsc-toast:empty { padding: 0; background: transparent; }
     .dsc-toast button { margin-left: 10px; background: transparent; border: 1px solid currentColor; color: inherit; border-radius: 5px; cursor: pointer; padding: 1px 8px; font: inherit; }

@@ -76,6 +76,7 @@ export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promi
   <div class="dsc-drawer-bg" id="dscDrawerBg" hidden></div>
   <aside class="dsc-drawer" id="dscDrawer" role="dialog" aria-modal="true" aria-labelledby="dscDrawerTitle" hidden></aside>
   <div class="dsc-toast" id="dscToast" role="status" aria-live="polite"></div>
+  <div class="dsc-sr" id="dscAnnounce" role="status" aria-live="polite"></div>
   <script type="application/json" id="dscData">${escJsonScript({ shelves: data.shelves })}</script>
   <script>${client}</script>
 </body>

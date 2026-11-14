@@ -253,7 +253,7 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
       : "";
   const why = failed.length ? `<ul class="dsc-fail-list">${failed.map((f) => `<li>${escHtml(f)}</li>`).join("")}</ul>` : "";
   progress(`Done: ${parts.join(", ")}${show}${why}`);
-  // The drawer inerts the progress line's live region: say the outcome through the page's toast instead.
+  // The drawer inerts the progress line's live region: say the outcome through the page's announcer instead.
   if (announce && $("dscProgress")?.closest("[inert]")) announce(`Done: ${parts.join(", ")}.`);
 }
 
