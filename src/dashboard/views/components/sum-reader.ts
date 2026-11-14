@@ -213,11 +213,16 @@ export function sumReaderStyles(): string {
     .sum-col-right a.sum-wiki-link:hover .sum-wiki-page { text-decoration: underline; }
     .sum-col-right a.sum-wiki-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
     .sum-wiki-meta { font-size: 11px; color: var(--text-soft); }
-    /* The header's controls wrap under the title at any width: a YouTube
-       document shows every button, and at 701–1000 px they squeezed the
-       title to 0 px. The basis keeps the title, the buttons take a line. */
+    /* The header's controls wrap rather than squeeze the title: without the
+       wrap the fixed-width buttons took the title to 0 px at 701–800 px
+       (54 px at 1000 px with a YouTube document's extra button). The basis
+       keeps the title; a YouTube header takes a second row below ~1180 px.
+       Back, the title and Ask a follow-up come first, so a wrap moves the
+       optional buttons and never the primary action. */
     .doc-panel-header { flex-wrap: wrap; row-gap: 8px; }
-    .doc-panel-title { flex: 1 1 14rem; min-width: 0; }
+    .doc-panel-title { flex: 1 1 14rem; }
+    .doc-panel-close, .doc-panel-title { order: -2; }
+    #docPanelFollowUp { order: -1; }
     @media (max-width: 1000px) {
       /* Below the breakpoint the rail sits after the article, where an
          outline of what is above it has nothing left to jump to. */

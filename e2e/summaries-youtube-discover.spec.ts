@@ -290,8 +290,10 @@ test("the route refuses a non-YouTube source and a missing document", async ({ r
 
 // The header with every control a YouTube document shows: the title keeps real
 // width and no control spills out of the header, at every width the reader
-// lays out differently (phone, the 701–1000 px band, the breakpoint, desktop).
-for (const width of [390, 800, 1000, 1440]) {
+// lays out differently (phone, the 701–1000 px band, the breakpoint, the band
+// where the controls wrap, desktop). Above 700 px the primary action stays on
+// the title's row; from 1280 px everything fits on one row.
+for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
   test(`at ${width}px the panel header keeps its title and fits its controls`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await openDoc(page, "youtube", YT_DOC.id, "evaluating coding agents");
@@ -300,17 +302,29 @@ for (const width of [390, 800, 1000, 1440]) {
     const m = await page.evaluate(() => {
       const header = document.querySelector(".doc-panel-header") as HTMLElement;
       const title = document.getElementById("docPanelTitle")!;
+      const followUp = document.getElementById("docPanelFollowUp")!;
       const box = header.getBoundingClientRect();
-      const spill = [...header.children]
-        .filter((el) => (el as HTMLElement).offsetParent !== null)
+      const shown = Array.from(header.children).filter((el) => (el as HTMLElement).offsetParent !== null);
+      const spill = shown
         .filter((el) => {
           const r = el.getBoundingClientRect();
           return r.right > box.right + 1 || r.left < box.left - 1;
         })
         .map((el) => el.id || el.className);
-      return { titleWidth: title.getBoundingClientRect().width, spill };
+      const mid = (el: Element) => {
+        const r = el.getBoundingClientRect();
+        return Math.round(r.top + r.height / 2);
+      };
+      return {
+        titleWidth: title.getBoundingClientRect().width,
+        spill,
+        followUpRowGap: Math.abs(mid(followUp) - mid(title)),
+        rows: new Set(shown.map((el) => Math.round(mid(el) / 10))).size,
+      };
     });
     expect(m.spill).toEqual([]);
     expect(m.titleWidth).toBeGreaterThanOrEqual(120);
+    if (width > 700) expect(m.followUpRowGap).toBeLessThanOrEqual(4);
+    if (width >= 1280) expect(m.rows).toBe(1);
   });
 }
