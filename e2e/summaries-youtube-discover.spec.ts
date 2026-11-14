@@ -108,6 +108,9 @@ const FIXTURE = {
 
 /** The listing's second YouTube document: a seed for the seed bar (PR 3). */
 const CAPTURED_DOC = "ai/e2e/E2E already captured.md";
+/** A shelf no seed-bar run replaces (its seed is not in the listing). */
+const BATCH_SEED = "ai/e2e/E2E batch seed.md";
+const BATCH_IDS = ["e2eBatch001", "e2eBatch002"] as const;
 
 /** A shelf seeded straight into the DB with five cards: the reader flow only ever makes two. */
 const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
@@ -120,6 +123,8 @@ async function clearStoredRuns(): Promise<void> {
     await sql`DELETE FROM youtube_discover_hits WHERE video_id IN (${NEW_A}, ${NEW_B}, ${NEW_C})`;
     await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${YT_DOC.id}, ${FOCUS_SEED}, ${CAPTURED_DOC})`;
     await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eFocus%'`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id = ${BATCH_SEED}`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eBatch%'`;
   } finally {
     await sql.end();
   }
@@ -798,4 +803,84 @@ test("the category and pick seed panels: newest per category, and a filter that 
   await page.keyboard.press("Escape");
   await expect(panel).toBeHidden();
   await expect(page.getByRole("button", { name: "+ Pick summaries…" })).toBeFocused();
+});
+
+/** A fresh batch shelf, and no stored run for CAPTURED_DOC, so a Last 7 days run adds that shelf. */
+async function seedBatchShelf(): Promise<void> {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${BATCH_SEED}, ${CAPTURED_DOC})`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eBatch%'`;
+    const [run] = await sql`
+      INSERT INTO youtube_discover_runs (seed_doc_id, seed_title, seed_video_id, seed_category, queries, searched, known, origin)
+      VALUES (${BATCH_SEED}, 'E2E batch seed', NULL, 'ai/e2e', '[]'::jsonb, 2, 0, 'reader') RETURNING id`;
+    for (const [i, id] of BATCH_IDS.entries()) {
+      await sql`
+        INSERT INTO youtube_discover_hits (run_id, video_id, title, channel, duration_sec, view_count, score, why, query, rank)
+        VALUES (${run!.id}, ${id}, ${`Batch card ${i + 1}`}, 'B', 600, 10, ${0.9 - i / 10}, 'invented', 'q', ${i + 1})`;
+    }
+  } finally {
+    await sql.end();
+  }
+}
+
+/** Answer the shelves GET with what the server read when asked, `ms` later. */
+async function holdShelves(page: Page, ms: number): Promise<void> {
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    const res = await route.fetch();
+    await new Promise((r) => setTimeout(r, ms));
+    await route.fulfill({ response: res });
+  });
+}
+
+const batchShelf = (page: Page) => page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E batch seed" }) });
+
+test("starting a seed run by keyboard moves focus to the progress line (fix round 1 batch 3)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  const run = page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ });
+  await run.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#dscProgress")).toBeFocused();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+});
+
+test("a Later pressed while a shelves re-read is in flight survives that re-read (fix round 1 batch 3)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await holdShelves(page, 1500);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  const shelvesAsked = page.waitForRequest("**/api/summaries/discover/shelves");
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await shelvesAsked;
+  const later = batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"] [data-act="later"]`);
+  await later.click();
+  await expect(later).toHaveAttribute("aria-pressed", "true");
+  // The first re-read renders before the progress moves on: read once, no polling (the second re-read
+  // would bring the write back inside a polling window and hide the overwrite).
+  await expect(page.locator("#dscProgress")).toContainText("Searching 2 of 2", { timeout: 20_000 });
+  expect(await later.getAttribute("aria-pressed")).toBe("true");
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await expect(later).toHaveAttribute("aria-pressed", "true");
+});
+
+test("shelves that land while the drawer is open wait until it closes; focus returns to the card (fix round 1 batch 3)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  await holdShelves(page, 800);
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  const card = batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`);
+  await card.click();
+  const drawer = page.locator("#dscDrawer");
+  await expect(drawer).toBeVisible();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await expect(drawer).toBeVisible();
+  const captured = page.locator(".dsc-shelf", { hasText: "E2E already captured" });
+  await expect(captured).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await expect(captured).toHaveCount(1);
+  await expect(card).toBeFocused();
 });

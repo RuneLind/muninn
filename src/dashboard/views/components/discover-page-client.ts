@@ -154,7 +154,23 @@ async function setState(videoId: string, state: DiscoverHitState): Promise<strin
     return "Could not save: the server did not answer.";
   }
   eachHit(videoId, (h) => (h.state = state));
+  writes.set(videoId, { state, at: performance.now() });
   return null;
+}
+
+/** When each video's last state write committed: laid over shelves read before it (see `applyShelves`). */
+const writes = new Map<string, { state: DiscoverHitState; at: number }>();
+/** Shelves a seed run delivered while the drawer was open: applied when it closes. */
+let pendingShelves: { shelves: DiscoverShelf[]; requestedAt: number } | null = null;
+
+/** Replace the shelves with a fresh read; a write that committed after the read was asked wins over it. */
+function applyShelves(shelves: DiscoverShelf[], requestedAt: number): void {
+  for (const s of shelves)
+    for (const h of s.hits) {
+      const w = writes.get(h.videoId);
+      if (w && w.at >= requestedAt) h.state = w.state;
+    }
+  st.shelves = shelves;
 }
 
 /** Videos with a Later or Dismiss write in flight: a second click waits for the first. */
@@ -273,6 +289,8 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
     (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(byKey(k.act)) : null) ??
     card ??
     neighbour ??
+    // The shelf itself was replaced (a newer run of its seed): the same video on any shelf.
+    (video ? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(video)}"]`) : null) ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] h3 a`);
   target?.focus({ preventScroll: true });
@@ -284,6 +302,11 @@ let renderedOpen: PageState["open"] = null;
 function render(): void {
   const main = $("dscMain");
   if (!main) return;
+  if (!st.open && pendingShelves) {
+    const p = pendingShelves;
+    pendingShelves = null;
+    applyShelves(p.shelves, p.requestedAt);
+  }
   const shown = st.shelves.reduce((n, s) => n + dscVisibleHits(s.hits, st.sort, st.minLen).length, 0);
   const count = $("dscCount");
   if (count) count.textContent = `${shown} suggestion${shown === 1 ? "" : "s"} on ${st.shelves.length} shel${st.shelves.length === 1 ? "f" : "ves"}`;
@@ -566,14 +589,13 @@ export function bootDiscoverPage(): void {
     }
   });
   window.addEventListener("hashchange", focusHashShelf);
-  bootSeedBar((shelves) => {
-    st.shelves = shelves;
-    // A newer run of the open video's seed replaces its shelf: follow the video to it.
-    const open = st.open;
-    if (open && !shelves.some((s) => s.runId === open.runId)) {
-      const shelf = shelves.find((s) => s.hits.some((h) => h.videoId === open.videoId));
-      st.open = shelf ? { runId: shelf.runId, videoId: open.videoId } : null;
+  bootSeedBar((shelves, requestedAt) => {
+    // The drawer is a modal over the shelves: swap them in when it closes, not under it.
+    if (st.open) {
+      pendingShelves = { shelves, requestedAt };
+      return;
     }
+    applyShelves(shelves, requestedAt);
     render();
   });
   render();

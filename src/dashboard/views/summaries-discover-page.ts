@@ -68,7 +68,7 @@ export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promi
         <button type="button" class="dsc-chip" data-seedmode="pick" aria-expanded="false" aria-controls="dscSeedPanel">+ Pick summaries…</button>
       </div>
       <div class="dsc-seed-panel" id="dscSeedPanel" hidden></div>
-      <div class="dsc-progress" id="dscProgress" role="status" aria-live="polite"></div>
+      <div class="dsc-progress" id="dscProgress" role="status" aria-live="polite" tabindex="-1"></div>
     </section>
     ${error}
     <main id="dscMain" class="dsc-main"></main>

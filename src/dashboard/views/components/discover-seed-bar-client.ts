@@ -179,25 +179,30 @@ function progress(html: string): void {
   if (p) p.innerHTML = html;
 }
 
-async function readShelves(): Promise<DiscoverShelf[] | null> {
+/** The stored shelves, and when they were asked for (`performance.now()`). */
+async function readShelves(): Promise<{ shelves: DiscoverShelf[]; requestedAt: number } | null> {
+  const requestedAt = performance.now();
   try {
     const res = await fetch("/api/summaries/discover/shelves");
     if (!res.ok) return null;
     const data = (await res.json()) as { shelves?: DiscoverShelf[] };
-    return Array.isArray(data.shelves) ? data.shelves : null;
+    return Array.isArray(data.shelves) ? { shelves: data.shelves, requestedAt } : null;
   } catch {
     return null;
   }
 }
 
+export type OnShelves = (shelves: DiscoverShelf[], requestedAt: number) => void;
+
 /** Search from each seed in turn; `onShelves` gets the stored shelves after each run that landed. */
-async function runSeeds(seeds: SeedDoc[], onShelves: (shelves: DiscoverShelf[]) => void): Promise<void> {
+async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves): Promise<void> {
   if (bar.running || !seeds.length) return;
-  const opener = document.querySelector<HTMLButtonElement>(`[data-seedmode="${bar.mode}"]`);
   bar.running = true;
   bar.mode = null;
   renderPanel();
-  opener?.focus();
+  // The panel and its Run button are gone and the chips are disabled: the progress line holds focus.
+  progress(`Searching 1 of ${seeds.length}: <b>${escHtml(seeds[0]!.title)}</b>…`);
+  $("dscProgress")?.focus();
   const failed: string[] = [];
   let firstRun: string | null = null;
   let landed = 0;
@@ -220,8 +225,8 @@ async function runSeeds(seeds: SeedDoc[], onShelves: (shelves: DiscoverShelf[]) 
       }
       landed++;
       firstRun ??= data.runId;
-      const shelves = await readShelves();
-      if (shelves) onShelves(shelves);
+      const read = await readShelves();
+      if (read) onShelves(read.shelves, read.requestedAt);
     } catch {
       failed.push(`${seed.title}: the server did not answer`);
     }
@@ -236,7 +241,7 @@ async function runSeeds(seeds: SeedDoc[], onShelves: (shelves: DiscoverShelf[]) 
 }
 
 /** Wire the seed bar; `onShelves` replaces the page's shelves and re-renders. */
-export function bootSeedBar(onShelves: (shelves: DiscoverShelf[]) => void): void {
+export function bootSeedBar(onShelves: OnShelves): void {
   const root = $("dscSeeds");
   if (!root) return;
   root.addEventListener("click", (e) => {
