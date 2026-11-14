@@ -28,8 +28,8 @@
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
-import { RUN_GAP_SRC } from "../../../wiki/core/cross-ref.ts";
-import { fetchAndResolveXrefs, wrapXrefRuns, xrefFetchVia } from "./wiki-cross-refs.ts";
+import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
+import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
 import { INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
 
 export { INLINE, PEEK_CLASS, REF_SKIP };
@@ -577,8 +577,10 @@ let installed = false;
 
 const touchOnly = (): boolean => matchMedia("(hover: none)").matches;
 
-function hidePeek(): void {
-  clearTimeout(showTimer);
+/** `keepPending`: a scroll retires the card it placed, never the one the
+ *  pointer just asked for (hovering a link off-screen scrolls first). */
+function hidePeek(keepPending = false): void {
+  if (!keepPending) clearTimeout(showTimer);
   clearTimeout(hideTimer);
   // Cleared before the removal: removing a card that holds focus fires its
   // focusout, which calls back in here, and a second remove() throws.
@@ -595,18 +597,29 @@ export function hideRefPeek(): void {
   hidePeek();
 }
 
-function showPeek(a: HTMLAnchorElement): void {
+/** The card's content: an in-page target's (with its "Go to ↓"), or a
+ *  cross-page link's (`wiki-cross-refs.ts`), which navigates on its own click. */
+function cardParts(a: HTMLAnchorElement): { id: string; label: string; where: string; body: Node[]; isTitle: boolean; go?: () => void } | null {
+  if (a.classList.contains(XREF_CLASS)) {
+    const x = xrefPeekParts(a);
+    return x && { id: XREF_PEEK_ID, ...x, isTitle: false };
+  }
   const target = document.getElementById(a.dataset.ref ?? "");
-  if (!target) return;
+  return target && { id: PEEK_CLASS, ...peekParts(target), go: () => jump(target.id) };
+}
+
+function showPeek(a: HTMLAnchorElement): void {
+  const parts = cardParts(a);
+  if (!parts) return;
   hidePeek();
-  const { label, where, body, isTitle } = peekParts(target);
+  const { id, label, where, body, isTitle, go: onGo } = parts;
   const card = document.createElement("div");
-  card.className = PEEK_CLASS;
+  card.className = id === PEEK_CLASS ? PEEK_CLASS : `${PEEK_CLASS} ${id}`;
   // A tooltip, not a dialog: the reader's modal checks treat any
   // [role="dialog"] as open and would block shortcuts while a card shows.
-  card.id = PEEK_CLASS;
+  card.id = id;
   card.setAttribute("role", "tooltip");
-  a.setAttribute("aria-describedby", PEEK_CLASS);
+  a.setAttribute("aria-describedby", id);
   const head = document.createElement("div");
   head.className = `${PEEK_CLASS}-head`;
   const lab = document.createElement("span");
@@ -615,12 +628,15 @@ function showPeek(a: HTMLAnchorElement): void {
   const wh = document.createElement("span");
   wh.className = `${PEEK_CLASS}-where`;
   wh.textContent = where;
-  const go = document.createElement("button");
-  go.type = "button";
-  go.className = `${PEEK_CLASS}-go`;
-  go.textContent = "Go to ↓";
-  go.addEventListener("click", () => jump(target.id));
-  head.append(lab, wh, go);
+  head.append(lab, wh);
+  if (onGo) {
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = `${PEEK_CLASS}-go`;
+    go.textContent = "Go to ↓";
+    go.addEventListener("click", onGo);
+    head.append(go);
+  }
   const bodyEl = document.createElement("div");
   bodyEl.className = `${PEEK_CLASS}-body`;
   bodyEl.append(...body);
@@ -709,7 +725,7 @@ function onPopState(): void {
 /** The reference link an event is about, outside a peek card: a link inside
  *  the card jumps on click but opens no second card. */
 function refLink(e: Event): HTMLAnchorElement | null {
-  const a = (e.target as Element).closest?.(`a.${REF_CLASS}`) as HTMLAnchorElement | null;
+  const a = (e.target as Element).closest?.(`a.${REF_CLASS}, a.${XREF_CLASS}`) as HTMLAnchorElement | null;
   return a && !a.closest(`.${PEEK_CLASS}`) ? a : null;
 }
 
@@ -740,6 +756,8 @@ function install(): void {
     const a = refLink(e);
     if (a && peekFor === a && !peek?.contains(e.relatedTarget as Node | null)) hidePeek();
   });
+  // A cross-page link navigates (the shell's page navigation): its card goes first.
+  document.addEventListener("click", (e) => (e.target as Element).closest?.(`a.${XREF_CLASS}`) && hidePeek(), true);
   document.addEventListener("click", (e) => {
     const a = (e.target as Element).closest?.(`a.${REF_CLASS}`) as HTMLAnchorElement | null;
     if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -783,7 +801,7 @@ function install(): void {
   document.addEventListener(
     "scroll",
     (e) => {
-      if (peek && !peek.contains(e.target as Node)) hidePeek();
+      if (peek && !peek.contains(e.target as Node)) hidePeek(true);
     },
     true,
   );

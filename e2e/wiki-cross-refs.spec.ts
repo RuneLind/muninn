@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 
 const PORT = e2ePort("wiki-cross-refs");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -133,7 +134,8 @@ test.beforeAll(async () => {
     "utf8",
   );
 
-  server = spawn("bun", ["run", "src/index.ts"], {
+  await assertPortFree(PORT);
+  server = spawn("bun",["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -145,18 +147,7 @@ test.beforeAll(async () => {
     },
     stdio: "ignore",
   });
-
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    try {
-      const res = await fetch(`${BASE}/api/wiki/pages?wiki=${WIKI}`);
-      if (res.ok) break;
-    } catch {
-      /* not up yet */
-    }
-    if (Date.now() > deadline) throw new Error("dedicated muninn did not start on port " + PORT);
-    await new Promise((r) => setTimeout(r, 400));
-  }
+  await waitForOwnServer(server, `${BASE}/api/wiki/pages?wiki=${WIKI}`);
 });
 
 test.afterAll(async () => {
@@ -264,6 +255,46 @@ test.describe("Wiki reader: cross-page ids", () => {
     await page.locator(".wiki-article a.wiki-xref", { hasText: "O5" }).click();
     await expect(page).toHaveURL(/#o5-2$/);
     await expect(page.locator(".wiki-article li.dl-item#o5-2")).toBeInViewport();
+  });
+
+  // Fix round 1 g2: the cross-page card is the in-page peek's card, with its Escape and its one slot.
+  test("in focus mode, Escape closes the cross-page card and leaves focus mode alone", async ({ page }) => {
+    await open(page, "plans/b.md");
+    await expect(page.locator(".wiki-article a.wiki-xref").first()).toBeAttached();
+    await page.locator(".wiki-article").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("f");
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+    await page.locator(".wiki-article a.wiki-xref").first().hover();
+    await expect(page.locator("#wiki-xref-peek")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wiki-xref-peek")).toHaveCount(0);
+    await expect(page.locator(".wiki-layout")).toHaveClass(/\bfocus-mode\b/);
+  });
+
+  test("one card at a time: the cross-page card replaces a focused in-page peek", async ({ page }) => {
+    // Tall enough that the hover scrolls nothing (a scroll retires a card on its own).
+    await page.setViewportSize({ width: 1280, height: 2000 });
+    await open(page, "plans/b.md");
+    await expect(page.locator(".wiki-article a.wiki-xref").first()).toBeAttached();
+    // Keyboard focus on B's own bare D7 holds its in-page peek open.
+    const own = page.locator(".wiki-article a.wiki-ref", { hasText: "D7" }).first();
+    await own.focus();
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    await expect(page.locator("#wiki-ref-peek")).toBeVisible();
+    await page.locator(".wiki-article a.wiki-xref", { hasText: "Q-3" }).hover();
+    await expect(page.locator("#wiki-xref-peek")).toBeVisible();
+    await expect(page.locator(".wiki-ref-peek")).toHaveCount(1);
+  });
+
+  test("opening the find palette closes the cross-page card", async ({ page }) => {
+    await open(page, "plans/b.md");
+    await page.locator(".wiki-article a.wiki-xref").first().hover();
+    await expect(page.locator("#wiki-xref-peek")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    // At once, on open (`hideRefPeek`): not the 250 ms hide timer a pointer
+    // leaving the link would start when the palette covers it.
+    await expect(page.locator("#wiki-xref-peek")).toHaveCount(0, { timeout: 150 });
   });
 
   test("after A's item closes, B's references show Closed → D2", async ({ page }) => {

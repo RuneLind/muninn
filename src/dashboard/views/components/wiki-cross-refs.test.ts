@@ -146,6 +146,47 @@ describe("the two steps around linkRefs", () => {
   });
 });
 
+describe("a run never links inside a link or code (fix round 1 g5)", () => {
+  test("a wrapper holding a link ends the run: no anchor inside the link", () => {
+    const { out, article } = withB("**[D9](https://x.y/D9) og D9** i [[A]].", (a) => {
+      const cands = wrapXrefRuns(a);
+      resolveXrefRuns(cands, answerOf({ D9: target("d9") }));
+      return cands;
+    });
+    expect(ids(out)).toEqual([]);
+    expect(article.querySelectorAll("a a").length).toBe(0);
+    expect(article.querySelectorAll("a.wiki-xref").length).toBe(0);
+  });
+
+  test("a wrapper holding code ends the run: nothing links inside the code", () => {
+    const { out, article } = withB("**`D9`** i [[A]].", (a) => {
+      const cands = wrapXrefRuns(a);
+      resolveXrefRuns(cands, answerOf({ D9: target("d9") }));
+      return cands;
+    });
+    expect(ids(out)).toEqual([]);
+    expect(article.querySelectorAll("code a").length).toBe(0);
+  });
+
+  test("text under code or a hidden .gl-tip inside a run gets no link; the run's own id does", () => {
+    const { article } = withB("Se **D9** i [[A]].", (a) => {
+      const cands = wrapXrefRuns(a);
+      // Planted after the wrap: what the walker meets inside the wrapper.
+      const strong = a.querySelector(".wiki-xref-run > strong")!;
+      const doc = strong.ownerDocument;
+      const tip = doc.createElement("span");
+      tip.className = "gl-tip";
+      tip.textContent = "D9";
+      const code = doc.createElement("code");
+      code.textContent = "D9";
+      strong.append(tip, code);
+      resolveXrefRuns(cands, answerOf({ D9: target("d9") }));
+    });
+    expect(article.querySelectorAll("a.wiki-xref").length).toBe(1);
+    expect(article.querySelectorAll(".gl-tip a, code a").length).toBe(0);
+  });
+});
+
 describe("a run before a missing page (`wiki-link-missing`)", () => {
   test("stays plain where B defines the id: no in-page link, no call, no wrapper left", async () => {
     const calls: string[] = [];

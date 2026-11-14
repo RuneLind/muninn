@@ -32,14 +32,18 @@ import {
   type XrefTarget,
 } from "../../../wiki/core/cross-ref.ts";
 import { NAV_RELPATH_ATTR } from "../../../wiki/core/wiki-nav.ts";
-import { INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
+import { INLINE, REF_SKIP } from "./wiki-ref-dom.ts";
 
 /** PR 3b's live chip beside a key or PR mention: read as if absent. */
 export const FACT_CHIP_SELECTOR = ".fact-chip";
 
 /** An element the run text is never read through: a link, code, or another
- *  run's wrapper. */
+ *  run's wrapper. An inline element holding one ends the run too. */
 const BARRIER = `a, code, kbd, .${XREF_RUN_CLASS}`;
+
+/** Text inside a run that never becomes a link: a link's, code's, or a
+ *  glossary's hidden `.gl-tip` (as `REF_SKIP` keeps it unlinked). */
+const NO_LINK_TEXT = "a, code, kbd, .gl-tip";
 
 export interface XrefCandidate {
   wrapper: HTMLElement;
@@ -79,7 +83,7 @@ function piecesBefore(link: Element, article: Element): { parent: Element; piece
     } else if (n.nodeType === 1) {
       const el = n as Element;
       if (el.matches(FACT_CHIP_SELECTOR)) continue;
-      if (!el.matches(INLINE) || el.matches(BARRIER)) break;
+      if (!el.matches(INLINE) || el.matches(BARRIER) || el.querySelector(BARRIER)) break;
       rev.push({ node: n, text: n.textContent ?? "" });
     } else if (n.nodeType !== 8) {
       break;
@@ -178,7 +182,7 @@ export function resolveXrefRuns(
     if (answer) {
       const walker = document.createTreeWalker(wrapper, NodeFilter.SHOW_TEXT);
       const nodes: Text[] = [];
-      for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) if (!n.parentElement?.closest(NO_LINK_TEXT)) nodes.push(n as Text);
       for (const node of nodes) {
         const text = node.nodeValue ?? "";
         const hits = xrefIdsIn(text).filter((t) => wanted.has(t.id) && Object.hasOwn(answer.refs, t.id));
@@ -236,7 +240,6 @@ export async function fetchAndResolveXrefs(cands: readonly XrefCandidate[], fetc
     for (const id of c.ids) set.add(id);
     byPage.set(c.relPath, set);
   }
-  if (byPage.size) installXrefPeek();
   const answers = new Map<string, XrefAnswer | null>();
   await Promise.all(
     [...byPage].map(async ([relPath, ids]) => {
@@ -247,15 +250,12 @@ export async function fetchAndResolveXrefs(cands: readonly XrefCandidate[], fetc
 }
 
 // ── Hover card ───────────────────────────────────────────────────────────
+// The card itself is the in-page peek's (`wiki-ref-links.ts`): one card, one
+// Escape owner, its focus, scroll and resize guards. This module gives it a
+// body for an `a.wiki-xref`.
 
-const XREF_PEEK_ID = "wiki-xref-peek";
-const SHOW_DELAY_MS = 200;
-const HIDE_DELAY_MS = 250;
-let peek: HTMLElement | null = null;
-let peekFor: HTMLAnchorElement | null = null;
-let showTimer: ReturnType<typeof setTimeout> | undefined;
-let hideTimer: ReturnType<typeof setTimeout> | undefined;
-let installed = false;
+/** The cross-page card's id, beside the in-page card's class. */
+export const XREF_PEEK_ID = "wiki-xref-peek";
 
 /** The state line of a question item: `Closed → D2`, `Closed`, `Open`. */
 export function xrefStateLine(t: XrefTarget, language: string): string {
@@ -275,93 +275,18 @@ export function xrefPeekLines(t: XrefTarget, language: string): { cls: string; t
   return lines.filter((l) => l.text);
 }
 
-/** Hide the card, and cancel one about to show unless `keepPending`: a
- *  scroll retires the card it placed, never the one the pointer just asked
- *  for (moving onto a link off-screen scrolls first). */
-function hidePeek(keepPending = false): void {
-  if (!keepPending) clearTimeout(showTimer);
-  clearTimeout(hideTimer);
-  const card = peek;
-  peekFor?.removeAttribute("aria-describedby");
-  peek = null;
-  peekFor = null;
-  card?.remove();
-}
-
-function showPeek(a: HTMLAnchorElement): void {
+/** The card's parts for a resolved link: the id, the linked page's title and
+ *  the item's lines. Null for a link this module did not make. */
+export function xrefPeekParts(a: HTMLAnchorElement): { label: string; where: string; body: Node[] } | null {
   const info = linkInfo.get(a);
-  if (!info) return;
-  hidePeek();
-  const card = document.createElement("div");
-  card.className = `${PEEK_CLASS} ${XREF_PEEK_ID}`;
-  card.id = XREF_PEEK_ID;
-  card.setAttribute("role", "tooltip");
-  a.setAttribute("aria-describedby", XREF_PEEK_ID);
-  const head = document.createElement("div");
-  head.className = `${PEEK_CLASS}-head`;
-  const lab = document.createElement("span");
-  lab.className = `${PEEK_CLASS}-label`;
-  lab.textContent = info.id;
-  const wh = document.createElement("span");
-  wh.className = `${PEEK_CLASS}-where`;
-  wh.textContent = info.title;
-  head.append(lab, wh);
-  const body = document.createElement("div");
-  body.className = `${PEEK_CLASS}-body`;
-  for (const l of xrefPeekLines(info.target, info.language)) {
+  if (!info) return null;
+  const body = xrefPeekLines(info.target, info.language).map((l) => {
     const p = document.createElement("div");
     p.className = l.cls;
     p.textContent = l.text;
-    body.append(p);
-  }
-  card.append(head, body);
-  card.addEventListener("mouseenter", () => clearTimeout(hideTimer));
-  card.addEventListener("mouseleave", () => {
-    hideTimer = setTimeout(hidePeek, HIDE_DELAY_MS);
+    return p;
   });
-  (a.closest(".wiki-article") ?? document.body).append(card);
-  peek = card;
-  peekFor = a;
-  const r = a.getBoundingClientRect();
-  const vw = document.documentElement.clientWidth;
-  const left = Math.max(16, Math.min(r.left, vw - card.offsetWidth - 16));
-  const below = r.bottom + 6;
-  const top = below + card.offsetHeight + 8 > window.innerHeight && r.top - card.offsetHeight - 6 > 0 ? r.top - card.offsetHeight - 6 : below;
-  card.style.left = `${left}px`;
-  card.style.top = `${top}px`;
-}
-
-const xrefLink = (e: Event): HTMLAnchorElement | null =>
-  ((e.target as Element).closest?.(`a.${XREF_CLASS}`) as HTMLAnchorElement | null) ?? null;
-
-/** The hover and focus listeners, once per document. */
-export function installXrefPeek(): void {
-  if (installed) return;
-  installed = true;
-  document.addEventListener("mouseover", (e) => {
-    const a = xrefLink(e);
-    if (!a || matchMedia("(hover: none)").matches) return;
-    clearTimeout(hideTimer);
-    if (peekFor === a) return;
-    clearTimeout(showTimer);
-    showTimer = setTimeout(() => showPeek(a), SHOW_DELAY_MS);
-  });
-  document.addEventListener("mouseout", (e) => {
-    if (!xrefLink(e)) return;
-    clearTimeout(showTimer);
-    hideTimer = setTimeout(hidePeek, HIDE_DELAY_MS);
-  });
-  document.addEventListener("focusin", (e) => {
-    const a = xrefLink(e);
-    if (a && peekFor !== a && a.matches(":focus-visible")) showPeek(a);
-  });
-  document.addEventListener("focusout", (e) => {
-    if (xrefLink(e) && !peek?.contains(e.relatedTarget as Node | null)) hidePeek();
-  });
-  document.addEventListener("scroll", (e) => peek && !peek.contains(e.target as Node) && hidePeek(true), true);
-  window.addEventListener("keydown", (e) => e.key === "Escape" && peek && hidePeek());
-  // A click navigates (the shell's page navigation): the card goes with the page.
-  document.addEventListener("click", (e) => xrefLink(e) && hidePeek(), true);
+  return { label: info.id, where: info.title, body };
 }
 
 /** The reader's CSS for a cross-page id link and its card's lines. */
