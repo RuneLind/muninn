@@ -141,6 +141,11 @@ export const E2E_PORTS = {
   // fetches canned in-process), against a fake huginn.
   "summaries-find-links": 3170,
   "summaries-find-links/huginn": 3171,
+  // ▶ Find on YouTube: the real discover route on a muninn booted through
+  // `e2e/youtube-discover-boot.ts` (model calls and yt-dlp search canned
+  // in-process), against a fake huginn that also records the Summarize POST.
+  "summaries-youtube-discover": 3246,
+  "summaries-youtube-discover/huginn": 3247,
   // Reading themes: the palette picker, the no-flash init and mermaid under a
   // palette, on a muninn with a temp `WIKI_EXTRA` wiki.
   "theme-palettes": 3172,
