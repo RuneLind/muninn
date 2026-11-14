@@ -352,7 +352,10 @@ export function prMentions(body: string, grammar: PrGrammar | null, home: string
   // refused), so their ends are sorted too: an overlap is a binary search.
   const takenStarts: number[] = [];
   const takenEnds: number[] = [];
-  const add = (id: string, start: number, len: number, form: RefForm) => {
+  // A null id claims the span and gives no mention: a repo or alias form the
+  // grammar cannot qualify (no owner). The sweep's form always claims it, so
+  // the bare `#n` inside it must not resolve under the home repo.
+  const add = (id: string | null, start: number, len: number, form: RefForm) => {
     const end = start + len;
     let lo = 0;
     let hi = takenStarts.length;
@@ -364,7 +367,7 @@ export function prMentions(body: string, grammar: PrGrammar | null, home: string
     if (lo > 0 && takenEnds[lo - 1]! > start) return;
     takenStarts.splice(lo, 0, start);
     takenEnds.splice(lo, 0, end);
-    out.push({ id, start, end, form });
+    if (id !== null) out.push({ id, start, end, form });
   };
   for (const m of body.matchAll(/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/g)) add(`${m[1]}/${m[2]}#${+m[3]!}`, m.index!, m[0].length, "url");
   for (const m of body.matchAll(/\b([A-Za-z][\w.-]*)\/([\w.-]+)\s?#(\d+)\b/g)) add(`${m[1]}/${m[2]}#${+m[3]!}`, m.index!, m[0].length, "qualified");
@@ -373,7 +376,7 @@ export function prMentions(body: string, grammar: PrGrammar | null, home: string
       const alias = Object.hasOwn(grammar.aliases, m[1]!) ? grammar.aliases[m[1]!] : undefined;
       const name = alias ?? (m[1]!.includes("-") ? m[1]! : undefined);
       const repo = name ? qualifyRepo(grammar.owner, name) : null;
-      if (repo) add(`${repo}#${+m[2]!}`, m.index!, m[0].length, alias ? "alias" : "repo");
+      if (name) add(repo && `${repo}#${+m[2]!}`, m.index!, m[0].length, alias ? "alias" : "repo");
     }
     const homeRepo = home ? qualifyRepo(grammar.owner, home) : null;
     if (homeRepo) for (const m of matchesNotAfter(body, /#(\d{3,5})\b/g, /[\w/#-]/)) add(`${homeRepo}#${+m[1]!}`, m.index, m[0].length, "bare");
@@ -577,7 +580,9 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
     const at = span ? span[1] : m.end;
     let site = sites.get(at);
     if (!site) sites.set(at, (site = { at, ids: [] }));
-    if (!site.ids.some((x) => x.id === m.id)) site.ids.push({ id: m.id, kind: m.kind });
+    // One chip per PR: GitHub ids ignore case, so the site keeps the first spelling.
+    const lower = m.id.toLowerCase();
+    if (!site.ids.some((x) => x.kind === m.kind && x.id.toLowerCase() === lower)) site.ids.push({ id: m.id, kind: m.kind });
   }
   return [...sites.values()].sort((a, b) => a.at - b.at);
 }
@@ -642,7 +647,12 @@ export function planLiveChips(
   const out: LiveFactsPayload = { prs: {}, keys: {}, noProd: [] };
   for (const site of insertions)
     for (const { id, kind } of site.ids) {
-      if (kind === "pr") out.prs[id] = prEntry(id)![1];
+      // Under the file's id, so a PR the page spells two ways (or a key's list
+      // spells another way) is one entry; the client looks a chip up ignoring case.
+      if (kind === "pr") {
+        const [fileId, entry] = prEntry(id)!;
+        out.prs[fileId] = entry;
+      }
       else {
         const k = facts.keys[id]!;
         out.keys[id] = k;

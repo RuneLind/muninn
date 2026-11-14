@@ -39,9 +39,19 @@ export interface FactsKeyEntry {
   searchedAt?: string;
 }
 
+/** The payload's entry for a PR chip's id, ignoring case (GitHub owner and
+ *  repo names do; the payload holds the facts file's spelling). */
+export function prOf(facts: LiveFactsPayload, id: string): FactsPrEntry | undefined {
+  if (Object.hasOwn(facts.prs, id)) return facts.prs[id];
+  const lower = id.toLowerCase();
+  for (const k of Object.keys(facts.prs)) if (k.toLowerCase() === lower) return facts.prs[k];
+  return undefined;
+}
+
 /** `GET /api/wiki/page`'s `facts`: the entries for the refs and keys marked on
- *  the page, plus every PR in those keys' lists. A marked PR is keyed by the id
- *  as the page writes it (`data-live-fact`); a key list's PRs by the file's id. */
+ *  the page, plus every PR in those keys' lists, one entry per PR under the
+ *  facts file's id. A chip's `data-live-fact` keeps the page's spelling, so a
+ *  PR chip is looked up ignoring case ({@link prOf}). */
 export interface LiveFactsPayload {
   prs: Record<string, FactsPrEntry>;
   keys: Record<string, FactsKeyEntry>;
@@ -142,7 +152,7 @@ export function chipView(
 ): ChipView | null {
   const noProd = new Set(facts.noProd);
   const deploys = (pr: string) => !noProd.has(repoOfPr(pr).toLowerCase());
-  const pr = facts.prs[id];
+  const pr = prOf(facts, id);
   if (id.includes("#")) {
     if (!pr) return null;
     const { state, prod } = prChipParts(pr, deploys(id), lang);

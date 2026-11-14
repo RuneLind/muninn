@@ -25,6 +25,7 @@ import {
   loadFacts,
   markedMentions,
   pageKeySet,
+  prMentions,
   parseWikiFacts,
   planLiveChips,
   readWikiFacts,
@@ -237,6 +238,39 @@ describe("the chip pass in renderWikiHtml", () => {
   test("a PR id is matched ignoring case and keeps the case the page writes", () => {
     expect(chipIds(render(page("ACME/Acme-Api#101")).html)).toEqual(["ACME/Acme-Api#101"]);
   });
+
+  test("one site, one PR in two spellings: one chip, in the first spelling", () => {
+    const { html } = render(page("See [acme/acme-api#101](https://github.com/Acme/acme-api/pull/101) today."));
+    expect(chipIds(html)).toEqual(["acme/acme-api#101"]);
+  });
+});
+
+describe("a repo or alias form the grammar cannot qualify (no owner)", () => {
+  const OWNERLESS = { owner: null, aliases: { web: "acme-web", other: "acme/other" }, noProd: [] };
+  const home = "acme/acme-api";
+  // The sweep's repo form always claims its span (it qualifies under a
+  // default owner); with no owner muninn has no id for it, but the bare form
+  // must not take the `#n` inside it and resolve it under the home repo.
+  for (const text of ["acme-web #101", "web #101", "acme-web PR #101", "web#101"])
+    test(`«${text}» gives no mention, never the home repo's #101`, () => {
+      expect(prMentions(`Then ${text} landed.`, OWNERLESS, home)).toEqual([]);
+    });
+
+  test("a bare #n beside it still resolves under the home repo, and an alias to owner/repo still qualifies", () => {
+    expect(prMentions("web #101, #102 and other #77", OWNERLESS, home).map((m) => [m.id, m.form])).toEqual([
+      ["acme/acme-api#102", "bare"],
+      ["acme/other#77", "alias"],
+    ]);
+  });
+
+  test("the chip pass places no chip for it (a bare #101 on the same page would get one)", () => {
+    const plan = (text: string) => {
+      const md = page(`For DEMO-11: then ${text} landed.`, "repos: [acme/acme-api]\n");
+      return planLiveChips(readerBody(md), md, { loaded: loadFacts(FACTS), grammar: OWNERLESS, trackers: [], relPath: "plans/demo.mdx" }).insertions;
+    };
+    expect(plan("#101").flatMap((s) => s.ids.map((x) => x.id))).toEqual(["acme/acme-api#101"]);
+    expect(plan("web #101")).toEqual([]);
+  });
 });
 
 describe("the payload's facts", () => {
@@ -245,6 +279,15 @@ describe("the payload's facts", () => {
     expect(Object.keys(facts!.keys)).toEqual(["DEMO-11"]);
     expect(Object.keys(facts!.prs).sort()).toEqual(["acme/acme-api#101", "acme/acme-api#102", "acme/acme-api#103", "acme/acme-e2e#7"]);
     expect(facts!.noProd).toEqual(["acme/acme-e2e"]);
+  });
+
+  test("one entry per PR, under the facts file's id, whatever spellings the page uses; every chip still reads it", () => {
+    const now = Date.parse("2026-01-21T08:00:00Z");
+    const { html, facts } = render(page("ACME/Acme-Api#101, then acme/acme-api#101 and DEMO-11."));
+    expect(Object.keys(facts!.prs).sort()).toEqual(["acme/acme-api#101", "acme/acme-api#102", "acme/acme-e2e#7"]);
+    expect(chipIds(html)).toEqual(["ACME/Acme-Api#101", "acme/acme-api#101", "DEMO-11"]);
+    for (const id of chipIds(html)) expect([id, chipView(id!, facts!, now, "no")?.text ?? null]).not.toEqual([id, null]);
+    expect(chipView("ACME/Acme-Api#101", facts!, now, "no")?.text).toBe(chipView("acme/acme-api#101", facts!, now, "no")!.text);
   });
 
   test("no chip ⇒ no payload", () => {
