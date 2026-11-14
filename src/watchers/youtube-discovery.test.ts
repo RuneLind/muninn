@@ -10,11 +10,13 @@ import type { YouTubeHit } from "../youtube/discover.ts";
 import type { CapturedDoc } from "../youtube/discover-deps.ts";
 import type { DiscoverHitInput, DiscoverRunInput } from "../db/youtube-discover.ts";
 import type { SourceHealthRecorder, SourceOutcome } from "./source-health.ts";
+import { computeWatcherTimeoutMs, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import {
   checkYouTubeDiscovery,
   HEALTH_HUGINN,
   HEALTH_MODEL,
   HEALTH_SEARCH,
+  HEALTH_STORE,
   RECENT_RUN_SKIP_MS,
   resolveMaxSeeds,
   type YouTubeDiscoveryDeps,
@@ -102,6 +104,11 @@ beforeEach(() => {
 
 describe("checkYouTubeDiscovery", () => {
   test("searches each of the last week's seeds as its own watcher run; health all ok", async () => {
+    let call = 0;
+    searchAnswer = async () => {
+      call++;
+      return [hit(vid(call * 10 + 1)), hit(vid(call * 10 + 2))];
+    };
     const alerts = await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(alerts).toEqual([]);
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 1.md", "ai/Seed 2.md", "ai/Seed 3.md"]);
@@ -112,6 +119,7 @@ describe("checkYouTubeDiscovery", () => {
       [HEALTH_HUGINN]: "ok",
       [HEALTH_MODEL]: "ok",
       [HEALTH_SEARCH]: "ok",
+      [HEALTH_STORE]: "ok",
     });
     expect(carried).toEqual([]);
   });
@@ -147,11 +155,11 @@ describe("checkYouTubeDiscovery", () => {
     expect(saved[0]!.hits.map((h) => h.videoId)).toEqual([vid(3)]);
   });
 
-  test("a failed listing marks huginn error and carries the other two, searching nothing", async () => {
+  test("a failed listing marks huginn error and carries the other three, searching nothing", async () => {
     listed = new Error("huginn down");
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(marks.get(HEALTH_HUGINN)).toEqual({ outcome: "error", detail: "listing failed: huginn down" });
-    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH, HEALTH_STORE].sort());
     expect(saved).toEqual([]);
   });
 
@@ -190,7 +198,7 @@ describe("checkYouTubeDiscovery", () => {
     raws = new Map();
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
-    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH, HEALTH_STORE].sort());
 
     marks = new Map();
     carried = [];
@@ -199,11 +207,11 @@ describe("checkYouTubeDiscovery", () => {
     expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("error");
   });
 
-  test("no seeds this week: huginn ok, model and search carried", async () => {
+  test("no seeds this week: huginn ok, model, search and store carried", async () => {
     listed = [doc(4, "2026-10-01")];
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
-    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH].sort());
+    expect(carried.sort()).toEqual([HEALTH_MODEL, HEALTH_SEARCH, HEALTH_STORE].sort());
     expect(saved).toEqual([]);
   });
 
@@ -219,5 +227,65 @@ describe("checkYouTubeDiscovery", () => {
     });
     await checkYouTubeDiscovery(watcher(), bot, undefined, d);
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md", "ai/Seed 3.md"]);
+  });
+});
+
+describe("fix round 1 batch 1", () => {
+  test("a run-wide deadline inside the runner's net: model calls get it, and no seed starts too close to it", async () => {
+    listed = [1, 2, 3, 4, 5].map((n) => doc(n, "2026-11-13"));
+    raws = new Map([1, 2, 3, 4, 5].map((n) => [`ai/Seed ${n}.md`, raw(n)]));
+    let clock = NOW;
+    const deadlines: (number | undefined)[] = [];
+    const w = watcher({ timeoutMs: 300_000 });
+    const d = deps({ now: () => clock });
+    d.services.queriesCall = async (_p, _b, _t, opts) => {
+      deadlines.push(opts?.deadlineAt);
+      clock += 100_000; // a slow model: 100 s per seed
+      return JSON.stringify([{ query: "agent evals", why: "same topic" }]);
+    };
+    d.services.rankCall = async (_p, _b, _t, opts) => {
+      deadlines.push(opts?.deadlineAt);
+      return JSON.stringify([{ n: 1, score: 0.8, why: "fits" }]);
+    };
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    const deadline = NOW + computeWatcherTimeoutMs(w) - WATCHER_TIMEOUT_MARGIN_MS;
+    expect(deadlines.length).toBeGreaterThan(0);
+    expect(deadlines.every((x) => x === deadline)).toBe(true);
+    // Seeds start at 0, 100 and 200 s; at 300 s the deadline (300 s) has no room left.
+    expect(saved).toHaveLength(3);
+  });
+
+  test("a failed shelf save marks youtube:store error; a stored one ok; no seed carries it", async () => {
+    await checkYouTubeDiscovery(
+      watcher(),
+      bot,
+      undefined,
+      deps({
+        saveRun: async () => {
+          throw new Error("relation youtube_discover_runs does not exist");
+        },
+      }),
+    );
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "relation youtube_discover_runs does not exist" });
+
+    marks = new Map();
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(marks.get(HEALTH_STORE)?.outcome).toBe("ok");
+
+    marks = new Map();
+    carried = [];
+    listed = [doc(4, "2026-10-01")];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(carried).toContain(HEALTH_STORE);
+  });
+
+  test("a video one seed's shelf already holds is not ranked again for a later seed in the same run", async () => {
+    listed = [doc(1, "2026-11-13"), doc(2, "2026-11-12")];
+    searchAnswer = async () => [hit(vid(1)), hit(vid(2))];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved[0]!.hits.map((h) => h.videoId)).toEqual([vid(1)]);
+    expect(rankPrompts).toHaveLength(2);
+    expect(rankPrompts[1]).not.toContain(vid(1));
+    expect(rankPrompts[1]).toContain(vid(2));
   });
 });

@@ -11,11 +11,16 @@
  *   - `youtube:huginn` — the listing, then each seed's raw read (ok when no read ran)
  *   - `youtube:model`  — the queries and rank calls
  *   - `youtube:search` — the yt-dlp searches
+ *   - `youtube:store`  — saving each shelf (the watcher's only output)
  * A key is `ok` when at least one run passed its step, `error` when every run
  * that reached it failed there, carried when no run reached it.
  *
  * A seed searched in the last 6 days (by any origin) is skipped: the reader's
  * own Find on YouTube already made its shelf.
+ *
+ * The run keeps inside the runner's net: every model call carries one run-wide
+ * `deadlineAt` (the net minus its margin, so `health.finish()` still runs), and
+ * no seed starts with less than {@link MIN_SEED_MS} left.
  */
 
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -36,6 +41,7 @@ import {
 } from "../db/youtube-discover.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { openSourceHealth, type SourceHealthRecorder } from "./source-health.ts";
+import { computeWatcherTimeoutMs, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "youtube-discovery");
@@ -43,9 +49,12 @@ const log = getLog("watchers", "youtube-discovery");
 export const HEALTH_HUGINN = "youtube:huginn";
 export const HEALTH_MODEL = "youtube:model";
 export const HEALTH_SEARCH = "youtube:search";
+export const HEALTH_STORE = "youtube:store";
 /** A seed searched more recently than this is not searched again. */
 export const RECENT_RUN_SKIP_MS = 6 * 86_400_000;
 const MAX_SEEDS_LIMIT = 10;
+/** A seed needs this much of the run's budget left to start (a healthy one takes about 25 s). */
+export const MIN_SEED_MS = 60_000;
 
 export interface YouTubeDiscoveryDeps {
   services: Pick<DiscoverServices, "readRaw" | "queriesCall" | "rankCall" | "search" | "listCaptured">;
@@ -137,6 +146,7 @@ export async function checkYouTubeDiscovery(
   deps: YouTubeDiscoveryDeps = defaultYouTubeDiscoveryDeps(),
 ): Promise<WatcherAlert[]> {
   const now = deps.now ?? Date.now;
+  const deadlineAt = now() + computeWatcherTimeoutMs(watcher) - WATCHER_TIMEOUT_MARGIN_MS;
   const health = await deps.health(watcher);
   const botName = botConfig.name;
 
@@ -148,6 +158,7 @@ export async function checkYouTubeDiscovery(
     health.mark(HEALTH_HUGINN, "error", `listing failed: ${errText(err)}`);
     health.carry(HEALTH_MODEL);
     health.carry(HEALTH_SEARCH);
+    health.carry(HEALTH_STORE);
     return health.finish();
   }
 
@@ -161,21 +172,30 @@ export async function checkYouTubeDiscovery(
   const seeds = week.filter((s) => (recent.get(s.id) ?? 0) < now() - RECENT_RUN_SKIP_MS).slice(0, resolveMaxSeeds(watcher.config));
 
   const tally = { huginn: { reached: 0, passed: 0 } as StepTally, model: { reached: 0, passed: 0 } as StepTally, search: { reached: 0, passed: 0 } as StepTally };
+  const store: StepTally = { reached: 0, passed: 0 };
   const captured = new Set(listed.map((d) => extractYouTubeVideoId(d.url ?? "")).filter((id): id is string => !!id));
-  // Known = captured ∪ dismissed ∪ queued, re-read before each seed so this run's own shelves count too.
+  // Videos this run already put on a shelf: one video lands on one shelf per run.
+  const shelved = new Set<string>();
+  // Known = captured ∪ dismissed ∪ queued ∪ shelved this run; the store half is re-read per seed.
   const knownIds = async () => {
     const stored = await deps.storedKnownIds().catch(() => new Set<string>());
-    return new Set([...captured, ...stored]);
+    return new Set([...captured, ...stored, ...shelved]);
   };
+  const opts = { deadlineAt };
 
   let shelves = 0;
-  for (const seed of seeds) {
+  let stoppedAt: number | null = null;
+  for (const [i, seed] of seeds.entries()) {
+    if (deadlineAt - now() < MIN_SEED_MS) {
+      stoppedAt = i;
+      break;
+    }
     const tracer = deps.tracer?.(botConfig) ?? null;
     const out = await runDiscovery(
       {
         readRaw: deps.services.readRaw,
-        queriesCall: deps.services.queriesCall,
-        rankCall: deps.services.rankCall,
+        queriesCall: (p, b, t) => deps.services.queriesCall(p, b, t, opts),
+        rankCall: (p, b, t) => deps.services.rankCall(p, b, t, opts),
         search: deps.services.search,
         knownIds,
         profile: () => deps.profile(watcher.userId, botName),
@@ -189,6 +209,7 @@ export async function checkYouTubeDiscovery(
       log.warn("YouTube discovery: {code} for {doc}: {error}", { botName, doc: seed.id, code: out.code, error: out.cause ?? out.error });
       continue;
     }
+    store.reached++;
     try {
       await deps.saveRun(
         {
@@ -207,11 +228,16 @@ export async function checkYouTubeDiscovery(
         out.results,
       );
       shelves++;
+      store.passed++;
+      for (const r of out.results) shelved.add(r.videoId);
     } catch (err) {
+      store.detail ??= errText(err);
       log.warn("YouTube discovery: saving the run for {doc} failed: {error}", { botName, doc: seed.id, error: errText(err) });
     }
   }
 
+  if (stoppedAt !== null)
+    log.warn("YouTube discovery: out of time, {left} of {seeds} seeds not searched", { botName, left: seeds.length - stoppedAt, seeds: seeds.length });
   log.info("YouTube discovery: {shelves} shelves from {seeds} seeds ({week} in the last week)", {
     botName,
     shelves,
@@ -223,5 +249,6 @@ export async function checkYouTubeDiscovery(
   else markStep(health, HEALTH_HUGINN, tally.huginn);
   markStep(health, HEALTH_MODEL, tally.model);
   markStep(health, HEALTH_SEARCH, tally.search);
+  markStep(health, HEALTH_STORE, store);
   return health.finish();
 }

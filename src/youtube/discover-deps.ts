@@ -28,11 +28,16 @@ export interface CapturedDoc {
   date: string | null;
 }
 
+export interface ModelCallOptions {
+  deadlineAt?: number;
+}
+
 export interface DiscoverServices {
   /** The raw file, or `null` when huginn has no such document. Throws on any other failure. */
   readRaw: (collection: string, docId: string) => Promise<string | null>;
-  queriesCall: (prompt: string, bot: BotConfig, tracer: DiscoverTracer | null) => Promise<string>;
-  rankCall: (prompt: string, bot: BotConfig, tracer: DiscoverTracer | null) => Promise<string>;
+  /** `deadlineAt` (epoch ms) bounds the call and its CLI fallback together (the Haiku router's deadline). */
+  queriesCall: (prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, opts?: ModelCallOptions) => Promise<string>;
+  rankCall: (prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, opts?: ModelCallOptions) => Promise<string>;
   /** One search: hits, or `null` when it failed. */
   search: (query: string, n: number) => Promise<YouTubeHit[] | null>;
   /** Every `youtube-summaries` document. Throws on failure. */
@@ -70,7 +75,7 @@ export function parseCapturedListing(data: unknown): CapturedDoc[] {
   return out;
 }
 
-async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, source: string): Promise<string> {
+async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, source: string, opts?: ModelCallOptions): Promise<string> {
   const res = await callHaikuWithFallback(prompt, {
     source,
     entrypoint: "youtube-discover",
@@ -78,6 +83,7 @@ async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | nu
     connector: bot.connector,
     haikuBackend: bot.haikuBackend,
     timeoutMs: MODEL_TIMEOUT_MS,
+    ...(opts?.deadlineAt !== undefined ? { deadlineAt: opts.deadlineAt } : {}),
     ...(tracer ? { tracer: tracer as Tracer } : {}),
   });
   return res.result;
@@ -98,10 +104,10 @@ export function defaultDiscoverServices(knowledgeApiUrl: string): DiscoverServic
         throw err;
       }
     },
-    queriesCall: (prompt, bot, tracer) =>
-      seam.queriesCall ? seam.queriesCall(prompt, bot, tracer) : haiku(prompt, bot, tracer, "youtube-discover-queries"),
-    rankCall: (prompt, bot, tracer) =>
-      seam.rankCall ? seam.rankCall(prompt, bot, tracer) : haiku(prompt, bot, tracer, "youtube-discover-rank"),
+    queriesCall: (prompt, bot, tracer, opts) =>
+      seam.queriesCall ? seam.queriesCall(prompt, bot, tracer, opts) : haiku(prompt, bot, tracer, "youtube-discover-queries", opts),
+    rankCall: (prompt, bot, tracer, opts) =>
+      seam.rankCall ? seam.rankCall(prompt, bot, tracer, opts) : haiku(prompt, bot, tracer, "youtube-discover-rank", opts),
     search: (query, n) => (seam.search ? seam.search(query, n) : searchYouTube(query, n)),
     listCaptured: async () => {
       if (seam.listCaptured) return seam.listCaptured();
