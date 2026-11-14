@@ -2251,7 +2251,7 @@ describe("GET /api/wiki/digest", () => {
             { relPath: "c/Lovvalg.md", title: "Lovvalg [analyse] | utkast" },
             { relPath: "c/a|b.md", title: "Pipe" },
             { relPath: "c/x].md", title: "Bracket" },
-            { relPath: "c/gone.md", title: "Gone" },
+            { relPath: "c/gone.md", title: "<b>Gone</b>" },
           ],
         },
       ],
@@ -2259,7 +2259,8 @@ describe("GET /api/wiki/digest", () => {
     const res = await app.request("/api/wiki/digest?wiki=digwiki");
     const body = (await res.json()) as { digest: { syncs: { title: string; html: string }[] } };
     const [sync] = body.digest.syncs;
-    expect(sync!.html).toContain("<li>Gone</li>");
+    expect(sync!.html).toContain("<li>&lt;b&gt;Gone&lt;/b&gt;</li>");
+    expect(sync!.html).toContain('href="/wiki?wiki=digwiki&relPath=c%2FLovvalg.md"');
     expect(sync!.html).not.toContain("wiki-link-missing");
     expect(sync!.html).toContain('data-relpath="c/Lovvalg.md">Lovvalg [analyse] | utkast</a>');
     expect(sync!.html).toContain('data-relpath="c/a|b.md">Pipe</a>');
