@@ -18,6 +18,8 @@ export const DISCOVER_RESULTS_PER_QUERY = 10;
 export const DISCOVER_MAX_QUERIES = 5;
 /** Videos shown. */
 export const DISCOVER_MAX_SHOWN = 8;
+/** Gate scores under this are not shown: the prompt calls ~0.5 borderline and asks to omit the rest. */
+export const DISCOVER_MIN_SCORE = 0.4;
 /** One search's bound (measured ~2 s per `ytsearch10:`). */
 export const DISCOVER_SEARCH_TIMEOUT_MS = 15_000;
 /** A query past this is cut (code points). */
@@ -59,8 +61,11 @@ export function buildSearchArgs(query: string, n: number = DISCOVER_RESULTS_PER_
 }
 
 const finiteOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+// Line and paragraph separators too: a title must not start a new numbered line in the rank prompt.
 const textOrNull = (v: unknown, max: number): string | null =>
-  typeof v === "string" && v.trim() ? Array.from(v.replace(/\p{Cc}/gu, " ").trim()).slice(0, max).join("") : null;
+  typeof v === "string" && v.trim()
+    ? Array.from(v.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").trim()).slice(0, max).join("")
+    : null;
 
 /** `yt-dlp -J` output → hits. Entries failing the id gate are dropped; duplicates keep the first. */
 export function parseYouTubeSearch(json: unknown): YouTubeHit[] {

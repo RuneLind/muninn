@@ -29,6 +29,7 @@ import {
   buildDiscoverQueriesPrompt,
   buildDiscoverRankPrompt,
   DISCOVER_MAX_SHOWN,
+  DISCOVER_MIN_SCORE,
   DISCOVER_RESULTS_PER_QUERY,
   parseDiscoverQueries,
   searchYouTube,
@@ -88,7 +89,11 @@ async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | nu
   return res.result;
 }
 
-export function defaultSummariesDiscoverDeps(config: Config): SummariesDiscoverDeps {
+export function defaultSummariesDiscoverDeps(
+  config: Config,
+  opts: { loadProfile?: typeof loadInterestProfileForBot } = {},
+): SummariesDiscoverDeps {
+  const loadProfile = opts.loadProfile ?? loadInterestProfileForBot;
   return {
     readRaw: async (collection, docId) => {
       try {
@@ -116,7 +121,7 @@ export function defaultSummariesDiscoverDeps(config: Config): SummariesDiscoverD
       return docs.map((d) => (typeof d.url === "string" ? d.url : "")).filter(Boolean);
     },
     // An authenticating instance has many readers: a bot-wide profile is someone else's interests.
-    profile: async (bot) => (authMode() === "off" ? loadInterestProfileForBot(bot.name) : null),
+    profile: async (bot) => (authMode() === "off" ? loadProfile(bot.name) : null),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discover" }),
   };
 }
@@ -275,7 +280,10 @@ export function registerSummariesDiscoverRoutes(
       }
       const results: DiscoverResult[] = fresh
         .map((f, i) => ({ f, s: scores.get(i + 1), i }))
-        .filter((x): x is { f: (typeof fresh)[number]; s: NonNullable<typeof x.s>; i: number } => x.s !== undefined)
+        .filter(
+          (x): x is { f: (typeof fresh)[number]; s: NonNullable<typeof x.s>; i: number } =>
+            x.s !== undefined && x.s.score >= DISCOVER_MIN_SCORE,
+        )
         .sort((a, b) => b.s.score - a.s.score || a.i - b.i)
         .slice(0, DISCOVER_MAX_SHOWN)
         .map(({ f, s }) => ({ ...f.hit, score: s.score, why: s.why, query: f.query }));

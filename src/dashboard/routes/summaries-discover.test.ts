@@ -221,6 +221,15 @@ describe("search and dedup", () => {
     expect(prompts.rank[0]).not.toContain(`Video ${SEED}`);
     expect(prompts.rank[0]).not.toContain(`Video ${ID(1)}`);
   });
+  test("a score under the gate's floor is not shown, even when the model returns it", async () => {
+    rankAnswer = JSON.stringify([
+      { n: 1, score: 0.05, why: "off-contract low" },
+      { n: 2, score: 0.5, why: "borderline" },
+    ]);
+    const res = await post(app(), { source: "youtube", docId: DOC });
+    const body = (await res.json()) as { results: { videoId: string }[] };
+    expect(body.results.map((r) => r.videoId)).toEqual([ID(3)]);
+  });
   test("the queries prompt reads the summary, never the transcript", async () => {
     await post(app(), { source: "youtube", docId: DOC });
     expect(prompts.queries[0]).toContain("Title: Invented seed talk");
@@ -288,10 +297,24 @@ describe("interest profile", () => {
     await post(app(), { source: "youtube", docId: DOC });
     expect(prompts.rank[1]).not.toContain("current interests");
   });
-  test("the default profile dep gives none on an authenticating instance (no DB read)", async () => {
+  test("the default profile dep never reads a profile on an authenticating instance", async () => {
+    const loads: string[] = [];
+    const loadProfile = async (name: string | undefined) => (loads.push(String(name)), "Invented profile");
     __setAuthPolicyForTest({ authenticating: true, mode: "local" });
     try {
-      expect(await defaultSummariesDiscoverDeps(config).profile(bot)).toBeNull();
+      expect(await defaultSummariesDiscoverDeps(config, { loadProfile }).profile(bot)).toBeNull();
+      expect(loads).toEqual([]);
+    } finally {
+      __setAuthPolicyForTest(null);
+    }
+  });
+  test("the default profile dep reads the bot's profile under MUNINN_AUTH=off", async () => {
+    const loads: string[] = [];
+    const loadProfile = async (name: string | undefined) => (loads.push(String(name)), "Invented profile");
+    __setAuthPolicyForTest({ authenticating: false, mode: "off" });
+    try {
+      expect(await defaultSummariesDiscoverDeps(config, { loadProfile }).profile(bot)).toBe("Invented profile");
+      expect(loads).toEqual(["summarizer"]);
     } finally {
       __setAuthPolicyForTest(null);
     }
