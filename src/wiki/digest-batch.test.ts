@@ -7,14 +7,13 @@ import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import {
   selectBatchEntries,
-  rawHeaderLine,
   generateWikiDigest,
   parseLogEntries,
   BATCH_DIGEST_SYSTEM_PROMPT,
   DIGEST_SYSTEM_PROMPT,
   type LogEntry,
 } from "./digest.ts";
-import { changedPagesForEntry } from "./digest-changed-pages.ts";
+import { changedPagesForEntry, entryCommitFromBlame } from "./digest-changed-pages.ts";
 import { parseWhatsNewReaderConfig } from "./whats-new-config.ts";
 import { buildWikiIndex, readWikiReaderConfig } from "./store.ts";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -102,13 +101,37 @@ describe("selectBatchEntries", () => {
   });
 });
 
-describe("rawHeaderLine", () => {
-  test("returns the line as written, extra spacing included", () => {
-    const log = "# Log\n\n##  [2026-11-01]  update |  Sync A\n\nbody\n\n## [2026-11-01] update | Sync B\n";
+describe("entry line ranges", () => {
+  test("each entry runs from its header to the line before the next header", () => {
+    const log = "# Log\n\n## [2026-11-01] update | Sync A\n\nbody\n\n## [2026-11-01] update | Sync B\nlast";
     const [a, b] = parseLogEntries(log);
-    expect(rawHeaderLine(log, a!)).toBe("##  [2026-11-01]  update |  Sync A");
-    expect(rawHeaderLine(log, b!)).toBe("## [2026-11-01] update | Sync B");
-    expect(rawHeaderLine(log, e("2026-11-02", "update", "Sync B"))).toBeNull();
+    expect([a!.line, a!.endLine]).toEqual([3, 6]);
+    expect([b!.line, b!.endLine]).toEqual([7, 8]);
+  });
+});
+
+describe("entryCommitFromBlame", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  const Z = "0".repeat(40);
+  const blame = (rows: [string, number, string][]) => {
+    const seen = new Set<string>();
+    return rows
+      .map(([sha, t, text], i) => {
+        const head = `${sha} ${i + 1} ${i + 1} 1`;
+        const meta = seen.has(sha) ? "" : `\nauthor x\ncommitter-time ${t}`;
+        seen.add(sha);
+        return `${head}${meta}\n\t${text}`;
+      })
+      .join("\n");
+  };
+  test("most non-blank lines win; blank and uncommitted lines do not count", () => {
+    expect(entryCommitFromBlame(blame([[B, 200, "## header"], [A, 100, "one"], [A, 100, "two"], [B, 200, ""], [B, 200, " "]]))).toBe(A);
+    expect(entryCommitFromBlame(blame([[Z, 0, "## new"], [Z, 0, "body"], [A, 100, ""]]))).toBeNull();
+  });
+  test("a tie goes to the oldest commit", () => {
+    expect(entryCommitFromBlame(blame([[B, 200, "x"], [A, 100, "y"]]))).toBe(A);
+    expect(entryCommitFromBlame(blame([[A, 100, "x"], [B, 200, "y"]]))).toBe(A);
   });
 });
 
@@ -151,22 +174,33 @@ describe("changed pages from git", () => {
     await rm(repo, { recursive: true, force: true });
   });
 
+  /** The line range of the entry whose header is `header`, in the current log. */
+  async function rangeOf(header: string): Promise<[number, number]> {
+    const entry = parseLogEntries(await Bun.file(path.join(root, "log.md")).text()).find(
+      (x) => `## [${x.date}] ${x.kind} | ${x.title}` === header,
+    )!;
+    return [entry.line!, entry.endLine!];
+  }
+
   test("each entry lists only its own commit's pages, wiki-relative, meta files left out", async () => {
     const index = await buildWikiIndex(root);
-    const a = (await changedPagesForEntry(root, SYNC_A, index.resolveRelPath))!;
+    const a = (await changedPagesForEntry(root, ...(await rangeOf(SYNC_A)), index.resolveRelPath))!;
     expect(a).toHaveLength(28);
     expect(a.some((p) => p.relPath === "concepts/Side 7 æ.md")).toBe(true);
     expect(a.some((p) => p.relPath === "index.md" || p.relPath.includes("outside"))).toBe(false);
-    const b = (await changedPagesForEntry(root, SYNC_B, index.resolveRelPath))!;
+    const b = (await changedPagesForEntry(root, ...(await rangeOf(SYNC_B)), index.resolveRelPath))!;
     expect(b.map((p) => p.relPath).sort()).toEqual(["concepts/Ny.md", "concepts/Side 0 æ.md"]);
   });
 
   test("an uncommitted entry or a root outside git has no list", async () => {
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    await Bun.write(path.join(root, "log.md"), log.replace("# Log\n\n", "# Log\n\n## [2026-11-02] update | Not committed\n\nNew body\n\n"));
     const index = await buildWikiIndex(root);
-    expect(await changedPagesForEntry(root, "## [2026-11-02] update | Not committed", index.resolveRelPath)).toBeNull();
+    expect(await changedPagesForEntry(root, ...(await rangeOf("## [2026-11-02] update | Not committed")), index.resolveRelPath)).toBeNull();
     const bare = await testTempDir(path.join(tmpdir(), "wiki-batch-nogit-"));
     try {
-      expect(await changedPagesForEntry(bare, SYNC_A, index.resolveRelPath)).toBeNull();
+      await Bun.write(path.join(bare, "log.md"), log);
+      expect(await changedPagesForEntry(bare, 3, 5, index.resolveRelPath)).toBeNull();
     } finally {
       await rm(bare, { recursive: true, force: true });
     }
@@ -222,5 +256,68 @@ describe("changed pages from git", () => {
     }))!;
     expect(system).toBe(DIGEST_SYSTEM_PROMPT);
     expect(d.syncs).toBeUndefined();
+  });
+});
+
+// ── which commit an entry belongs to (fix round 1) ────────────────────────────
+
+describe("an entry's commit is the one that wrote its lines", () => {
+  let repo: string;
+  let root: string;
+
+  beforeEach(async () => {
+    repo = await testTempDir(path.join(tmpdir(), "wiki-batch-blame-"));
+    root = path.join(repo, "wiki");
+    await mkdir(path.join(root, "c"), { recursive: true });
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ whatsNew: { mode: "batch" } }));
+    git(repo, "init", "-q");
+  });
+
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  async function commit(files: Record<string, string>, msg: string): Promise<void> {
+    for (const [rel, text] of Object.entries(files)) await Bun.write(path.join(root, rel), text);
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", msg);
+  }
+
+  async function syncsOf(): Promise<[string, string[] | undefined][]> {
+    const index = await buildWikiIndex(root);
+    const d = (await generateWikiDigest(root, index, {} as Config, { name: "melosys" } as BotConfig, {
+      now: NOW,
+      oneShot: async () => ({ result: "### A\n- x" }) as ClaudeExecResult,
+    }))!;
+    return d.syncs!.map((s) => [s.title, s.pages?.map((p) => p.relPath)]);
+  }
+
+  test("a header that is a prefix of an older header gets its own commit", async () => {
+    await commit({ "c/a.md": "# a\n", "log.md": "# Log\n\n## [2026-11-01] update | Sync del 2\n\nA body\n\n## [2026-10-20] note | Older\n" }, "1");
+    await commit(
+      { "c/b.md": "# b\n", "log.md": "# Log\n\n## [2026-11-01] update | Sync\n\nB body\n\n## [2026-11-01] update | Sync del 2\n\nA body\n\n## [2026-10-20] note | Older\n" },
+      "2",
+    );
+    expect(await syncsOf()).toEqual([
+      ["Sync", ["c/b.md"]],
+      ["Sync del 2", ["c/a.md"]],
+    ]);
+  });
+
+  test("two entries with the same header each get their own commit", async () => {
+    // Byte-identical entries: git's diff decides which copy is the new one, so
+    // only "one each" is pinned, not which copy gets which.
+    const entry = "## [2026-11-01] update | Confluence sync\n\nsame body\n\n";
+    await commit({ "c/a.md": "# a\n", "log.md": `# Log\n\n${entry}## [2026-10-20] note | Older\n` }, "1");
+    await commit({ "c/b.md": "# b\n", "log.md": `# Log\n\n${entry}${entry}## [2026-10-20] note | Older\n` }, "2");
+    const pages = (await syncsOf()).map(([, p]) => p!.join(",")).sort();
+    expect(pages).toEqual(["c/a.md", "c/b.md"]);
+  });
+
+  test("a header edited later still maps to the commit that wrote the entry", async () => {
+    const body = "\n\nSide A er skrevet.\nTo kilder lest.\n\n## [2026-10-20] note | Older\n";
+    await commit({ "c/a.md": "# a\n", "log.md": `# Log\n\n## [2026-11-01] update | Sync of [[Old]]${body}` }, "sync");
+    await commit({ "c/z.md": "# z\n", "log.md": `# Log\n\n## [2026-11-01] update | Sync of [[New]]${body}` }, "rename sweep");
+    expect(await syncsOf()).toEqual([["Sync of [[New]]", ["c/a.md"]]]);
   });
 });

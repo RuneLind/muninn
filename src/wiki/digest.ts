@@ -60,6 +60,10 @@ export interface LogEntry {
   title: string;
   /** Free-markdown body under the header, trimmed (may be empty). */
   body: string;
+  /** 1-based line of the header in `log.md`, and the last line before the
+   *  next header (or the file's end). Set by {@link parseLogEntries}. */
+  line?: number;
+  endLine?: number;
 }
 
 /** The digest returned to the route + persisted by a future scheduler. `bullets`
@@ -101,33 +105,36 @@ const ENTRY_HEADER_RE = /^##\s+\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$/;
 export function parseLogEntries(logText: string): LogEntry[] {
   const lines = logText.split("\n");
   const entries: LogEntry[] = [];
-  let current: { date: string; kind: string; title: string; body: string[] } | null = null;
+  let current: { date: string; kind: string; title: string; body: string[]; line: number } | null = null;
 
-  const flush = () => {
+  const flush = (endLine: number) => {
     if (current) {
       entries.push({
         date: current.date,
         kind: current.kind,
         title: current.title,
         body: current.body.join("\n").trim(),
+        line: current.line,
+        endLine,
       });
     }
   };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     const m = line.match(ENTRY_HEADER_RE);
     if (m) {
-      flush();
+      flush(i);
       const remainder = m[2]!.trim();
       const pipe = remainder.indexOf("|");
       const kind = pipe === -1 ? "" : remainder.slice(0, pipe).trim();
       const title = (pipe === -1 ? remainder : remainder.slice(pipe + 1)).trim();
-      current = { date: m[1]!, kind, title, body: [] };
+      current = { date: m[1]!, kind, title, body: [], line: i + 1 };
     } else if (current) {
       current.body.push(line);
     }
   }
-  flush();
+  flush(lines.length);
   return entries;
 }
 
@@ -263,18 +270,6 @@ export function selectBatchEntries(
   // Dropping a sync can leave context older than the oldest sync kept.
   context = context.filter((e) => e.date >= syncs[0]!.date);
   return { syncs, context };
-}
-
-/** The raw `log.md` line that parses to `entry`'s header, for the git lookup:
- *  the parsed fields lose the line's own spacing. Null when none does. */
-export function rawHeaderLine(logText: string, entry: LogEntry): string | null {
-  for (const line of logText.split("\n")) {
-    const m = line.match(ENTRY_HEADER_RE);
-    if (!m || m[1] !== entry.date) continue;
-    const parsed = parseLogEntries(line)[0];
-    if (parsed && parsed.kind === entry.kind && parsed.title === entry.title) return line;
-  }
-  return null;
 }
 
 const TRUNCATION_NOTE = "\n\n…[entry truncated to fit the digest budget]";
@@ -493,12 +488,11 @@ ${renderEntriesBlock(entries)}
 Write the "what's new" digest as 4–6 markdown bullets.`;
 
   // The pages each sync changed come from git, read while the model runs. A
-  // truncated sync keeps its header, so its line is still found.
+  // truncated sync keeps the line range `parseLogEntries` gave it.
   const syncsPromise: Promise<DigestSync[] | undefined> = batch
     ? Promise.all(
         [...batch.syncs].reverse().map(async (e): Promise<DigestSync> => {
-          const line = rawHeaderLine(logText, e);
-          const pages = line ? await changedPagesForEntry(root, line, index.resolveRelPath) : null;
+          const pages = e.line && e.endLine ? await changedPagesForEntry(root, e.line, e.endLine, index.resolveRelPath) : null;
           return { date: e.date, title: e.title, pages };
         }),
       )
