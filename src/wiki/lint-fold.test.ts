@@ -16,6 +16,7 @@ test("foldedIntoNamed: a flow list, a bare link, `none` and a block list name so
   expect(foldedIntoNamed("folded_into : none # a one-off run")).toBe(true);
   expect(foldedIntoNamed('folded_into:\n  - "[[projects/x/reader]]"\ntags: [a]')).toBe(true);
   expect(foldedIntoNamed('folded_into:\r\n  - "[[a]]"\r\n')).toBe(true);
+  expect(foldedIntoNamed('folded_into:\n- "[[a]]"\ntags: [a]')).toBe(true);
 });
 
 test("foldedIntoNamed: no key, a bare key, an empty list, a comment and another key's lines name nothing", () => {
@@ -48,6 +49,8 @@ test("when the frontmatter is not YAML, the key's own entry is still read: last 
   expect(foldedIntoNamed(`${broken}\nfolded_into: none`)).toBe(true);
   expect(foldedIntoNamed(`folded_into:\n  - "[[projects/x]]"\n${broken}`)).toBe(true);
   expect(foldedIntoNamed(`${broken}\r\nfolded_into: none\r`)).toBe(true);
+  // A block list at column 0 belongs to the key above it.
+  expect(foldedIntoNamed(`${broken}\nfolded_into:\n- "[[a]]"\ntags: [a]`)).toBe(true);
   expect(foldedIntoNamed(`${broken}\n"folded_into": none`)).toBe(true);
   expect(foldedIntoNamed(`folded_into:\n${broken}\nfolded_into: none`)).toBe(true);
   expect(foldedIntoNamed(`folded_into: none\n${broken}\nfolded_into:`)).toBe(false);
@@ -99,6 +102,9 @@ test("lintWiki reports plan-not-folded only when the wiki declares foldCheck, an
   await Bun.write(path.join(root, "plans/none.md"), plan("status_date: 2026-11-14\nfolded_into: none\n"));
   await Bun.write(path.join(root, "plans/old.md"), plan("status_date: 2026-11-13\n"));
   await Bun.write(path.join(root, "plans/in-flight.md"), plan("status_date: 2026-11-14\n").replace("shipped", "in-flight"));
+  // A retired page and a reserved basename are not subjects.
+  await Bun.write(path.join(root, "plans/retired.md"), plan("status_date: 2026-11-14\nsignal: none\nsignal-reason: replaced\n"));
+  await Bun.write(path.join(root, "plans/index.md"), plan("status_date: 2026-11-14\n"));
   await Bun.write(path.join(root, "projects/reader.md"), "---\ntitle: Reader\nupdated: 2026-11-14\n---\n\n# Reader\n\nBody.\n");
   const got = async () => (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.check === "plan-not-folded").map((f) => f.relPath).sort();
   expect(await got()).toEqual([]);
