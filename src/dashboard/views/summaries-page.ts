@@ -163,6 +163,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     /* Page head: title + live presence + the collapsed paste-article affordance. */
     .sum-page-head {
       display: flex;
+      flex-wrap: wrap; /* the Discover + Prompts links overflowed 390 px by 43 px */
       align-items: center;
       gap: 12px;
       margin-bottom: 16px;
