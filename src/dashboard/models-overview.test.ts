@@ -724,3 +724,14 @@ test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its
     expect(VERTEX_NOTE_TEXT[k]).toMatch(/CLAUDE_CODE_USE_VERTEX is not/);
   }
 });
+
+test("youtube-discovery watcher: the Haiku router label names the watcher bot's backend (fix round 1 batch 6)", async () => {
+  const watchers = [watcher("YouTube Discovery", "youtube-discovery", {})];
+  const o = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis", { connector: "claude-sdk", haikuBackend: "anthropic" })], watchers }),
+  );
+  const yd = o.pipeline.find((p) => p.job.startsWith("Watcher: YouTube Discovery"))!;
+  expect(yd.backend).toBe("Haiku router (anthropic)");
+  expect(yd.matchRecentName).toBe("youtube-discovery");
+});

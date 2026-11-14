@@ -193,6 +193,9 @@ export async function checkYouTubeDiscovery(
     return new Set([...captured, ...stored, ...shelved]);
   };
   const opts = { deadlineAt };
+  // The owner's interest profile, read once per run (it changes weekly at most).
+  let profile: Promise<string | null> | null = null;
+  const loadProfile = () => (profile ??= deps.profile(watcher.userId, botName));
 
   let shelves = 0;
   let stoppedAt: number | null = null;
@@ -209,7 +212,7 @@ export async function checkYouTubeDiscovery(
         rankCall: (p, b, t) => deps.services.rankCall(p, b, t, opts),
         search: deps.services.search,
         knownIds,
-        profile: () => deps.profile(watcher.userId, botName),
+        profile: loadProfile,
       },
       botConfig,
       tracer,

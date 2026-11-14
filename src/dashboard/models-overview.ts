@@ -780,10 +780,12 @@ export async function assembleModelsOverview(
       continue;
     }
     if (w.type === "youtube-discovery") {
-      // Two `callHaikuWithFallback` calls per seed (queries, rank) on the bot's Haiku router.
+      // Two `callHaikuWithFallback` calls per seed (queries, rank) on the watcher bot's Haiku router.
+      const wb = bots.find((b) => b.name === w.botName);
+      const wBackend = wb ? resolveBackendWithReason({ connector: wb.connector, haikuBackend: wb.haikuBackend }).backend : "cli";
       pipeline.push({
         job: `Watcher: ${w.name} · ${w.botName}`,
-        backend: `Haiku router (${w.botName})`,
+        backend: `Haiku router (${wBackend})`,
         model: { value: HAIKU_DEFAULT_MODEL, origin: "default" },
         note: "per seed: queries + rank",
         used: usedHaikuForSource("youtube-discover-rank", w.botName),

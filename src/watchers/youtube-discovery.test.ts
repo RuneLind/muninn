@@ -114,7 +114,8 @@ describe("checkYouTubeDiscovery", () => {
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 1.md", "ai/Seed 2.md", "ai/Seed 3.md"]);
     expect(saved.every((s) => s.run.origin === "watcher" && s.run.seedSource === "youtube" && s.run.botName === "invented-bot")).toBe(true);
     expect(saved[0]!.run.seedVideoId).toBe(seedVid(1));
-    expect(profileCalls).toEqual(["owner-1|invented-bot", "owner-1|invented-bot", "owner-1|invented-bot"]);
+    // Loaded once per run, not once per seed (the watchers notes' interest-profile rule).
+    expect(profileCalls).toEqual(["owner-1|invented-bot"]);
     expect(Object.fromEntries([...marks].map(([k, v]) => [k, v.outcome]))).toEqual({
       [HEALTH_HUGINN]: "ok",
       [HEALTH_MODEL]: "ok",
