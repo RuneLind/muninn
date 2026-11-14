@@ -10,7 +10,7 @@
  *
  * The cutoff is `.wiki-reader.json` `foldCheck`: `{ "since": "YYYY-MM-DD" }`. A
  * wiki that declares none is not checked, and a plan shipped before the day is
- * left alone: mimir held 223 shipped plans on 2026-11-13, none with the key.
+ * left alone: mimir held 222 shipped plans on 2026-11-14, none with the key.
  * The check reads only whether the key names something; it does not resolve
  * the links (check 1 reads body links, not frontmatter).
  */
