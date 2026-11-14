@@ -366,3 +366,16 @@ describe("details probe: abandoned and unavailable (fix round 1)", () => {
     expect(await probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr: "ERROR: HTTP Error 429", exitCode: 1 }))).toBeNull();
   });
 });
+
+describe("details probe: yt-dlp's real wording (fix round 2)", () => {
+  const answer = (stderr: string) => probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr, exitCode: 1 }));
+  test("a missing video's measured answer is 'unavailable'", async () => {
+    // yt-dlp 2026.08.19 on a bogus id (measured 2026-11-14).
+    expect(await answer(`ERROR: [youtube] ${ID_A}: This video is unavailable`)).toBe("unavailable");
+    expect(await answer(`ERROR: [youtube] ${ID_A}: This video is not available`)).toBe("unavailable");
+  });
+  test("YouTube's throttle answer is a plain failure, never 'unavailable'", async () => {
+    expect(await answer(`ERROR: [youtube] ${ID_A}: Video unavailable. This content isn't available, try again later.`)).toBeNull();
+    expect(await answer(`ERROR: [youtube] ${ID_A}: Sign in to confirm you're not a bot`)).toBeNull();
+  });
+});

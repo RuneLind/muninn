@@ -303,8 +303,17 @@ function inDetailsQueue<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** yt-dlp's answer for a video that is gone: unavailable, private or removed (measured stderr wording). */
-const UNAVAILABLE_RE = /Video unavailable|Private video|has been removed|This video is no longer available/i;
+/**
+ * yt-dlp's answer for a video that is gone. Measured 2026-11-14 on a bogus id:
+ * "This video is unavailable". YouTube's throttle answer also says "Video
+ * unavailable", so a transient wording is checked first and is never "gone".
+ */
+const TRANSIENT_RE = /try again later|not a bot|HTTP Error 429|Too Many Requests/i;
+const UNAVAILABLE_RE = /video (?:is )?unavailable|video is not available|Private video|has been removed|no longer available/i;
+
+export function isUnavailableAnswer(stderr: string): boolean {
+  return !TRANSIENT_RE.test(stderr) && UNAVAILABLE_RE.test(stderr);
+}
 
 /**
  * One video's details. `"unavailable"` when YouTube says the video is gone;
@@ -322,7 +331,7 @@ export async function probeDiscoverDetails(
     if (signal?.aborted) return null;
     try {
       const res = await run(args, DISCOVER_DETAILS_TIMEOUT_MS, "yt-dlp details");
-      if (res.exitCode !== 0) return UNAVAILABLE_RE.test(res.stderr) ? "unavailable" : null;
+      if (res.exitCode !== 0) return isUnavailableAnswer(res.stderr) ? "unavailable" : null;
       return parseDetailsProbe(res.stdout, videoId);
     } catch {
       return null;

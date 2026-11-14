@@ -349,10 +349,13 @@ export function registerSummariesDiscoverRoutes(
         return fail(c, 410, "video_unavailable", "This video is no longer available on YouTube.");
       }
       let entry = probing.get(videoId);
-      if (!entry) {
+      // An entry whose last waiter left is aborted: joining it would answer a probe that never runs.
+      if (!entry || entry.ctl.signal.aborted) {
         const ctl = new AbortController();
         const created = { result: deps.probeDetails(videoId, ctl.signal), waiters: 0, ctl };
-        created.result = created.result.finally(() => probing.delete(videoId));
+        created.result = created.result.finally(() => {
+          if (probing.get(videoId) === created) probing.delete(videoId);
+        });
         probing.set(videoId, created);
         entry = created;
       }

@@ -606,3 +606,65 @@ describe("details: unavailable and abandoned (fix round 1)", () => {
     await Promise.resolve(pending).catch(() => undefined);
   });
 });
+
+describe("details: a request after the last waiter left (fix round 2)", () => {
+  test("joins a fresh probe, not the aborted one", async () => {
+    detailsCache.set(ID(1), null);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    probeAnswer = async (_id, signal) => {
+      await held;
+      return signal?.aborted ? null : DETAILS;
+    };
+    const a = app();
+    const ctl = new AbortController();
+    const first = a.request("/api/summaries/discover/details", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ videoId: ID(1) }),
+      signal: ctl.signal,
+    });
+    await Bun.sleep(5);
+    ctl.abort();
+    await Bun.sleep(5);
+    const second = postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    await Bun.sleep(5);
+    release();
+    await Promise.resolve(first).catch(() => undefined);
+    const res = await second;
+    expect(res.status).toBe(200);
+    expect(probes).toEqual([ID(1), ID(1)]);
+  });
+});
+
+describe("details: the aborted probe settling later (fix round 2)", () => {
+  test("does not drop the fresh probe's entry: a third request joins the fresh probe", async () => {
+    detailsCache.set(ID(1), null);
+    const releases: (() => void)[] = [];
+    probeAnswer = async (_id, signal) => {
+      await new Promise<void>((r) => releases.push(r));
+      return signal?.aborted ? null : DETAILS;
+    };
+    const a = app();
+    const ctl = new AbortController();
+    const first = a.request("/api/summaries/discover/details", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ videoId: ID(1) }),
+      signal: ctl.signal,
+    });
+    await Bun.sleep(5);
+    ctl.abort();
+    const second = postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    await Bun.sleep(5);
+    releases[0]!(); // the aborted probe settles first
+    await Promise.resolve(first).catch(() => undefined);
+    await Bun.sleep(5);
+    const third = postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    await Bun.sleep(5);
+    expect(probes).toEqual([ID(1), ID(1)]);
+    releases[1]!();
+    expect((await second).status).toBe(200);
+    expect((await third).status).toBe(200);
+  });
+});
