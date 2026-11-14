@@ -69,6 +69,7 @@ import { kickWorkSessionsRefresh, workSessionsFor, workSessionsIdentityFor } fro
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
 import { parseWorkMapReaderConfig, type WorkMapKind } from "./work-map/kind.ts";
+import { parseWhatsNewReaderConfig, type WhatsNewMode } from "./whats-new-config.ts";
 
 const log = getLog("wiki", "store");
 
@@ -261,6 +262,13 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   workMap?: { kind: WorkMapKind };
+  /**
+   * Which digest the What's new card builds (`whatsNew: {"mode": "batch"}`,
+   * `whats-new-config.ts`). Absent ⇒ `default`. A bad block or mode warns and
+   * reads as `default`. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  whatsNew?: { mode: WhatsNewMode };
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -2226,6 +2234,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   if (workMap.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "workMap", reason: workMap.warning });
   }
+  const whatsNew = parseWhatsNewReaderConfig(obj.whatsNew);
+  if (whatsNew.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
+  }
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
@@ -2256,6 +2268,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     foldCheck: foldCheck.config,
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
+    whatsNew: { mode: whatsNew.mode },
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

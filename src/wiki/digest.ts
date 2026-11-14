@@ -27,6 +27,7 @@ import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts"
 import { getLog } from "../logging.ts";
 import { isCalendarDay } from "../format/calendar-day.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
+import { changedPagesForEntry, type ChangedPage } from "./digest-changed-pages.ts";
 
 const log = getLog("wiki", "digest");
 
@@ -36,6 +37,15 @@ export const DIGEST_WINDOW_DAYS = 14;
 export const DIGEST_MAX_ENTRIES = 30;
 /** Byte budget for the entries block handed to the model. */
 export const DIGEST_MAX_BYTES = 15_000;
+/** Batch mode (`whatsNew: {"mode": "batch"}`): the log kind that marks a sync. */
+export const BATCH_SYNC_KIND = "update";
+/** Batch mode: at most this many sync entries, newest kept. */
+export const BATCH_MAX_SYNCS = 3;
+/** Batch mode: sync entries older than this many days before the newest entry are not read. */
+export const BATCH_WINDOW_DAYS = 45;
+/** Batch mode's byte budget. Larger than {@link DIGEST_MAX_BYTES}: huginn-nav's
+ *  2026-10-31 sync entry alone is about 5 KB. */
+export const BATCH_MAX_BYTES = 40_000;
 /** Timeout for the single digest connector call. Kept well under the global
  *  `CLAUDE_TIMEOUT_MS` (120s) so a cold connector can't hold the GET open — the
  *  route degrades to `{ digest: null, error }` on timeout. */
@@ -50,6 +60,8 @@ export interface LogEntry {
   title: string;
   /** Free-markdown body under the header, trimmed (may be empty). */
   body: string;
+  /** 1-based line of the header in `log.md`. Set by {@link parseLogEntries}. */
+  line?: number;
 }
 
 /** The digest returned to the route + persisted by a future scheduler. `bullets`
@@ -66,6 +78,16 @@ export interface WikiDigest {
   /** Earliest / latest entry date in the summarized window (`YYYY-MM-DD`). */
   fromDate: string;
   toDate: string;
+  /** Batch mode only: the sync entries summarized, newest first, each with the
+   *  pages its commit changed (null when no commit could be read for it). */
+  syncs?: DigestSync[];
+}
+
+/** One sync entry in a batch digest. */
+export interface DigestSync {
+  date: string;
+  title: string;
+  pages: ChangedPage[] | null;
 }
 
 const ENTRY_HEADER_RE = /^##\s+\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$/;
@@ -81,7 +103,7 @@ const ENTRY_HEADER_RE = /^##\s+\[(\d{4}-\d{2}-\d{2})\]\s*(.*)$/;
 export function parseLogEntries(logText: string): LogEntry[] {
   const lines = logText.split("\n");
   const entries: LogEntry[] = [];
-  let current: { date: string; kind: string; title: string; body: string[] } | null = null;
+  let current: { date: string; kind: string; title: string; body: string[]; line: number } | null = null;
 
   const flush = () => {
     if (current) {
@@ -90,11 +112,13 @@ export function parseLogEntries(logText: string): LogEntry[] {
         kind: current.kind,
         title: current.title,
         body: current.body.join("\n").trim(),
+        line: current.line,
       });
     }
   };
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     const m = line.match(ENTRY_HEADER_RE);
     if (m) {
       flush();
@@ -102,7 +126,7 @@ export function parseLogEntries(logText: string): LogEntry[] {
       const pipe = remainder.indexOf("|");
       const kind = pipe === -1 ? "" : remainder.slice(0, pipe).trim();
       const title = (pipe === -1 ? remainder : remainder.slice(pipe + 1)).trim();
-      current = { date: m[1]!, kind, title, body: [] };
+      current = { date: m[1]!, kind, title, body: [], line: i + 1 };
     } else if (current) {
       current.body.push(line);
     }
@@ -151,10 +175,7 @@ export function selectRecentEntries(
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   if (valid.length === 0) return [];
 
-  const today = new Date(now()).toISOString().slice(0, 10);
-  const nonFuture = valid.filter((e) => e.date <= today);
-  const anchorSet = nonFuture.length ? nonFuture : valid;
-  const anchor = anchorSet[anchorSet.length - 1]!.date;
+  const anchor = windowAnchor(valid, now);
   const cutoff = shiftDate(anchor, -windowDays);
 
   // Window is [cutoff, anchor] — the upper bound excludes future outliers.
@@ -175,6 +196,77 @@ export function selectRecentEntries(
     selected = [truncateEntryToBudget(selected[0]!, maxBytes)];
   }
   return selected;
+}
+
+/** The newest non-future date among `valid` (sorted ascending, non-empty), or
+ *  the newest date when all are future — step 1 of {@link selectRecentEntries}. */
+function windowAnchor(valid: LogEntry[], now: () => number): string {
+  const today = new Date(now()).toISOString().slice(0, 10);
+  const nonFuture = valid.filter((e) => e.date <= today);
+  const anchorSet = nonFuture.length ? nonFuture : valid;
+  return anchorSet[anchorSet.length - 1]!.date;
+}
+
+/** A batch digest's input: the sync entries, then the other entries since the
+ *  oldest of them. Both oldest→newest. */
+export interface BatchSelection {
+  syncs: LogEntry[];
+  context: LogEntry[];
+}
+
+/**
+ * Select batch mode's input, or null when the window holds no sync entry (the
+ * caller then builds the default digest). Validation and the anchor are
+ * {@link selectRecentEntries}' steps 0–1. Then:
+ *
+ *  1. **syncs** — the newest {@link BATCH_MAX_SYNCS} entries of kind
+ *     {@link BATCH_SYNC_KIND} within {@link BATCH_WINDOW_DAYS} of the anchor.
+ *  2. **context** — every other entry in the window dated on or after the
+ *     oldest sync.
+ *  3. **bytes** — under {@link BATCH_MAX_BYTES}, context goes first (oldest
+ *     first), then the oldest syncs; a lone sync still over is truncated.
+ */
+export function selectBatchEntries(
+  entries: LogEntry[],
+  opts: { maxSyncs?: number; windowDays?: number; maxBytes?: number; now?: () => number } = {},
+): BatchSelection | null {
+  const maxSyncs = opts.maxSyncs ?? BATCH_MAX_SYNCS;
+  const windowDays = opts.windowDays ?? BATCH_WINDOW_DAYS;
+  const maxBytes = opts.maxBytes ?? BATCH_MAX_BYTES;
+  const now = opts.now ?? Date.now;
+
+  // Oldest→newest within a day too: the sort is stable, so a newest-first log
+  // (huginn-nav prepends) is reversed first, or two syncs of one day would
+  // swap places and the count cap could keep the older one. The file's order
+  // is the majority of its adjacent date steps; a log of one date reads as
+  // appended.
+  const dated = entries.filter((e) => isValidCalendarDate(e.date));
+  let steps = 0;
+  for (let i = 1; i < dated.length; i++) {
+    if (dated[i]!.date < dated[i - 1]!.date) steps++;
+    else if (dated[i]!.date > dated[i - 1]!.date) steps--;
+  }
+  const newestFirst = steps > 0;
+  const valid = (newestFirst ? [...dated].reverse() : dated).sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0,
+  );
+  if (valid.length === 0) return null;
+  const anchor = windowAnchor(valid, now);
+  const cutoff = shiftDate(anchor, -windowDays);
+  const inWindow = valid.filter((e) => e.date >= cutoff && e.date <= anchor);
+
+  let syncs = inWindow.filter((e) => e.kind.toLowerCase() === BATCH_SYNC_KIND).slice(-maxSyncs);
+  if (syncs.length === 0) return null;
+  const chosen = new Set(syncs);
+  let context = inWindow.filter((e) => !chosen.has(e) && e.date >= syncs[0]!.date);
+
+  const size = () => Buffer.byteLength(renderEntriesBlock([...syncs, ...context]), "utf8");
+  while (context.length > 0 && size() > maxBytes) context = context.slice(1);
+  while (syncs.length > 1 && size() > maxBytes) syncs = syncs.slice(1);
+  if (size() > maxBytes) syncs = [truncateEntryToBudget(syncs[0]!, maxBytes)];
+  // Dropping a sync can leave context older than the oldest sync kept.
+  context = context.filter((e) => e.date >= syncs[0]!.date);
+  return { syncs, context };
 }
 
 const TRUNCATION_NOTE = "\n\n…[entry truncated to fit the digest budget]";
@@ -302,6 +394,16 @@ Rules:
 - When you name a specific wiki page, wrap it in [[double brackets]] so it becomes a link (e.g. [[knowledge-graph]]). Only do this for names that look like real page titles from the entries.
 - Be terse and specific. No preamble, no heading, no closing remark — just the bullets.`;
 
+export const BATCH_DIGEST_SYSTEM_PROMPT = `You write the "what's new" digest for a domain knowledge wiki that is updated in large batch syncs. The input holds the newest sync log entries, and other log entries from the same period for context. Show the reader what the syncs changed, area by area.
+
+Rules:
+- Output ONLY markdown: one "### <area>" heading per domain area, at most 10, the areas the newest sync touched first.
+- Under each heading, 1 to 3 bullets, one line each: what changed, the issue keys it names (such as MELOSYS-1234) and the pages.
+- When you name a specific wiki page, wrap it in [[double brackets]] so it becomes a link. Only do this for names that look like real page titles from the entries.
+- When there is more than one sync, end with a short "### Earlier syncs" group: one bullet per older sync, with its date and what it covered.
+- Write in the language the log entries are written in.
+- No preamble and no closing remark.`;
+
 /** Read `log.md`'s mtime (epoch ms) for a wiki root, or null when it's absent. */
 export async function readLogMtimeMs(root: string): Promise<number | null> {
   try {
@@ -350,20 +452,48 @@ export async function generateWikiDigest(
     return null;
   }
 
-  const entries = selectRecentEntries(parseLogEntries(logText), { now });
+  const parsed = parseLogEntries(logText);
+  // Batch mode falls back to the default digest when the window holds no sync.
+  const batch = index.readerConfig?.whatsNew?.mode === "batch" ? selectBatchEntries(parsed, { now }) : null;
+  const entries = batch
+    ? [...batch.syncs, ...batch.context].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    : selectRecentEntries(parsed, { now });
+  // `entries` sets only the range and the count in batch mode; the prompt
+  // takes the two lists apart.
   if (entries.length === 0) return null;
 
   const fromDate = entries[0]!.date;
   const toDate = entries[entries.length - 1]!.date;
-  const block = renderEntriesBlock(entries);
 
   const wikiName = root.split("/").pop() ?? "wiki";
-  const userPrompt = `Wiki: ${wikiName}
+  const userPrompt = batch
+    ? `Wiki: ${wikiName}
+The newest syncs (${batch.syncs.length}), oldest first:
+
+${renderEntriesBlock(batch.syncs)}
+${batch.context.length ? `
+Other log entries from the same period, for context:
+
+${renderEntriesBlock(batch.context)}
+` : ""}
+Write the "what's new" digest grouped by area.`
+    : `Wiki: ${wikiName}
 Recent log entries (${fromDate} – ${toDate}), oldest first:
 
-${block}
+${renderEntriesBlock(entries)}
 
 Write the "what's new" digest as 4–6 markdown bullets.`;
+
+  // The pages each sync changed come from git, read while the model runs. A
+  // truncated sync keeps the header line `parseLogEntries` gave it.
+  const syncsPromise: Promise<DigestSync[] | undefined> = batch
+    ? Promise.all(
+        [...batch.syncs].reverse().map(async (e): Promise<DigestSync> => {
+          const pages = e.line ? await changedPagesForEntry(root, e.line, index.resolveRelPath) : null;
+          return { date: e.date, title: e.title, pages };
+        }),
+      )
+    : Promise.resolve(undefined);
 
   // Observability. The digest fires on every /wiki open (cache miss) and used to
   // leave NOTHING behind — no trace, no /agents row — so a slow or failing digest
@@ -387,10 +517,10 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     result = await tracedOneShot(tracer, "claude", userPrompt, config, botConfig, {
       // The digest summarizes the log.md entries in the prompt; no tools.
       toolSurface: "none",
-      systemPrompt: DIGEST_SYSTEM_PROMPT,
+      systemPrompt: batch ? BATCH_DIGEST_SYSTEM_PROMPT : DIGEST_SYSTEM_PROMPT,
       timeoutMs,
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
-      startAttrs: { wiki: wikiName, entries: entries.length, fromDate, toDate },
+      startAttrs: { wiki: wikiName, entries: entries.length, fromDate, toDate, mode: batch ? "batch" : "default" },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -425,6 +555,7 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
   if (!raw) return null;
 
   const bullets = markPageMentions(raw, index.resolve);
+  const syncs = await syncsPromise;
   log.info("Wiki digest generated: {entries} entries {from}..{to} from {root}", {
     entries: entries.length,
     from: fromDate,
@@ -439,5 +570,6 @@ Write the "what's new" digest as 4–6 markdown bullets.`;
     entryCount: entries.length,
     fromDate,
     toDate,
+    ...(syncs ? { syncs } : {}),
   };
 }

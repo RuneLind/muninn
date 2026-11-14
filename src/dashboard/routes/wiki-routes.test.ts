@@ -2156,6 +2156,116 @@ describe("GET /api/wiki/digest", () => {
     // The wikilink resolved to a real page ⇒ rendered as an in-reader anchor.
     expect(body.digest!.html).toContain('data-wiki-page="knowledge-graph"');
   });
+
+  test("batch digest: each sync's pages render as links by relPath, a root page and same-stem pages included", async () => {
+    await mkdir(path.join(root, "concepts"), { recursive: true });
+    await mkdir(path.join(root, "analyses"), { recursive: true });
+    await Bun.write(path.join(root, "concepts", "Lovvalg.md"), "---\ntitle: Lovvalg\n---\n\nA.");
+    await Bun.write(path.join(root, "analyses", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse]\n---\n\nB.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "### Area\n- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync",
+          pages: [
+            { relPath: "knowledge-graph.md", title: "knowledge-graph" },
+            { relPath: "concepts/Lovvalg.md", title: "Lovvalg" },
+            { relPath: "analyses/Lovvalg.md", title: "Lovvalg [analyse]" },
+          ],
+        },
+        { date: "2026-10-01", title: "Uncommitted", pages: null },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as {
+      digest: { syncs: { date: string; title: string; count: number | null; html: string }[] };
+    };
+    const [sync, none] = body.digest.syncs;
+    expect(sync!.count).toBe(3);
+    expect(sync!.html).toContain('data-relpath="knowledge-graph.md"');
+    expect(sync!.html).toContain('data-relpath="concepts/Lovvalg.md"');
+    expect(sync!.html).toContain('data-relpath="analyses/Lovvalg.md"');
+    expect(sync!.html).not.toContain("wiki-link-missing");
+    expect(none).toEqual({ date: "2026-10-01", title: "Uncommitted", count: null, html: "" });
+  });
+
+  test("batch digest: a sync title's wikilinks read as text", async () => {
+    await mkdir(path.join(root, "c"), { recursive: true });
+    await Bun.write(path.join(root, "c", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse] | utkast\n---\n\nA.");
+    await Bun.write(path.join(root, "c", "a|b.md"), "---\ntitle: Pipe\n---\n\nB.");
+    await Bun.write(path.join(root, "c", "x].md"), "---\ntitle: Bracket\n---\n\nC.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync of [[knowledge-graph]] and [[c/Lovvalg|lovvalg]]\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync of [[knowledge-graph]] and [[c/Lovvalg|lovvalg]]",
+          pages: [
+            { relPath: "c/Lovvalg.md", title: "Lovvalg [analyse] | utkast" },
+            { relPath: "c/a|b.md", title: "Pipe" },
+            { relPath: "c/x].md", title: "Bracket" },
+          ],
+        },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as { digest: { syncs: { title: string; html: string }[] } };
+    const [sync] = body.digest.syncs;
+    expect(sync!.title).toBe("Sync of knowledge-graph and lovvalg");
+  });
+
+  test("batch digest: page titles show as written and odd file names still link", async () => {
+    await mkdir(path.join(root, "c"), { recursive: true });
+    await Bun.write(path.join(root, "c", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse] | utkast\n---\n\nA.");
+    await Bun.write(path.join(root, "c", "a|b.md"), "---\ntitle: Pipe\n---\n\nB.");
+    await Bun.write(path.join(root, "c", "x].md"), "---\ntitle: Bracket\n---\n\nC.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync",
+          pages: [
+            { relPath: "c/Lovvalg.md", title: "Lovvalg [analyse] | utkast" },
+            { relPath: "c/a|b.md", title: "Pipe" },
+            { relPath: "c/x].md", title: "Bracket" },
+            { relPath: "c/gone.md", title: "<b>Gone</b>" },
+          ],
+        },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as { digest: { syncs: { title: string; html: string }[] } };
+    const [sync] = body.digest.syncs;
+    expect(sync!.html).toContain("<li>&lt;b&gt;Gone&lt;/b&gt;</li>");
+    expect(sync!.html).toContain('href="/wiki?wiki=digwiki&relPath=c%2FLovvalg.md"');
+    expect(sync!.html).not.toContain("wiki-link-missing");
+    expect(sync!.html).toContain('data-relpath="c/Lovvalg.md">Lovvalg [analyse] | utkast</a>');
+    expect(sync!.html).toContain('data-relpath="c/a|b.md">Pipe</a>');
+    expect(sync!.html).toContain('data-relpath="c/x].md">Bracket</a>');
+  });
 });
 
 /**

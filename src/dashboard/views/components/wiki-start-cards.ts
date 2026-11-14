@@ -151,6 +151,9 @@ interface WikiDigest {
   entryCount: number;
   fromDate: string;
   toDate: string;
+  /** Batch mode: the syncs summarized, newest first. `count` is null when no
+   *  commit could be read for the entry; `html` is the server-rendered page list. */
+  syncs?: { date: string; title: string; count: number | null; html: string }[];
 }
 /** Cached rendered card body — reused across renderStart calls (tab switches).
  *  Retained across a failed refresh so a transient error never drops the last
@@ -186,8 +189,23 @@ function buildWhatsNewInner(d: WikiDigest): string {
     '<button class="wiki-wn-refresh" id="wikiWhatsNewRefresh" title="Regenerate digest">↻</button>' +
     "</div>" +
     '<div class="wiki-wn-bullets">' + d.html + "</div>" +
+    buildChangedPages(d) +
     (gen ? '<div class="wiki-wn-gen">' + esc(gen) + "</div>" : "")
   );
+}
+
+/** Batch mode: one collapsed «N pages changed» list per sync that has pages. */
+function buildChangedPages(d: WikiDigest): string {
+  if (!d.syncs) return "";
+  return d.syncs
+    .filter((s) => s.count)
+    .map(
+      (s) =>
+        '<details class="wiki-wn-changed"><summary>' +
+        esc(s.count + (s.count === 1 ? " page" : " pages") + " changed · " + s.date + " " + s.title) +
+        "</summary>" + s.html + "</details>",
+    )
+    .join("");
 }
 
 /** Paint an inline error + retry affordance, keeping the last good digest (if

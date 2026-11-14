@@ -161,7 +161,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // -> 865,897 (294,423), so the pin moves to 866,000.
 // 2026-11-13, its fix round 1 batch 2 (Escape on the lane button closes its panel): 866,050 (294,463),
 // so the pin moves to 866,200.
-const WIKI_CLIENT_MAX_BYTES = 866_200;
+// 2026-11-14, What's new batch mode (the collapsed «N pages changed» list per sync): 866,187 -> 866,440
+// (294,614 gzipped), so the pin moves to 866,600.
+const WIKI_CLIENT_MAX_BYTES = 866_600;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

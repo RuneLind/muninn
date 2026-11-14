@@ -84,6 +84,13 @@ function readerCheckSlot(rawAttrs: string): string {
   return checkSlotHtml(rawAttrs);
 }
 
+/** The reader's link to one page, showing `text` (escaped here). `wiki` is the
+ *  registered wiki name for the `href`; omit it for the default wiki. */
+export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string): string {
+  const wikiQuery = wiki ? `wiki=${encodeURIComponent(wiki)}&` : "";
+  return `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`;
+}
+
 export function renderWikiHtml(
   markdown: string,
   resolve: (target: string) => WikiPageMeta | undefined,
@@ -154,7 +161,7 @@ export function renderWikiHtml(
         // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
         // link on mimir opened jarvis) and the page (the stem re-resolved to
         // whichever registered first).
-        `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
+        wikiPageAnchor(meta, text, opts?.wiki)
       : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);

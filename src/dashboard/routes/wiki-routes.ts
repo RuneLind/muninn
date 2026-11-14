@@ -28,7 +28,9 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
-import { questionRenderOptionsFor, readerPayload, renderWikiHtml } from "../../wiki/render.ts";
+import { questionRenderOptionsFor, readerPayload, renderWikiHtml, wikiPageAnchor } from "../../wiki/render.ts";
+import { escapeHtml } from "../../format/markdown-core.ts";
+import { wikiLinksAsText } from "../../wiki/decision-text.ts";
 import { loadPageFiles, resolveContainedFile } from "../../wiki/page-files.ts";
 import {
   listWikis,
@@ -2399,8 +2401,31 @@ export function registerWikiToolRoutes(
     if (!digest) return c.json({ digest: null });
     // Render the stored markdown bullets to reader HTML (wikilinks → in-reader
     // page anchors) at response time — cheap, and keeps the cached form plain.
+    // Batch mode: each sync's changed pages as reader links built from the
+    // page itself, so a title or file name holding `[`, `]` or `|` shows and
+    // links as written. A page gone from the index since shows as text. The
+    // sync's title reads its wikilinks as their text.
+    const syncs = digest.syncs?.map((s) => ({
+      date: s.date,
+      title: wikiLinksAsText(s.title),
+      count: s.pages?.length ?? null,
+      html: s.pages?.length
+        ? "<ul>" +
+          s.pages
+            .map((p) => {
+              const meta = index.resolveRelPath(p.relPath);
+              return "<li>" + (meta ? wikiPageAnchor(meta, p.title, entry.name) : escapeHtml(p.title)) + "</li>";
+            })
+            .join("") +
+          "</ul>"
+        : "",
+    }));
     return c.json({
-      digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }) },
+      digest: {
+        ...digest,
+        html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }),
+        ...(syncs ? { syncs } : {}),
+      },
     });
   });
 

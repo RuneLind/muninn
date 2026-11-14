@@ -59,3 +59,4 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 - Corrective Retrieval (Path D, in huginn) — from the root `CLAUDE.md`
 - Mermaid in the reader (`wiki-mermaid.ts`, `mermaid-theme.ts`, `scroll-stop.ts`) [trap]
 - Section bar (`wiki-section-bar.ts`) [trap]
+- What's new — batch mode (`digest.ts`, `digest-changed-pages.ts`, `.wiki-reader.json` `whatsNew`) [trap]
