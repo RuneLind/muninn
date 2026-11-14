@@ -14,6 +14,7 @@ import {
   type SummariesDiscoverDeps,
 } from "./summaries-discover.ts";
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
+import { runDiscovery } from "../../youtube/discover-run.ts";
 import type { YouTubeHit } from "../../youtube/discover.ts";
 import type {
   DiscoverHitInput,
@@ -544,5 +545,25 @@ describe("GET /summaries/discover", () => {
     expect(json).toBeDefined();
     expect(JSON.parse(json!).shelves[0].seedTitle).toBe("Invented </script><b>seed</b>");
     expect(html).not.toContain("</script><b>seed");
+  });
+});
+
+describe("runDiscovery failure causes", () => {
+  test("a failed read, queries call and rank call carry the error text for the caller's log", async () => {
+    const base = {
+      readRaw: async () => RAW,
+      queriesCall: async () => JSON.stringify([{ query: "agent evals", why: "" }]),
+      rankCall: async () => "[]",
+      search: async () => [hit(ID(1))],
+      knownIds: async () => new Set<string>(),
+      profile: async () => null,
+    };
+    const target = { collection: "youtube-summaries", docId: DOC };
+    const read = await runDiscovery({ ...base, readRaw: async () => { throw new Error("huginn 503 invented"); } }, bot, null, target);
+    expect(read).toMatchObject({ ok: false, code: "upstream", cause: "huginn 503 invented" });
+    const q = await runDiscovery({ ...base, queriesCall: async () => { throw new Error("quota invented"); } }, bot, null, target);
+    expect(q).toMatchObject({ ok: false, code: "model_failed", cause: "queries call: quota invented" });
+    const r = await runDiscovery({ ...base, rankCall: async () => { throw new Error("timeout invented"); } }, bot, null, target);
+    expect(r).toMatchObject({ ok: false, code: "model_failed", cause: "rank call: timeout invented" });
   });
 });

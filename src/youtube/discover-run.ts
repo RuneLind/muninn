@@ -79,6 +79,8 @@ export type DiscoverRunOutcome =
       status: 404 | 502 | 503;
       code: "upstream" | "not_found" | "model_failed" | "model_unparseable" | "search_failed";
       error: string;
+      /** The underlying error's text, for the caller's log (a read or model-call failure). */
+      cause?: string;
     };
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -103,7 +105,7 @@ export async function runDiscovery(
     raw = await deps.readRaw(collection, docId);
   } catch (err) {
     tracer?.finish("error", { error: `read failed: ${errText(err)}` });
-    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document." };
+    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document.", cause: errText(err) };
   }
   if (raw === null) {
     tracer?.finish("error", { error: "not found" });
@@ -129,7 +131,13 @@ export async function runDiscovery(
   } catch (err) {
     tracer?.end("queries", { error: errText(err) }, "error");
     tracer?.finish("error");
-    return { ok: false, status: 502, code: "model_failed", error: "The call that writes the search queries failed. Try again." };
+    return {
+      ok: false,
+      status: 502,
+      code: "model_failed",
+      error: "The call that writes the search queries failed. Try again.",
+      cause: `queries call: ${errText(err)}`,
+    };
   }
   if (!queries || queries.length === 0) {
     tracer?.finish("error", { error: "no queries" });
@@ -186,7 +194,7 @@ export async function runDiscovery(
   } catch (err) {
     tracer?.end("rank", { error: errText(err) }, "error");
     tracer?.finish("error");
-    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again." };
+    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}` };
   }
   const results: DiscoverResult[] = fresh
     .map((f, i) => ({ f, s: scores.get(i + 1), i }))

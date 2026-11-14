@@ -39,7 +39,7 @@ const REFRESH = "the plain read; its `?refresh=1` rebuild is on REFRESH_SIDE_EFF
 const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
   ...[
     "/", "/docs", "/traces", "/memsearch", "/logs", "/search", "/search/document/:collection/*",
-    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/youtube",
+    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/summaries/discover", "/youtube",
     "/x-articles", "/tiktok", "/vimeo", "/graph", "/wiki", "/wiki/issues", "/wiki/gardener",
     "/benchmark", "/benchmark/retrieval", "/benchmark/run-live/:traceId", "/benchmark/runs/:id",
     "/models", "/indexing", "/agents", "/plans", "/jira", "/chat",

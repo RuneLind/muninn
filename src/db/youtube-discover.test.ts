@@ -140,6 +140,21 @@ describe("per-video state and details", () => {
     expect([...(await getDiscoverKnownVideoIds())].sort()).toEqual(["vidAAAAAAA1", "vidBBBBBBB2"]);
   });
 
+  test("a state write during another seed's save reaches the new shelf's row too", async () => {
+    await saveDiscoverRun(run({ seedDocId: "a.md" }), [hit("vidAAAAAAA1", 0.9)]);
+    let write: Promise<number> | undefined;
+    await saveDiscoverRun(run({ seedDocId: "b.md" }), [hit("vidAAAAAAA1", 0.8)], {
+      // Inside b's transaction, after its rows are written and before it commits.
+      beforeCommit: async () => {
+        write = setDiscoverVideoState("vidAAAAAAA1", "dismissed");
+        await Bun.sleep(50);
+      },
+    });
+    await write;
+    const states = (await listDiscoverShelves()).map((s) => `${s.seedDocId}:${s.hits[0]!.state}`).sort();
+    expect(states).toEqual(["a.md:dismissed", "b.md:dismissed"]);
+  });
+
   test("the state CHECK refuses an unknown state", async () => {
     await saveDiscoverRun(run(), [hit("vidAAAAAAA1", 0.9)]);
     await expect(setDiscoverVideoState("vidAAAAAAA1", "summarized" as never)).rejects.toThrow();

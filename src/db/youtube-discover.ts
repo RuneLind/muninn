@@ -88,6 +88,19 @@ export interface DiscoverShelf {
   hits: DiscoverHit[];
 }
 
+type Tx = ReturnType<typeof getDb>;
+
+/**
+ * Serialize writers of the same videos: a state write that ran while another
+ * seed's save was open could not see that save's uncommitted row, which kept
+ * the old state (measured). Ids sorted so two saves cannot deadlock.
+ */
+async function lockVideos(sql: Tx, videoIds: readonly string[]): Promise<void> {
+  for (const id of [...new Set(videoIds)].sort()) {
+    await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`youtube-discover:${id}`}, 0))`;
+  }
+}
+
 const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
 
 function toHit(r: Record<string, unknown>): DiscoverHit {
@@ -110,7 +123,12 @@ function toHit(r: Record<string, unknown>): DiscoverHit {
  * Store one run and its hits in one transaction; returns the run id. Each hit
  * takes the state and details its video already has on an earlier row.
  */
-export async function saveDiscoverRun(run: DiscoverRunInput, hits: readonly DiscoverHitInput[]): Promise<string> {
+export async function saveDiscoverRun(
+  run: DiscoverRunInput,
+  hits: readonly DiscoverHitInput[],
+  /** Test seam: runs inside the transaction after every row is written, before the commit. */
+  opts: { beforeCommit?: () => Promise<void> } = {},
+): Promise<string> {
   return getDb().begin(async (sql) => {
     const [row] = await sql`
       INSERT INTO youtube_discover_runs
@@ -121,6 +139,7 @@ export async function saveDiscoverRun(run: DiscoverRunInput, hits: readonly Disc
       RETURNING id
     `;
     const runId = row!.id as string;
+    await lockVideos(sql as unknown as Tx, hits.map((h) => h.videoId));
     let rank = 0;
     for (const h of hits) {
       rank++;
@@ -138,6 +157,7 @@ export async function saveDiscoverRun(run: DiscoverRunInput, hits: readonly Disc
         ON CONFLICT (run_id, video_id) DO NOTHING
       `;
     }
+    await opts.beforeCommit?.();
     return runId;
   });
 }
@@ -184,10 +204,14 @@ export async function listDiscoverShelves(limit = 40): Promise<DiscoverShelf[]> 
 
 /** Set a video's state on every hit row it has; returns how many rows changed (0 = no such video). */
 export async function setDiscoverVideoState(videoId: string, state: DiscoverHitState): Promise<number> {
-  const res = await getDb()`
-    UPDATE youtube_discover_hits SET state = ${state}, updated_at = now() WHERE video_id = ${videoId}
-  `;
-  return res.count;
+  return getDb().begin(async (tx) => {
+    const sql = tx as unknown as Tx;
+    await lockVideos(sql, [videoId]);
+    const res = await sql`
+      UPDATE youtube_discover_hits SET state = ${state}, updated_at = now() WHERE video_id = ${videoId}
+    `;
+    return res.count;
+  });
 }
 
 /** The video ids never to suggest again: dismissed or queued. */
@@ -213,8 +237,11 @@ export async function getDiscoverVideoDetails(videoId: string): Promise<Discover
 
 /** Cache a probe's answer on every hit row of the video. */
 export async function saveDiscoverVideoDetails(videoId: string, details: DiscoverVideoDetails): Promise<void> {
-  const sql = getDb();
-  await sql`
-    UPDATE youtube_discover_hits SET details = ${sql.json(details as never)}, details_at = now() WHERE video_id = ${videoId}
-  `;
+  await getDb().begin(async (tx) => {
+    const sql = tx as unknown as Tx;
+    await lockVideos(sql, [videoId]);
+    await sql`
+      UPDATE youtube_discover_hits SET details = ${sql.json(details as never)}, details_at = now() WHERE video_id = ${videoId}
+    `;
+  });
 }

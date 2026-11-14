@@ -265,7 +265,8 @@ export function registerSummariesDiscoverRoutes(
         { collection: source.collection, docId },
       );
       if (!out.ok) {
-        log.warn("Find on YouTube failed for {doc}: {code}", { doc: docId, code: out.code });
+        // PR 1 logged exactly these: a failed read or model call, with the error text.
+        if (out.cause) log.warn("Find on YouTube: {code} for {doc}: {error}", { doc: docId, code: out.code, error: out.cause });
         return fail(c, out.status, out.code, out.error);
       }
       let runId: string | null = null;
@@ -341,7 +342,10 @@ export function registerSummariesDiscoverRoutes(
         probing.set(videoId, pending);
       }
       const details = await pending;
-      if (!details) return fail(c, 502, "probe_failed", "YouTube did not answer the details lookup. Try again.");
+      if (!details) {
+        log.warn("Discover: details probe failed for {video}", { video: videoId });
+        return fail(c, 502, "probe_failed", "YouTube did not answer the details lookup. Try again.");
+      }
       await deps.store.saveDetails(videoId, details).catch((err) => {
         log.warn("Discover: caching details failed for {video}: {error}", { video: videoId, error: errText(err) });
       });
