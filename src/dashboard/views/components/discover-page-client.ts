@@ -527,7 +527,9 @@ async function dismiss(videoId: string, fromRun?: string): Promise<void> {
       if (undoErr) return;
       const run = liveRun(runId);
       const card = cardEl(run, videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`);
-      if (!card && !st.open && st.minLen > 0) toast("Restored, but the length filter hides it.");
+      // No card shown, yet a shelf holds the video undismissed: only the length filter hides it then.
+      const held = st.shelves.some((s) => s.hits.some((h) => h.videoId === videoId && h.state !== "dismissed"));
+      if (!card && !st.open && held) toast("Restored, but the length filter hides it.");
       // The Undo button went with its click: place the focus it dropped, never take focus moved meanwhile.
       const a = document.activeElement;
       if (a && a !== document.body) return;

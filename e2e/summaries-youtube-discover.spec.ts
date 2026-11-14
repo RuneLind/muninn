@@ -1469,3 +1469,31 @@ test("Try again keeps focus on the details slot through loading, a second failur
   expect(await activeEl(page), "focus after the details land").toMatchObject({ key: "details", inDrawer: true });
   await page.unroute("**/api/summaries/discover/details");
 });
+
+test("Undo of a video a re-read dropped blames no filter (#861 follow-up 2, fix round 1)", async ({ page }) => {
+  const runs = await seedDupShelves();
+  await page.goto(`${BASE}/summaries/discover`);
+  // The re-read answers seed A's shelf without a3: a newer run of the seed no longer holds it.
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { shelves: { runId: string; hits: { videoId: string }[] }[] };
+    for (const s of body.shelves) if (s.runId === runs.a) s.hits = s.hits.filter((h) => h.videoId !== DUP.a3);
+    await route.fulfill({ response: res, json: body });
+  });
+  await dupCard(page, runs.a, DUP.a3).locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(dupCard(page, runs.a, DUP.a3)).toHaveCount(0);
+  await page.locator("#dscLen").selectOption("600");
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  const undone = page.waitForResponse((r) => r.url().endsWith("/api/summaries/discover/state") && (r.request().postDataJSON() as { state: string }).state === "new");
+  await page.locator("#dscToast [data-undo]").click();
+  await undone;
+  // The short card on the same shelf really is hidden by the filter, so the filter is on; a3 is simply gone.
+  await expect(dupCard(page, runs.a, DUP.short)).toHaveCount(0);
+  // Read once: the toast clears itself after 5 s, so a retrying not-assertion would pass on the empty toast.
+  await page.waitForTimeout(300);
+  expect(await page.locator("#dscToast").textContent()).not.toContain("filter");
+  await page.unroute("**/api/summaries/discover/shelves");
+});
