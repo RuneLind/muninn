@@ -41,6 +41,7 @@ import { readRelatedOrder, writeRelatedOrder } from "./wiki-recents-store.ts";
 import type { ProvenancePayload } from "../../../wiki/provenance.ts";
 import type { PageAnswersInfo } from "./wiki-answer-cards.ts";
 import type { ReaderPayload } from "../../../wiki/render.ts";
+import { adoptLiveFactIssues, type LiveFactsPayload } from "./wiki-live-facts.ts";
 import type { RelatedOrder } from "./wiki-recents.ts";
 import type { WorkedGate } from "./wiki-activity-rank.ts";
 
@@ -118,6 +119,7 @@ export interface WikiPageDetail {
   /** The lens switch's inputs, the ids' nouns and the Agent flag. ABSENT on an
    *  older server: the reader then shows All with English labels. */
   reader?: ReaderPayload;
+  facts?: LiveFactsPayload; // the live chips' entries (PR 3b); ABSENT without a chip
   error?: string;
 }
 
@@ -502,6 +504,7 @@ function redrawProvStrip(provenance: ProvenancePayload): void {
  *  Connections and the mini-graph. A block with no `issues` means the page has
  *  none now, so the rows go too. */
 function adoptIssueRows(provenance: ProvenancePayload): void {
+  adoptLiveFactIssues(provenance.issues); // a key chip's Jira status rides these rows (PR 3b)
   const had = issueRows !== null;
   issueRows = provenance.issues ?? null;
   issueStampable = provenance.stampable;

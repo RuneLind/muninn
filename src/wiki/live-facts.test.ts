@@ -1,0 +1,326 @@
+/**
+ * Live chips (living facts PR 3b): the server half — the facts file, what is
+ * marked, where the chip goes and the payload — and the shared chip text.
+ *
+ * The first two describe blocks are the DRIFT GATE against the sweep. The
+ * three `__fixtures__/live-facts-*.json` files are copies of claude-skills
+ * `plan-status-sweep/scripts/fixtures/{reference-forms,wiki-facts,wiki-facts-chips}.json`,
+ * whose own suite (`sweep-lib.test.ts`) derives the same rows from the sweep's
+ * code. One line differs: reference-forms case 1's tracker carries
+ * `"frontmatterKeys": ["issue","tickets"]`, which muninn's tracker rule reads
+ * its declared fields from (the sweep reads those two always). Synthetic
+ * owners, repos and numbers only.
+ */
+
+import { describe, expect, test, beforeEach, afterAll } from "bun:test";
+import { rm, writeFile, unlink } from "node:fs/promises";
+import { testTempDir } from "../test/temp-dir.ts";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { parseTrackersConfig } from "./trackers/index.ts";
+import { parsePrGrammar, noProdSet } from "./pr-grammar.ts";
+import {
+  bodyKeyMentions,
+  jiraTrackers,
+  loadFacts,
+  markedMentions,
+  pageKeySet,
+  parseWikiFacts,
+  planLiveChips,
+  readWikiFacts,
+  resetWikiFactsCache,
+  type WikiFacts,
+} from "./live-facts.ts";
+import { chipView, countedKeyPrs, keySummary, prChipParts, repoOfPr, type LiveFactsPayload } from "./core/live-facts-chip.ts";
+import { readerBody, renderWikiHtml } from "./render.ts";
+import { stripFrontmatter } from "./store.ts";
+
+const FIX = path.join(import.meta.dir, "__fixtures__");
+const json = async (name: string) => JSON.parse(await Bun.file(path.join(FIX, name)).text());
+
+function grammarOf(readerConfig: Record<string, unknown>) {
+  const g = parsePrGrammar(readerConfig.prGrammar);
+  expect(g.warnings).toEqual([]);
+  const trackers = jiraTrackers(parseTrackersConfig(readerConfig.trackers, (w) => {
+    throw new Error(`${w.key} ${w.reason}`);
+  }));
+  return { grammar: g.grammar, trackers };
+}
+
+const distinct = (xs: string[]) => [...new Set(xs)];
+
+describe("the shared reference-form fixture (copied from plan-status-sweep)", async () => {
+  const data = await json("live-facts-reference-forms.json");
+  for (const c of data.cases)
+    for (const row of c.rows)
+      test(`${c.name}: ${row.name}`, () => {
+        const { grammar, trackers } = grammarOf(c.readerConfig);
+        expect([...pageKeySet(row.page, row.rel, trackers)].sort()).toEqual(row.keys);
+        const projects = trackers.flatMap((t) => t.projects);
+        expect(distinct(bodyKeyMentions(stripFrontmatter(row.page), projects).map((m) => m.key))).toEqual(row.bodyKeys);
+        const body = readerBody(row.page);
+        const marked = markedMentions(body, row.page, row.rel, grammar, trackers, (id) => row.titles[id]);
+        expect(distinct(marked.filter((m) => m.kind === "pr").map((m) => m.id))).toEqual(row.marked);
+        // Keys are marked only with tracker projects, and then every body mention outside code.
+        if (!row.page.includes("```")) expect(distinct(marked.filter((m) => m.kind === "key").map((m) => m.id))).toEqual(projects.length ? row.bodyKeys : []);
+      });
+  for (const c of data.cases)
+    if (c.noProd)
+      test(`${c.name}: noProd matching ignores case`, () => {
+        const set = noProdSet(grammarOf(c.readerConfig).grammar);
+        for (const [repo, want] of Object.entries<boolean>(c.noProd)) expect([repo, set.has(repo.toLowerCase())]).toEqual([repo, want]);
+      });
+});
+
+describe("the facts fixture and its chip inputs (copied from plan-status-sweep)", async () => {
+  const text = await Bun.file(path.join(FIX, "live-facts-wiki-facts.json")).text();
+  const chips = await json("live-facts-chips.json");
+  test("every PR's state and prod part, and every key's summary, follow from the facts", () => {
+    const r = parseWikiFacts(text);
+    if ("error" in r) throw new Error(r.error);
+    const { grammar } = grammarOf(chips.readerConfig);
+    const noProd = noProdSet(grammar);
+    const deploys = (id: string) => !noProd.has(repoOfPr(id).toLowerCase());
+    expect(Object.keys(chips.prs).sort()).toEqual(Object.keys(r.facts.prs).sort());
+    expect(Object.keys(chips.keys).sort()).toEqual(Object.keys(r.facts.keys).sort());
+    for (const id of Object.keys(chips.prs)) expect([id, prChipParts(r.facts.prs[id]!, deploys(id), "no")]).toEqual([id, chips.prs[id]]);
+    for (const k of Object.keys(chips.keys))
+      expect([k, keySummary(countedKeyPrs(r.facts.keys[k]!, r.facts.prs, deploys), "no")]).toEqual([k, chips.keys[k].summary]);
+  });
+});
+
+const FACTS: WikiFacts = (() => {
+  const r = parseWikiFacts(require("node:fs").readFileSync(path.join(FIX, "live-facts-wiki-facts.json"), "utf8"));
+  if ("error" in r) throw new Error(r.error);
+  return r.facts;
+})();
+const GRAMMAR = { owner: "acme", aliases: { api: "acme-api", web: "acme-web" }, noProd: ["acme-e2e"] };
+const TRACKERS = jiraTrackers(parseTrackersConfig([{ id: "jira", projects: ["DEMO"] }], () => {}));
+
+function render(md: string, relPath = "plans/demo.mdx") {
+  let facts: LiveFactsPayload | undefined;
+  const html = renderWikiHtml(md, () => undefined, {
+    liveFacts: { loaded: loadFacts(FACTS), grammar: GRAMMAR, trackers: TRACKERS, relPath, collect: (f) => (facts = f) },
+  });
+  return { html, facts };
+}
+const chipIds = (html: string) => [...html.matchAll(/data-live-fact="([^"]+)"/g)].map((m) => m[1]);
+const page = (body: string, fm = "repos: [acme-api]\n") => `---\ntitle: Demo\n${fm}---\n\n${body}\n`;
+
+describe("the chip pass in renderWikiHtml", () => {
+  test("a chip is an empty reader-only span after the mention", () => {
+    const { html } = render(page("Merged acme/acme-api#101 today."));
+    expect(html).toContain('acme/acme-api#101<span class="fact-chip" data-live-fact="acme/acme-api#101" data-reader-only></span> today');
+  });
+
+  test("a link is one mention: one chip per distinct id after the closing parenthesis, href unchanged", () => {
+    const { html } = render(page("See [PR #101](https://github.com/acme/acme-api/pull/101) and [DEMO-12](https://jira.example/browse/DEMO-12)."));
+    expect(html).toContain('<a href="https://github.com/acme/acme-api/pull/101" target="_blank" rel="noopener">PR #101</a><span class="fact-chip" data-live-fact="acme/acme-api#101"');
+    expect(html).toContain('<a href="https://jira.example/browse/DEMO-12" target="_blank" rel="noopener">DEMO-12</a><span class="fact-chip" data-live-fact="DEMO-12"');
+    expect(chipIds(html)).toEqual(["acme/acme-api#101", "DEMO-12"]);
+  });
+
+  test("a link whose text and target name two PRs gets both chips, in text order", () => {
+    const { html } = render(page("[api #103](https://github.com/acme/acme-api/pull/101)"));
+    expect(chipIds(html)).toEqual(["acme/acme-api#103", "acme/acme-api#101"]);
+  });
+
+  test("a bare URL is one mention: the chip goes after the URL, not inside it", () => {
+    const { html } = render(page("At https://github.com/acme/acme-api/pull/102/files."));
+    expect(html).toContain("pull/102/files<span");
+  });
+
+  test("forms: repo #n, alias, bare #n and PR #n resolved through repos:, Jira key", () => {
+    // #101 and #103 carry DEMO-11 and DEMO-12 in their titles, which the page names.
+    const { html } = render(page("acme-web #205, web PR #206, #101, PR #103, DEMO-11 and DEMO-12."));
+    expect(chipIds(html)).toEqual(["acme/acme-web#205", "acme/acme-web#206", "acme/acme-api#101", "acme/acme-api#103", "DEMO-11", "DEMO-12"]);
+  });
+
+  test("a bare #n whose entry's title carries no page key gets no chip", () => {
+    // #104's title names DEMO-110; the page names DEMO-11 only through its stem.
+    expect(chipIds(render(page("#104 here."), "plans/demo-11-x.mdx").html)).toEqual([]);
+  });
+
+  test("a ref or key with no entry gets no chip", () => {
+    expect(chipIds(render(page("acme/acme-api#999 and DEMO-99.")).html)).toEqual([]);
+  });
+
+  test("never marked: fences, inline code, attributes, headings, wikilinks", () => {
+    const md = page(
+      [
+        "## Heading acme/acme-api#101",
+        "",
+        "```",
+        "acme/acme-api#101 DEMO-11",
+        "```",
+        "",
+        "Inline `acme/acme-api#101` code.",
+        "",
+        '<Fold summary="acme/acme-api#101 and DEMO-11">',
+        "",
+        "Inside.",
+        "",
+        "</Fold>",
+        "",
+        "[[acme/acme-api#101]]",
+      ].join("\n"),
+    );
+    const out = render(md);
+    expect(chipIds(out.html)).toEqual([]);
+    // Not marked at all, so no entry ships: the rendered-code restore alone
+    // would hide a chip in code, not keep its id out of the payload.
+    expect(out.facts).toBeUndefined();
+  });
+
+  test("never marked: the state homes (StatusRows, a Status paragraph, the PR ledger)", () => {
+    const md = page(
+      [
+        "<StatusRows>",
+        "- acme/acme-api#101 i prod",
+        "</StatusRows>",
+        "",
+        "**Status:** acme/acme-api#101 merget.",
+        "",
+        "PR ledger",
+        "",
+        "| PR | State |",
+        "|---|---|",
+        "| acme/acme-api#101 | merget |",
+        "",
+        "Prose acme/acme-api#102.",
+      ].join("\n"),
+    );
+    expect(chipIds(render(md).html)).toEqual(["acme/acme-api#102"]);
+  });
+
+  test("history blocks and blockquotes are not homes: they get chips", () => {
+    const md = page(["<Timeline>", "", "- **2026-01-05** acme/acme-api#101 merget", "", "</Timeline>", "", "> quoted acme/acme-api#102"].join("\n"));
+    expect(chipIds(render(md).html)).toEqual(["acme/acme-api#101", "acme/acme-api#102"]);
+  });
+
+  test("homes are found on the string the render marks, after fact-check sentinel lines are removed", () => {
+    const md = page(["<!-- factcheck:start -->", "<!-- factcheck:end -->", "Prose acme/acme-api#102.", "", "**Status:** acme/acme-api#101."].join("\n"));
+    expect(chipIds(render(md).html)).toEqual(["acme/acme-api#102"]);
+  });
+
+  test("without liveFacts no chip; without prGrammar only owner-qualified forms; without trackers no key", () => {
+    const md = page("api #103, acme/acme-api#101 and DEMO-11.");
+    expect(renderWikiHtml(md, () => undefined)).not.toContain("fact-chip");
+    let html = renderWikiHtml(md, () => undefined, { liveFacts: { loaded: loadFacts(FACTS), grammar: null, trackers: [], relPath: "plans/x.mdx" } });
+    expect(chipIds(html)).toEqual(["acme/acme-api#101"]);
+    html = renderWikiHtml(md, () => undefined, { liveFacts: { loaded: loadFacts(FACTS), grammar: GRAMMAR, trackers: [], relPath: "plans/x.mdx" } });
+    expect(chipIds(html)).toEqual(["acme/acme-api#103", "acme/acme-api#101"]);
+  });
+
+  test("a PR id is matched ignoring case and keeps the case the page writes", () => {
+    expect(chipIds(render(page("ACME/Acme-Api#101")).html)).toEqual(["ACME/Acme-Api#101"]);
+  });
+});
+
+describe("the payload's facts", () => {
+  test("the marked PRs' entries, the marked keys' entries and every PR in their lists", () => {
+    const { facts } = render(page("acme/acme-api#103 and DEMO-11."));
+    expect(Object.keys(facts!.keys)).toEqual(["DEMO-11"]);
+    expect(Object.keys(facts!.prs).sort()).toEqual(["acme/acme-api#101", "acme/acme-api#102", "acme/acme-api#103", "acme/acme-e2e#7"]);
+    expect(facts!.noProd).toEqual(["acme/acme-e2e"]);
+  });
+
+  test("no chip ⇒ no payload", () => {
+    expect(render(page("nothing here")).facts).toBeUndefined();
+  });
+
+  test("planLiveChips places nothing for a key or ref with no entry", () => {
+    const r = planLiveChips(readerBody(page("DEMO-13x and DEMO-99")), page(""), { loaded: loadFacts(FACTS), grammar: GRAMMAR, trackers: TRACKERS, relPath: "a.mdx" });
+    expect(r.insertions).toEqual([]);
+  });
+});
+
+describe("chip text (core/live-facts-chip.ts)", () => {
+  const now = Date.parse("2026-01-21T08:00:00Z");
+  const payload = (ids: string[], keys: string[] = []): LiveFactsPayload => ({
+    prs: Object.fromEntries(ids.map((id) => [id, FACTS.prs[id]!])),
+    keys: Object.fromEntries(keys.map((k) => [k, FACTS.keys[k]!])),
+    noProd: ["acme/acme-e2e"],
+  });
+
+  test("a PR: state, prod part, age; a noProd repo the state alone; English", () => {
+    expect(chipView("acme/acme-api#101", payload(["acme/acme-api#101"]), now, "no")?.text).toBe("merget · i prod 26.006.120000 · 1 d");
+    expect(chipView("acme/acme-e2e#7", payload(["acme/acme-e2e#7"]), now, "no")?.text).toBe("merget · 1 d");
+    expect(chipView("acme/acme-api#108", payload(["acme/acme-api#108"]), now, "no")?.text).toBe("merget · ? · 1 d");
+    expect(chipView("acme/acme-api#102", payload(["acme/acme-api#102"]), now, "en")?.text).toBe("merged · not in prod · 1 d");
+    expect(chipView("acme/acme-web#206", payload(["acme/acme-web#206"]), now, "no")?.text).toBe("lukket · 1 d");
+  });
+
+  test("a key: Jira status with its date, then the summary over its PRs, oldest age", () => {
+    const p = payload(["acme/acme-api#101", "acme/acme-api#102", "acme/acme-e2e#7"], ["DEMO-11"]);
+    expect(chipView("DEMO-11", p, now, "no")?.text).toBe("1 av 2 i prod · 1 d");
+    expect(chipView("DEMO-11", p, now, "no", { status: "Under utvikling", updated: "2026-01-19T10:00:00Z" })?.text).toBe("Under utvikling 19.01 · 1 av 2 i prod · 1 d");
+  });
+
+  test("a key whose only other PR is noProd reads «i prod»; one in prod plus one closed unmerged reads «i prod»", () => {
+    const p: LiveFactsPayload = { prs: { "acme/acme-web#210": FACTS.prs["acme/acme-web#210"]!, "acme/acme-web#211": FACTS.prs["acme/acme-web#211"]!, "acme/acme-e2e#7": FACTS.prs["acme/acme-e2e#7"]! }, keys: { "DEMO-16": FACTS.keys["DEMO-16"]!, X: { prs: ["acme/acme-web#210", "acme/acme-e2e#7"] } }, noProd: ["acme/acme-e2e"] };
+    expect(chipView("DEMO-16", p, now, "no")?.text).toBe("i prod · 1 d");
+    expect(chipView("X", p, now, "no")?.text).toBe("i prod · 1 d");
+  });
+
+  test("a key with no counted PR: Jira status alone, or no chip", () => {
+    const p = payload([], ["DEMO-13"]);
+    expect(chipView("DEMO-13", p, now, "no")).toBeNull();
+    expect(chipView("DEMO-13", p, now, "no", { status: "Ferdig" })?.text).toBe("Ferdig");
+  });
+
+  test("an entry older than 7 days dims; today reads «i dag»", () => {
+    const p = payload(["acme/acme-web#205"]);
+    expect(chipView("acme/acme-web#205", p, Date.parse("2026-01-19T08:00:00Z"), "no")).toMatchObject({ text: "draft · 7 d", dim: false });
+    expect(chipView("acme/acme-web#205", p, Date.parse("2026-01-20T08:00:00Z"), "no")).toMatchObject({ text: "draft · 8 d", dim: true });
+    expect(chipView("acme/acme-api#103", payload(["acme/acme-api#103"]), Date.parse("2026-01-20T09:00:00Z"), "no")).toMatchObject({ text: "åpen · i dag", dim: false });
+  });
+});
+
+describe("readWikiFacts", () => {
+  let root = "";
+  const warnings: string[] = [];
+  const warn = (r: string) => warnings.push(r);
+  beforeEach(async () => {
+    resetWikiFactsCache();
+    warnings.length = 0;
+    if (root) await rm(root, { recursive: true, force: true });
+    root = await testTempDir(path.join(tmpdir(), "live-facts-"));
+  });
+  afterAll(async () => {
+    if (root) await rm(root, { recursive: true, force: true });
+  });
+  const file = () => path.join(root, ".wiki-facts.json");
+
+  test("no file: null and no warning", async () => {
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(warnings).toEqual([]);
+  });
+
+  test("a valid file loads", async () => {
+    await writeFile(file(), JSON.stringify(FACTS));
+    expect((await readWikiFacts(root, warn))?.facts.prs["acme/acme-api#101"]?.state).toBe("MERGED");
+  });
+
+  test("a malformed file or another version: null, one warning per change of the file", async () => {
+    await writeFile(file(), "{ not json");
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(warnings.length).toBe(1);
+    await writeFile(file(), JSON.stringify({ ...FACTS, version: 2 }));
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(warnings.length).toBe(2);
+    expect(warnings[1]).toContain("version 1");
+    // A different size: two writes inside one mtime tick are told apart by size.
+    await writeFile(file(), JSON.stringify(FACTS, null, 1));
+    expect(await readWikiFacts(root, warn)).not.toBeNull();
+    await unlink(file());
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    expect(warnings.length).toBe(2);
+  });
+
+  test("a key list naming a missing entry is an error", () => {
+    expect(parseWikiFacts(JSON.stringify({ version: 1, prs: {}, keys: { "DEMO-1": { prs: ["a/b#1"] } } }))).toEqual({ error: "keys.DEMO-1.prs names a/b#1, which has no prs entry" });
+  });
+});

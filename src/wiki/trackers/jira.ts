@@ -151,6 +151,13 @@ export function stemKeys(stem: string, config: TrackerConfig): string[] {
   return scanKeys(stem, config, { caseSensitive: false, chain: STEM_CHAIN, maxGap: TITLE_MAX_GAP });
 }
 
+/** The keys a declared frontmatter field (`trackers[].frontmatterKeys`)
+ *  gives: any case, uppercased, project-bounded. The live chips' page key set
+ *  (`live-facts.ts`) reads the same rule. */
+export function declaredKeys(value: string | string[] | undefined, config: TrackerConfig): string[] {
+  return valueStrings(value).flatMap((v) => scanKeys(v, config, { caseSensitive: false }));
+}
+
 /** A tag that IS a key: `demo-145`. */
 function tagKeys(tags: readonly string[], config: TrackerConfig): string[] {
   const re = new RegExp(`^${projectAlt(config)}-${NUM}$`, "i");
@@ -318,7 +325,7 @@ export function inferJiraIssues(page: TrackerPage, config: TrackerConfig): Issue
   add(stampedKeys(page.frontmatter[jiraAdapter.frontmatterKey]).filter((k) => parseClientKey(k) !== null), "stamped");
   for (const field of config.frontmatterKeys) {
     if (!Object.prototype.hasOwnProperty.call(page.frontmatter, field)) continue;
-    add(valueStrings(page.frontmatter[field]).flatMap((v) => scanKeys(v, config, { caseSensitive: false })), "declared");
+    add(declaredKeys(page.frontmatter[field], config), "declared");
   }
   if (page.authoredTitle) add(titleKeys(page.authoredTitle, config), "title");
   add(stemKeys(page.stem, config), "stem");

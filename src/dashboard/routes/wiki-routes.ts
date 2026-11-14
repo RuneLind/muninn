@@ -1,4 +1,6 @@
 import type { Context, Hono } from "hono";
+import { jiraTrackers, readWikiFacts, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
 import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config, type WikiAnswerConfig } from "../../config.ts";
@@ -1775,6 +1777,8 @@ export function registerWikiReadRoutes(
     markdown: string,
     answerable: boolean,
     owner: string | null,
+    /** The live chips' pass: `GET /api/wiki/page` alone passes it. */
+    liveFacts?: LiveFactsInput,
   ): Promise<string> {
     // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
     // a link opened on a non-default wiki lands on the DEFAULT one.
@@ -1796,6 +1800,7 @@ export function registerWikiReadRoutes(
       proposedPlan: meta.plan_status === "proposed",
       // Number columns, verdict cells, the label grid: styled in the article only.
       readerShapes: true,
+      ...(liveFacts ? { liveFacts } : {}),
     });
   }
 
@@ -1811,6 +1816,22 @@ export function registerWikiReadRoutes(
     // whose zone admits the answer routes — role `user` only on nais, where
     // the read slice opens them. Elsewhere a flag would fire a 403 GET per card.
     const answersForViewer = answerable && viewerMayUseAnswers(c.get("role"), readSliceOnly);
+
+    // LIVE CHIPS (living facts PR 3b): only on a wiki with a readable
+    // `.wiki-facts.json`, and only after a mention that has an entry in it.
+    // `facts` carries the entries the page's chips read; absent with no chip.
+    const loadedFacts = await readWikiFacts(index.root);
+    let liveFacts: LiveFactsPayload | undefined;
+    const liveFactsInput: LiveFactsInput | undefined = loadedFacts
+      ? {
+          loaded: loadedFacts,
+          grammar: index.readerConfig?.prGrammar ?? null,
+          trackers: jiraTrackers(index.readerConfig?.trackers),
+          relPath: meta.relPath,
+          collect: (f) => (liveFacts = f),
+        }
+      : undefined;
+    const html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, liveFactsInput);
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])
@@ -1843,7 +1864,8 @@ export function registerWikiReadRoutes(
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
       // No network join, so the section renders with the page.
       ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
-      html: await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null),
+      html,
+      ...(liveFacts ? { facts: liveFacts } : {}),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
       // `roles`: the viewer's group keys (D30) — never a member — and the

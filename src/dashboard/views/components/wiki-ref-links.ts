@@ -29,8 +29,9 @@
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
-import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
+import { FACT_CHIP_SELECTOR, fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
 import { INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
+import { enhanceLiveFacts, type LiveFactsPayload } from "./wiki-live-facts.ts";
 
 export { INLINE, PEEK_CLASS, REF_SKIP };
 import {
@@ -245,6 +246,11 @@ function precedingText(node: Text): string {
   while (out.length < PRECEDING_MAX) {
     const prev: Node | null = at.previousSibling;
     if (prev) {
+      // A live chip (PR 3b) reads as if it were not there.
+      if (prev instanceof Element && prev.matches(FACT_CHIP_SELECTOR)) {
+        at = prev;
+        continue;
+      }
       if (prev.nodeType === Node.TEXT_NODE) out = (prev.nodeValue ?? "") + out;
       else if (prev instanceof Element && prev.matches(INLINE)) out = (prev.textContent ?? "") + out;
       else if (prev.nodeType !== Node.COMMENT_NODE) break;
@@ -817,6 +823,9 @@ export interface CrossRefOptions {
   withWiki: (url: string) => string;
   /** The wiki's language, for the hover card's state words. */
   language?: string;
+  /** The page's live-chip entries (PR 3b): the chips are filled after the
+   *  linker, which reads the article's text. */
+  facts?: LiveFactsPayload;
 }
 
 /** Link the references in a freshly rendered article and reset the jump
@@ -836,6 +845,7 @@ export function enhanceRefLinks(articleRoot: Element, relPath = "", idLabels?: I
   const xrefs = cross ? wrapXrefRuns(article, cross.trackerProjects ?? []) : [];
   linkRefs(article, idLabels);
   if (cross) void fetchAndResolveXrefs(xrefs, xrefFetchVia(cross.withWiki), cross.language);
+  enhanceLiveFacts(article, cross?.facts, cross?.language);
 }
 
 /** The reader's CSS for links, the peek card and the back pill. */

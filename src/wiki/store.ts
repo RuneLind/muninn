@@ -11,6 +11,7 @@
  * empty state instead of taking the dashboard down.
  */
 
+import { parsePrGrammar, type PrGrammar } from "./pr-grammar.ts";
 import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
@@ -269,6 +270,13 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   whatsNew?: { mode: WhatsNewMode };
+  /**
+   * How the wiki's short PR forms resolve (`prGrammar`, living facts PR 3b,
+   * `pr-grammar.ts`): the owner, the aliases and the `noProd` repos. Null or
+   * absent ⇒ the live chips mark only owner-qualified forms (a pull URL,
+   * `owner/repo#n`). A bad field warns and is dropped.
+   */
+  prGrammar?: PrGrammar | null;
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -2234,6 +2242,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   if (workMap.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "workMap", reason: workMap.warning });
   }
+  const prGrammar = parsePrGrammar(obj.prGrammar);
+  for (const reason of prGrammar.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "prGrammar", reason });
+  }
   const whatsNew = parseWhatsNewReaderConfig(obj.whatsNew);
   if (whatsNew.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
@@ -2269,6 +2281,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
     whatsNew: { mode: whatsNew.mode },
+    prGrammar: prGrammar.grammar,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),

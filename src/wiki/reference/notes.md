@@ -3555,6 +3555,16 @@ long key, filled vs outline, contrast at
 rest / hovered / active, a listing that drops the tracker, and chip = rows =
 `#wikiCount` through a closed series and an `.html` twin).
 
+#### Live chips (`live-facts.ts`, `core/live-facts-chip.ts`, `.wiki-facts.json`)
+
+Living facts PR 3b. A chip shows only on a wiki with a readable `.wiki-facts.json` (written by the plan-status-sweep's `--write-facts`), and only after a mention that has an entry in it. The facts file is re-read only when its mtime or size changes: a malformed file or a `version` other than 1 gives no chips and one warning per change of the file, never a failed page open. `GET /api/wiki/page` is the only caller of the pass (`renderWikiHtml`'s `liveFacts`); `/api/wiki/ref`, the walkthrough, the gardener preview and the component lint render without it.
+
+- What is marked is the sweep's `prRefs`/`pageKeys`, pinned by `__fixtures__/live-facts-*.json` (copies of claude-skills `plan-status-sweep/scripts/fixtures/`; case 1 of the reference-forms copy adds `frontmatterKeys`). Change a form on both sides together.
+- The chip is a wikilink sentinel with an empty literal and an empty link text, inserted into `readerBody`'s string before the wikilink pass. In code or an attribute value it restores to nothing, and every plain-text reader of a sentinel reads nothing. Source-side masking (code, tags, headings, wikilinks, `stateLineRoles(body).home`) keeps the id out of the payload as well.
+- A markdown link or a bare URL is one mention: the chip goes after `)` or the URL, never inside it.
+- ⚠️ A component that repeats a rendered item (the question grid's row, the `<NextMoves>` summary) repeats its chip too: the 8332 page renders 20 chip spans for 19 marked sites.
+- The client fills the chips after the ref linker (`enhanceRefLinks`'s `facts`); a key chip's Jira status arrives with the deferred provenance `issues` rows, so a page with no provenance gets key chips without Jira status.
+
 ### Connections and Link (`trackers/rows.ts`, `trackers/jira-lookup.ts`, `views/components/wiki-issue-rows.ts`)
 
 On a wiki with a tracker, the Connections panel opens with the page's issues,
