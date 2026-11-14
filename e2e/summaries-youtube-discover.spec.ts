@@ -1049,3 +1049,56 @@ test("Undo from the toast while the drawer is open keeps focus in the drawer (fi
   await expect(batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"]`)).toHaveCount(1);
   expect(await page.evaluate(() => !!document.activeElement?.closest("#dscDrawer"))).toBe(true);
 });
+
+test("a failed re-read of a stale listing keeps the old one usable and says so (fix round 2 batch 3)", async ({ page }) => {
+  await page.clock.install();
+  await page.goto(`${BASE}/summaries/discover`);
+  const pick = page.getByRole("button", { name: "+ Pick summaries…" });
+  await pick.click();
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await pick.click();
+  await page.route("**/api/summaries/discover/seeds", (route) => route.fulfill({ status: 500, json: { error: "down" } }));
+  await page.clock.fastForward("11:00");
+  await pick.click();
+  await expect(page.locator("#dscSeedPanel")).toContainText("Could not refresh");
+  await expect(page.locator("#dscSeedFilter")).toBeVisible();
+  await expect(page.locator("#dscSeedPanel [data-pick]")).toHaveCount(2);
+});
+
+test("a re-read that fails and a later one that lands: the shelves are shown, the link kept (fix round 2 batch 3)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  let reads = 0;
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    reads++;
+    if (reads === 1) return route.fulfill({ status: 500, json: { error: "down" } });
+    return route.continue();
+  });
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  const progress = page.locator("#dscProgress");
+  await expect(progress).toContainText("Done", { timeout: 20_000 });
+  await expect(progress).not.toContainText("could not be shown");
+  await expect(progress.getByRole("link", { name: "Show the first" })).toHaveCount(1);
+});
+
+test("picks stay when another mode runs, and a pick that failed stays for a retry (fix round 2 batch 3)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  const panel = page.locator("#dscSeedPanel");
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await panel.locator(`[data-pick="${CAPTURED_DOC}"]`).check();
+  await page.getByRole("button", { name: "+ A category…" }).click();
+  await panel.getByRole("button", { name: /Search from/ }).click();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(panel.locator("#dscPickCount")).toHaveText("1 of 5 chosen");
+
+  await page.route("**/api/summaries/discover", (route) =>
+    route.request().method() === "POST" ? route.fulfill({ status: 502, json: { error: "model down", code: "model_failed" } }) : route.continue(),
+  );
+  await panel.getByRole("button", { name: "Search from 1 summary" }).click();
+  await expect(page.locator("#dscProgress")).toContainText("1 failed", { timeout: 20_000 });
+  await page.getByRole("button", { name: "+ Pick summaries…" }).click();
+  await expect(panel.locator("#dscPickCount")).toHaveText("1 of 5 chosen");
+});

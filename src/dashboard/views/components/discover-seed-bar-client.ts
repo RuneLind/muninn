@@ -7,7 +7,8 @@
  * time, and the shelves are re-read after each one that lands.
  *
  * The listing (`GET /api/summaries/discover/seeds`) is read on the first open
- * and kept. Seed rules are `src/youtube/discover-seeds.ts`, the same ones the
+ * and read again on an open once it is over {@link LISTING_MAX_AGE_MS} old; a
+ * failed re-read keeps the old one. Seed rules are `src/youtube/discover-seeds.ts`, the same ones the
  * weekly watcher uses.
  */
 
@@ -47,6 +48,8 @@ interface BarState {
   listedAt: number;
   loading: boolean;
   loadError: string | null;
+  /** A failed re-read of a listing we already hold: the old one stays in use. */
+  refreshError: string | null;
   category: string;
   filter: string;
   picked: Map<string, SeedDoc>;
@@ -59,6 +62,7 @@ const bar: BarState = {
   listedAt: 0,
   loading: false,
   loadError: null,
+  refreshError: null,
   category: "",
   filter: "",
   picked: new Map(),
@@ -109,6 +113,10 @@ function panelHtml(): string {
     return `<p class="dsc-note dsc-warn">${escHtml(bar.loadError)}</p><button type="button" class="dsc-btn" id="dscSeedRetry">Try again</button>`;
   const l = bar.listing;
   if (!l) return "";
+  return (bar.refreshError ? `<p class="dsc-note dsc-warn">${escHtml(bar.refreshError)}</p>` : "") + modeHtml(l);
+}
+
+function modeHtml(l: SeedListing): string {
   if (bar.mode === "category") {
     if (!l.categories.length) return `<p class="dsc-note">Your YouTube summaries have no categories yet.</p>`;
     const opts = l.categories
@@ -162,8 +170,12 @@ async function loadListing(): Promise<void> {
     bar.listing = { docs: data.docs, categories: data.categories ?? [], now: typeof data.now === "number" ? data.now : Date.now() };
     bar.listedAt = performance.now();
     bar.category ||= bar.listing.categories[0]?.category ?? "";
+    bar.refreshError = null;
   } catch (err) {
-    bar.loadError = `Could not list your YouTube summaries: ${err instanceof Error ? err.message : String(err)}`;
+    const why = err instanceof Error ? err.message : String(err);
+    // A listing in hand is still usable: keep it and say it may be out of date.
+    if (bar.listing) bar.refreshError = `Could not refresh the list (${why}); showing the one read earlier.`;
+    else bar.loadError = `Could not list your YouTube summaries: ${why}`;
   } finally {
     bar.loading = false;
   }
@@ -204,6 +216,7 @@ export type OnShelves = (shelves: DiscoverShelf[], requestedAt: number) => void;
 /** Search from each seed in turn; `onShelves` gets the stored shelves after each run that landed. */
 async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg: string) => void): Promise<void> {
   if (bar.running || !seeds.length) return;
+  const runMode = bar.mode;
   bar.running = true;
   bar.mode = null;
   renderPanel();
@@ -233,16 +246,17 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
       }
       landed++;
       firstRun ??= data.runId;
+      // A pick that landed is done; one that failed stays picked for a retry.
+      if (runMode === "pick") bar.picked.delete(seed.id);
       const read = await readShelves();
       if (read) onShelves(read.shelves, read.requestedAt);
-      else unshown = true;
+      // Every read returns all stored shelves: only the last one decides what the page shows.
+      unshown = !read;
     } catch {
       failed.push(`${seed.title}: the server did not answer`);
     }
   }
   bar.running = false;
-  // The picks were searched: a second Run would search them again.
-  bar.picked.clear();
   syncModeButtons();
   const parts = [`${landed} new shel${landed === 1 ? "f" : "ves"}`];
   if (failed.length) parts.push(`${failed.length} failed`);
