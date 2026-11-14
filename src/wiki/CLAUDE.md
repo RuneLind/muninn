@@ -129,6 +129,7 @@ Pages and routes:
 - Lint check 25 — declared efforts (`effort-unknown`, in `lint.ts`) [trap]
 - Lint check 26 — genre and its picture (`lint-genre.ts`)
 - Lint check 27 — log kinds (`log-kind`, `lint-log-kind.ts`)
+- `plan-not-folded`
 - Decision chain route and dry run
 - Stale check — free half (`stale.ts`, `GET /api/wiki/stale`, `scripts/wiki-stale.ts`)
 - Stale check — model half (`stale-confirm.ts`, `wiki_stale_verdicts`, the STALE tab) [trap]

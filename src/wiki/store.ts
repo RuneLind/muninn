@@ -32,6 +32,7 @@ import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from 
 import { parseRoleKeys } from "../format/lane-roles.ts";
 import { parseStatePhrases, type StatePhrasesConfig } from "../format/state-phrases.ts";
 import { parseLogKinds, type LogKindsConfig } from "./lint-log-kind.ts";
+import { parseFoldCheck, type FoldCheckConfig } from "./lint-fold.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -242,6 +243,9 @@ export interface WikiReaderConfig {
   /** The kinds a `log.md` entry may carry (`logKinds`, lint check 27). Null or
    *  absent ⇒ the check does not run. */
   logKinds?: LogKindsConfig | null;
+  /** The day from which a shipped plan must name its durable page
+   *  (`foldCheck`, lint check 28). Null or absent: not checked. */
+  foldCheck?: FoldCheckConfig | null;
   /**
    * The heading names whose sections the `system-map-drift` lint reads for
    * links between `repos/` pages (`systemMapLinkHeadings`). Undefined ⇒ the
@@ -2207,6 +2211,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of logKinds.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "logKinds", reason });
   }
+  const foldCheck = parseFoldCheck(obj.foldCheck);
+  for (const reason of foldCheck.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "foldCheck", reason });
+  }
   const systemMapLinkHeadings = parseSystemMapLinkHeadings(obj.systemMapLinkHeadings);
   for (const reason of systemMapLinkHeadings.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "systemMapLinkHeadings", reason });
@@ -2245,6 +2253,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
     logKinds: logKinds.config,
+    foldCheck: foldCheck.config,
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>

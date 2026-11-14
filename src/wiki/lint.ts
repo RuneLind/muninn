@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Forty-two check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Forty-seven check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -154,6 +154,12 @@
  * 27. log-kind       — a `log.md` entry whose kind is outside
  *                      `.wiki-reader.json` `logKinds` (warning). Silent on a
  *                      wiki that declares none. Rules: `lint-log-kind.ts`.
+ * 28. plan-not-folded — a `plans/` page with `plan_status: shipped`, a
+ *                      `status_date` on or after `.wiki-reader.json`
+ *                      `foldCheck.since`, and no `folded_into:` entry
+ *                      (warning). Silent on a wiki that declares no cutoff.
+ *                      Reads `status_date`, so `lintWiki` only. Rules:
+ *                      `lint-fold.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -202,6 +208,7 @@ import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYS
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { EFFORT_ID_RE } from "./work-map/ids.ts";
 import { checkLogKinds, LOG_KIND_LINT_CHECKS } from "./lint-log-kind.ts";
+import { checkPlanFold, FOLD_LINT_CHECKS } from "./lint-fold.ts";
 import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -248,6 +255,7 @@ export const LINT_CHECKS = [
   ...STALE_LINT_CHECKS,
   ...GENRE_LINT_CHECKS,
   ...LOG_KIND_LINT_CHECKS,
+  ...FOLD_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -1165,6 +1173,7 @@ export async function lintWiki(
   // `system-map-drift` reads the repos pages a map names, so it runs after
   // the loop over the hub pages the loop collected.
   const systemMapPages: SystemMapPage[] = [];
+  const foldCheck = index.readerConfig?.foldCheck ?? null;
 
   for (const page of index.pages) {
     // Check 24 — a status word after a link to a plan that says otherwise
@@ -1189,6 +1198,9 @@ export async function lintWiki(
       if (sources) findings.push(sources);
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
+      // Check 28 — a shipped plan with no `folded_into:` entry, from the wiki's cutoff.
+      const unfolded = foldCheck ? checkPlanFold(page, content, foldCheck) : null;
+      if (unfolded) findings.push({ check: "plan-not-folded", relPath: page.relPath, message: unfolded });
     }
     if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
     // Reserved and culled pages own nothing and are linted for nothing.

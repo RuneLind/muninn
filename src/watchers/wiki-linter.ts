@@ -45,6 +45,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "case-board-labels": { one: "unusable CaseBoard label", many: "unusable CaseBoard labels" },
   "effort-unknown": { one: "unknown declared effort", many: "unknown declared efforts" },
   "log-kind": { one: "log entry with an unlisted kind", many: "log entries with an unlisted kind" },
+  "plan-not-folded": { one: "shipped plan that names no durable page", many: "shipped plans that name no durable page" },
   "ledger-row-state": { one: "PR ledger row with no readable state", many: "PR ledger rows with no readable state" },
   "plan-no-ledger": { one: "plan with two or more PRs and no PR ledger", many: "plans with two or more PRs and no PR ledger" },
   "chain-close-conflict": { one: "contradicted «Lukker» close", many: "contradicted «Lukker» closes" },
