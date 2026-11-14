@@ -1,7 +1,7 @@
 /**
  * `.wiki-reader.json`'s `whatsNew` block: which digest the start view's What's
  * new card builds. `default` is the 14-day bullet digest; `batch` lays out the
- * newest sync entries by area (`digest-batch.ts`). Its own module, with no
+ * newest sync entries by area (`digest.ts`, `digest-changed-pages.ts`). Its own module, with no
  * imports, so `store.ts` can read it without importing the digest code.
  */
 

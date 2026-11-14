@@ -199,7 +199,7 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   }
 }
 
-/** The same helper for `digest-batch.ts`, which reads one commit's file list. */
+/** The same helper for `digest-changed-pages.ts`, which reads one entry's commit and its file list. */
 export { git as runWikiGit };
 
 /** A commit line: `%H %at`, then a TAB and the subject (`%x09%s`). The
