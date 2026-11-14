@@ -536,6 +536,12 @@ describe("renderWikiHtml — double-backtick code spans", () => {
 describe("readerPayload (the lens switch's page inputs)", () => {
   const cfg = (extra: Record<string, unknown>) =>
     ({ typeMap: {}, typeLabels: {}, include: [], titleFrom: [], defaultType: "", folderLabels: {}, project: null, ...extra }) as never;
+  test("trackerProjects: every configured project once, absent without trackers (PR 4)", () => {
+    const trackers = [{ projects: ["MELOSYS", "TEAM"] }, { projects: ["MELOSYS"] }];
+    expect(readerPayload("kode", cfg({ trackers }), undefined).trackerProjects).toEqual(["MELOSYS", "TEAM"]);
+    expect("trackerProjects" in readerPayload("kode", cfg({}), undefined)).toBe(false);
+  });
+
   test("WIKI_DEFAULT_LENS beats the file's defaultLens; Agent is offered nowhere yet", () => {
     const inst = parseWikiDefaultLens("felles=overview");
     expect(readerPayload("felles", cfg({ defaultLens: "all", language: "no" }), inst)).toEqual({

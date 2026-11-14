@@ -9,6 +9,9 @@ import { renderWikiPage, getWikiAssets, WIKI_ASSET_PREFIX } from "../views/wiki-
 import { waitOwnerFrom } from "../../wiki/next-moves.ts";
 import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
+import { parseXrefIds, type XrefAnswer } from "../../wiki/core/cross-ref.ts";
+import { displayTitleOf } from "../../wiki/core/wiki-filter.ts";
+import { pageRefTargets } from "../../wiki/ref-targets.ts";
 import { DECISION_CHAIN_LINES_MAX, lineageLine } from "../../format/decision-chain.ts";
 import { hasExcludedSegment } from "../../format/query-block.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
@@ -1763,6 +1766,39 @@ export function registerWikiReadRoutes(
     return r.ok ? r : { ok: false, res: c.json({ error: r.error }, r.status) };
   }
 
+  /** The page's article HTML with the page route's options, which
+   *  `GET /api/wiki/ref` shares: an anchor there is the one the reader shows. */
+  async function renderPageArticle(
+    entry: Extract<PageResolution, { ok: true }>["entry"],
+    index: WikiIndex,
+    meta: WikiPageMeta,
+    markdown: string,
+    answerable: boolean,
+    owner: string | null,
+  ): Promise<string> {
+    // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
+    // a link opened on a non-default wiki lands on the DEFAULT one.
+    // `files`: the `<Query>` cards' csv/sql, read beside the page under the
+    // index root's containment check (`loadPageFiles`) before the sync render.
+    // `question`: a `<Question>` card's `questions_to:`, label language,
+    // whether this wiki takes answers (`WIKI_ANSWER_WIKIS`) and the owner a
+    // question nobody is named for goes to.
+    return renderWikiHtml(markdown, index.resolve, {
+      stripTitle: meta.title,
+      wiki: entry?.name,
+      files: await loadPageFiles(index.root, meta.relPath, markdown),
+      question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, owner),
+      idLabels: index.readerConfig?.idLabels,
+      language: index.readerConfig?.language,
+      // The decision chain view and the PR strip: the reader's page render only.
+      // `plan_status` as the index keeps it (comment-stripped).
+      views: true,
+      proposedPlan: meta.plan_status === "proposed",
+      // Number columns, verdict cells, the label grid: styled in the article only.
+      readerShapes: true,
+    });
+  }
+
   app.get("/api/wiki/page", async (c) => {
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
@@ -1807,27 +1843,7 @@ export function registerWikiReadRoutes(
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
       // No network join, so the section renders with the page.
       ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
-      // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
-      // a link opened on a non-default wiki lands on the DEFAULT one.
-      // `files`: the `<Query>` cards' csv/sql, read beside the page under the
-      // index root's containment check (`loadPageFiles`) before the sync render.
-      // `question`: a `<Question>` card's `questions_to:`, label language,
-      // whether this wiki takes answers (`WIKI_ANSWER_WIKIS`) and the owner a
-      // question nobody is named for goes to.
-      html: renderWikiHtml(markdown, index.resolve, {
-        stripTitle: meta.title,
-        wiki: entry?.name,
-        files: await loadPageFiles(index.root, meta.relPath, markdown),
-        question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
-        idLabels: index.readerConfig?.idLabels,
-        language: index.readerConfig?.language,
-        // The decision chain view and the PR strip: the reader's page render only.
-        // `plan_status` as the index keeps it (comment-stripped).
-        views: true,
-        proposedPlan: meta.plan_status === "proposed",
-        // Number columns, verdict cells, the label grid: styled in the article only.
-        readerShapes: true,
-      }),
+      html: await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
       // `roles`: the viewer's group keys (D30) — never a member — and the
@@ -1945,6 +1961,29 @@ export function registerWikiReadRoutes(
       chains: analysis.chains.slice(0, DECISION_CHAIN_LINES_MAX).map(lineageLine),
       total: analysis.chains.length,
     });
+  });
+
+  // CROSS-PAGE IDS (living facts PR 4) — for `D9 i [[page]]` on another page:
+  // each asked id this page defines, with its kind, anchor and hover text
+  // (`pageRefTargets`). The page is rendered with the page route's own options
+  // (`renderPageArticle`), so an anchor is the one the reader shows, `-2`
+  // suffix included. Ids the page does not define are left out. Same
+  // resolution and 400/404/503 ladder as `/api/wiki/page`, so a page the
+  // viewer may not read answers nothing. A new route rather than an `?id=` on
+  // `/api/wiki/decision-chain`: two of the three kinds are not decisions.
+  app.get("/api/wiki/ref", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
+    const ids = parseXrefIds(c.req.query("ids"));
+    if (ids.length === 0) return c.json({ error: "ids query param required" }, 400);
+    const markdown = await readWikiPage(index, meta);
+    if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
+    const answerCfg = config.wikiAnswers ?? resolveWikiAnswerConfig();
+    const answerable = wikiTakesAnswers(entry?.name, answerCfg);
+    const html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null);
+    const answer: XrefAnswer = { title: displayTitleOf(meta), refs: pageRefTargets(html, markdown, ids) };
+    return c.json(answer);
   });
 
   // The provenance block for ONE page — who wrote it, which issue it serves,

@@ -84,6 +84,7 @@ describe("wiki read slice — routes", () => {
     `/api/wiki/page/provenance?wiki=${wiki}&name=Widgets`,
     `/api/wiki/related?wiki=${wiki}&name=Widgets`,
     `/api/wiki/decision-chain?wiki=${wiki}&name=Widgets`,
+    `/api/wiki/ref?wiki=${wiki}&name=Widgets&ids=D1`,
     `/api/wiki/html?wiki=${wiki}&relPath=x.html`,
     `/api/wiki/graph?wiki=${wiki}&scope=wiki&level=1&depth=0`,
   ];
@@ -171,6 +172,7 @@ describe("wiki read slice — routes", () => {
     expect((await app.request("/api/wiki/html?wiki=rowiki&relPath=x.html")).status).toBe(200);
     expect((await app.request("/api/wiki/related?wiki=rowiki&name=Widgets")).status).toBe(200);
     expect((await app.request("/api/wiki/decision-chain?wiki=rowiki&name=Widgets")).status).toBe(200);
+    expect((await app.request("/api/wiki/ref?wiki=rowiki&name=Widgets&ids=D1")).status).toBe(200);
     const bare = (await (await app.request("/api/wiki/pages")).json()) as { pages: { relPath: string }[] };
     expect(bare.pages.map((p) => p.relPath).sort()).toEqual(["Widgets.md", "x.html"]);
   });

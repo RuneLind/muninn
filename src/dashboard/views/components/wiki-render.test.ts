@@ -163,7 +163,11 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves to 866,200.
 // 2026-11-14, What's new batch mode (the collapsed «N pages changed» list per sync): 866,187 -> 866,440
 // (294,614 gzipped), so the pin moves to 866,600.
-const WIKI_CLIENT_MAX_BYTES = 866_600;
+// 2026-11-14, cross-page ids (wiki-cross-refs.ts: the run matcher, the endpoint step, the hover card,
+// and core/cross-ref.ts): 866,440 -> 873,139 (296,789 gzipped), so the pin moves to 873,400.
+// Its fix round 1 batch 2 (one peek card for both kinds; the copied card and its listeners gone):
+// 873,251 -> 871,770 (296,543 gzipped), so the pin moves down to 872,000.
+const WIKI_CLIENT_MAX_BYTES = 872_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

@@ -1022,7 +1022,7 @@ is the one surface the user zone is written around.
    wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki`, the page's hashed
    script and stylesheet `/wiki/assets/:file` — a one-segment pattern, never a
    prefix — and
-   `/api/wiki/{pages,page,page/provenance,related,decision-chain,html,graph}`, GET/HEAD only),
+   `/api/wiki/{pages,page,page/provenance,related,decision-chain,ref,html,graph}`, GET/HEAD only),
    plus the slice's one write: GET/HEAD and POST on the exact path
    `/api/wiki/answers` (`WIKI_READ_SLICE_METHOD_ENTRIES` — rows of `{methods,
    path}`, the deny list's shape read the other way; answer cards PR 5). The
