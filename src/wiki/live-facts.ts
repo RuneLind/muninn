@@ -7,7 +7,7 @@
  *
  * - **The facts file** (`.wiki-facts.json` at the wiki root) is written by the
  *   plan-status-sweep (`--write-facts`). {@link readWikiFacts} reads it on a
- *   page open, re-parsing only when its mtime or size changed; a malformed
+ *   page open, re-parsing only when its stat signature changed; a malformed
  *   file or a `version` other than 1 gives no chips and one warning per change
  *   of the file.
  * - **What is marked** is what the sweep extracts (claude-skills
@@ -107,8 +107,8 @@ export function loadFacts(facts: WikiFacts): LoadedFacts {
   return { facts, prIds };
 }
 
-/** Per root: the file's signature (mtime and size) and what it parsed to. */
-const factsCache = new Map<string, { sig: string; loaded: LoadedFacts | null }>();
+/** Per root: the file's signature and the read of it (shared while in flight). */
+const factsCache = new Map<string, { sig: string; loaded: Promise<LoadedFacts | null> }>();
 
 /** For tests: forget every cached read. */
 export function resetWikiFactsCache(): void {
@@ -117,31 +117,40 @@ export function resetWikiFactsCache(): void {
 
 /**
  * The wiki's facts, or null: no file, an unreadable one, a malformed one or a
- * `version` other than 1. Re-read only when the file's mtime or size changed,
- * so a malformed file warns once per change, never once per page open.
+ * `version` other than 1. Re-read only when the file's signature changed
+ * (inode, ctime, mtime, size: a `chmod` or an mtime-keeping rewrite moves
+ * ctime), so a malformed file warns once per change, never once per page
+ * open. Opens that miss together share one read (single-flight per signature).
  */
 export async function readWikiFacts(root: string, warn: (reason: string) => void = (reason) => log.warn("{file} at {root} gives no live chips: {reason}", { file: WIKI_FACTS_FILE, root, reason })): Promise<LoadedFacts | null> {
   const file = path.join(root, WIKI_FACTS_FILE);
   let sig: string;
   try {
-    const st = await fs.stat(file);
-    sig = `${st.mtimeMs}:${st.size}`;
+    // Nanoseconds: Bun's `ctimeMs` is whole milliseconds, and two writes in one
+    // millisecond are a change too.
+    const st = await fs.stat(file, { bigint: true });
+    sig = `${st.ino}:${st.ctimeNs}:${st.mtimeNs}:${st.size}`;
   } catch {
     factsCache.delete(root);
     return null;
   }
   const hit = factsCache.get(root);
   if (hit && hit.sig === sig) return hit.loaded;
-  let loaded: LoadedFacts | null = null;
+  // Set before the first await, so an open arriving mid-read joins this one.
+  const loaded = loadWikiFactsFile(file, warn);
+  factsCache.set(root, { sig, loaded });
+  return loaded;
+}
+
+async function loadWikiFactsFile(file: string, warn: (reason: string) => void): Promise<LoadedFacts | null> {
   try {
     const r = parseWikiFacts(await Bun.file(file).text());
-    if ("error" in r) warn(r.error);
-    else loaded = loadFacts(r.facts);
+    if (!("error" in r)) return loadFacts(r.facts);
+    warn(r.error);
   } catch (err) {
     warn(`unreadable: ${err instanceof Error ? err.message : String(err)}`);
   }
-  factsCache.set(root, { sig, loaded });
-  return loaded;
+  return null;
 }
 
 // ── A page's keys ────────────────────────────────────────────────────────────
@@ -346,7 +355,8 @@ export function markedMentions(
   for (const m of body.matchAll(WIKILINK_WITH_LABEL_RE)) blocked.push([m.index!, m.index! + m[0].length]);
   const starts = lineStarts(body);
   const lines = body.split("\n");
-  const homes = new Set(stateLineRoles(body).home.flatMap((u) => u.lines));
+  // `body` is `readerBody`'s string: its frontmatter is gone, so a leading `---` is a rule.
+  const homes = new Set(stateLineRoles(body, { frontmatter: false }).home.flatMap((u) => u.lines));
   const isBlocked = (m: Mention) => {
     if (inProtectedRegion(m.start, code) || inProtectedRegion(m.end - 1, code)) return true;
     if (blocked.some(([a, b]) => m.start < b && m.end > a)) return true;
@@ -389,6 +399,14 @@ export function chipSpanHtml(id: string): string {
   return `<span class="${FACT_CHIP_CLASS}" ${LIVE_FACT_ATTR}="${escapeHtml(id)}" ${READER_ONLY_ATTR}></span>`;
 }
 
+let chipPassFault: Error | null = null;
+
+/** For tests: make every chip pass throw `err` (null clears it), so a route
+ *  can prove a failed chip pass still opens the page. */
+export function __setChipPassFaultForTest(err: Error | null): void {
+  chipPassFault = err;
+}
+
 /**
  * The chip pass for one page: the insertions over `body` and the payload's
  * `facts` — the entries of the PRs and keys that got a chip, plus every PR in
@@ -399,6 +417,7 @@ export function planLiveChips(
   markdown: string,
   input: Pick<LiveFactsInput, "loaded" | "grammar" | "trackers" | "relPath">,
 ): { insertions: ChipInsertion[]; facts: LiveFactsPayload | undefined } {
+  if (chipPassFault) throw chipPassFault;
   const { facts, prIds } = input.loaded;
   const prEntry = (id: string): [string, FactsPrEntry] | undefined => {
     const fileId = prIds.get(id.toLowerCase());

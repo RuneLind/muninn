@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
-import { rm, writeFile, unlink } from "node:fs/promises";
+import { chmod, rm, stat, utimes, writeFile, unlink } from "node:fs/promises";
 import { testTempDir } from "../test/temp-dir.ts";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -97,13 +97,15 @@ const FACTS: WikiFacts = (() => {
 const GRAMMAR = { owner: "acme", aliases: { api: "acme-api", web: "acme-web" }, noProd: ["acme-e2e"] };
 const TRACKERS = jiraTrackers(parseTrackersConfig([{ id: "jira", projects: ["DEMO"] }], () => {}));
 
-function render(md: string, relPath = "plans/demo.mdx") {
+function render(md: string, relPath = "plans/demo.mdx", opts: Omit<NonNullable<Parameters<typeof renderWikiHtml>[2]>, "liveFacts"> = {}) {
   let facts: LiveFactsPayload | undefined;
   const html = renderWikiHtml(md, () => undefined, {
+    ...opts,
     liveFacts: { loaded: loadFacts(FACTS), grammar: GRAMMAR, trackers: TRACKERS, relPath, collect: (f) => (facts = f) },
   });
   return { html, facts };
 }
+const stripChips = (html: string) => html.replace(/<span class="fact-chip" data-live-fact="[^"]*" data-reader-only><\/span>/g, "");
 const chipIds = (html: string) => [...html.matchAll(/data-live-fact="([^"]+)"/g)].map((m) => m[1]);
 const page = (body: string, fm = "repos: [acme-api]\n") => `---\ntitle: Demo\n${fm}---\n\n${body}\n`;
 
@@ -201,6 +203,26 @@ describe("the chip pass in renderWikiHtml", () => {
   test("homes are found on the string the render marks, after fact-check sentinel lines are removed", () => {
     const md = page(["<!-- factcheck:start -->", "<!-- factcheck:end -->", "Prose acme/acme-api#102.", "", "**Status:** acme/acme-api#101."].join("\n"));
     expect(chipIds(render(md).html)).toEqual(["acme/acme-api#102"]);
+  });
+
+  test("a `---` rule right after the stripped H1 is a rule, not frontmatter: the Status home under it stays unmarked", () => {
+    const md = page(["# Demo", "---", "**Status:** merged acme/acme-api#101", "", "---", "", "Prose acme/acme-api#102."].join("\n"));
+    expect(chipIds(render(md, "plans/demo.mdx", { stripTitle: "Demo" }).html)).toEqual(["acme/acme-api#102"]);
+  });
+
+  test("a chip adds no text to a plain-text reader: the page with chips stripped is the page without facts, Timeline lanes included", () => {
+    const md = page(
+      [
+        "<StatusRows>", "", "- **Plan:** open", "", "</StatusRows>", "",
+        "<DecisionLog>", "", "- **D1** — Ship DEMO-12: «Rename». 2026-01-05", "- **D2** — Then acme/acme-api#101: merge. 2026-01-10", "", "</DecisionLog>", "",
+        "<Timeline>", "", "- **2026-01-05** — DEMO-12: «Rename»", "- **2026-01-10** — web acme/acme-api#101: merged", "", "</Timeline>",
+      ].join("\n"),
+    );
+    const opts = { views: true, today: "2026-01-20" };
+    const withChips = render(md, "plans/demo.mdx", opts).html;
+    expect(chipIds(withChips).length).toBeGreaterThan(0);
+    expect(withChips).toContain('title="2026-01-05: DEMO-12: «Rename»"');
+    expect(stripChips(withChips)).toBe(renderWikiHtml(md, () => undefined, opts));
   });
 
   test("without liveFacts no chip; without prGrammar only owner-qualified forms; without trackers no key", () => {
@@ -318,6 +340,37 @@ describe("readWikiFacts", () => {
     await unlink(file());
     expect(await readWikiFacts(root, warn)).toBeNull();
     expect(warnings.length).toBe(2);
+  });
+
+  test("a same-size rewrite that keeps the mtime is a change of the file", async () => {
+    // A whole-second mtime, so putting it back is exact.
+    const T = 1_767_000_000;
+    await writeFile(file(), JSON.stringify({ ...FACTS, version: 2 }));
+    await utimes(file(), T, T);
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    // Same size, mtime put back: only ctime (and the content) moved.
+    const before = await stat(file());
+    await writeFile(file(), JSON.stringify({ ...FACTS, version: 1 }));
+    await utimes(file(), T, T);
+    const after = await stat(file());
+    expect([after.size, after.mtimeMs]).toEqual([before.size, before.mtimeMs]);
+    expect(await readWikiFacts(root, warn)).not.toBeNull();
+  });
+
+  test("a chmod is a change of the file: unreadable gives null, readable again loads", async () => {
+    await writeFile(file(), JSON.stringify(FACTS));
+    expect(await readWikiFacts(root, warn)).not.toBeNull();
+    await chmod(file(), 0o000);
+    expect(await readWikiFacts(root, warn)).toBeNull();
+    await chmod(file(), 0o644);
+    expect(await readWikiFacts(root, warn)).not.toBeNull();
+  });
+
+  test("page opens that miss together share one read: one warning per change", async () => {
+    await writeFile(file(), JSON.stringify({ ...FACTS, version: 2 }));
+    const all = await Promise.all([readWikiFacts(root, warn), readWikiFacts(root, warn), readWikiFacts(root, warn)]);
+    expect(all).toEqual([null, null, null]);
+    expect(warnings.length).toBe(1);
   });
 
   test("a key list naming a missing entry is an error", () => {

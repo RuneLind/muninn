@@ -1820,18 +1820,27 @@ export function registerWikiReadRoutes(
     // LIVE CHIPS (living facts PR 3b): only on a wiki with a readable
     // `.wiki-facts.json`, and only after a mention that has an entry in it.
     // `facts` carries the entries the page's chips read; absent with no chip.
-    const loadedFacts = await readWikiFacts(index.root);
+    // Never a failed page open: a throw anywhere in the chip pass renders the
+    // page without chips and logs one warning.
     let liveFacts: LiveFactsPayload | undefined;
-    const liveFactsInput: LiveFactsInput | undefined = loadedFacts
-      ? {
+    let html: string | undefined;
+    try {
+      const loadedFacts = await readWikiFacts(index.root);
+      if (loadedFacts) {
+        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, {
           loaded: loadedFacts,
           grammar: index.readerConfig?.prGrammar ?? null,
           trackers: jiraTrackers(index.readerConfig?.trackers),
           relPath: meta.relPath,
           collect: (f) => (liveFacts = f),
-        }
-      : undefined;
-    const html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, liveFactsInput);
+        });
+      }
+    } catch (err) {
+      log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+      liveFacts = undefined;
+      html = undefined;
+    }
+    html ??= await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined);
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])

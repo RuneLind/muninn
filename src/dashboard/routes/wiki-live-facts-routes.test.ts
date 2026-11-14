@@ -12,7 +12,7 @@ import { Hono } from "hono";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { resetWikiFactsCache } from "../../wiki/live-facts.ts";
+import { __setChipPassFaultForTest, resetWikiFactsCache } from "../../wiki/live-facts.ts";
 import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 
@@ -76,6 +76,18 @@ describe("GET /api/wiki/page — live chips", () => {
     expect([...data.html.matchAll(/data-live-fact="([^"]+)"/g)].map((m) => m[1])).toEqual(["acme/acme-api#101", "DEMO-11"]);
     expect(Object.keys(data.facts!.prs).sort()).toEqual(["acme/acme-api#101", "acme/acme-api#102"]);
     expect(Object.keys(data.facts!.keys)).toEqual(["DEMO-11"]);
+  });
+
+  test("a throw in the chip pass still opens the page: 200, no chip, no facts field", async () => {
+    __setChipPassFaultForTest(new Error("injected chip-pass fault"));
+    try {
+      const data = await get("chips");
+      expect(data.html).not.toContain("fact-chip");
+      expect(data.html).toContain("DEMO-11");
+      expect(data.facts).toBeUndefined();
+    } finally {
+      __setChipPassFaultForTest(null);
+    }
   });
 
   test("a wiki with no facts file: no chip, no facts field", async () => {
