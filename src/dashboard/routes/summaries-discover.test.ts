@@ -230,6 +230,15 @@ describe("search and dedup", () => {
     const body = (await res.json()) as { results: { videoId: string }[] };
     expect(body.results.map((r) => r.videoId)).toEqual([ID(3)]);
   });
+  test("the floor is inclusive: a score of exactly 0.4 is shown, 0.39 is not", async () => {
+    rankAnswer = JSON.stringify([
+      { n: 1, score: 0.39, why: "just under" },
+      { n: 2, score: 0.4, why: "at the floor" },
+    ]);
+    const res = await post(app(), { source: "youtube", docId: DOC });
+    const body = (await res.json()) as { results: { videoId: string; score: number }[] };
+    expect(body.results.map((r) => [r.videoId, r.score])).toEqual([[ID(3), 0.4]]);
+  });
   test("the queries prompt reads the summary, never the transcript", async () => {
     await post(app(), { source: "youtube", docId: DOC });
     expect(prompts.queries[0]).toContain("Title: Invented seed talk");
@@ -313,8 +322,9 @@ describe("interest profile", () => {
     const loadProfile = async (name: string | undefined) => (loads.push(String(name)), "Invented profile");
     __setAuthPolicyForTest({ authenticating: false, mode: "off" });
     try {
-      expect(await defaultSummariesDiscoverDeps(config, { loadProfile }).profile(bot)).toBe("Invented profile");
-      expect(loads).toEqual(["summarizer"]);
+      const other = { name: "inventedbot", dir: "/tmp/inventedbot", connector: "claude-sdk" } as never;
+      expect(await defaultSummariesDiscoverDeps(config, { loadProfile }).profile(other)).toBe("Invented profile");
+      expect(loads).toEqual(["inventedbot"]);
     } finally {
       __setAuthPolicyForTest(null);
     }

@@ -147,6 +147,32 @@ describe("searchYouTube", () => {
     expect(peak).toBe(5);
     expect(active).toBe(0);
   });
+  test("queued searches run first-in, first-out", async () => {
+    const started: string[] = [];
+    const releases: (() => void)[] = [];
+    const run = async (cmd: string[]) => {
+      started.push(cmd[cmd.length - 1]!);
+      await new Promise<void>((r) => releases.push(r));
+      return { stdout: JSON.stringify(SEARCH_JSON), stderr: "", exitCode: 0 };
+    };
+    const all = ["h1", "h2", "h3", "h4", "h5", "wA", "wB", "wC"].map((q) => searchYouTube(q, 5, run));
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      expect(started).toEqual(["ytsearch5:h1", "ytsearch5:h2", "ytsearch5:h3", "ytsearch5:h4", "ytsearch5:h5"]);
+      releases.shift()!();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(started.at(-1)).toBe("ytsearch5:wA");
+      releases.shift()!();
+      await new Promise((r) => setTimeout(r, 5));
+      expect(started.at(-1)).toBe("ytsearch5:wB");
+    } finally {
+      for (let i = 0; i < 200 && (releases.length || started.length < 8); i++) {
+        releases.shift()?.();
+        await new Promise((r) => setTimeout(r, 2));
+      }
+      await Promise.all(all);
+    }
+  });
   test("a search that throws frees its slot for the next one", async () => {
     let calls = 0;
     const run = async () => {
