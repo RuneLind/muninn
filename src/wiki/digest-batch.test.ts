@@ -13,7 +13,7 @@ import {
   DIGEST_SYSTEM_PROMPT,
   type LogEntry,
 } from "./digest.ts";
-import { changedPagesForEntry, entryCommitFromBlame } from "./digest-changed-pages.ts";
+import { changedPagesForEntry, blameOrigin, entryCommitFromLineLog } from "./digest-changed-pages.ts";
 import { parseWhatsNewReaderConfig } from "./whats-new-config.ts";
 import { buildWikiIndex, readWikiReaderConfig } from "./store.ts";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -110,35 +110,46 @@ describe("entry line ranges", () => {
   });
 });
 
-describe("entryCommitFromBlame", () => {
+describe("reading git's output", () => {
   const A = "a".repeat(40);
   const B = "b".repeat(40);
-  const Z = "0".repeat(40);
-  const blame = (rows: [string, number, string][]) => {
-    const seen = new Set<string>();
-    return rows
-      .map(([sha, t, text], i) => {
-        const head = `${sha} ${i + 1} ${i + 1} 1`;
-        const meta = seen.has(sha) ? "" : `\nauthor x\ncommitter-time ${t}`;
-        seen.add(sha);
-        return `${head}${meta}\n\t${text}`;
-      })
-      .join("\n");
-  };
-  test("most non-blank lines win; blank and uncommitted lines do not count", () => {
-    expect(entryCommitFromBlame(blame([[B, 200, "## header"], [A, 100, "one"], [A, 100, "two"], [B, 200, ""], [B, 200, " "]]))).toBe(A);
-    expect(entryCommitFromBlame(blame([[Z, 0, "## new"], [Z, 0, "body"], [A, 100, ""]]))).toBeNull();
+  const C = "c".repeat(40);
+  test("blameOrigin reads the commit and the line it sat on, and refuses an uncommitted line", () => {
+    expect(blameOrigin(`${A} 3 21 1\nauthor x\n\t## [2026-11-01] update | S`)).toEqual({ sha: A, line: 3 });
+    expect(blameOrigin(`${"0".repeat(40)} 21 21 1\n\t## x`)).toBeNull();
+    expect(blameOrigin("")).toBeNull();
   });
-  test("a tie goes to the oldest commit", () => {
-    expect(entryCommitFromBlame(blame([[B, 200, "x"], [A, 100, "y"]]))).toBe(A);
-    expect(entryCommitFromBlame(blame([[A, 100, "x"], [B, 200, "y"]]))).toBe(A);
+  const block = (sha: string, removed: string | null, added: string) =>
+    `\x01${sha}\n\ndiff --git a/log.md b/log.md\n--- a/log.md\n+++ b/log.md\n@@ -3,1 +3,1 @@\n${removed === null ? "" : `-${removed}\n`}+${added}\n`;
+  test("an edit keeping the date and kind is walked past; an addition stops the walk", () => {
+    const out =
+      block(A, "## [2026-11-01] update | Sync of [[Old]]", "## [2026-11-01] update | Sync of [[New]]") +
+      block(B, null, "## [2026-11-01] update | Sync of [[Old]]");
+    expect(entryCommitFromLineLog(out)).toBe(B);
+  });
+  test("a header written over another entry's header, or over a non-header line, stops the walk", () => {
+    expect(entryCommitFromLineLog(block(A, "## [2026-11-01] lint | Helsesjekk", "## [2026-11-01] update | Helfo") + block(B, null, "## [2026-11-01] lint | Helsesjekk"))).toBe(A);
+    expect(entryCommitFromLineLog(block(A, "## [2026-10-31] update | S", "## [2026-11-01] update | S") + block(B, null, "x"))).toBe(A);
+    expect(entryCommitFromLineLog(block(A, "plain text", "## [2026-11-01] update | S") + block(B, null, "plain text"))).toBe(A);
+  });
+  test("a walk that never stops takes the oldest commit; no commit is null", () => {
+    const keep = (sha: string) => block(sha, "## [2026-11-01] update | S", "## [2026-11-01] update | S2");
+    expect(entryCommitFromLineLog(keep(A) + keep(B) + keep(C))).toBe(C);
+    expect(entryCommitFromLineLog("")).toBeNull();
   });
 });
 
 // ── git-backed: a wiki in a subdirectory of its repo ──────────────────────────
 
+/** Each git call one minute after the last, so commits in a test never share a
+ *  committer second (a tie rule that reads commit times needs them apart). */
+let gitClock = Date.parse("2026-11-01T08:00:00Z") / 1000;
+
 function git(cwd: string, ...args: string[]): void {
-  const r = Bun.spawnSync(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args]);
+  const at = `${(gitClock += 60)} +0000`;
+  const r = Bun.spawnSync(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], {
+    env: { ...process.env, GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at },
+  });
   if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
 }
 
@@ -174,21 +185,21 @@ describe("changed pages from git", () => {
     await rm(repo, { recursive: true, force: true });
   });
 
-  /** The line range of the entry whose header is `header`, in the current log. */
-  async function rangeOf(header: string): Promise<[number, number]> {
+  /** The header line of the entry whose header is `header`, in the current log. */
+  async function lineOf(header: string): Promise<number> {
     const entry = parseLogEntries(await Bun.file(path.join(root, "log.md")).text()).find(
       (x) => `## [${x.date}] ${x.kind} | ${x.title}` === header,
     )!;
-    return [entry.line!, entry.endLine!];
+    return entry.line!;
   }
 
   test("each entry lists only its own commit's pages, wiki-relative, meta files left out", async () => {
     const index = await buildWikiIndex(root);
-    const a = (await changedPagesForEntry(root, ...(await rangeOf(SYNC_A)), index.resolveRelPath))!;
+    const a = (await changedPagesForEntry(root, await lineOf(SYNC_A), index.resolveRelPath))!;
     expect(a).toHaveLength(28);
     expect(a.some((p) => p.relPath === "concepts/Side 7 æ.md")).toBe(true);
     expect(a.some((p) => p.relPath === "index.md" || p.relPath.includes("outside"))).toBe(false);
-    const b = (await changedPagesForEntry(root, ...(await rangeOf(SYNC_B)), index.resolveRelPath))!;
+    const b = (await changedPagesForEntry(root, await lineOf(SYNC_B), index.resolveRelPath))!;
     expect(b.map((p) => p.relPath).sort()).toEqual(["concepts/Ny.md", "concepts/Side 0 æ.md"]);
   });
 
@@ -196,11 +207,11 @@ describe("changed pages from git", () => {
     const log = await Bun.file(path.join(root, "log.md")).text();
     await Bun.write(path.join(root, "log.md"), log.replace("# Log\n\n", "# Log\n\n## [2026-11-02] update | Not committed\n\nNew body\n\n"));
     const index = await buildWikiIndex(root);
-    expect(await changedPagesForEntry(root, ...(await rangeOf("## [2026-11-02] update | Not committed")), index.resolveRelPath)).toBeNull();
+    expect(await changedPagesForEntry(root, await lineOf("## [2026-11-02] update | Not committed"), index.resolveRelPath)).toBeNull();
     const bare = await testTempDir(path.join(tmpdir(), "wiki-batch-nogit-"));
     try {
       await Bun.write(path.join(bare, "log.md"), log);
-      expect(await changedPagesForEntry(bare, 3, 5, index.resolveRelPath)).toBeNull();
+      expect(await changedPagesForEntry(bare, 3, index.resolveRelPath)).toBeNull();
     } finally {
       await rm(bare, { recursive: true, force: true });
     }
@@ -312,6 +323,44 @@ describe("an entry's commit is the one that wrote its lines", () => {
     await commit({ "c/b.md": "# b\n", "log.md": `# Log\n\n${entry}${entry}## [2026-10-20] note | Older\n` }, "2");
     const pages = (await syncsOf()).map(([, p]) => p!.join(",")).sort();
     expect(pages).toEqual(["c/a.md", "c/b.md"]);
+  });
+
+  test("an entry written over another entry's header is the overwriting commit's, even when the body lines tie", async () => {
+    // huginn-nav 2026-05-11: the Helfo entry's commit replaced the lint
+    // entry's header line, so the lint body sits under the Helfo header.
+    const lint = "Lint linje 1.\nLint linje 2.\nLint linje 3.\nLint linje 4.\n";
+    await commit({ "c/a.md": "# a\n", "log.md": `# Log\n\n## [2026-11-01] lint | Helsesjekk\n\n${lint}\n## [2026-10-20] note | Older\n` }, "lint");
+    await commit(
+      { "c/b.md": "# b\n", "log.md": `# Log\n\n## [2026-11-01] update | [[Helfo]] bekreftet\n\nHelfo 1.\nHelfo 2.\nHelfo 3.\n\n${lint}\n## [2026-10-20] note | Older\n` },
+      "helfo",
+    );
+    expect(await syncsOf()).toEqual([["[[Helfo]] bekreftet", ["c/b.md"]]]);
+  });
+
+  test("a rename sweep that rewrites most of the entry's lines still loses to the sync", async () => {
+    const tail = "\n- [[Other]] ny\n\n## [2026-10-20] note | Older\n";
+    await commit(
+      { "c/a.md": "# a\n", "log.md": `# Log\n\n## [2026-11-01] update | Sync of [[Old]]\n\n- [[Old]] oppdatert\n- [[Old]]/sub oppdatert${tail}` },
+      "sync",
+    );
+    await commit(
+      { "c/z.md": "# z\n", "log.md": `# Log\n\n## [2026-11-01] update | Sync of [[New]]\n\n- [[New]] oppdatert\n- [[New]]/sub oppdatert${tail}` },
+      "rename sweep",
+    );
+    expect(await syncsOf()).toEqual([["Sync of [[New]]", ["c/a.md"]]]);
+  });
+
+  test("an entry written while resolving a merge lists the pages the merge brought in", async () => {
+    await commit({ "c/base.md": "# base\n", "log.md": "# Log\n\n## [2026-10-20] note | Older\n" }, "base");
+    git(repo, "checkout", "-q", "-b", "side");
+    await commit({ "c/b.md": "# b\n", "c/b2.md": "# b2\n" }, "side pages");
+    git(repo, "checkout", "-q", "-");
+    await commit({ "c/m.md": "# m\n" }, "main page");
+    git(repo, "-c", "core.editor=true", "merge", "-q", "--no-ff", "--no-commit", "side");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Merged sync\n\nBody.\n\n## [2026-10-20] note | Older\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "merge side");
+    expect(await syncsOf()).toEqual([["Merged sync", ["c/b.md", "c/b2.md"]]]);
   });
 
   test("a header edited later still maps to the commit that wrote the entry", async () => {

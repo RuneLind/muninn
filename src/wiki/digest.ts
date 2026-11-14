@@ -488,11 +488,11 @@ ${renderEntriesBlock(entries)}
 Write the "what's new" digest as 4–6 markdown bullets.`;
 
   // The pages each sync changed come from git, read while the model runs. A
-  // truncated sync keeps the line range `parseLogEntries` gave it.
+  // truncated sync keeps the header line `parseLogEntries` gave it.
   const syncsPromise: Promise<DigestSync[] | undefined> = batch
     ? Promise.all(
         [...batch.syncs].reverse().map(async (e): Promise<DigestSync> => {
-          const pages = e.line && e.endLine ? await changedPagesForEntry(root, e.line, e.endLine, index.resolveRelPath) : null;
+          const pages = e.line ? await changedPagesForEntry(root, e.line, index.resolveRelPath) : null;
           return { date: e.date, title: e.title, pages };
         }),
       )
