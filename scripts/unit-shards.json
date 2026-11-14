@@ -81,6 +81,7 @@
       "src/dashboard/routes/wiki-read-slice-routes.test.ts",
       "src/dashboard/routes/wiki-related-routes.test.ts",
       "src/dashboard/routes/wiki-decision-chain-routes.test.ts",
+      "src/dashboard/routes/wiki-ref-routes.test.ts",
       "src/dashboard/routes/wiki-work-routes.test.ts",
       "src/dashboard/routes/sync-routes.test.ts",
       "src/dashboard/routes/claude-usage-routes.test.ts",

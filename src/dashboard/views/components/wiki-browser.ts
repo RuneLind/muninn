@@ -1569,7 +1569,7 @@ function blogAccentStyleBlock(m: WikiListing): string {
  *  navigation keys funnel through, so the explainer branch, the in-flight flag and
  *  the pending-listing apply can't drift between them. */
 function openNavTarget(target: NavTarget, push: boolean): void {
-  if (target.kind === "relPath") loadPageByRelPath(target.relPath, push);
+  if (target.kind === "relPath") loadPageByRelPath(target.relPath, push, true, target.anchor);
   else loadPage(target.name, push);
 }
 
@@ -1601,8 +1601,8 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  `data-relpath`). The by-`name` route resolves first-stem-match, which on a wiki
  *  with same-stem pages opens the wrong page entirely. The relPath rides into the
  *  pushed history entry so Back/reload/share re-resolve the SAME page;
- *  `push=false` on popstate/boot replays without re-pushing. */
-function loadPageByRelPath(relPath: string, push = true, revealHash = true): void {
+ *  `push=false` on popstate/boot replays without re-pushing; `anchor` becomes its `#fragment`. */
+function loadPageByRelPath(relPath: string, push = true, revealHash = true, anchor?: string): void {
   hideExplainPill();
   closeRailPanel();
   navInFlight = true; // same in-flight window as loadPage
@@ -1619,14 +1619,14 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true): voi
     loadExplainer(listing, push);
     return;
   }
-  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, revealHash);
+  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, revealHash, anchor ? `#${encodeURIComponent(anchor)}` : undefined);
 }
 
 /** Shared fetch + article render for both by-name and by-relPath navigation.
  *  History is pushed as `?relPath=<relPath>` off the RESOLVED page (see below), so
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
-function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): void {
+function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, hash?: string): void {
   // The page being left stops boosting a find now: a load that fails (an error
   // payload or a rejected fetch) leaves `currentRelPath` on it.
   currentNear = null;
@@ -1687,7 +1687,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
         // navigation — that is what makes reload/Back/share land on the SAME page
         // instead of re-resolving the stem to the first registration.
         if (currentRelPath) {
-          history.pushState({ relPath: currentRelPath }, "", pageUrlByRelPath(currentRelPath));
+          history.pushState({ relPath: currentRelPath }, "", pageUrlByRelPath(currentRelPath) + (hash ?? ""));
         } else {
           history.pushState({ page: getCurrentName() }, "", pageUrl(getCurrentName()!));
         }
@@ -1734,7 +1734,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // Bare ids (D4, Q-8) and quoted section titles → links with a peek card.
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
-      enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels);
+      enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels, { trackerProjects: reader?.trackerProjects, withWiki, language: readerLang });
       // 🧭 on each top-level section heading. After the ref links, which index
       // heading text: the button's own glyph must not join that text.
       if (data.meta.relPath) {
@@ -1817,7 +1817,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean): vo
       // A `#id` in the URL (a shared `#q-8`): open the folds around it, scroll to
       // it. Not on an in-place reload (`reloadPageInPlace`): the URL keeps the
       // hash, and the reader may have closed that fold since.
-      if (revealHash) revealHashTarget(articleRoot);
+      if (revealHash) revealHashTarget(articleRoot, hash);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.

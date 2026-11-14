@@ -343,6 +343,10 @@ export interface ReaderPayload {
    *  keys (whose lanes the reader puts first and marks «deg»), and whether the
    *  viewer gets «Se som rolle» (admin). Keys only, never a group member. */
   roles: ViewerRoles;
+  /** The configured tracker projects (`trackers[].projects`): a key such as
+   *  `MELOSYS-8308` before a wikilink is never a cross-page id. Absent on a
+   *  wiki with no trackers. */
+  trackerProjects?: string[];
 }
 
 export interface ViewerRoles {
@@ -360,7 +364,9 @@ export function readerPayload(
    *  page carries `plan_status`, its root is a plan-card root, viewer admin. */
   agentLens = false,
 ): ReaderPayload {
+  const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
   return {
+    ...(trackerProjects.length ? { trackerProjects } : {}),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),

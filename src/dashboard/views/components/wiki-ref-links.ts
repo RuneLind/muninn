@@ -28,6 +28,11 @@
 
 import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
+import { RUN_GAP_SRC } from "../../../wiki/core/cross-ref.ts";
+import { fetchAndResolveXrefs, wrapXrefRuns, xrefFetchVia } from "./wiki-cross-refs.ts";
+import { INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
+
+export { INLINE, PEEK_CLASS, REF_SKIP };
 import {
   CB_LINE_CLASS,
   CB_MORE_CLASS,
@@ -49,7 +54,6 @@ import {
 export const ID_NOUN_CLASS = "id-noun";
 
 export const REF_CLASS = "wiki-ref";
-export const PEEK_CLASS = "wiki-ref-peek";
 export const BACK_CLASS = "wiki-ref-back";
 
 /** GitHub's heading slug: lowercase, punctuation dropped, each space a hyphen
@@ -175,13 +179,11 @@ export function refTargets(root: Element): { ids: Map<string, Element>; titles: 
   return { ids: unique(idDefs), titles };
 }
 
-// `.tl-lanes` and a glossary's `.gl-tip`: hidden text (visually hidden labels, a
-// role=tooltip definition), where a link would be an unseen tab stop.
-const SKIP =
-  "a, code, pre, summary, h1, h2, h3, h4, h5, h6, button, textarea, input, select, svg, script, style, .mermaid, .query-result, .tl-lanes, .gl-tip";
+/** What the linker leaves alone (`wiki-ref-dom.ts`). */
+const SKIP = REF_SKIP;
 
 /** What may stand between two ids of one run: a list or range separator. */
-const RUN_GAP_RE = /^\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*$/u;
+const RUN_GAP_RE = new RegExp(`^${RUN_GAP_SRC}$`, "u");
 
 /** Whether the text before an id ends with a word that starts with one of the
  *  noun's forms: «beslutningen D7», «Beslutning D7», «beslutningene D1–D3»,
@@ -232,9 +234,6 @@ export function nounRuns(text: string, matches: RefMatch[], labels: IdLabels | u
   return out;
 }
 
-/** The inline elements the text before an id is read back through; any other
- *  element (a heading, a list, a fold, a `<br>`) ends the read-back. */
-const INLINE = "strong, em, b, i, u, s, del, mark, code, kbd, sup, sub, small, abbr, span, a";
 const PRECEDING_MAX = 80;
 
 /** The text before `node` back to the first non-inline element, through its
@@ -792,9 +791,22 @@ function install(): void {
   window.addEventListener("popstate", onPopState);
 }
 
+/** What the cross-page id step needs from the reader (`wiki-cross-refs.ts`). */
+export interface CrossRefOptions {
+  /** `reader.trackerProjects`: a key of one is never an id. */
+  trackerProjects?: readonly string[];
+  /** The shell's `withWiki`, for `GET /api/wiki/ref`. */
+  withWiki: (url: string) => string;
+  /** The wiki's language, for the hover card's state words. */
+  language?: string;
+}
+
 /** Link the references in a freshly rendered article and reset the jump
- *  history. Called once per page render, before the URL's hash is revealed. */
-export function enhanceRefLinks(articleRoot: Element, relPath = "", idLabels?: IdLabels): void {
+ *  history. Called once per page render, before the URL's hash is revealed.
+ *  With `cross`, cross-page id runs (`D9 i [[page]]`) are wrapped first, so
+ *  none links to this page's own item, and resolved when the linked pages
+ *  answer. */
+export function enhanceRefLinks(articleRoot: Element, relPath = "", idLabels?: IdLabels, cross?: CrossRefOptions): void {
   install();
   pageRelPath = relPath;
   hidePeek();
@@ -802,7 +814,10 @@ export function enhanceRefLinks(articleRoot: Element, relPath = "", idLabels?: I
   backPill = null;
   root = articleRoot;
   article = articleRoot.querySelector(".wiki-article");
-  if (article) linkRefs(article, idLabels);
+  if (!article) return;
+  const xrefs = cross ? wrapXrefRuns(article, cross.trackerProjects ?? []) : [];
+  linkRefs(article, idLabels);
+  if (cross) void fetchAndResolveXrefs(xrefs, xrefFetchVia(cross.withWiki), cross.language);
 }
 
 /** The reader's CSS for links, the peek card and the back pill. */

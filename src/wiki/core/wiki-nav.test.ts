@@ -27,6 +27,16 @@ describe("navTargetFrom", () => {
     ).toEqual({ kind: "relPath", relPath: "a/MEMORY.md" });
   });
 
+  test("a cross-page id link's data-anchor rides along (living facts PR 4)", () => {
+    expect(navTargetFrom(el({ "data-relpath": "plans/a.md", "data-anchor": "o1-2" }))).toEqual({
+      kind: "relPath",
+      relPath: "plans/a.md",
+      anchor: "o1-2",
+    });
+    // Blank: no anchor key at all, so a plain row's target is unchanged.
+    expect(navTargetFrom(el({ "data-relpath": "plans/a.md", "data-anchor": " " }))).toEqual({ kind: "relPath", relPath: "plans/a.md" });
+  });
+
   test("falls back to the name attributes when there is no relPath", () => {
     expect(navTargetFrom(el({ "data-wiki-page": "Harness Engineering" }))).toEqual({
       kind: "name",
