@@ -11,6 +11,8 @@ import type { CapturedDoc } from "./discover-deps.ts";
 export const DISCOVER_SEED_CAP = 5;
 /** "The last 7 days": today and the six days before it. */
 export const DISCOVER_WEEK_DAYS = 7;
+/** The weekly watcher looks back at most this far, however long ago it last succeeded. */
+export const DISCOVER_MAX_WINDOW_DAYS = 14;
 
 export interface SeedDoc {
   id: string;
@@ -62,8 +64,26 @@ function dayMinus(now: number, days: number): string {
   return new Date(now - days * 86_400_000).toISOString().slice(0, 10);
 }
 
+/** Documents dated `fromDay` (`YYYY-MM-DD`) or later, newest first, at most `cap`. */
+export function seedsSince(docs: readonly SeedDoc[], fromDay: string, cap = DISCOVER_SEED_CAP): SeedDoc[] {
+  return docs.filter((d) => d.date !== null && d.date >= fromDay).sort(newestFirst).slice(0, cap);
+}
+
 /** Documents dated within the last {@link DISCOVER_WEEK_DAYS} days (today included), newest first, at most `cap`. */
 export function lastWeekSeeds(docs: readonly SeedDoc[], now: number, cap = DISCOVER_SEED_CAP): SeedDoc[] {
-  const from = dayMinus(now, DISCOVER_WEEK_DAYS - 1);
-  return docs.filter((d) => d.date !== null && d.date >= from).sort(newestFirst).slice(0, cap);
+  return seedsSince(docs, dayMinus(now, DISCOVER_WEEK_DAYS - 1), cap);
+}
+
+/**
+ * The first day a weekly run looks back to: the last 7 days, widened back to the
+ * day of the last successful run (at most {@link DISCOVER_MAX_WINDOW_DAYS}), so a
+ * capture made after that run on its day, or in a week the run slipped, is still
+ * a seed. Seeds already searched are skipped by the caller.
+ */
+export function seedWindowStart(now: number, lastSuccessAt: number | null): string {
+  const week = dayMinus(now, DISCOVER_WEEK_DAYS - 1);
+  if (lastSuccessAt === null) return week;
+  const last = new Date(lastSuccessAt).toISOString().slice(0, 10);
+  const floor = dayMinus(now, DISCOVER_MAX_WINDOW_DAYS - 1);
+  return last >= week ? week : last < floor ? floor : last;
 }

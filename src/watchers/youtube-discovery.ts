@@ -1,6 +1,7 @@
 /**
  * The weekly `youtube-discovery` watcher (plan muninn-youtube-discovery, PR 3):
- * the last 7 days' YouTube summaries, at most `maxSeeds` (5), each searched as
+ * the last 7 days' YouTube summaries (widened back to the last successful run's
+ * day, `seedWindowStart`), the newest not yet searched, at most `maxSeeds` (5), each searched as
  * its own discovery run and stored as a shelf on `/summaries/discover`
  * (`origin = 'watcher'`). It sends no alert of its own: the shelves are the
  * output (D5). Its failures go to `source-health.ts`, so a broken yt-dlp search
@@ -31,7 +32,8 @@ import { Tracer } from "../tracing/tracer.ts";
 import { extractYouTubeVideoId } from "../youtube/url.ts";
 import { defaultDiscoverServices, YOUTUBE_SUMMARIES_COLLECTION, type DiscoverServices } from "../youtube/discover-deps.ts";
 import { runDiscovery, type DiscoverRunOutcome, type DiscoverTracer } from "../youtube/discover-run.ts";
-import { lastWeekSeeds, toSeedDocs, DISCOVER_SEED_CAP } from "../youtube/discover-seeds.ts";
+import { seedsSince, seedWindowStart, toSeedDocs, DISCOVER_SEED_CAP } from "../youtube/discover-seeds.ts";
+import { readIntKnob } from "./config-knobs.ts";
 import {
   getDiscoverKnownVideoIds,
   getLatestDiscoverRunTimes,
@@ -79,10 +81,17 @@ export function defaultYouTubeDiscoveryDeps(): YouTubeDiscoveryDeps {
   };
 }
 
-/** `config.maxSeeds`, 1–10; anything else is the default (5). */
-export function resolveMaxSeeds(config: Record<string, unknown> | undefined): number {
-  const v = config?.maxSeeds;
-  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= MAX_SEEDS_LIMIT ? v : DISCOVER_SEED_CAP;
+/** `config.maxSeeds`, 1–10; anything else is warned about and runs at the default (5). */
+export function resolveMaxSeeds(config: Record<string, unknown> | undefined, ctx: { botName?: string; watcherId?: string } = {}): number {
+  const raw = config?.maxSeeds;
+  return readIntKnob(raw, {
+    field: "maxSeeds",
+    fallback: DISCOVER_SEED_CAP,
+    min: 1,
+    max: MAX_SEEDS_LIMIT,
+    botName: ctx.botName,
+    ...(ctx.watcherId ? { dedupeKey: `${ctx.watcherId}:${String(raw)}` } : {}),
+  });
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -162,14 +171,16 @@ export async function checkYouTubeDiscovery(
     return health.finish();
   }
 
-  const week = lastWeekSeeds(toSeedDocs(listed), now(), MAX_SEEDS_LIMIT * 4);
+  const week = seedsSince(toSeedDocs(listed), seedWindowStart(now(), watcher.lastSuccessAt ?? null), Infinity);
   let recent = new Map<string, number>();
   try {
     recent = await deps.latestRunTimes(week.map((s) => s.id));
   } catch (err) {
     log.warn("YouTube discovery: reading earlier runs failed, searching every seed: {error}", { botName, error: errText(err) });
   }
-  const seeds = week.filter((s) => (recent.get(s.id) ?? 0) < now() - RECENT_RUN_SKIP_MS).slice(0, resolveMaxSeeds(watcher.config));
+  const seeds = week
+    .filter((s) => (recent.get(s.id) ?? 0) < now() - RECENT_RUN_SKIP_MS)
+    .slice(0, resolveMaxSeeds(watcher.config, { botName, watcherId: watcher.id }));
 
   const tally = { huginn: { reached: 0, passed: 0 } as StepTally, model: { reached: 0, passed: 0 } as StepTally, search: { reached: 0, passed: 0 } as StepTally };
   const store: StepTally = { reached: 0, passed: 0 };
@@ -238,7 +249,7 @@ export async function checkYouTubeDiscovery(
 
   if (stoppedAt !== null)
     log.warn("YouTube discovery: out of time, {left} of {seeds} seeds not searched", { botName, left: seeds.length - stoppedAt, seeds: seeds.length });
-  log.info("YouTube discovery: {shelves} shelves from {seeds} seeds ({week} in the last week)", {
+  log.info("YouTube discovery: {shelves} shelves from {seeds} seeds ({week} in the window)", {
     botName,
     shelves,
     seeds: seeds.length,

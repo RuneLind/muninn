@@ -289,3 +289,27 @@ describe("fix round 1 batch 1", () => {
     expect(rankPrompts[1]).toContain(vid(2));
   });
 });
+
+describe("fix round 1 batch 2", () => {
+  test("a capture dated on the last run's day, after that run, is still a seed a week later", async () => {
+    listed = [doc(1, "2026-11-07"), doc(2, "2026-11-13")];
+    const w = { ...watcher(), lastSuccessAt: Date.parse("2026-11-07T12:00:00Z") } as Watcher;
+    await checkYouTubeDiscovery(w, bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId).sort()).toEqual(["ai/Seed 1.md", "ai/Seed 2.md"]);
+  });
+
+  test("the seed cap applies after the recent-run skip, however many recent seeds come first", async () => {
+    const many = Array.from({ length: 45 }, (_, i) => ({ id: `ai/Many ${String(i).padStart(2, "0")}.md`, url: null, date: "2026-11-13" }));
+    listed = many;
+    raws = new Map(many.map((d, i) => [d.id, raw((i % 4) + 1)]));
+    // The 42 first in listing order (ties sort by id) were all searched yesterday.
+    recent = new Map(many.slice(0, 42).map((d) => [d.id, NOW - 86_400_000]));
+    let call = 0;
+    searchAnswer = async () => {
+      call++;
+      return [hit(vid(call * 10 + 1))];
+    };
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Many 42.md", "ai/Many 43.md", "ai/Many 44.md"]);
+  });
+});

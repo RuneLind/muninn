@@ -1,5 +1,6 @@
 /** Seed rules shared by the Discover page's seed bar and the weekly watcher. Invented ids only (public repo). */
 import { describe, expect, test } from "bun:test";
+import * as seedsMod from "./discover-seeds.ts";
 import { categoryOfDocId, lastWeekSeeds, newestInCategory, seedCategories, toSeedDocs } from "./discover-seeds.ts";
 import { parseCapturedListing } from "./discover-deps.ts";
 
@@ -93,5 +94,21 @@ describe("parseCapturedListing", () => {
     ]);
     expect(parseCapturedListing(null)).toEqual([]);
     expect(parseCapturedListing({ documents: "x" })).toEqual([]);
+  });
+});
+
+describe("seedWindowStart (fix round 1 batch 2)", () => {
+  const start = (now: number, last: number | null): string =>
+    (seedsMod as unknown as { seedWindowStart: (n: number, l: number | null) => string }).seedWindowStart(now, last);
+  test("the last 7 days with no earlier success", () => {
+    expect(start(NOW, null)).toBe("2026-11-08");
+  });
+  test("widened back to the last successful run's day, so that day's later captures still count", () => {
+    expect(start(NOW, Date.parse("2026-11-07T12:00:00Z"))).toBe("2026-11-07");
+    expect(start(NOW, Date.parse("2026-11-03T23:59:00Z"))).toBe("2026-11-03");
+  });
+  test("never narrower than the week, never wider than 14 days", () => {
+    expect(start(NOW, Date.parse("2026-11-12T12:00:00Z"))).toBe("2026-11-08");
+    expect(start(NOW, Date.parse("2026-10-01T12:00:00Z"))).toBe("2026-11-01");
   });
 });
