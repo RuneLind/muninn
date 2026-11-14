@@ -65,6 +65,15 @@ export const DEFAULT_ANTHROPIC_FEEDS: readonly string[] = [
 const DEFAULT_LLMS_TXT_URL = "https://platform.claude.com/llms.txt";
 /** Tier-2 blog/research listings (SSR HTML, no feed): diff the `/section/<slug>` set. */
 const DEFAULT_BLOG_SECTIONS: readonly string[] = ["news", "engineering", "research"];
+/**
+ * Article path prefixes a listing links to, when not just its own section. Since ~2026-10-20
+ * the /engineering listing links its posts as `/research/<slug>` and `/engineering/<slug>`
+ * 308-redirects there; matching only `/engineering/` parsed 0 links and skipped the source
+ * 173 runs in a row.
+ */
+const BLOG_ARTICLE_PREFIXES: Readonly<Record<string, readonly string[]>> = {
+  engineering: ["engineering", "research"],
+};
 
 /** Default Haiku-gate threshold once `config.gate` is on. The model already omits
  *  routine churn; this is a defensive floor (Phase 4 calibrates against real output). */
@@ -546,7 +555,14 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
   const tier1Cands: Candidate[] = coldTier1
     ? []
     : tier1Entries.filter((e) => !known.has(e.id)).map(toFeedCandidate);
-  const tier2Cands: Candidate[] = tier2.candidates.filter((c) => !known.has(c.id));
+  // One candidate per id: the engineering and research listings share `/research/` URLs,
+  // so a post new on both would otherwise be gated and alerted twice in one run.
+  const tier2Ids = new Set<string>();
+  const tier2Cands: Candidate[] = tier2.candidates.filter((c) => {
+    if (known.has(c.id) || tier2Ids.has(c.id)) return false;
+    tier2Ids.add(c.id);
+    return true;
+  });
   const candidates: Candidate[] = [...tier1Cands, ...tier2Cands];
 
   if (candidates.length === 0) {
@@ -810,7 +826,9 @@ async function fetchTier2(
       // `prior`: the stored baseline as an array, or null when there's no row yet
       // (or a corrupt non-array — re-baseline rather than treat it as empty).
       const snap = await getWatcherSnapshot(watcherId, src.key);
-      const prior = Array.isArray(snap) ? (snap as string[]) : null;
+      // Canonicalized so a baseline stored before the /engineering → /research move
+      // diffs against the new URLs instead of reading every post as new.
+      const prior = Array.isArray(snap) ? (snap as string[]).map(canonicalBlogUrl) : null;
 
       // The guard record is read on EVERY run, not just shrunken ones: a stale
       // `consecutiveSkips: 2` surviving an arbitrary number of healthy runs would let
@@ -1072,17 +1090,28 @@ export function parseLlmsTxtDocs(text: string): Map<string, string> {
  */
 export function parseBlogSlugs(html: string, section: string): Map<string, string> {
   const map = new Map<string, string>();
-  // Escape the section in case it ever carries regex metacharacters from config.
-  const esc = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`href="(?:https?://www\\.anthropic\\.com)?/${esc}/([^"#?]+)"`, "gi");
+  // Escape each prefix in case it ever carries regex metacharacters from config.
+  const prefixes = (BLOG_ARTICLE_PREFIXES[section] ?? [section]).map((p) =>
+    p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+  );
+  const re = new RegExp(
+    `href="(?:https?://www\\.anthropic\\.com)?/(${prefixes.join("|")})/([^"#?]+)"`,
+    "gi",
+  );
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
-    const slug = m[1]!.replace(/\/+$/, "");
+    const slug = m[2]!.replace(/\/+$/, "");
     if (!slug || slug.includes("/")) continue; // skip sub-paths / the bare section page
-    const url = `https://www.anthropic.com/${section}/${slug}`;
+    const prefix = m[1]!.toLowerCase() === section.toLowerCase() ? section : m[1]!.toLowerCase();
+    const url = canonicalBlogUrl(`https://www.anthropic.com/${prefix}/${slug}`);
     if (!map.has(url)) map.set(url, prettifySlug(slug));
   }
   return map;
+}
+
+/** `/engineering/<slug>` → `/research/<slug>`, where anthropic.com now redirects it. Other URLs unchanged. */
+export function canonicalBlogUrl(url: string): string {
+  return url.replace(/^https:\/\/www\.anthropic\.com\/engineering\//, "https://www.anthropic.com/research/");
 }
 
 function blogLabel(section: string): string {
