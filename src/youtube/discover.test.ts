@@ -124,6 +124,39 @@ describe("searchYouTube", () => {
     expect(calls[0]!.ms).toBe(DISCOVER_SEARCH_TIMEOUT_MS);
     expect(calls[0]!.cmd.at(-1)).toBe("ytsearch5:invented query");
   });
+  test("at most DISCOVER_MAX_CONCURRENT_SEARCHES yt-dlp processes run at once, process-wide", async () => {
+    let active = 0;
+    let peak = 0;
+    const releases: (() => void)[] = [];
+    const run = async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((r) => releases.push(r));
+      active--;
+      return { stdout: JSON.stringify(SEARCH_JSON), stderr: "", exitCode: 0 };
+    };
+    const all = Array.from({ length: 8 }, (_, i) => searchYouTube(`invented query ${i}`, 5, run));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(peak).toBe(5);
+    while (releases.length) {
+      releases.shift()!();
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    const results = await Promise.all(all);
+    expect(results.every((h) => h !== null && h.length === 3)).toBe(true);
+    expect(peak).toBe(5);
+    expect(active).toBe(0);
+  });
+  test("a search that throws frees its slot for the next one", async () => {
+    let calls = 0;
+    const run = async () => {
+      calls++;
+      throw new Error("invented spawn failure");
+    };
+    const results = await Promise.all(Array.from({ length: 7 }, (_, i) => searchYouTube(`q ${i}`, 5, run)));
+    expect(results.every((r) => r === null)).toBe(true);
+    expect(calls).toBe(7);
+  });
   test("null on a non-zero exit, unparseable output, a throw, or an empty query", async () => {
     expect(await searchYouTube("q", 10, async () => ({ stdout: "", stderr: "ERROR", exitCode: 1 }))).toBeNull();
     expect(await searchYouTube("q", 10, async () => ({ stdout: "{oops", stderr: "", exitCode: 0 }))).toBeNull();

@@ -22,6 +22,24 @@ export const DISCOVER_MAX_SHOWN = 8;
 export const DISCOVER_MIN_SCORE = 0.4;
 /** One search's bound (measured ~2 s per `ytsearch10:`). */
 export const DISCOVER_SEARCH_TIMEOUT_MS = 15_000;
+/** yt-dlp searches running at once across every request in this process (the `framesQueue` reasoning: N panels must not mean 5N processes). */
+export const DISCOVER_MAX_CONCURRENT_SEARCHES = 5;
+
+let searchesActive = 0;
+const searchWaiters: (() => void)[] = [];
+
+async function withSearchSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (searchesActive >= DISCOVER_MAX_CONCURRENT_SEARCHES) await new Promise<void>((r) => searchWaiters.push(r));
+  else searchesActive++;
+  try {
+    return await fn();
+  } finally {
+    // Hand the slot straight to the next waiter; only free it when nobody waits.
+    const next = searchWaiters.shift();
+    if (next) next();
+    else searchesActive--;
+  }
+}
 /** A query past this is cut (code points). */
 export const DISCOVER_QUERY_MAX_CHARS = 120;
 
@@ -109,7 +127,7 @@ export async function searchYouTube(
   const args = buildSearchArgs(query, n);
   if (!args) return null;
   try {
-    const res = await run(args, DISCOVER_SEARCH_TIMEOUT_MS, "yt-dlp search");
+    const res = await withSearchSlot(() => run(args, DISCOVER_SEARCH_TIMEOUT_MS, "yt-dlp search"));
     if (res.exitCode !== 0) return null;
     const data = JSON.parse(res.stdout);
     if (!Array.isArray((data as { entries?: unknown })?.entries)) return null;

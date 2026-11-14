@@ -155,7 +155,8 @@ export function sumDiscoverStart(): void {
 
 async function summarize(key: string, row: DiscoverRow): Promise<void> {
   const s = stateFor(key);
-  if (s.summarize.has(row.videoId)) return;
+  // An error leaves the row retryable; a pending or started one does not post again.
+  if (s.summarize.has(row.videoId) && s.summarize.get(row.videoId)!.state !== "error") return;
   s.summarize.set(row.videoId, { state: "pending", text: "Starting…" });
   render();
   const url = `https://www.youtube.com/watch?v=${row.videoId}`;
@@ -194,7 +195,7 @@ function rowHtml(r: DiscoverRow, sum: Summarize | undefined): string {
   return (
     `<li class="sum-discover-row">` +
     `<div class="sum-discover-line"><a class="sum-discover-title" href="${escHtml(url)}" target="_blank" rel="noopener">${escHtml(r.title || r.videoId)}</a>` +
-    `<button type="button" class="sum-discover-btn" data-summarize="${escHtml(r.videoId)}"${sum ? " disabled" : ""}>Summarize</button>${status}</div>` +
+    `<button type="button" class="sum-discover-btn" data-summarize="${escHtml(r.videoId)}"${sum && sum.state !== "error" ? " disabled" : ""}>Summarize</button>${status}</div>` +
     (meta ? `<div class="sum-discover-meta">${escHtml(meta)}</div>` : "") +
     (r.why ? `<div class="sum-discover-why">${escHtml(r.why)}</div>` : "") +
     `</li>`

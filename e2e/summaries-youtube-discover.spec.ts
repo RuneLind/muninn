@@ -213,7 +213,7 @@ test("lists the ranked new videos, then Summarize posts once and reads the answe
     const req = route.request();
     posts.push({ body: req.postDataJSON(), ct: req.headers()["content-type"] });
     const body = req.postDataJSON() as { video_id: string };
-    if (body.video_id === NEW_A) {
+    if (body.video_id === NEW_A && posts.filter((p) => (p as { body: { video_id: string } }).body.video_id === NEW_A).length === 1) {
       await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Invented refusal.", code: "x" }) });
     } else {
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ job_id: "job-1", dashboard_url: "/summaries?source=youtube&job=job-1" }) });
@@ -264,12 +264,18 @@ test("lists the ranked new videos, then Summarize posts once and reads the answe
   await sumA.click();
   await expect(rows.nth(1).locator(".sum-discover-status")).toHaveText("Invented refusal.");
   await expect(rows.nth(1).locator(".sum-discover-status")).toHaveClass(/error/);
+  // An error leaves the row retryable (a transient 503 must not need a reload); the retry succeeds.
+  await expect(sumA).toBeEnabled();
+  await sumA.click();
+  await expect(rows.nth(1).locator(".sum-discover-status")).toContainText("Started");
   await expect(sumA).toBeDisabled();
   await sumB.click({ force: true });
 
+  const bodyA = { title: "Invented eval talk", url: `https://www.youtube.com/watch?v=${NEW_A}`, video_id: NEW_A };
   expect(posts).toEqual([
     { body: { title: "Invented benchmark tour", url: `https://www.youtube.com/watch?v=${NEW_B}`, video_id: NEW_B }, ct: "application/json" },
-    { body: { title: "Invented eval talk", url: `https://www.youtube.com/watch?v=${NEW_A}`, video_id: NEW_A }, ct: "application/json" },
+    { body: bodyA, ct: "application/json" },
+    { body: bodyA, ct: "application/json" },
   ]);
 });
 
