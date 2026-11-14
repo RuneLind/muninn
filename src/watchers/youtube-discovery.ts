@@ -21,7 +21,7 @@
  * anchored on this bot's newest stored watcher run (`seedWindowStart`).
  *
  * The run keeps inside the runner's net: every model call carries one run-wide
- * `deadlineAt` (the net minus its margin, so `health.finish()` still runs), and
+ * `deadlineAt` (min(net, tick) minus the net's margin, so `health.finish()` still runs), and
  * no seed starts with less than {@link MIN_SEED_MS} left.
  */
 
@@ -55,7 +55,7 @@ export const HEALTH_MODEL = "youtube:model";
 export const HEALTH_SEARCH = "youtube:search";
 export const HEALTH_STORE = "youtube:store";
 const MAX_SEEDS_LIMIT = 10;
-/** A seed needs this much of the run's budget left to start (a healthy one takes about 25 s). */
+/** A seed needs this much of the run's budget left to start (a healthy run took 11–14 s in 4 live traces, 2026-11-14). */
 export const MIN_SEED_MS = 60_000;
 
 export interface YouTubeDiscoveryDeps {

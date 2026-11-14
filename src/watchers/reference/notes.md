@@ -432,7 +432,7 @@ path reached the same checkers unguarded, so a readonly instance left with
 — that only the write owner can apply. Both call sites read the same set, which
 is why it lives here rather than in `data-routes.ts`. `wiki-linter` (report-only)
 and `wiki-committer` (git, which the flag deliberately leaves open) are NOT
-skipped. The skip is not an error: the run still advances `last_run_at`. **All eight**
+skipped. The skip is not an error: the run still advances `last_run_at`. **All nine**
 checkers are reachable through the injectable `WatcherCheckers` seam
 (`runChecker`'s 4th arg) purely so a test can assert WHICH checker a run reaches
 — every checker degrades to `[]`, so a return value proves nothing. It began
@@ -441,7 +441,7 @@ scoped to the four wiki checkers, for the readonly guard; it was widened
 — a refactor deleted `case "email"` and every tick returned `[]`, which the
 runner reads as a quiet inbox, so run-health saw a healthy run and the user
 would have silently stopped receiving mail alerts, with tsc clean and the full
-suite green. **A ninth checker type must be wired through this seam and given a
+suite green. **A tenth checker type must be wired through this seam and given a
 dispatch test**, or deleting its branch is invisible.
 
 ### Time-of-day scheduling
@@ -469,6 +469,8 @@ bot's chat connector. `watcherConnectorInfo(watcher, botConfig, botFallbackModel
   every other `setConnectorInfo` caller passes.
 - `news` / `wiki-linter` / `wiki-committer` → `null` (no model runs, so no chip
   is stamped).
+- `youtube-discovery` → `{ label: "Haiku router" }`: its two calls per seed go
+  through `callHaikuWithFallback` on the row's bot.
 
 ### Scheduler context
 
@@ -1804,12 +1806,13 @@ the wiki's OWN pages into saga-style `type: blog` narrative pages under `blogs/`
 
 ## YouTube Discovery (youtube-discovery.ts)
 
-Weekly (plan muninn-youtube-discovery, PR 3). Each run lists `youtube-summaries` with dates, takes the last 7 days' documents (`lastWeekSeeds`, `src/youtube/discover-seeds.ts`), drops any seed with a run in the last 6 days (`RECENT_RUN_SKIP_MS`, any origin: the reader's own Find on YouTube counts), caps at `config.maxSeeds` (1–10, default 5), and runs `runDiscovery` once per seed. Each run is saved as a shelf with `origin: 'watcher'`; the watcher returns no alert of its own, only `health.finish()`.
+Weekly (plan muninn-youtube-discovery, PR 3). Each run lists `youtube-summaries` with dates and takes the documents dated in its window: the last 7 days, widened back to the UTC day of this bot's newest STORED watcher run (`getLatestDiscoverRunAt("watcher", botName)` → `seedWindowStart`), at most 14 days. The anchor is the stored run, not `last_success_at`: the runner writes that column for email only. A seed with any stored run (any origin, any time) is skipped, so the widened band is never searched twice; then the newest are capped at `config.maxSeeds` (1–10 via `readIntKnob`, default 5) and `runDiscovery` runs once per seed. Each run is saved as a shelf with `origin: 'watcher'`; the watcher returns no alert of its own, only `health.finish()`. Captures beyond the cap in a busy week are never seeds (newest first, the plan's ≤5).
 
-- **Health keys:** `youtube:huginn` (the listing, then each seed's raw read: ok when the listing answered and no read ran, error when every read that ran failed; a seed deleted since the listing, `not_found`, is not counted), `youtube:model` (queries + rank calls), `youtube:search` (yt-dlp). A key is `ok` when one run passed its step, `error` when every run that reached it failed, carried when none reached it. A failed listing marks huginn error and carries the other two. `tallyOutcome` reads `DiscoverRunOutcome.stage`.
-- **Known set:** captured ids from the listing's urls ∪ dismissed/queued (`getDiscoverKnownVideoIds`), re-read before each seed so this run's own state writes count.
-- **Profile:** `loadInterestProfile(watcher.userId, botName)`, the owner's.
-- **Model:** the two calls go through `callHaikuWithFallback` (sources `youtube-discover-queries`, `youtube-discover-rank`), so they follow the row's bot `haikuBackend`; `/models` reads usage of the rank source.
+- **Deadline:** one run-wide `deadlineAt = start + min(computeWatcherTimeoutMs, TICK_TIMEOUT_MS) − WATCHER_TIMEOUT_MARGIN_MS`, passed to both model calls (the Haiku router's deadline); no seed starts with less than `MIN_SEED_MS` (60 s) left. A row with no `timeoutMs` gets 90 s, so about two seeds; the setup script sets 300 s.
+- **Health keys:** `youtube:huginn` (the listing, then each seed's raw read: ok when the listing answered and no read ran, error when every read that ran failed; a seed deleted since the listing, `not_found`, is not counted), `youtube:model` (queries + rank calls), `youtube:search` (yt-dlp), `youtube:store` (saving each shelf: ok when one save passed, error with the first failure when every attempted save failed). A key is `ok` when one run passed its step, `error` when every run that reached it failed, carried when none reached it. A failed listing marks huginn error and carries the other three. `tallyOutcome` reads `DiscoverRunOutcome.stage`. A budget stop is logged, not marked.
+- **Known set:** captured ids from the listing's urls ∪ dismissed/queued (`getDiscoverKnownVideoIds`, re-read per seed) ∪ the videos this run already shelved, so a video lands on one shelf per run. A failed save leaves its videos rankable.
+- **Profile:** `loadInterestProfile(watcher.userId, botName)`, the owner's, read once per run (on the first rank).
+- **Model:** the two calls go through `callHaikuWithFallback` (sources `youtube-discover-queries`, `youtube-discover-rank`), so they follow the row's bot `haikuBackend`; `/models` labels the row `Haiku router (<that bot's backend>)` and reads usage of the rank source (which the page route shares).
 - **Seed:** `bun scripts/setup-youtube-discovery.ts [--apply]` — weekly interval, `{hour: 12, timeoutMs: 300000, maxSeeds: 5}`.
 - **Tests:** `youtube-discovery.test.ts` injects every seam (`YouTubeDiscoveryDeps`), no `mock.module`.
 

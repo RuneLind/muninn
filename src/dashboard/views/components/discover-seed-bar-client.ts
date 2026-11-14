@@ -255,7 +255,7 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
       if (runMode === "pick") bar.picked.delete(seed.id);
       const read = await readShelves();
       if (read) onShelves(read.shelves, read.requestedAt);
-      // Every read returns all stored shelves: only the last one decides what the page shows.
+      // Every read returns the newest run per seed: the last one holds this run's shelves, so it decides.
       unshown = !read;
     } catch {
       failed.push(`${seed.title}: the server did not answer`);

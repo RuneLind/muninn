@@ -11,7 +11,7 @@ import type { CapturedDoc } from "./discover-deps.ts";
 export const DISCOVER_SEED_CAP = 5;
 /** "The last 7 days": today and the six days before it. */
 export const DISCOVER_WEEK_DAYS = 7;
-/** The weekly watcher looks back at most this far, however long ago it last succeeded. */
+/** The weekly watcher looks back at most this far, however long ago it last ran. */
 export const DISCOVER_MAX_WINDOW_DAYS = 14;
 
 export interface SeedDoc {

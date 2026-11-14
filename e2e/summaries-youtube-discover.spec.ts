@@ -23,7 +23,7 @@
  *
  * PR 3's seed bar runs last (it replaces the reader's shelf): Last 7 days over
  * the fake listing's two documents, both dated today, runs one search per seed
- * in turn, and the pick list caps a hand-picked set at five.
+ * in turn; the fix rounds' tests pin focus, held shelves, the announcer and listing re-reads.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -906,7 +906,7 @@ test("Undo after a run replaced the card's shelf focuses the restored card (fix 
   await expect(card(page)).toBeFocused();
 });
 
-test("a run that ends while the drawer is open is announced through the toast (fix round 1 batch 4)", async ({ page }) => {
+test("a run that ends while the drawer is open is announced through the announcer (fix round 1 batch 4)", async ({ page }) => {
   await seedBatchShelf();
   await page.goto(`${BASE}/summaries/discover`);
   await holdShelves(page, 500);

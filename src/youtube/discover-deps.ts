@@ -48,8 +48,8 @@ export interface DiscoverServices {
 
 /**
  * Test seam for `e2e/youtube-discover-boot.ts` ONLY: the two model calls, the
- * search, the listing and the details probe, replaced in-process before muninn
- * boots (the `findLinksTestSeam` precedent). Production never sets it.
+ * search and the details probe (the boot sets these four; the listing is served
+ * by the spec's fake huginn), replaced in-process before muninn boots (the `findLinksTestSeam` precedent). Production never sets it.
  */
 export const discoverTestSeam: Partial<DiscoverServices> = {};
 

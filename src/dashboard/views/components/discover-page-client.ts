@@ -397,7 +397,7 @@ function detailBodyHtml(hit: DiscoverHit, shelf: DiscoverShelf, stats: string[],
   );
 }
 
-/** Everything but the dialog, its backdrop and the toast is inert while the dialog is open (the nav included). */
+/** Everything but the dialog, its backdrop, the toast and the announcer is inert while the dialog is open (the nav included). */
 function setModal(open: boolean): void {
   const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast", "dscAnnounce"]);
   for (const el of Array.from(document.body.children)) {

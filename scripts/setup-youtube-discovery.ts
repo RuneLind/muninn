@@ -11,10 +11,13 @@
  *  - `interval_ms` weekly (7 days). With `config.hour: 12` it fires once a week
  *    at/after 12:00 Oslo.
  *  - `config.hour: 12` — clear of the overnight quiet-hours window (22–08) and of
- *    the wiki watchers' morning slots (9, 10, 11).
- *  - `config.timeoutMs: 300000` (5 min) — five seeds at about 15–40 s each (one
- *    queries call, five yt-dlp searches, one rank call); the runner's net is
- *    max(120s, timeoutMs + 30s).
+ *    the wiki watchers' morning slots (9, 10, 11). It shares the tick with the X
+ *    Daily and Anthropic Daily rows (also hour 12); watchers run concurrently.
+ *  - `config.timeoutMs: 300000` (5 min) — a healthy run took 11–14 s (4 live
+ *    traces, 2026-11-14: one queries call, 3–5 yt-dlp searches, one rank call), so
+ *    five seeds fit with room for slow model calls. The checker keeps a run-wide
+ *    deadline of min(net, tick) − 30 s and starts no seed with under 60 s left;
+ *    the runner's net is max(120s, timeoutMs + 30s).
  *  - `config.maxSeeds: 5` — the seed bar's cap; 1–10 accepted.
  *
  * The row's bot decides which Haiku backend the two model calls run on.
@@ -105,8 +108,8 @@ async function main() {
   `;
   console.log(`  ✓ Created '${NAME}' (id=${row!.id})`);
   console.log();
-  console.log("Done. The row is immediately due (last_run_at NULL); forceNextRun a first");
-  console.log("supervised run from the dashboard Automation panel, or wait for the weekly fire.");
+  console.log("Done. The row is due now (last_run_at NULL): it fires on the first tick at or after");
+  console.log("12:00 Oslo, then weekly. forceNextRun from the dashboard Automation panel to watch a first run.");
 }
 
 main()
