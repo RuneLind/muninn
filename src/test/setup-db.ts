@@ -1,5 +1,5 @@
 import { beforeAll, afterAll, beforeEach } from "bun:test";
-import { initDb, getDb } from "../db/client.ts";
+import { initDb, getDb, closeDb } from "../db/client.ts";
 import { TEST_DATABASE_URL } from "./test-db-url.ts";
 
 
@@ -56,6 +56,20 @@ const ALL_TABLES = [
 ];
 
 let dbInitialized = false;
+
+/**
+ * Close the shared pool and open a new one. For a test that changes a shared
+ * table's row type (drops and re-adds a column): every pooled connection that
+ * prepared a `SELECT *` or `RETURNING *` on it holds a stale plan, and
+ * postgres.js 3.4.9's retry of a stale plan serializes the parameters a second
+ * time, so a `sql.json` value is stored as a jsonb string (measured). Later
+ * files in the same `bun test` process then read it back wrong.
+ */
+export async function replaceTestDbPool(): Promise<void> {
+  await closeDb();
+  initDb({ databaseUrl: TEST_DATABASE_URL } as any);
+  await getDb().unsafe("SET client_min_messages = WARNING");
+}
 
 export function setupTestDb() {
   beforeAll(async () => {

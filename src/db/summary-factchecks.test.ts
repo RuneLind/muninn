@@ -1,7 +1,7 @@
 // Run only under the shared test-DB lock: a case here drops and re-adds the
 // transcript columns on the shared schema, which fails any suite running beside it.
 import { test, expect, describe } from "bun:test";
-import { setupTestDb } from "../test/setup-db.ts";
+import { replaceTestDbPool, setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
   deleteSummaryFactcheck,
@@ -153,21 +153,54 @@ describe("summary_factchecks: applied_at and the apply CAS (migration 080)", () 
   });
 });
 
+/**
+ * Drop migration 081's two columns for `body`, then add them back. ADD COLUMN
+ * appends, so on a database built from init.sql (where they precede
+ * `applied_at`) the table's row type changes, and the pool is replaced
+ * ({@link replaceTestDbPool}): its stale plans made `source-redraft.test.ts`,
+ * later in the same process, store claims as a jsonb string.
+ */
+async function withoutTranscriptColumns(body: () => Promise<void>): Promise<void> {
+  const sql = getDb();
+  await sql.unsafe("ALTER TABLE summary_factchecks DROP COLUMN transcript_claims, DROP COLUMN transcript_sha256");
+  try {
+    await body();
+  } finally {
+    await sql.unsafe(
+      "ALTER TABLE summary_factchecks ADD COLUMN IF NOT EXISTS transcript_claims JSONB, ADD COLUMN IF NOT EXISTS transcript_sha256 TEXT",
+    );
+    await replaceTestDbPool();
+  }
+}
+
 describe("summary_factchecks: the upsert without migration 081's columns (080 present)", () => {
   test("a replacement still clears applied_at", async () => {
     const sql = getDb();
     await upsertSummaryFactcheck(base);
     await sql`UPDATE summary_factchecks SET applied_at = now()`;
-    await sql.unsafe("ALTER TABLE summary_factchecks DROP COLUMN transcript_claims, DROP COLUMN transcript_sha256");
-    try {
+    await withoutTranscriptColumns(async () => {
       const again = await upsertSummaryFactcheck({ ...base, answer: "replaced" });
       expect(again.answer).toBe("replaced");
       expect(again.appliedAt).toBeNull();
       expect(again.transcript).toBeNull();
-    } finally {
-      await sql.unsafe(
-        "ALTER TABLE summary_factchecks ADD COLUMN IF NOT EXISTS transcript_claims JSONB, ADD COLUMN IF NOT EXISTS transcript_sha256 TEXT",
-      );
-    }
+    });
+  });
+
+  test("putting the columns back leaves no stale plan: every pooled connection stores claims as an array", async () => {
+    const sql = getDb();
+    const writeOnEveryConnection = () =>
+      Promise.all(Array.from({ length: 5 }, (_, i) => upsertSummaryFactcheck({ ...base, docId: `pool-${i}.md` })));
+    // init.sql's order, transcript columns before applied_at, so the drop and
+    // re-add below changes the row type as it does on a fresh test database.
+    await sql.unsafe("ALTER TABLE summary_factchecks DROP COLUMN applied_at");
+    await sql.unsafe("ALTER TABLE summary_factchecks ADD COLUMN applied_at TIMESTAMPTZ");
+    // Twice: the first round can itself retry a plan the line above staled.
+    await writeOnEveryConnection();
+    await writeOnEveryConnection();
+    await withoutTranscriptColumns(async () => {});
+    await writeOnEveryConnection();
+    const kinds = await getDb()<{ doc_id: string; kind: string }[]>`
+      SELECT doc_id, jsonb_typeof(claims) AS kind FROM summary_factchecks ORDER BY doc_id`;
+    expect(kinds.map((r) => r.kind)).toEqual(Array(5).fill("array"));
   });
 });
