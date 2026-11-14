@@ -134,8 +134,12 @@ function toast(msg: string, undo?: () => void): void {
     };
 }
 
-async function postJson(url: string, body: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+async function postJson(
+  url: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal });
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { ok: res.ok, status: res.status, data };
 }
@@ -224,15 +228,24 @@ interface FocusKey {
   run?: string;
   video?: string;
   act?: string;
+  /** The card's neighbours in its row, for when the card itself is gone. */
+  next?: string;
+  prev?: string;
 }
 function focusKey(): FocusKey | null {
   const a = document.activeElement as HTMLElement | null;
   if (!a || a === document.body) return null;
+  const inDrawer = !!a.closest("#dscDrawer");
+  const card = inDrawer
+    ? renderedOpen && cardEl(renderedOpen.runId, renderedOpen.videoId)
+    : a.closest<HTMLElement>(".dsc-card");
   return {
-    inDrawer: !!a.closest("#dscDrawer"),
+    inDrawer,
     run: a.closest<HTMLElement>("[data-run]")?.dataset.run,
     video: a.closest<HTMLElement>("[data-video]")?.dataset.video,
     act: a.dataset.act,
+    next: (card?.nextElementSibling as HTMLElement | null)?.dataset.video,
+    prev: (card?.previousElementSibling as HTMLElement | null)?.dataset.video,
   };
 }
 function cardEl(run: string, video: string): HTMLElement | null {
@@ -250,12 +263,15 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
   const video = k.inDrawer ? prevOpen?.videoId : k.video;
   if (!run) return;
   const card = video ? cardEl(run, video) : null;
+  // A gone card hands focus to its neighbour, never the row's first card: focusing that scrolls the row back.
+  const neighbour = (k.next ? cardEl(run, k.next) : null) ?? (k.prev ? cardEl(run, k.prev) : null);
   const target =
     (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(`[data-act="${CSS.escape(k.act)}"]`) : null) ??
     card ??
+    neighbour ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] h3 a`);
-  target?.focus();
+  target?.focus({ preventScroll: true });
 }
 
 /** The open drawer's shelf and video at the last render, for focus after it closes. */
@@ -292,7 +308,7 @@ function render(): void {
 function detailHtml(hit: DiscoverHit, shelf: DiscoverShelf, bodyOnly = false): string {
   const d: DiscoverVideoDetails | null = hit.details;
   const player = st.playing
-    ? `<div class="dsc-player"><iframe src="https://www.youtube-nocookie.com/embed/${escHtml(hit.videoId)}?autoplay=1" title="${escHtml(hit.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
+    ? `<div class="dsc-player" tabindex="-1"><iframe src="https://www.youtube-nocookie.com/embed/${escHtml(hit.videoId)}?autoplay=1" title="${escHtml(hit.title)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div>`
     : `<div class="dsc-player"><img src="${escHtml(thumb(hit.videoId, "hqdefault"))}" alt=""><button type="button" class="dsc-play" data-act="play" aria-label="Play here">▶</button></div>`;
   const stats: string[] = [];
   if (hit.durationSec !== null) stats.push(`<span class="dsc-stat"><b>${escHtml(dscDuration(hit.durationSec))}</b> long</span>`);
@@ -351,6 +367,7 @@ function renderDrawer(): void {
   if (!dr || !bg) return;
   const found = st.open ? findHit(st.open.videoId) : null;
   if (!st.open || !found) {
+    abortDetails();
     dr.hidden = true;
     bg.hidden = true;
     dr.innerHTML = "";
@@ -371,26 +388,40 @@ function renderDrawer(): void {
   setModal(true);
 }
 
+/** The drawer's details request: aborted when the drawer closes or another video opens, so the server drops its probe. */
+let detailsRequest: { videoId: string; ctl: AbortController } | null = null;
+function abortDetails(): void {
+  if (!detailsRequest) return;
+  detailsRequest.ctl.abort();
+  st.details.delete(detailsRequest.videoId);
+  detailsRequest = null;
+}
+
 async function loadDetails(videoId: string): Promise<void> {
   const found = findHit(videoId);
   if (!found || found.hit.details || st.details.get(videoId)?.state === "loading") return;
   st.details.set(videoId, { state: "loading" });
+  const ctl = new AbortController();
+  detailsRequest = { videoId, ctl };
   renderDrawer();
   let next: { state: "error"; text: string } | null = null;
   try {
-    const r = await postJson("/api/summaries/discover/details", { videoId });
+    const r = await postJson("/api/summaries/discover/details", { videoId }, ctl.signal);
     const details = r.data.details as DiscoverVideoDetails | undefined;
     if (r.ok && details) eachHit(videoId, (h) => (h.details = details));
     else next = { state: "error", text: typeof r.data.error === "string" ? r.data.error : `Could not load the details (HTTP ${r.status}).` };
   } catch {
+    if (ctl.signal.aborted) return;
     next = { state: "error", text: "Could not load the details: the server did not answer." };
   }
+  if (detailsRequest?.ctl === ctl) detailsRequest = null;
   if (next) st.details.set(videoId, next);
   else st.details.delete(videoId);
   if (st.open?.videoId === videoId) render();
 }
 
 function openDrawer(runId: string, videoId: string): void {
+  if (detailsRequest && detailsRequest.videoId !== videoId) abortDetails();
   st.open = { runId, videoId };
   st.playing = false;
   render();
@@ -464,6 +495,9 @@ function act(name: string, videoId: string): void {
   } else if (name === "play") {
     st.playing = true;
     renderDrawer();
+    // The Play button is gone: focus the player's box, inside the dialog. Not the
+    // iframe: a cross-origin frame keeps the keys, so Escape would stop closing the drawer.
+    $("dscDrawer")?.querySelector<HTMLElement>(".dsc-player")?.focus();
   }
 }
 

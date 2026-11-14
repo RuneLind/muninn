@@ -102,12 +102,17 @@ const FIXTURE = {
   },
 };
 
+/** A shelf seeded straight into the DB with five cards: the reader flow only ever makes two. */
+const FOCUS_SEED = "ai/e2e/E2E focus seed.md";
+const FOCUS_IDS = ["e2eFocus001", "e2eFocus002", "e2eFocus003", "e2eFocus004", "e2eFocus005"];
+
 /** Rows an earlier run of this spec left: a dismissed or queued video would join the known set. */
 async function clearStoredRuns(): Promise<void> {
   const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
   try {
     await sql`DELETE FROM youtube_discover_hits WHERE video_id IN (${NEW_A}, ${NEW_B}, ${NEW_C})`;
-    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id = ${YT_DOC.id}`;
+    await sql`DELETE FROM youtube_discover_runs WHERE seed_doc_id IN (${YT_DOC.id}, ${FOCUS_SEED})`;
+    await sql`DELETE FROM youtube_discover_hits WHERE video_id LIKE 'e2eFocus%'`;
   } finally {
     await sql.end();
   }
@@ -543,6 +548,61 @@ test("a queued card offers no Later; a double click posts once; a failed queued 
   await page.reload();
   await expect(card.getByRole("button", { name: "✓ Queued" })).toBeDisabled();
   await expect(card.locator('[data-act="later"]')).toHaveCount(0);
+});
+
+test("a dismissed card hands focus to its neighbour without scrolling the row back; Play keeps focus in the dialog; closing the drawer cancels its details request", async ({ page }) => {
+  const sql = postgres(TEST_DB, { max: 1, onnotice: () => {} });
+  try {
+    const [run] = await sql`
+      INSERT INTO youtube_discover_runs (seed_doc_id, seed_title, seed_video_id, seed_category, queries, searched, known, origin)
+      VALUES (${FOCUS_SEED}, 'E2E focus seed', NULL, 'ai/e2e', '[]'::jsonb, 5, 0, 'reader') RETURNING id`;
+    for (const [i, id] of FOCUS_IDS.entries()) {
+      await sql`
+        INSERT INTO youtube_discover_hits (run_id, video_id, title, channel, duration_sec, view_count, score, why, query, rank)
+        VALUES (${run!.id}, ${id}, ${`Focus card ${i + 1}`}, 'F', 600, 10, ${0.9 - i / 10}, 'invented', 'q', ${i + 1})`;
+    }
+  } finally {
+    await sql.end();
+  }
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.goto(`${BASE}/summaries/discover`);
+  const shelf = page.locator("section.dsc-shelf").filter({ has: page.locator("h3 a", { hasText: "E2E focus seed" }) });
+  const row = shelf.locator(".dsc-row");
+  const card4 = shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[3]}"]`);
+  await card4.scrollIntoViewIfNeeded();
+  const before = await row.evaluate((r) => r.scrollLeft);
+  expect(before).toBeGreaterThan(0);
+  await card4.locator(".dsc-x").focus();
+  await page.keyboard.press("Enter");
+  await expect(card4).toHaveCount(0);
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("data-video"))).toBe(FOCUS_IDS[4]);
+  expect(await row.evaluate((r) => r.scrollLeft)).toBeGreaterThan(0);
+  await page.locator("#dscToast").getByRole("button", { name: "Undo" }).click();
+  await expect(card4).toHaveCount(1);
+
+  // Play by keyboard: focus lands on the player, inside the dialog.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[0]}"]`).click();
+  const drawer = page.locator("#dscDrawer");
+  await drawer.getByRole("button", { name: "Play here" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(drawer.locator("iframe")).toHaveCount(1);
+  expect(await page.evaluate(() => !!document.activeElement?.closest("#dscDrawer"))).toBe(true);
+  // …and Escape still closes it (focus is not inside the cross-origin frame).
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
+  // Closing the drawer before the details answer cancels the request.
+  const aborted: string[] = [];
+  page.on("requestfailed", (r) => {
+    if (r.url().endsWith("/api/summaries/discover/details") && (r.postDataJSON() as { videoId: string }).videoId === FOCUS_IDS[1])
+      aborted.push(r.failure()?.errorText ?? "");
+  });
+  await shelf.locator(`.dsc-card[data-video="${FOCUS_IDS[1]}"]`).click();
+  await expect(drawer).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+  await expect.poll(() => aborted.length).toBe(1);
 });
 
 test("the route refuses a non-YouTube source and a missing document", async ({ request }) => {
