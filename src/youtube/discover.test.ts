@@ -124,28 +124,43 @@ describe("searchYouTube", () => {
     expect(calls[0]!.ms).toBe(DISCOVER_SEARCH_TIMEOUT_MS);
     expect(calls[0]!.cmd.at(-1)).toBe("ytsearch5:invented query");
   });
-  test("at most DISCOVER_MAX_CONCURRENT_SEARCHES yt-dlp processes run at once, process-wide", async () => {
+  test("at most DISCOVER_MAX_CONCURRENT_SEARCHES yt-dlp processes run at once, process-wide, burst after burst", async () => {
     let active = 0;
-    let peak = 0;
     const releases: (() => void)[] = [];
     const run = async () => {
       active++;
-      peak = Math.max(peak, active);
       await new Promise<void>((r) => releases.push(r));
       active--;
       return { stdout: JSON.stringify(SEARCH_JSON), stderr: "", exitCode: 0 };
     };
-    const all = Array.from({ length: 8 }, (_, i) => searchYouTube(`invented query ${i}`, 5, run));
-    await new Promise((r) => setTimeout(r, 10));
-    expect(peak).toBe(5);
-    while (releases.length) {
-      releases.shift()!();
-      await new Promise((r) => setTimeout(r, 1));
+    // Each burst queues 3 and hands their slots over; a counter that drifts on a
+    // handoff shows up as the wrong number running in the NEXT burst.
+    const burst = async (tag: string): Promise<number> => {
+      let peak = 0;
+      const all = Array.from({ length: 8 }, (_, i) => searchYouTube(`${tag} ${i}`, 5, run));
+      await new Promise((r) => setTimeout(r, 10));
+      peak = Math.max(peak, active);
+      for (let i = 0; i < 200 && releases.length; i++) {
+        releases.shift()!();
+        await new Promise((r) => setTimeout(r, 2));
+        peak = Math.max(peak, active);
+      }
+      const results = await Promise.all(all);
+      expect(results.every((h) => h !== null && h.length === 3)).toBe(true);
+      return peak;
+    };
+    try {
+      expect(await burst("first")).toBe(5);
+      expect(active).toBe(0);
+      expect(await burst("second")).toBe(5);
+      expect(active).toBe(0);
+    } finally {
+      // Never leave a slot held for the tests after this one, whatever failed above.
+      for (let i = 0; i < 200 && releases.length; i++) {
+        releases.shift()!();
+        await new Promise((r) => setTimeout(r, 2));
+      }
     }
-    const results = await Promise.all(all);
-    expect(results.every((h) => h !== null && h.length === 3)).toBe(true);
-    expect(peak).toBe(5);
-    expect(active).toBe(0);
   });
   test("queued searches run first-in, first-out", async () => {
     const started: string[] = [];

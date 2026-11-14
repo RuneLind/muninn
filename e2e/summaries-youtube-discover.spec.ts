@@ -7,8 +7,9 @@
  * state, the ranked list as the route answers it (seed and already-captured
  * videos gone — the known set read from the fake huginn listing), the title
  * linking to the watch URL built from the id in a new tab, and Summarize
- * posting `{title, url, video_id}` to `/api/youtube/summarize` once, then
- * showing "Started" or the error and staying disabled.
+ * posting `{title, url, video_id}` to `/api/youtube/summarize` once per click,
+ * then showing "Started" (button disabled) or the error (button enabled, so a
+ * transient refusal can be retried).
  *
  * **What is faked and why.** huginn is an in-process `node:http` server
  * serving the two documents, their raw files and the `youtube-summaries`
@@ -207,7 +208,7 @@ test("a Vimeo document gets no button", async ({ page }) => {
   await expect(page.locator("#sumDiscover")).toHaveCount(0);
 });
 
-test("lists the ranked new videos, then Summarize posts once and reads the answer", async ({ page }) => {
+test("lists the ranked new videos, then Summarize posts once per click, and an error can be retried", async ({ page }) => {
   const posts: unknown[] = [];
   await page.route("**/api/youtube/summarize", async (route) => {
     const req = route.request();
