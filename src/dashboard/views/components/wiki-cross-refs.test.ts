@@ -185,6 +185,52 @@ describe("a run never links inside a link or code (fix round 1 g5)", () => {
     expect(article.querySelectorAll("a.wiki-xref").length).toBe(1);
     expect(article.querySelectorAll(".gl-tip a, code a").length).toBe(0);
   });
+
+  test("a run inside `<kbd>` links nothing", () => {
+    const { out, article } = withB(
+      "D9 i [[A]].",
+      (a) => {
+        const cands = wrapXrefRuns(a);
+        resolveXrefRuns(cands, answerOf({ D9: target("d9") }));
+        return cands;
+      },
+      (a) => {
+        const p = a.querySelector("a.wiki-link")!.parentElement!;
+        const kbd = p.ownerDocument.createElement("kbd");
+        kbd.append(...Array.from(p.childNodes));
+        p.append(kbd);
+      },
+    );
+    // The run is found (kbd is inline and no skip), so the link test is what stops it.
+    expect(ids(out)).toEqual(["D9"]);
+    expect(article.querySelectorAll("a.wiki-xref").length).toBe(0);
+  });
+
+  test("a link inside a `.fact-chip` the run reads across gets no link; the run's ids do", () => {
+    const { out, article } = withB(
+      "Se D8 og D9 i [[A]].",
+      (a) => {
+        const cands = wrapXrefRuns(a);
+        resolveXrefRuns(cands, answerOf({ D8: target("d8"), D9: target("d9") }));
+        return cands;
+      },
+      (a) => {
+        const text = a.querySelector("a.wiki-link")!.parentElement!.firstChild as Text;
+        const rest = text.splitText("Se D8".length);
+        const doc = text.ownerDocument;
+        const chip = doc.createElement("span");
+        chip.className = "fact-chip";
+        const link = doc.createElement("a");
+        link.setAttribute("href", "#elsewhere");
+        link.textContent = "D9";
+        chip.append(link);
+        rest.before(chip);
+      },
+    );
+    expect(ids(out)).toEqual(["D8,D9"]);
+    expect(article.querySelectorAll("a.wiki-xref").length).toBe(2);
+    expect(article.querySelectorAll(".fact-chip a.wiki-xref, a a").length).toBe(0);
+  });
 });
 
 describe("a run before a missing page (`wiki-link-missing`)", () => {

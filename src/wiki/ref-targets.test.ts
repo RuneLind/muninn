@@ -118,6 +118,40 @@ describe("pageRefTargets — hover text is the item's own plain text", () => {
     expect(t.D2!.text).toBe("An em and u word, see B and docs.");
   });
 
+  test("a reversed decision reads its new claim, not the struck one; a question keeps its struck text beside its state", () => {
+    const t = targets(
+      log(
+        "- **S4** — ~~Is the widget shipped in 2024?~~ Closed 2026-10-07 (D9).",
+        "- **D9** — ~~Case 7 gets a settlement for 2024.~~ Reversed in round 6: case 7 gets **no** settlement, the rule changed. More.",
+        "- **D10** — ~~Struck whole, nothing after.~~",
+        "- **D11** — Ship ~~on Friday~~ on Monday. Then rest.",
+      ),
+      ["S4", "D9", "D10", "D11"],
+    );
+    expect(t.S4).toMatchObject({ text: "Is the widget shipped in 2024?", state: "decided", decision: "D9" });
+    expect(t.D9!.text).toBe("Reversed in round 6: case 7 gets no settlement, the rule changed.");
+    expect(t.D10!.text).toBe("Struck whole, nothing after.");
+    expect(t.D11!.text).toBe("Ship on Monday.");
+  });
+
+  test("display text keeps a leading `>`, number or `#`, and honours backslash escapes", () => {
+    const t = targets(
+      log(
+        "- **D1** — > 5 cases are stopped. More.",
+        "- **D2** — 3. juli ble det vedtatt. More.",
+        "- **D3** — # 3 is chosen. More.",
+        "- **D4** — See \\*not\\* this, and \\[x\\](y). More.",
+        "- **D5** — 1) first. More.",
+      ),
+      ["D1", "D2", "D3", "D4", "D5"],
+    );
+    expect(t.D1!.text).toBe("> 5 cases are stopped.");
+    expect(t.D2!.text).toBe("3. juli ble det vedtatt.");
+    expect(t.D3!.text).toBe("# 3 is chosen.");
+    expect(t.D4!.text).toBe("See *not* this, and [x](y).");
+    expect(t.D5!.text).toBe("1) first.");
+  });
+
   test("a Query card without a question or an answer never reads the next card's", () => {
     const md = [
       '<Query id="Q-1">',
@@ -157,6 +191,26 @@ describe("pageRefTargets — hover text is the item's own plain text", () => {
     const t = pageRefTargets(html, md, ["Q-5"])["Q-5"]!;
     expect(t.text).toBe("How many Hold cases per Nope month and theme?");
     expect(t.answer).toBe("Twelve Holds in all months.");
+  });
+
+  test("a glossary term inside the answer reads without its hidden definition", () => {
+    const md = [
+      '<Query id="Q-6" question="How many?" answer="Twelve were Hold in all months.">',
+      "",
+      "Body.",
+      "",
+      "</Query>",
+      "",
+      "<Glossary>",
+      "",
+      "- **Hold:** a case kept back secretdefinition",
+      "",
+      "</Glossary>",
+    ].join("\n");
+    const html = render(md);
+    // The tip sits inside the answer, so the assertion below reads a real one.
+    expect(/<div class="query-answer">[\s\S]*class="gl-tip"/.test(html)).toBe(true);
+    expect(pageRefTargets(html, md, ["Q-6"])["Q-6"]!.answer).toBe("Twelve were Hold in all months.");
   });
 
   test("an answer with a nested div is read whole", () => {

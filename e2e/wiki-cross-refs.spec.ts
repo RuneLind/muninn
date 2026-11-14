@@ -135,7 +135,7 @@ test.beforeAll(async () => {
   );
 
   await assertPortFree(PORT);
-  server = spawn("bun",["run", "src/index.ts"], {
+  server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
@@ -285,6 +285,29 @@ test.describe("Wiki reader: cross-page ids", () => {
     await page.locator(".wiki-article a.wiki-xref", { hasText: "Q-3" }).hover();
     await expect(page.locator("#wiki-xref-peek")).toBeVisible();
     await expect(page.locator(".wiki-ref-peek")).toHaveCount(1);
+  });
+
+  test("a click closes the cross-page card at once, before A has rendered", async ({ page }) => {
+    // A's page answer is held back, so only the click itself can take the card down.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(
+      (u) => u.pathname === "/api/wiki/page" && u.searchParams.get("relPath") === "plans/a.md",
+      async (route) => {
+        await held;
+        await route.continue();
+      },
+    );
+    await open(page, "plans/b.md");
+    const link = page.locator(".wiki-article a.wiki-xref", { hasText: "Q-3" });
+    await link.hover();
+    await expect(page.locator("#wiki-xref-peek")).toBeVisible();
+    await link.click();
+    await expect(page.locator("#wiki-xref-peek")).toHaveCount(0, { timeout: 300 });
+    // Still B: A's render (which would hide the card too) has not happened.
+    await expect(page.locator(".wiki-article a.wiki-xref", { hasText: "Q-3" })).toBeAttached();
+    release();
+    await expect(page).toHaveURL(/relPath=plans%2Fa\.md.*#q-3$/);
   });
 
   test("opening the find palette closes the cross-page card", async ({ page }) => {

@@ -18,7 +18,6 @@ import { DECISION_ID_RE, parseQuestionPage, type QuestionState } from "../format
 import { decodeBasicCharRefs } from "../format/safe-link-href.ts";
 import type { XrefKind, XrefTarget } from "./core/cross-ref.ts";
 import { decisionText } from "./decision-text.ts";
-import { stripMarkdownSyntax } from "./walkthrough.ts";
 
 /** An HTML fragment's text, whitespace collapsed. */
 function plain(html: string): string {
@@ -55,11 +54,111 @@ function withoutTips(html: string): string {
   return html;
 }
 
-/** A DecisionLog item's lead sentence as plain text. Code and emphasis syntax
- *  (`~~`, `*`, `_`, `**`) go first, so a bold opening is part of the sentence
- *  rather than all of it; `leadSentence` flattens the links. */
-function itemLead(itemText: string): string {
-  return leadSentence(stripMarkdownSyntax(itemText.split("\n")[0]!, { emphasis: true }));
+/** CommonMark's backslash-escapable characters (ASCII punctuation). */
+const ASCII_PUNCT = /[!-/:-@[-`{-~]/;
+/** ASCII punctuation `leadSentence` must read as plain text goes to the Private
+ *  Use Area (U+E000 + its code) and comes back after it. */
+const hide = (c: string): string => String.fromCharCode(0xe000 + c.charCodeAt(0));
+const unhide = (s: string): string => s.replace(/[-]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xe000));
+const isSpace = (c: string | undefined): boolean => c === undefined || /\s/u.test(c);
+const isPunct = (c: string | undefined): boolean => c !== undefined && /[\p{P}\p{S}]/u.test(c);
+
+/**
+ * One markdown line as display text, inline syntax only: no block marker goes
+ * (`> 5 saker`, `3. juli` and `# 3` keep their first character, unlike the
+ * walkthrough's quote matcher). A backslash escape and a code span's content
+ * are literal (returned hidden, see `hide`); an emphasis or strike run (`*`,
+ * `_`, `~`) goes when it pairs under CommonMark's flanking rules. With
+ * `dropStruck`, a `~~…~~` run goes with its words. Links are `leadSentence`'s.
+ */
+function inlineDisplay(s: string, dropStruck: boolean): string {
+  type Piece = { text: string; delim?: { ch: string; n: number; open: boolean; close: boolean } };
+  const pieces: Piece[] = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i]!;
+    if (c === "\\" && ASCII_PUNCT.test(s[i + 1] ?? "")) {
+      pieces.push({ text: hide(s[i + 1]!) });
+      i += 2;
+      continue;
+    }
+    if (c === "`") {
+      let n = 1;
+      while (s[i + n] === "`") n++;
+      const fence = "`".repeat(n);
+      let close = s.indexOf(fence, i + n);
+      while (close !== -1 && (s[close + n] === "`" || s[close - 1] === "`")) {
+        let e = close;
+        while (s[e] === "`") e++;
+        close = s.indexOf(fence, e);
+      }
+      if (close === -1) {
+        pieces.push({ text: fence });
+        i += n;
+      } else {
+        let body = s.slice(i + n, close);
+        if (body.length > 1 && body.startsWith(" ") && body.endsWith(" ") && body.trim() !== "") body = body.slice(1, -1);
+        pieces.push({ text: body.replace(new RegExp(ASCII_PUNCT.source, "g"), hide) });
+        i = close + n;
+      }
+      continue;
+    }
+    if (c === "*" || c === "_" || c === "~") {
+      let n = 1;
+      while (s[i + n] === c) n++;
+      const before = s[i - 1];
+      const after = s[i + n];
+      const left = !isSpace(after) && (!isPunct(after) || isSpace(before) || isPunct(before));
+      const right = !isSpace(before) && (!isPunct(before) || isSpace(after) || isPunct(after));
+      const open = c === "_" ? left && (!right || isPunct(before)) : left;
+      const close = c === "_" ? right && (!left || isPunct(after)) : right;
+      // GFM strikethrough is one or two tildes; a closer pairs with an opener of its length.
+      const delim = (open || close) && (c !== "~" || n <= 2) ? { ch: c, n, open, close } : undefined;
+      pieces.push({ text: s.slice(i, i + n), delim });
+      i += n;
+      continue;
+    }
+    let j = i + 1;
+    while (j < s.length && !"\\`*_~".includes(s[j]!)) j++;
+    pieces.push({ text: s.slice(i, j) });
+    i = j;
+  }
+  const openers: number[] = [];
+  const drop = new Set<number>();
+  pieces.forEach((p, k) => {
+    const d = p.delim;
+    if (!d) return;
+    if (d.close) {
+      const at = openers.findLastIndex((o) => {
+        const od = pieces[o]!.delim!;
+        return od.ch === d.ch && (d.ch !== "~" || od.n === d.n);
+      });
+      if (at !== -1) {
+        const from = openers[at]!;
+        if (dropStruck && d.ch === "~" && d.n === 2) for (let x = from; x <= k; x++) drop.add(x);
+        else drop.add(from).add(k);
+        openers.length = at;
+        return;
+      }
+    }
+    if (d.open) openers.push(k);
+  });
+  return pieces.map((p, k) => (drop.has(k) ? "" : p.text)).join("");
+}
+
+/** A DecisionLog item's lead sentence as plain text. Inline syntax goes first,
+ *  so a bold opening is part of the sentence rather than all of it;
+ *  `leadSentence` flattens the links. With `dropStruck` (an item with no
+ *  question state) a `~~…~~` run is an overturned claim and is left out; an
+ *  item struck whole keeps its struck words. */
+function itemLead(itemText: string, dropStruck: boolean): string {
+  const line = itemText.split("\n")[0]!;
+  const kept = dropStruck ? inlineDisplay(line, true) : "";
+  const text = (kept.trim() ? kept : inlineDisplay(line, false))
+    .replace(/\s+/g, " ")
+    // An ordinal's dot before a lower-case word (`3. juli`) ends no sentence.
+    .replace(/(^|\s)(\d+)\.(?= \p{Ll})/gu, (_, sp: string, n: string) => sp + n + hide("."));
+  return unhide(leadSentence(text));
 }
 
 /** The in-page linker's id test (`isRefId`): two or more characters, one a letter. */
@@ -122,12 +221,13 @@ export function pageRefTargets(html: string, markdown: string, ids: readonly str
       const li = segment(html, c.at, "</li>");
       const date = /data-item-date="(\d{4}-\d{2}-\d{2})"/.exec(li)?.[1];
       const isDecision = DECISION_ID_RE.test(id) || /\bdl-decision\b/.test(li.slice(0, li.indexOf(">")));
-      const text = entry ? itemLead(entry.itemText) : plain(li.replace(/^[\s\S]*?<\/a>/, ""));
+      const state = isDecision ? {} : stateFields(page.states.get(id));
+      const text = entry ? itemLead(entry.itemText, !state.state) : plain(li.replace(/^[\s\S]*?<\/a>/, ""));
       out[id] = {
         kind: "decision",
         anchor: c.anchor,
         text,
-        ...(isDecision ? {} : stateFields(page.states.get(id))),
+        ...state,
         ...(date ? { date } : {}),
       };
     } else if (c.kind === "query") {
