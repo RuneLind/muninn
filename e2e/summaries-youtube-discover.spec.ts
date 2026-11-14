@@ -315,7 +315,10 @@ for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
         const r = el.getBoundingClientRect();
         return Math.round(r.top + r.height / 2);
       };
+      const back = header.querySelector(".doc-panel-close")!;
+      const left = (el: Element) => el.getBoundingClientRect().left;
       return {
+        leftToRight: left(back) < left(title) && left(title) < left(followUp),
         titleWidth: title.getBoundingClientRect().width,
         spill,
         followUpRowGap: Math.abs(mid(followUp) - mid(title)),
@@ -324,7 +327,10 @@ for (const width of [390, 800, 1000, 1100, 1280, 1440]) {
     });
     expect(m.spill).toEqual([]);
     expect(m.titleWidth).toBeGreaterThanOrEqual(120);
-    if (width > 700) expect(m.followUpRowGap).toBeLessThanOrEqual(4);
+    if (width > 700) {
+      expect(m.followUpRowGap).toBeLessThanOrEqual(4);
+      expect(m.leftToRight).toBe(true);
+    }
     if (width >= 1280) expect(m.rows).toBe(1);
   });
 }

@@ -217,8 +217,10 @@ export function sumReaderStyles(): string {
        wrap the fixed-width buttons took the title to 0 px at 701–800 px
        (54 px at 1000 px with a YouTube document's extra button). The basis
        keeps the title; a YouTube header takes a second row below ~1180 px.
-       Back, the title and Ask a follow-up come first, so a wrap moves the
-       optional buttons and never the primary action. */
+       Back, the title and Ask a follow-up come first, so above 700 px a wrap
+       moves the optional buttons, not the primary action (below 700 px the
+       title takes its own line and the follow-up leads the next). CSS order
+       is visual only: Tab still reaches the follow-up last. */
     .doc-panel-header { flex-wrap: wrap; row-gap: 8px; }
     .doc-panel-title { flex: 1 1 14rem; }
     .doc-panel-close, .doc-panel-title { order: -2; }
