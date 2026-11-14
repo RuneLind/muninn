@@ -9,7 +9,8 @@ import type { DiscoverShelf } from "../../db/youtube-discover.ts";
  * PR 2, layout D5 "shelves by seed"). The server sends the shell and the stored
  * shelves as JSON; `discover-page-client.ts` renders the shelves, the sort and
  * length filters, the details drawer and the actions, so a sort or a dismiss
- * never round-trips for HTML.
+ * never round-trips for HTML. The seed bar (PR 3, `discover-seed-bar-client.ts`)
+ * starts new runs from a category, the last 7 days or a hand-picked set.
  */
 
 export interface DiscoverPageData {
@@ -59,12 +60,23 @@ export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promi
         </select>
       </label>
     </div>
+    <section class="dsc-seeds" id="dscSeeds" aria-labelledby="dscSeedsLbl">
+      <div class="dsc-seed-modes">
+        <span class="dsc-ctl-label" id="dscSeedsLbl">Search from</span>
+        <button type="button" class="dsc-chip" data-seedmode="category" aria-expanded="false" aria-controls="dscSeedPanel">+ A category…</button>
+        <button type="button" class="dsc-chip" data-seedmode="week" aria-expanded="false" aria-controls="dscSeedPanel">+ Last 7 days</button>
+        <button type="button" class="dsc-chip" data-seedmode="pick" aria-expanded="false" aria-controls="dscSeedPanel">+ Pick summaries…</button>
+      </div>
+      <div class="dsc-seed-panel" id="dscSeedPanel" hidden></div>
+      <div class="dsc-progress" id="dscProgress" role="status" aria-live="polite" tabindex="-1"></div>
+    </section>
     ${error}
     <main id="dscMain" class="dsc-main"></main>
   </div>
   <div class="dsc-drawer-bg" id="dscDrawerBg" hidden></div>
   <aside class="dsc-drawer" id="dscDrawer" role="dialog" aria-modal="true" aria-labelledby="dscDrawerTitle" hidden></aside>
   <div class="dsc-toast" id="dscToast" role="status" aria-live="polite"></div>
+  <div class="dsc-sr" id="dscAnnounce" role="status" aria-live="polite"></div>
   <script type="application/json" id="dscData">${escJsonScript({ shelves: data.shelves })}</script>
   <script>${client}</script>
 </body>

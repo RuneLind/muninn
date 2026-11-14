@@ -34,6 +34,7 @@ import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
+import { checkYouTubeDiscovery } from "./youtube-discovery.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { buildHealthAlerts, type SourceHealthMap } from "./source-health.ts";
 
@@ -746,6 +747,7 @@ const wikiCheckerSpies = () => {
       checkWikiLinter: spy("wiki-linter"),
       checkWikiCommitter: spy("wiki-committer"),
       checkConsolidationGardener: spy("consolidation-gardener"),
+      checkYouTubeDiscovery: spy("youtube-discovery"),
     } satisfies WatcherCheckers,
   };
 };
@@ -851,6 +853,7 @@ describe("runChecker — every type reaches its own checker", () => {
   const TYPES = [
     "email", "news", "x", "anthropic",
     "wiki-gardener", "wiki-linter", "wiki-committer", "consolidation-gardener",
+    "youtube-discovery",
   ] as const;
 
   afterEach(() => __setWikiReadonlyForTest());
@@ -896,6 +899,7 @@ describe("runChecker — every type reaches its own checker", () => {
     expect(DEFAULT_WATCHER_CHECKERS.checkWikiLinter).toBe(checkWikiLinter);
     expect(DEFAULT_WATCHER_CHECKERS.checkWikiCommitter).toBe(checkWikiCommitter);
     expect(DEFAULT_WATCHER_CHECKERS.checkConsolidationGardener).toBe(checkConsolidationGardener);
+    expect(DEFAULT_WATCHER_CHECKERS.checkYouTubeDiscovery).toBe(checkYouTubeDiscovery);
   });
 
   test("email is the only type that can report coverage", async () => {

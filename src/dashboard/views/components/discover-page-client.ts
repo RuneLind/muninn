@@ -13,6 +13,7 @@
  */
 
 import { escHtml } from "./escape.ts";
+import { bootSeedBar } from "./discover-seed-bar-client.ts";
 import type { DiscoverHit, DiscoverHitState, DiscoverShelf, DiscoverVideoDetails } from "../../../db/youtube-discover.ts";
 
 export type DiscoverSort = "score" | "new" | "long" | "short";
@@ -153,7 +154,37 @@ async function setState(videoId: string, state: DiscoverHitState): Promise<strin
     return "Could not save: the server did not answer.";
   }
   eachHit(videoId, (h) => (h.state = state));
+  writes.set(videoId, { state, at: performance.now() });
   return null;
+}
+
+/** When each video's last state write committed: laid over shelves read before it (see `applyShelves`). */
+const writes = new Map<string, { state: DiscoverHitState; at: number }>();
+/** Shelves a seed run delivered while the drawer was open: applied when it closes. */
+let pendingShelves: { shelves: DiscoverShelf[]; requestedAt: number } | null = null;
+
+/** A replaced shelf's run id → the run of the same seed that replaced it, for focus and Undo. */
+const runAlias = new Map<string, string>();
+const liveRun = (runId: string): string => {
+  let r = runId;
+  for (let i = 0; i < 10 && runAlias.has(r); i++) r = runAlias.get(r)!;
+  return r;
+};
+
+/** Replace the shelves with a fresh read; a write that committed after the read was asked wins over it. */
+function applyShelves(shelves: DiscoverShelf[], requestedAt: number): void {
+  const seedKey = (s: DiscoverShelf) => `${s.seedSource}\u0000${s.seedDocId}`;
+  const bySeed = new Map(shelves.map((s) => [seedKey(s), s.runId]));
+  for (const old of st.shelves) {
+    const now = bySeed.get(seedKey(old));
+    if (now && now !== old.runId) runAlias.set(old.runId, now);
+  }
+  for (const s of shelves)
+    for (const h of s.hits) {
+      const w = writes.get(h.videoId);
+      if (w && w.at >= requestedAt) h.state = w.state;
+    }
+  st.shelves = shelves;
 }
 
 /** Videos with a Later or Dismiss write in flight: a second click waits for the first. */
@@ -261,8 +292,9 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
     (dr.querySelector<HTMLElement>(k.act ? byKey(k.act) : ".dsc-close") ?? dr.querySelector<HTMLElement>(".dsc-close"))?.focus();
     return;
   }
-  // The drawer closed under the focus (a dismiss from it): go back to its shelf.
-  const run = k.inDrawer ? prevOpen?.runId : k.run;
+  // The drawer closed under the focus (a dismiss from it): go back to its shelf, or the run that replaced it.
+  const run0 = k.inDrawer ? prevOpen?.runId : k.run;
+  const run = run0 ? liveRun(run0) : run0;
   const video = k.inDrawer ? prevOpen?.videoId : k.video;
   if (!run) return;
   const card = video ? cardEl(run, video) : null;
@@ -272,6 +304,8 @@ function restoreFocus(k: FocusKey | null, prevOpen: PageState["open"]): void {
     (card && k.act && !k.inDrawer ? card.querySelector<HTMLElement>(byKey(k.act)) : null) ??
     card ??
     neighbour ??
+    // The shelf itself was replaced (a newer run of its seed): the same video on any shelf.
+    (video ? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(video)}"]`) : null) ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] .dsc-card`) ??
     document.querySelector<HTMLElement>(`.dsc-shelf[data-run="${CSS.escape(run)}"] h3 a`);
   target?.focus({ preventScroll: true });
@@ -283,6 +317,11 @@ let renderedOpen: PageState["open"] = null;
 function render(): void {
   const main = $("dscMain");
   if (!main) return;
+  if (!st.open && pendingShelves) {
+    const p = pendingShelves;
+    pendingShelves = null;
+    applyShelves(p.shelves, p.requestedAt);
+  }
   const shown = st.shelves.reduce((n, s) => n + dscVisibleHits(s.hits, st.sort, st.minLen).length, 0);
   const count = $("dscCount");
   if (count) count.textContent = `${shown} suggestion${shown === 1 ? "" : "s"} on ${st.shelves.length} shel${st.shelves.length === 1 ? "f" : "ves"}`;
@@ -294,7 +333,7 @@ function render(): void {
   });
   main.innerHTML =
     st.shelves.length === 0
-      ? `<div class="dsc-empty">No shelves yet. Open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
+      ? `<div class="dsc-empty">No shelves yet. Use Search from above, or open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
       : st.shelves.map(shelfHtml).join("");
   main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
     const left = sh.dataset.run ? scroll.get(sh.dataset.run) : undefined;
@@ -358,9 +397,9 @@ function detailBodyHtml(hit: DiscoverHit, shelf: DiscoverShelf, stats: string[],
   );
 }
 
-/** Everything but the dialog, its backdrop and the toast is inert while the dialog is open (the nav included). */
+/** Everything but the dialog, its backdrop, the toast and the announcer is inert while the dialog is open (the nav included). */
 function setModal(open: boolean): void {
-  const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast"]);
+  const keep = new Set(["dscDrawer", "dscDrawerBg", "dscToast", "dscAnnounce"]);
   for (const el of Array.from(document.body.children)) {
     if (el instanceof HTMLElement && !keep.has(el.id) && el.tagName !== "SCRIPT") el.inert = open;
   }
@@ -440,7 +479,7 @@ function closeDrawer(): void {
   st.open = null;
   st.playing = false;
   render();
-  if (prev) document.querySelector<HTMLElement>(`.dsc-card[data-run="${prev.runId}"][data-video="${prev.videoId}"]`)?.focus();
+  if (prev) cardEl(liveRun(prev.runId), prev.videoId)?.focus();
 }
 
 async function summarize(videoId: string): Promise<void> {
@@ -478,8 +517,11 @@ async function dismiss(videoId: string): Promise<void> {
     void setState(videoId, before).then((undoErr) => {
       if (undoErr) toast(undoErr);
       render();
-      // The Undo button is gone: focus the card it brought back.
-      if (!undoErr) cardEl(runId, videoId)?.focus();
+      if (undoErr) return;
+      // The Undo button is gone. With the drawer open the card is behind the modal: stay in the drawer.
+      if (st.open) return $("dscDrawer")?.querySelector<HTMLElement>(".dsc-close")?.focus();
+      // Otherwise focus the card it brought back, on its shelf (or the run that replaced it) or any shelf.
+      (cardEl(liveRun(runId), videoId) ?? document.querySelector<HTMLElement>(`.dsc-card[data-video="${CSS.escape(videoId)}"]`))?.focus();
     });
   });
 }
@@ -565,6 +607,22 @@ export function bootDiscoverPage(): void {
     }
   });
   window.addEventListener("hashchange", focusHashShelf);
+  bootSeedBar(
+    (shelves, requestedAt) => {
+    // The drawer is a modal over the shelves: swap them in when it closes, not under it.
+    if (st.open) {
+      pendingShelves = { shelves, requestedAt };
+      return;
+    }
+    applyShelves(shelves, requestedAt);
+    render();
+    },
+    (msg) => {
+      // Its own live region: the toast may be holding someone's Undo.
+      const a = $("dscAnnounce");
+      if (a) a.textContent = msg;
+    },
+  );
   render();
   focusHashShelf();
 }

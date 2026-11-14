@@ -78,6 +78,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/chat/conversations/:id/messages", "/chat/context-usage/:userId/:botName",
     "/chat/tool-usage/:userId/:botName", "/chat/reports/:botName/:userId/:issueKey",
     "/chat/specs/:botName/:userId/:issueKey", "/chat/dev-run/by-thread/:threadId",
+    "/api/summaries/discover/shelves",
   ].map((p) => [p, LOCAL] as const),
   ...[
     "/api/search/health", "/api/search/collections", "/api/search/collection/:name/documents",
@@ -87,6 +88,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/articles/document/*", "/api/youtube/document/*", "/api/x-articles/document/*",
     "/api/tiktok/document/*", "/api/vimeo/document/*", "/api/graph/collections",
     "/api/wiki/gardener/backlog-doc-delete-status", "/api/indexing/overview",
+    "/api/summaries/discover/seeds",
   ].map((p) => [p, HUGINN_READ] as const),
   ...[
     "/api/summaries/documents", "/api/wiki/reindex-status",

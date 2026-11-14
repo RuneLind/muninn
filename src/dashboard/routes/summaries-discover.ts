@@ -24,12 +24,12 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
-import { fetchKnowledgeApi, fetchKnowledgeApiText, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
-import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { Tracer } from "../../tracing/tracer.ts";
-import { encodeDocIdPath, getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
+import { getSummarySource, isSafeDocId } from "../../summaries/sources.ts";
 import { extractYouTubeVideoId } from "../../youtube/url.ts";
-import { probeDiscoverDetails, searchYouTube, type YouTubeHit } from "../../youtube/discover.ts";
+import type { YouTubeHit } from "../../youtube/discover.ts";
+import { defaultDiscoverServices, discoverTestSeam, type CapturedDoc } from "../../youtube/discover-deps.ts";
+import { seedCategories, toSeedDocs } from "../../youtube/discover-seeds.ts";
 import { runDiscovery, type DiscoverResult, type DiscoverTracer } from "../../youtube/discover-run.ts";
 import { YOUTUBE_FRAME_SOURCE, isFrameId } from "../../summaries/frames.ts";
 import {
@@ -56,13 +56,13 @@ export type { DiscoverResult, DiscoverTracer };
 
 const log = getLog("dashboard", "summaries-discover");
 
-const RAW_READ_TIMEOUT_MS = 10_000;
-const MODEL_TIMEOUT_MS = 60_000;
 /** How long a video YouTube called unavailable is answered 410 without a probe. */
 export const UNAVAILABLE_TTL_MS = 6 * 60 * 60_000;
 /** How long the captured-video set is reused (the Stats tab's TTL). */
 export const KNOWN_IDS_TTL_MS = 5 * 60_000;
-const YOUTUBE_COLLECTION = "youtube-summaries";
+
+/** The seed bar lists at most this many summaries (1,640 on 2026-11-14). */
+const SEEDS_LISTED_MAX = 5000;
 
 /** Where a stored run's shelf is. */
 export const discoverShelfUrl = (runId: string): string => `/summaries/discover#run-${runId}`;
@@ -77,6 +77,8 @@ export interface SummariesDiscoverDeps {
   search: (query: string, n: number) => Promise<YouTubeHit[] | null>;
   /** Every `url` the `youtube-summaries` listing carries. Throws on failure. */
   listKnownUrls: () => Promise<string[]>;
+  /** Every `youtube-summaries` document with its date, for the seed bar. Throws on failure. */
+  listCaptured: () => Promise<CapturedDoc[]>;
   /** The interest profile to rank with, or `null`. */
   profile: (bot: BotConfig) => Promise<string | null>;
   tracer?: (bot: BotConfig) => DiscoverTracer | null;
@@ -94,12 +96,8 @@ export interface SummariesDiscoverDeps {
   probeDetails: (videoId: string, signal?: AbortSignal) => Promise<DiscoverVideoDetails | "unavailable" | null>;
 }
 
-/**
- * Test seam for `e2e/youtube-discover-boot.ts` ONLY: the two model calls, the
- * search and the details probe, replaced in-process before muninn boots (the
- * `findLinksTestSeam` precedent). Production never sets it.
- */
-export const discoverTestSeam: Partial<Pick<SummariesDiscoverDeps, "queriesCall" | "rankCall" | "search" | "probeDetails">> = {};
+/** Re-exported: `e2e/youtube-discover-boot.ts` sets it before muninn boots. */
+export { discoverTestSeam };
 
 export const DISCOVER_STORE: SummariesDiscoverDeps["store"] = {
   saveRun: saveDiscoverRun,
@@ -110,56 +108,25 @@ export const DISCOVER_STORE: SummariesDiscoverDeps["store"] = {
   listShelves: () => listDiscoverShelves(),
 };
 
-async function haiku(prompt: string, bot: BotConfig, tracer: DiscoverTracer | null, source: string): Promise<string> {
-  const res = await callHaikuWithFallback(prompt, {
-    source,
-    entrypoint: "youtube-discover",
-    botName: bot.name,
-    connector: bot.connector,
-    haikuBackend: bot.haikuBackend,
-    timeoutMs: MODEL_TIMEOUT_MS,
-    ...(tracer ? { tracer: tracer as Tracer } : {}),
-  });
-  return res.result;
-}
-
 export function defaultSummariesDiscoverDeps(
   config: Config,
   opts: { loadProfile?: typeof loadInterestProfileForBot } = {},
 ): SummariesDiscoverDeps {
   const loadProfile = opts.loadProfile ?? loadInterestProfileForBot;
+  const services = defaultDiscoverServices(config.knowledgeApiUrl);
   return {
-    readRaw: async (collection, docId) => {
-      try {
-        return await fetchKnowledgeApiText(
-          config.knowledgeApiUrl,
-          `/api/document/${encodeURIComponent(collection)}/${encodeDocIdPath(docId)}?raw=1`,
-          { timeoutMs: RAW_READ_TIMEOUT_MS },
-        );
-      } catch (err) {
-        if (err instanceof KnowledgeApiError && err.upstreamStatus === 404) return null;
-        throw err;
-      }
-    },
+    readRaw: services.readRaw,
     bots: discoverAllBots,
-    queriesCall: (prompt, bot, tracer) =>
-      discoverTestSeam.queriesCall ? discoverTestSeam.queriesCall(prompt, bot, tracer) : haiku(prompt, bot, tracer, "youtube-discover-queries"),
-    rankCall: (prompt, bot, tracer) =>
-      discoverTestSeam.rankCall ? discoverTestSeam.rankCall(prompt, bot, tracer) : haiku(prompt, bot, tracer, "youtube-discover-rank"),
-    search: (query, n) => (discoverTestSeam.search ? discoverTestSeam.search(query, n) : searchYouTube(query, n)),
-    listKnownUrls: async () => {
-      const data = await fetchKnowledgeApi(config.knowledgeApiUrl, `/api/collection/${YOUTUBE_COLLECTION}/documents`, {
-        timeoutMs: 10_000,
-      });
-      const docs = (data?.documents ?? []) as { url?: unknown }[];
-      return docs.map((d) => (typeof d.url === "string" ? d.url : "")).filter(Boolean);
-    },
+    queriesCall: services.queriesCall,
+    rankCall: services.rankCall,
+    search: services.search,
+    listKnownUrls: async () => (await services.listCaptured()).map((d) => d.url ?? "").filter(Boolean),
+    listCaptured: services.listCaptured,
     // An authenticating instance has many readers: a bot-wide profile is someone else's interests.
     profile: async (bot) => (authMode() === "off" ? loadProfile(bot.name) : null),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discover" }),
     store: DISCOVER_STORE,
-    probeDetails: (videoId, signal) =>
-      discoverTestSeam.probeDetails ? discoverTestSeam.probeDetails(videoId, signal) : probeDiscoverDetails(videoId, undefined, signal),
+    probeDetails: services.probeDetails,
   };
 }
 
@@ -238,6 +205,27 @@ export function registerSummariesDiscoverRoutes(
       return c.html(await renderSummariesDiscoverPage({ shelves: [], error: "Could not read the stored shelves." }), 500);
     }
     return c.html(await renderSummariesDiscoverPage({ shelves }));
+  });
+
+  /** The seed bar's choices: every YouTube summary, newest first, and the categories. */
+  app.get("/api/summaries/discover/seeds", async (c) => {
+    try {
+      const docs = toSeedDocs(await deps.listCaptured()).slice(0, SEEDS_LISTED_MAX);
+      return c.json({ docs, categories: seedCategories(docs), now: now() });
+    } catch (err) {
+      log.warn("Discover: seed listing failed: {error}", { error: errText(err) });
+      return fail(c, 502, "upstream", "Could not list the YouTube summaries.");
+    }
+  });
+
+  /** The stored shelves, for the page to re-render after a run. */
+  app.get("/api/summaries/discover/shelves", async (c) => {
+    try {
+      return c.json({ shelves: await deps.store.listShelves() });
+    } catch (err) {
+      log.error("Discover: shelves read failed: {error}", { error: errText(err) });
+      return c.json({ error: "Could not read the stored shelves.", code: "internal" }, 500);
+    }
   });
 
   app.post("/api/summaries/discover", async (c) => {

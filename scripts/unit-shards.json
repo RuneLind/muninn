@@ -190,6 +190,8 @@
       "src/dashboard/routes/summaries-links.test.ts",
       "src/dashboard/routes/summaries-discover.test.ts",
       "src/youtube/discover.test.ts",
+      "src/youtube/discover-seeds.test.ts",
+      "src/watchers/youtube-discovery.test.ts",
       "src/dashboard/routes/wiki-relpath-routes.test.ts",
       "src/dashboard/routes/wiki-near.test.ts",
       "src/dashboard/routes/wiki-stale-check-routes.test.ts",

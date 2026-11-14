@@ -1,6 +1,6 @@
 # Watchers Module
 
-Background monitors that check external services at intervals and send alerts to Telegram and to configured Slack channels. The runner, the eight checkers, their health records and the wiki gardener's scheduling are described in the notes below.
+Background monitors that check external services at intervals and send alerts to Telegram and to configured Slack channels. The runner, the nine checkers, their health records and the wiki gardener's scheduling are described in the notes below.
 
 ## Detail: `src/watchers/reference/notes.md`
 
@@ -88,6 +88,7 @@ Rules and traps about one checker stay in their section of the notes; ` [trap]` 
 - Wiki Linter (wiki-linter.ts + src/wiki/lint.ts) [trap]
 - Wiki Committer (wiki-committer.ts) [trap]
 - Consolidation Gardener (consolidation-gardener.ts) [trap]
+- YouTube Discovery (youtube-discovery.ts)
 - Configurable prompts
 - Configurable model
 - Tool-call visibility for Haiku-driven checkers (`spawnHaiku` telemetry) [trap]
