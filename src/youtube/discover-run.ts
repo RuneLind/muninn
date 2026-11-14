@@ -1,7 +1,7 @@
 /**
  * One discovery run from one seed summary (plan muninn-youtube-discovery): the
- * pipeline PR 1 ran inside its route, lifted out so the route, the Discover
- * page and the weekly watcher (PR 3) run the same steps.
+ * pipeline PR 1 ran inside its route, lifted out so the route and PR 3's
+ * weekly watcher run the same steps.
  *
  * read the stored summary → one Haiku call writes 3–5 queries → one yt-dlp
  * search per query → union by id → drop the seed and every known id → the
@@ -41,12 +41,10 @@ export interface DiscoverRunDeps {
   rankCall: (prompt: string, bot: BotConfig, tracer: DiscoverTracer | null) => Promise<string>;
   /** One search: hits, or `null` when it failed. */
   search: (query: string, n: number) => Promise<YouTubeHit[] | null>;
-  /** Every video id never to suggest: captured, dismissed or queued. Throws on failure (the run degrades to none). */
+  /** Every video id never to suggest: captured, dismissed or queued. A throw degrades to none. */
   knownIds: () => Promise<Set<string>>;
   /** The interest profile to rank with, or `null`. */
   profile: (bot: BotConfig) => Promise<string | null>;
-  /** Called when `knownIds` failed, with the error. */
-  onKnownFailed?: (err: unknown) => void;
 }
 
 export interface DiscoverResult extends YouTubeHit {
@@ -163,9 +161,8 @@ export async function runDiscovery(
   let knownSet: Set<string>;
   try {
     knownSet = await deps.knownIds();
-  } catch (err) {
+  } catch {
     // Degrade: a result may be a video already captured, and the Summarize answer says `duplicate`.
-    deps.onKnownFailed?.(err);
     knownSet = new Set();
   }
   const fresh = [...union.values()].filter(({ hit }) => hit.videoId !== seed.videoId && !knownSet.has(hit.videoId));

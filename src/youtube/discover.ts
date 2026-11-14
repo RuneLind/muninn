@@ -303,17 +303,26 @@ function inDetailsQueue<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-/** One video's details. `null` on a bad id, a failed or timed-out yt-dlp, or unreadable output. */
+/** yt-dlp's answer for a video that is gone: unavailable, private or removed (measured stderr wording). */
+const UNAVAILABLE_RE = /Video unavailable|Private video|has been removed|This video is no longer available/i;
+
+/**
+ * One video's details. `"unavailable"` when YouTube says the video is gone;
+ * `null` on a bad id, a caller that aborted before its turn (nothing spawns),
+ * a failed or timed-out yt-dlp, or unreadable output.
+ */
 export async function probeDiscoverDetails(
   videoId: string,
   run: ProcRunner = (cmd, ms, label) => runProc(cmd, ms, label, { quietTimeout: true, processGroup: true }),
-): Promise<DiscoverVideoDetails | null> {
+  signal?: AbortSignal,
+): Promise<DiscoverVideoDetails | "unavailable" | null> {
   const args = buildDetailsArgs(videoId);
   if (!args) return null;
   return inDetailsQueue(async () => {
+    if (signal?.aborted) return null;
     try {
       const res = await run(args, DISCOVER_DETAILS_TIMEOUT_MS, "yt-dlp details");
-      if (res.exitCode !== 0) return null;
+      if (res.exitCode !== 0) return UNAVAILABLE_RE.test(res.stderr) ? "unavailable" : null;
       return parseDetailsProbe(res.stdout, videoId);
     } catch {
       return null;

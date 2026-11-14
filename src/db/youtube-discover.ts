@@ -140,8 +140,11 @@ export async function saveDiscoverRun(
     `;
     const runId = row!.id as string;
     await lockVideos(sql as unknown as Tx, hits.map((h) => h.videoId));
+    // One row per video and run; the first copy wins, so ranks stay gapless.
+    const seen = new Set<string>();
+    const unique = hits.filter((h) => !seen.has(h.videoId) && seen.add(h.videoId));
     let rank = 0;
-    for (const h of hits) {
+    for (const h of unique) {
       rank++;
       await sql`
         INSERT INTO youtube_discover_hits
@@ -169,9 +172,9 @@ export async function listDiscoverShelves(limit = 40): Promise<DiscoverShelf[]> 
     SELECT * FROM (
       SELECT DISTINCT ON (seed_source, seed_doc_id) *
       FROM youtube_discover_runs
-      ORDER BY seed_source, seed_doc_id, created_at DESC
+      ORDER BY seed_source, seed_doc_id, created_at DESC, id
     ) newest
-    ORDER BY created_at DESC
+    ORDER BY created_at DESC, id
     LIMIT ${limit}
   `;
   if (runs.length === 0) return [];
@@ -216,8 +219,9 @@ export async function setDiscoverVideoState(videoId: string, state: DiscoverHitS
 
 /** The video ids never to suggest again: dismissed or queued. */
 export async function getDiscoverKnownVideoIds(): Promise<Set<string>> {
+  // Spelled to match the partial index `idx_youtube_discover_hits_known`.
   const rows = await getDb()`
-    SELECT DISTINCT video_id FROM youtube_discover_hits WHERE state = ANY(${DISCOVER_KNOWN_STATES as string[]}::text[])
+    SELECT DISTINCT video_id FROM youtube_discover_hits WHERE state IN ('dismissed', 'queued')
   `;
   return new Set(rows.map((r) => r.video_id as string));
 }

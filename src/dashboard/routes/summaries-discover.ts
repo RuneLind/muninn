@@ -58,6 +58,8 @@ const log = getLog("dashboard", "summaries-discover");
 
 const RAW_READ_TIMEOUT_MS = 10_000;
 const MODEL_TIMEOUT_MS = 60_000;
+/** How long a video YouTube called unavailable is answered 410 without a probe. */
+export const UNAVAILABLE_TTL_MS = 6 * 60 * 60_000;
 /** How long the captured-video set is reused (the Stats tab's TTL). */
 export const KNOWN_IDS_TTL_MS = 5 * 60_000;
 const YOUTUBE_COLLECTION = "youtube-summaries";
@@ -88,8 +90,8 @@ export interface SummariesDiscoverDeps {
     saveDetails: (videoId: string, details: DiscoverVideoDetails) => Promise<void>;
     listShelves: () => Promise<DiscoverShelf[]>;
   };
-  /** One details probe, or `null` when it failed. */
-  probeDetails: (videoId: string) => Promise<DiscoverVideoDetails | null>;
+  /** One details probe: details, `"unavailable"` when the video is gone, or `null` when it failed. `signal` aborts when no caller is left. */
+  probeDetails: (videoId: string, signal?: AbortSignal) => Promise<DiscoverVideoDetails | "unavailable" | null>;
 }
 
 /**
@@ -156,13 +158,13 @@ export function defaultSummariesDiscoverDeps(
     profile: async (bot) => (authMode() === "off" ? loadProfile(bot.name) : null),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discover" }),
     store: DISCOVER_STORE,
-    probeDetails: (videoId) =>
-      discoverTestSeam.probeDetails ? discoverTestSeam.probeDetails(videoId) : probeDiscoverDetails(videoId),
+    probeDetails: (videoId, signal) =>
+      discoverTestSeam.probeDetails ? discoverTestSeam.probeDetails(videoId, signal) : probeDiscoverDetails(videoId, undefined, signal),
   };
 }
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-const fail = (c: Context, status: 400 | 404 | 409 | 502 | 503, code: string, error: string) => c.json({ error, code }, status);
+const fail = (c: Context, status: 400 | 404 | 409 | 410 | 502 | 503, code: string, error: string) => c.json({ error, code }, status);
 
 async function jsonBody(c: Context): Promise<Record<string, unknown>> {
   const parsed: unknown = await c.req.json().catch(() => null);
@@ -182,8 +184,14 @@ export function registerSummariesDiscoverRoutes(
   const now = deps.now ?? Date.now;
   /** One discovery per document at a time. */
   const running = new Set<string>();
-  /** One details probe per video at a time; a second click joins the first. */
-  const probing = new Map<string, Promise<DiscoverVideoDetails | null>>();
+  /**
+   * One details probe per video at a time; a second click joins the first. The
+   * probe's signal aborts when every caller waiting on it has gone, so a queued
+   * probe nobody waits for never spawns.
+   */
+  const probing = new Map<string, { result: Promise<DiscoverVideoDetails | "unavailable" | null>; waiters: number; ctl: AbortController }>();
+  /** Videos YouTube called unavailable, and when. */
+  const unavailable = new Map<string, number>();
   let captured: { ids: Set<string>; at: number } | null = null;
   let capturedInFlight: Promise<Set<string>> | null = null;
 
@@ -336,12 +344,39 @@ export function registerSummariesDiscoverRoutes(
       // Only a stored suggestion may spend a probe: the route never spawns yt-dlp for an arbitrary id.
       if (cached === undefined) return fail(c, 404, "unknown_video", "No stored suggestion has this video.");
       if (cached) return c.json({ videoId, details: cached, cached: true });
-      let pending = probing.get(videoId);
-      if (!pending) {
-        pending = deps.probeDetails(videoId).finally(() => probing.delete(videoId));
-        probing.set(videoId, pending);
+      const goneAt = unavailable.get(videoId);
+      if (goneAt !== undefined && now() - goneAt < UNAVAILABLE_TTL_MS) {
+        return fail(c, 410, "video_unavailable", "This video is no longer available on YouTube.");
       }
-      const details = await pending;
+      let entry = probing.get(videoId);
+      if (!entry) {
+        const ctl = new AbortController();
+        const created = { result: deps.probeDetails(videoId, ctl.signal), waiters: 0, ctl };
+        created.result = created.result.finally(() => probing.delete(videoId));
+        probing.set(videoId, created);
+        entry = created;
+      }
+      const joined = entry;
+      joined.waiters++;
+      const leave = () => {
+        if (--joined.waiters === 0) joined.ctl.abort();
+      };
+      const reqSignal = c.req.raw.signal;
+      reqSignal.addEventListener("abort", leave, { once: true });
+      let details: DiscoverVideoDetails | "unavailable" | null;
+      try {
+        details = await joined.result;
+      } finally {
+        if (!reqSignal.aborted) {
+          reqSignal.removeEventListener("abort", leave);
+          joined.waiters--;
+        }
+      }
+      if (details === "unavailable") {
+        unavailable.set(videoId, now());
+        log.info("Discover: {video} is unavailable on YouTube", { video: videoId });
+        return fail(c, 410, "video_unavailable", "This video is no longer available on YouTube.");
+      }
       if (!details) {
         log.warn("Discover: details probe failed for {video}", { video: videoId });
         return fail(c, 502, "probe_failed", "YouTube did not answer the details lookup. Try again.");

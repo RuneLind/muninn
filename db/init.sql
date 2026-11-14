@@ -985,7 +985,7 @@ CREATE TABLE youtube_discover_runs (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_doc_id, created_at DESC);
+CREATE INDEX idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_source, seed_doc_id, created_at DESC);
 
 CREATE TABLE youtube_discover_hits (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1007,6 +1007,7 @@ CREATE TABLE youtube_discover_hits (
 );
 
 CREATE INDEX idx_youtube_discover_hits_video ON youtube_discover_hits (video_id);
+CREATE INDEX idx_youtube_discover_hits_known ON youtube_discover_hits (video_id) WHERE state IN ('dismissed', 'queued');
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

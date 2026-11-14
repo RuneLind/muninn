@@ -345,3 +345,24 @@ describe("details probe (PR 2)", () => {
     expect(await probeDiscoverDetails(ID_B, run)).not.toBeNull();
   });
 });
+
+describe("details probe: abandoned and unavailable (fix round 1)", () => {
+  test("a probe whose caller aborted before its turn never spawns", async () => {
+    const spawned: string[] = [];
+    const ctl = new AbortController();
+    ctl.abort();
+    const out = await probeDiscoverDetails(ID_A, async (cmd) => (spawned.push(cmd.at(-1)!), { stdout: JSON.stringify({ id: ID_A }), stderr: "", exitCode: 0 }), ctl.signal);
+    expect(out).toBeNull();
+    expect(spawned).toEqual([]);
+  });
+  test("yt-dlp's unavailable/private/removed answer is 'unavailable', not a plain failure", async () => {
+    for (const stderr of [
+      `ERROR: [youtube] ${ID_A}: Video unavailable`,
+      `ERROR: [youtube] ${ID_A}: Private video. Sign in if you've been granted access to this video`,
+      `ERROR: [youtube] ${ID_A}: This video has been removed by the uploader`,
+    ]) {
+      expect(await probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr, exitCode: 1 }))).toBe("unavailable");
+    }
+    expect(await probeDiscoverDetails(ID_A, async () => ({ stdout: "", stderr: "ERROR: HTTP Error 429", exitCode: 1 }))).toBeNull();
+  });
+});

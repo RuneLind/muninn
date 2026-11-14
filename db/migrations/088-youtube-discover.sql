@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS youtube_discover_runs (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_doc_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_source, seed_doc_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS youtube_discover_hits (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -44,3 +44,4 @@ CREATE TABLE IF NOT EXISTS youtube_discover_hits (
 );
 
 CREATE INDEX IF NOT EXISTS idx_youtube_discover_hits_video ON youtube_discover_hits (video_id);
+CREATE INDEX IF NOT EXISTS idx_youtube_discover_hits_known ON youtube_discover_hits (video_id) WHERE state IN ('dismissed', 'queued');

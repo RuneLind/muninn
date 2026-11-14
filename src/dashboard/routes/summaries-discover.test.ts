@@ -56,7 +56,7 @@ let saved: { run: DiscoverRunInput; hits: DiscoverHitInput[] }[];
 let states: Map<string, DiscoverHitState>;
 let detailsCache: Map<string, DiscoverVideoDetails | null>;
 let probes: string[];
-let probeAnswer: (id: string) => Promise<DiscoverVideoDetails | null>;
+let probeAnswer: (id: string, signal?: AbortSignal) => Promise<DiscoverVideoDetails | null | "unavailable">;
 let saveFails: boolean;
 
 const DETAILS: DiscoverVideoDetails = {
@@ -112,9 +112,9 @@ function deps(over: Partial<SummariesDiscoverDeps> = {}): SummariesDiscoverDeps 
     tracer: () => null,
     now: () => clock,
     store: store(),
-    probeDetails: async (id) => {
+    probeDetails: async (id, signal) => {
       probes.push(id);
-      return probeAnswer(id);
+      return probeAnswer(id, signal);
     },
     ...over,
   };
@@ -565,5 +565,44 @@ describe("runDiscovery failure causes", () => {
     expect(q).toMatchObject({ ok: false, code: "model_failed", cause: "queries call: quota invented" });
     const r = await runDiscovery({ ...base, rankCall: async () => { throw new Error("timeout invented"); } }, bot, null, target);
     expect(r).toMatchObject({ ok: false, code: "model_failed", cause: "rank call: timeout invented" });
+  });
+});
+
+describe("details: unavailable and abandoned (fix round 1)", () => {
+  test("an unavailable video answers 410 and is not probed again", async () => {
+    detailsCache.set(ID(1), null);
+    probeAnswer = async () => "unavailable";
+    const a = app();
+    let res = await postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(res.status).toBe(410);
+    expect(((await res.json()) as { code: string }).code).toBe("video_unavailable");
+    res = await postTo(a, "/api/summaries/discover/details", { videoId: ID(1) });
+    expect(res.status).toBe(410);
+    expect(probes).toEqual([ID(1)]);
+  });
+  test("the probe is told when its only caller went away", async () => {
+    detailsCache.set(ID(1), null);
+    let seen: AbortSignal | undefined;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    probeAnswer = async (_id, signal) => {
+      seen = signal;
+      await held;
+      return null;
+    };
+    const ctl = new AbortController();
+    const pending = app().request("/api/summaries/discover/details", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ videoId: ID(1) }),
+      signal: ctl.signal,
+    });
+    await Bun.sleep(5);
+    expect(seen?.aborted).toBe(false);
+    ctl.abort();
+    await Bun.sleep(5);
+    expect(seen?.aborted).toBe(true);
+    release();
+    await Promise.resolve(pending).catch(() => undefined);
   });
 });

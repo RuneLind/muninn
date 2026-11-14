@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escHtml } from "./components/escape.ts";
+import { escJsonScript } from "../../utils/escape-html.ts";
 import { discoverPageClientScript, discoverPageStyles } from "./components/discover-page.ts";
 import type { DiscoverShelf } from "../../db/youtube-discover.ts";
 
@@ -14,11 +15,6 @@ import type { DiscoverShelf } from "../../db/youtube-discover.ts";
 export interface DiscoverPageData {
   shelves: DiscoverShelf[];
   error?: string;
-}
-
-/** JSON safe inside a `<script type="application/json">`: every `<` escaped, so no `</script>` or `<!--`. */
-export function scriptJson(value: unknown): string {
-  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promise<string> {
@@ -69,7 +65,7 @@ export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promi
   <div class="dsc-drawer-bg" id="dscDrawerBg" hidden></div>
   <aside class="dsc-drawer" id="dscDrawer" role="dialog" aria-modal="true" aria-labelledby="dscDrawerTitle" hidden></aside>
   <div class="dsc-toast" id="dscToast" role="status" aria-live="polite"></div>
-  <script type="application/json" id="dscData">${scriptJson({ shelves: data.shelves })}</script>
+  <script type="application/json" id="dscData">${escJsonScript({ shelves: data.shelves })}</script>
   <script>${client}</script>
 </body>
 </html>`;

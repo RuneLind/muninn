@@ -90,6 +90,15 @@ describe("saveDiscoverRun / listDiscoverShelves", () => {
     ]);
   });
 
+  test("the same video twice in one run is stored once, ranks without a gap", async () => {
+    await saveDiscoverRun(run(), [hit("vidAAAAAAA1", 0.9), hit("vidAAAAAAA1", 0.8), hit("vidBBBBBBB2", 0.7)]);
+    const [shelf] = await listDiscoverShelves();
+    expect(shelf!.hits.map((h) => [h.videoId, h.rank, h.score])).toEqual([
+      ["vidAAAAAAA1", 1, 0.9],
+      ["vidBBBBBBB2", 2, 0.7],
+    ]);
+  });
+
   test("an empty run is a shelf with no hits", async () => {
     await saveDiscoverRun(run(), []);
     const [shelf] = await listDiscoverShelves();
