@@ -1095,15 +1095,14 @@ export function parseBlogSlugs(html: string, section: string): Map<string, strin
     p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
   );
   const re = new RegExp(
-    `href="(?:https?://www\\.anthropic\\.com)?/(${prefixes.join("|")})/([^"#?]+)"`,
+    `href="(?:https?://www\\.anthropic\\.com)?/(?:${prefixes.join("|")})/([^"#?]+)"`,
     "gi",
   );
   let m: RegExpExecArray | null;
   while ((m = re.exec(html)) !== null) {
-    const slug = m[2]!.replace(/\/+$/, "");
+    const slug = m[1]!.replace(/\/+$/, "");
     if (!slug || slug.includes("/")) continue; // skip sub-paths / the bare section page
-    const prefix = m[1]!.toLowerCase() === section.toLowerCase() ? section : m[1]!.toLowerCase();
-    const url = canonicalBlogUrl(`https://www.anthropic.com/${prefix}/${slug}`);
+    const url = canonicalBlogUrl(`https://www.anthropic.com/${section}/${slug}`);
     if (!map.has(url)) map.set(url, prettifySlug(slug));
   }
   return map;
