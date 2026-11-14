@@ -16,6 +16,7 @@
  */
 
 import { isCalendarDay } from "../format/calendar-day.ts";
+import { readLinkList } from "./frontmatter-lists.ts";
 
 export const FOLD_LINT_CHECKS = ["plan-not-folded"] as const;
 
@@ -34,46 +35,18 @@ export function parseFoldCheck(value: unknown): { config: FoldCheckConfig | null
 }
 
 /** The key's own line, bare or quoted. */
-const KEY_RE = /^(["']?)folded_into\1[ \t]*:/;
-/** A line that starts a new top-level key: column 0, not a comment or a list item. */
-const TOP_LEVEL_RE = /^[^\s#-]/;
-
-/** A YAML mapping, or `null` when the text does not parse to one. */
-function yamlMap(text: string): Record<string, unknown> | null {
-  try {
-    const v: unknown = Bun.YAML.parse(text);
-    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A value that names a page: a non-empty string, or a list holding one (an
- *  unquoted `[[link]]` is a list in a list). Null, a number and a mapping do not. */
-function names(value: unknown): boolean {
-  if (typeof value === "string") return value.trim() !== "";
-  return Array.isArray(value) && value.some(names);
-}
+const KEY_RE = /^(["']?)folded_into\1\s*:/;
 
 /**
- * Whether the frontmatter's `folded_into:` names something. The frontmatter is
- * read as YAML, as `owns:` and `related:` are (`frontmatter-lists.ts`), not
- * through `parseFrontmatter`, which returns no key for a bare `folded_into:` or
- * a block list. When the whole frontmatter does not parse (a hand-written page
- * may break it anywhere), the key's own entry is parsed alone: its last
- * top-level line and the lines under it up to the next top-level key.
+ * Whether the page's `folded_into:` names something. The key is read by the
+ * reader `related:` has (`readLinkList`, `frontmatter-lists.ts`), so it takes
+ * every form pages write there. It names something when that read holds a
+ * link or a text entry (`none`, a path); an entry the reader cannot place (a
+ * number, a boolean, a mapping without a link) names nothing, and neither do
+ * a bare key, `null`, an empty list or empty strings.
  */
-export function foldedIntoNamed(frontmatter: string | null): boolean {
-  if (frontmatter === null) return false;
-  const whole = yamlMap(frontmatter);
-  if (whole) return names(whole.folded_into);
-  // A CRLF line keeps its `\r`: neither pattern reads a line's end, and YAML takes it.
-  const lines = frontmatter.split("\n");
-  const at = lines.findLastIndex((l) => KEY_RE.test(l));
-  if (at === -1) return false;
-  let end = at + 1;
-  while (end < lines.length && !TOP_LEVEL_RE.test(lines[end]!)) end++;
-  return names(yamlMap(lines.slice(at, end).join("\n"))?.folded_into);
+export function foldedIntoNamed(content: string): boolean {
+  return readLinkList(content, "folded_into", KEY_RE).entries.some((e) => e.kind !== "unread");
 }
 
 export interface FoldPage {
@@ -83,10 +56,10 @@ export interface FoldPage {
 }
 
 /** The finding's message for a shipped plan in scope with no entry, else null. */
-export function checkPlanFold(page: FoldPage, frontmatter: string | null, cfg: FoldCheckConfig): string | null {
+export function checkPlanFold(page: FoldPage, content: string, cfg: FoldCheckConfig): string | null {
   if (!page.relPath.startsWith("plans/") || page.plan_status !== "shipped") return null;
   // No date to hold against the cutoff: not judged.
   if (!page.status_date || page.status_date < cfg.since) return null;
-  if (foldedIntoNamed(frontmatter)) return null;
+  if (foldedIntoNamed(content)) return null;
   return "shipped plan names no durable page for its result — write the result into that page and add folded_into: with a link to it, or folded_into: none";
 }

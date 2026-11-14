@@ -209,7 +209,6 @@ import { isReservedBasename } from "./frontmatter-lists.ts";
 import { EFFORT_ID_RE } from "./work-map/ids.ts";
 import { checkLogKinds, LOG_KIND_LINT_CHECKS } from "./lint-log-kind.ts";
 import { checkPlanFold, FOLD_LINT_CHECKS } from "./lint-fold.ts";
-import { splitFrontmatter } from "./page-text.ts";
 import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
@@ -1200,7 +1199,7 @@ export async function lintWiki(
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
       // Check 28 — a shipped plan with no `folded_into:` entry, from the wiki's cutoff.
-      const unfolded = foldCheck ? checkPlanFold(page, splitFrontmatter(content).frontmatter, foldCheck) : null;
+      const unfolded = foldCheck ? checkPlanFold(page, content, foldCheck) : null;
       if (unfolded) findings.push({ check: "plan-not-folded", relPath: page.relPath, message: unfolded });
     }
     if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
