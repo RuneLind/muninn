@@ -386,3 +386,27 @@ describe("fix round 2 batch 5 (pins)", () => {
     expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "failure 1" });
   });
 });
+
+describe("fix round 2 batch 6 (pins)", () => {
+  test("a seed searched long ago is still skipped when the window widens back to it", async () => {
+    // The window's edge: 13 days back (DISCOVER_MAX_WINDOW_DAYS, today included). No search of a doc
+    // in the window can be older, so any age threshold of 14 days or more equals "ever".
+    lastWatcherRun = Date.parse("2026-11-01T00:30:00Z");
+    listed = [doc(1, "2026-11-01"), doc(2, "2026-11-13")];
+    recent = new Map([["ai/Seed 1.md", Date.parse("2026-11-01T00:31:00Z")]]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
+  });
+
+  test("a failed read of the last watcher run falls back to the last 7 days and the run goes on", async () => {
+    listed = [doc(1, "2026-11-04"), doc(2, "2026-11-13")];
+    const d = deps({
+      lastWatcherRunAt: async () => {
+        throw new Error("db down");
+      },
+    });
+    await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
+    expect(marks.get(HEALTH_STORE)?.outcome).toBe("ok");
+  });
+});

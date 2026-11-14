@@ -735,3 +735,13 @@ test("youtube-discovery watcher: the Haiku router label names the watcher bot's 
   expect(yd.backend).toBe("Haiku router (anthropic)");
   expect(yd.matchRecentName).toBe("youtube-discovery");
 });
+
+test("youtube-discovery watcher on another bot: the label is that bot's backend, not the selected bot's (fix round 2 batch 6)", async () => {
+  const watchers = [watcher("YouTube Discovery", "youtube-discovery", {}, "other")];
+  const o = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis", { connector: "copilot-sdk" }), bot("other", { connector: "claude-sdk", haikuBackend: "anthropic" })], watchers }),
+  );
+  const yd = o.pipeline.find((p) => p.job.startsWith("Watcher: YouTube Discovery"))!;
+  expect(yd.backend).toBe("Haiku router (anthropic)");
+});
