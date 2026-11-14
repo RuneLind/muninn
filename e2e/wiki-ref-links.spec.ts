@@ -268,6 +268,26 @@ test.describe("Wiki reader: in-page references", () => {
     expectClean(seen);
   });
 
+  test("a scroll retires the shown card but not the next link's pending one", async ({ page }) => {
+    const seen = await openPage(page);
+    const peek = page.locator(".wiki-ref-peek");
+    // Synthetic events: the scroll is the event alone, nothing moves under a pointer.
+    const over = (text: string, scroll: boolean) =>
+      page.locator(".wiki-article a.wiki-ref", { hasText: text }).first().evaluate((a, s) => {
+        a.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        if (s) document.getElementById("articleWrap")!.dispatchEvent(new Event("scroll"));
+      }, scroll);
+    await over("D4", false);
+    await expect(peek.locator(".wiki-ref-peek-label")).toHaveText("D4");
+    // S1's card is pending when the scroll (as a hover that scrolls the pane
+    // makes) retires D4's: one evaluate, so it lands inside the 200 ms delay.
+    await over("S1", true);
+    await expect(peek.locator(".wiki-ref-peek-label")).toHaveText("S1");
+    await page.locator("#articleWrap").evaluate((el) => el.dispatchEvent(new Event("scroll")));
+    await expect(peek).toHaveCount(0);
+    expectClean(seen);
+  });
+
   test("hover shows the target in a peek card; Go to jumps; Back restores the scroll", async ({ page }) => {
     const seen = await openPage(page);
     const ref = page.locator(".wiki-article a.wiki-ref", { hasText: "D4" }).first();

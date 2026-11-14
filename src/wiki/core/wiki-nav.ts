@@ -17,6 +17,9 @@
  */
 
 import { normalizeWorkedPath } from "../rel-path.ts";
+import { NAV_ANCHOR_ATTR } from "./cross-ref.ts";
+
+export { NAV_ANCHOR_ATTR };
 
 /** Attribute a row/card/node carries with its exact wiki-relative path. */
 export const NAV_RELPATH_ATTR = "data-relpath";
@@ -29,8 +32,10 @@ export interface AttrSource {
   getAttribute(name: string): string | null;
 }
 
-/** Where a click should navigate: an exact page, or a stem to resolve server-side. */
-export type NavTarget = { kind: "relPath"; relPath: string } | { kind: "name"; name: string };
+/** Where a click should navigate: an exact page, or a stem to resolve
+ *  server-side. `anchor`: an item on that page to land on (a cross-page id
+ *  link's `data-anchor`), carried into the pushed URL's `#fragment`. */
+export type NavTarget = { kind: "relPath"; relPath: string; anchor?: string } | { kind: "name"; name: string };
 
 /**
  * The target of a click on a navigation link. `data-relpath` wins whenever it is
@@ -42,7 +47,10 @@ export type NavTarget = { kind: "relPath"; relPath: string } | { kind: "name"; n
 export function navTargetFrom(el: AttrSource | null | undefined): NavTarget | null {
   if (!el) return null;
   const rel = (el.getAttribute(NAV_RELPATH_ATTR) || "").trim();
-  if (rel) return { kind: "relPath", relPath: rel };
+  if (rel) {
+    const anchor = (el.getAttribute(NAV_ANCHOR_ATTR) || "").trim();
+    return anchor ? { kind: "relPath", relPath: rel, anchor } : { kind: "relPath", relPath: rel };
+  }
   const name = (el.getAttribute("data-wiki-page") || el.getAttribute("data-page") || "").trim();
   if (name) return { kind: "name", name };
   return null;

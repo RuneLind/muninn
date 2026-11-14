@@ -37,6 +37,9 @@ const LEDGER = "one time- and byte-bounded read of the claude-usage ledger, poll
 const REFRESH = "the plain read; its `?refresh=1` rebuild is on REFRESH_SIDE_EFFECTING_GETS";
 
 const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
+  // Living facts PR 4: the cross-page id hover renders ONE page off disk (its
+  // own sibling files) and reads the asked ids off it.
+  ["/api/wiki/ref", "renders one page from disk and reads its id targets: no outbound call, spawn, search or model spend"],
   ...[
     "/", "/docs", "/traces", "/memsearch", "/logs", "/search", "/search/document/:collection/*",
     "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/summaries/discover", "/youtube",

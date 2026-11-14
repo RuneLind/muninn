@@ -417,6 +417,8 @@ export const E2E_PORTS = {
   // The owner-step check chips beside Done: env and migration probes on a spawned muninn.
   "wiki-step-checks": 3244,
   "wiki-step-checks/readonly": 3245,
+  // Living facts PR 4: cross-page ids (`D9 i [[page]]`) over a two-page wiki.
+  "wiki-cross-refs": 3250,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

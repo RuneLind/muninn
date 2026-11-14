@@ -1,5 +1,5 @@
 {
-  "source": "merged CI report, 2026-11-12 (run 43271051601); wiki-step-checks.spec.ts measured locally after the popover removal",
+  "source": "merged CI report, 2026-11-12 (run 43271051601); wiki-step-checks.spec.ts measured locally after the popover removal; wiki-cross-refs.spec.ts measured locally",
   "seconds": {
     "agents-recent-durable.spec.ts": 3.3,
     "agents-refresh.spec.ts": 17,
@@ -45,6 +45,7 @@
     "wiki-code-highlight.spec.ts": 10,
     "wiki-compact-lists.spec.ts": 13.5,
     "wiki-copy-path.spec.ts": 9.4,
+    "wiki-cross-refs.spec.ts": 8,
     "wiki-decision-inbox.spec.ts": 6.9,
     "wiki-decision-run-now.spec.ts": 0.7,
     "wiki-decision-views.spec.ts": 5.6,
