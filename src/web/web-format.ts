@@ -509,9 +509,13 @@ export interface ItemDateDays {
 /** `opts.itemDates` for the call in progress (reader only). */
 let currentItemDates: ItemDateDays | undefined;
 
-/** `text` with each wikilink sentinel read as the text its link shows. */
+/** `text` with each wikilink sentinel read as the text its link shows. A live
+ *  chip's sentinel has empty link text and reads as nothing, unpadded. */
 function shownLinkText(text: string): string {
-  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
+  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => {
+    const shown = currentLinkTexts?.[Number(i)] ?? "";
+    return shown ? ` ${shown} ` : "";
+  });
 }
 
 /** ` data-item-date="YYYY-MM-DD"` for the latest date in `text` not after the

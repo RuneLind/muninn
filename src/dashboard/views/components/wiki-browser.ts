@@ -1734,7 +1734,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // Bare ids (D4, Q-8) and quoted section titles → links with a peek card.
       // After the fact-check layer, which anchors marks on the text as served;
       // before the hash reveal, which needs the fold and heading ids it adds.
-      enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels, { trackerProjects: reader?.trackerProjects, withWiki, language: readerLang });
+      enhanceRefLinks(articleRoot, data.meta.relPath, reader?.idLabels, { trackerProjects: reader?.trackerProjects, withWiki, language: readerLang, facts: data.facts });
       // 🧭 on each top-level section heading. After the ref links, which index
       // heading text: the button's own glyph must not join that text.
       if (data.meta.relPath) {

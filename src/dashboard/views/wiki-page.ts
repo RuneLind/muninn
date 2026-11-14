@@ -49,6 +49,7 @@ import {
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
 import { crossRefsCss } from "./components/wiki-cross-refs.ts";
+import { liveFactsCss } from "./components/wiki-live-facts.ts";
 import { GRAPH_ON_CLASS } from "./components/wiki-graph-view.ts";
 import { lensCss } from "./components/wiki-lens.ts";
 import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
@@ -2685,6 +2686,8 @@ function buildWikiPageCss(): string {
     /* In-page references, their peek card and the back pill (wiki-ref-links.ts). */
     ${refLinksCss()}
     ${crossRefsCss()}
+    /* Live chips after PR and key mentions (wiki-live-facts.ts). */
+    ${liveFactsCss()}
     /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */
     ${lensCss()}
     /* "New since last read" (D20): item marks and the head line (wiki-new-since.ts). */

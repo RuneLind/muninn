@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "about": "The chip inputs fixtures/wiki-facts.json gives under the readerConfig below: the wiki's .wiki-reader.json, whose prGrammar.noProd decides which repos deploy. Shared by plan-status-sweep (sweep-lib.test.ts derives every value from the facts) and muninn's live chips (PR 3b, «Chip text»). Per PR: state is åpen, draft (open and isDraft), merget or lukket (closed unmerged); prod is null when the PR is not merged or its repo is in noProd (the chip shows the state alone), else «i prod <firstProd.tag>», «i prod» (inProd true, firstProd null), «ikke i prod» (inProd false) or «?» (inProd null). Per key: summary over its prs in repos that deploy, closed unmerged ones left out: null when none is left (every PR closed unmerged or in a noProd repo, or no PR at all: the key chip then shows its Jira status alone, or nothing when it has none), «M åpne» when none is merged, «i prod» when every one is in prod, else «N av M i prod» (an open PR or a merged one with inProd null counts in M, not in N). Chip age and Jira status are not here: the age is checkedAt, Jira status comes from provenance.",
+  "readerConfig": {
+    "language": "no",
+    "prGrammar": { "owner": "acme", "aliases": {}, "noProd": ["acme-e2e"] }
+  },
+  "prs": {
+    "acme/acme-api#101": { "state": "merget", "prod": "i prod 26.006.120000" },
+    "acme/acme-api#102": { "state": "merget", "prod": "ikke i prod" },
+    "acme/acme-api#103": { "state": "åpen", "prod": null },
+    "acme/acme-api#104": { "state": "merget", "prod": "i prod" },
+    "acme/acme-api#108": { "state": "merget", "prod": "?" },
+    "acme/acme-e2e#7": { "state": "merget", "prod": null },
+    "acme/acme-web#205": { "state": "draft", "prod": null },
+    "acme/acme-web#206": { "state": "lukket", "prod": null },
+    "acme/acme-web#209": { "state": "lukket", "prod": null },
+    "acme/acme-web#210": { "state": "merget", "prod": "i prod 26.008.090000" },
+    "acme/acme-web#211": { "state": "lukket", "prod": null }
+  },
+  "keys": {
+    "DEMO-11": { "summary": "1 av 2 i prod" },
+    "DEMO-110": { "summary": "i prod" },
+    "DEMO-12": { "summary": "2 åpne" },
+    "DEMO-13": { "summary": null },
+    "DEMO-14": { "summary": "0 av 1 i prod" },
+    "DEMO-16": { "summary": "i prod" }
+  }
+}
