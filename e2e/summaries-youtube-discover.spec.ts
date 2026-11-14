@@ -1028,10 +1028,11 @@ test("the run outcome under the drawer leaves a pending Undo alone (fix round 2 
   await seedBatchShelf();
   await page.goto(`${BASE}/summaries/discover`);
   await holdShelves(page, 500);
-  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"] [data-act="dismiss"]`).click();
-  await expect(page.locator("#dscToast")).toContainText("Dismissed");
   await page.getByRole("button", { name: "+ Last 7 days" }).click();
   await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  // Dismiss after the run started: the toast's 5 s then has to outlast only the rest of the run.
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[1]}"] [data-act="dismiss"]`).click();
+  await expect(page.locator("#dscToast")).toContainText("Dismissed");
   await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
   await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
   await expect(page.locator("#dscAnnounce")).toContainText("2 new shelves");
@@ -1216,4 +1217,25 @@ test("the announcer stays outside the drawer's inert set (fix round 2 batch 7)",
   await expect(page.locator("#dscDrawer")).toBeVisible();
   expect(await page.evaluate(() => !document.getElementById("dscAnnounce")?.closest("[inert]"))).toBe(true);
   expect(await page.evaluate(() => !!document.getElementById("dscProgress")?.closest("[inert]"))).toBe(true);
+});
+
+test("closing the drawer from the backdrop after a held run replaced its shelf focuses the card on the new run (fix round 2 batch 8)", async ({ page }) => {
+  await seedBatchShelf();
+  await page.goto(`${BASE}/summaries/discover`);
+  const NEW_RUN = "00000000-0000-4000-8000-0000000000b8";
+  await page.route("**/api/summaries/discover/shelves", async (route) => {
+    const res = await route.fetch();
+    const body = (await res.json()) as { shelves: { runId: string; seedDocId: string }[] };
+    for (const sh of body.shelves) if (sh.seedDocId === BATCH_SEED) sh.runId = NEW_RUN;
+    await new Promise((r) => setTimeout(r, 500));
+    await route.fulfill({ response: res, json: body });
+  });
+  await page.getByRole("button", { name: "+ Last 7 days" }).click();
+  await page.locator("#dscSeedPanel").getByRole("button", { name: /Search from/ }).click();
+  await batchShelf(page).locator(`.dsc-card[data-video="${BATCH_IDS[0]}"]`).click();
+  await expect(page.locator("#dscDrawer")).toBeVisible();
+  await expect(page.locator("#dscProgress")).toContainText("Done", { timeout: 20_000 });
+  await page.locator("#dscDrawerBg").click({ position: { x: 10, y: 10 } });
+  await expect(page.locator("#dscDrawer")).toBeHidden();
+  await expect(page.locator(`.dsc-card[data-run="${NEW_RUN}"][data-video="${BATCH_IDS[0]}"]`)).toBeFocused();
 });
