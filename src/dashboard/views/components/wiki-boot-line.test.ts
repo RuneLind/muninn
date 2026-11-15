@@ -3,7 +3,8 @@
  * line it always was; with peers one escaped row per machine, this one first.
  */
 import { describe, expect, test } from "bun:test";
-import { bootLineHtml, bootLineView } from "./wiki-boot-line.ts";
+import { Window } from "happy-dom";
+import { bootLineChanged, bootLineHtml, bootLineView } from "./wiki-boot-line.ts";
 
 const LOCAL = { row: "same", restart: false, text: "started from 409bfd1a (#864) on 14.11 20:58", start: { known: false, reason: "x", at: 0 }, unread: [], readAt: 0 };
 
@@ -61,5 +62,37 @@ describe("bootLineView / bootLineHtml", () => {
   test("not a line: null", () => {
     expect(bootLineView(null)).toBeNull();
     expect(bootLineView({ error: "x" })).toBeNull();
+  });
+});
+
+describe("bootLineChanged", () => {
+  const withPeers = (peers: unknown[]) => bootLineView({ ...LOCAL, machine: "laptop", peers })!;
+  /** A card (a happy-dom `Window` of the test's own, no globals) whose last child is `view`'s block. */
+  const cardWith = (html: string) => {
+    const card = new Window().document.createElement("div");
+    card.innerHTML = `<p>card</p>${html}`;
+    return card as unknown as Element;
+  };
+  const down = (why: string) => ({ machine: "mini", answered: false, why });
+
+  test("a changed reason alone leaves the block in place and updates its row's title", () => {
+    const card = cardWith(bootLineHtml(withPeers([down("the peer timed out")])));
+    const block = card.lastElementChild;
+    const next = withPeers([down('the peer was unreachable a moment ago (timed out) "<b>"')]);
+    expect(bootLineChanged(card, next)).toBe(false);
+    expect(card.lastElementChild).toBe(block);
+    const row = card.querySelector('[data-boot-machine="mini"]')!;
+    expect(row.getAttribute("title")).toBe('the peer was unreachable a moment ago (timed out) "<b>"');
+    expect(row.querySelector("b")).toBeNull();
+    // A reason dropped: the title goes with it.
+    expect(bootLineChanged(card, withPeers([{ machine: "mini", answered: false }]))).toBe(false);
+    expect(row.hasAttribute("title")).toBe(false);
+  });
+
+  test("a visible change replaces the block: a peer answering, a peer added", () => {
+    const card = cardWith(bootLineHtml(withPeers([down("the peer timed out")])));
+    expect(bootLineChanged(card, withPeers([{ machine: "mini", answered: true, row: "same", restart: false, text: "started from aaaaaaaa" }]))).toBe(true);
+    expect(bootLineChanged(card, withPeers([down("the peer timed out"), down("x")]))).toBe(true);
+    expect(bootLineChanged(card, withPeers([down("the peer timed out")]))).toBe(false);
   });
 });

@@ -15,6 +15,7 @@ import {
   toPeerBootLine,
   type PeerBootLine,
 } from "./boot-line-peer.ts";
+import { createPeerAnswerer } from "./peer.ts";
 
 const LINE: PeerBootLine = {
   row: "newer",
@@ -278,6 +279,26 @@ describe("createBootLinePeerReader", () => {
     expect((await a)[0]!.answered).toBe(true);
     expect((await b)[0]!.answered).toBe(true);
     expect(calls).toBe(1);
+  });
+
+  test("its down window is its own: a boot-line failure for a peer never makes the step-check client skip that peer", async () => {
+    // An older muninn 404s the boot-line route but answers step checks; sharing one window would turn its checks unknown.
+    const peers = new Map([["mini", "https://mini.test"]]);
+    const probe = { kind: "env", value: "HAVE" } as const;
+    const asked: string[] = [];
+    const fetch = async (url: string) => {
+      const u = new URL(url);
+      asked.push(u.pathname);
+      if (u.pathname === BOOT_LINE_PEER_PATH) return new Response("not found", { status: 404 });
+      return json({ v: 1, machine: "mini", results: [{ ...probe, state: "ok", why: "set" }] });
+    };
+    const clock = () => 1_000_000;
+    const read = createBootLinePeerReader({ peers, fetch, now: clock });
+    const answer = createPeerAnswerer({ peers, fetch, now: clock });
+    expect(await read()).toEqual([{ machine: "mini", answered: false, why: "the peer answered HTTP 404" }]);
+    expect((await read())[0]).toMatchObject({ answered: false, why: "the peer was unreachable a moment ago (answered HTTP 404)" });
+    expect(await answer("mini", [probe])).toEqual([{ state: "ok", why: "mini: set" }]);
+    expect(asked).toEqual([BOOT_LINE_PEER_PATH, "/api/checks/answer"]);
   });
 
   test("no peers: no request", async () => {

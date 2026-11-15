@@ -311,11 +311,19 @@ describe("GET /api/wiki/boot-line", () => {
       expect(raw).not.toContain("laptop");
     });
 
-    test("listed peers without MUNINN_MACHINE: the local prefix is «this machine»", async () => {
+    test("listed peers without MUNINN_MACHINE: no peer reader is built", () => {
+      // A laptop listing its own url under a name it does not carry would otherwise ask itself on every card ask.
+      expect(realBootLineDeps({ machine: null, peers: new Map([["laptop", "http://127.0.0.1:3010"]]) }).peers).toBeUndefined();
+    });
+
+    test("a peer reader without MUNINN_MACHINE: no request, and the payload has no peer keys", async () => {
+      let asked = 0;
       const { clone } = bootFixture();
       const record = await takeBootRecord(clone, NETWORK);
-      const { body } = await get(app({ record: async () => record, machine: null, peers: async () => [] }));
-      expect((body as BootLinePayload).machine).toBe("this machine");
+      const { raw } = await get(app({ record: async () => record, machine: null, peers: async () => (asked++, []) }));
+      expect(asked).toBe(0);
+      expect(raw).not.toContain('"peers"');
+      expect(raw).not.toContain('"machine"');
     });
   });
 

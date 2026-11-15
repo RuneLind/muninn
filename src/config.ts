@@ -973,7 +973,8 @@ export interface PeersParse {
 
 /**
  * `MUNINN_PEERS` — the other machines' muninns that answer owner-step checks for
- * themselves (`GET /api/checks/answer`): comma-separated `name=url`, e.g.
+ * themselves (`GET /api/checks/answer`) and show their own boot line on the Your
+ * work card (`GET /api/checks/boot-line`): comma-separated `name=url`, e.g.
  * `mini=https://mini.example.ts.net`. Names take {@link resolveMachineName}'s
  * grammar. A url is kept only when its text, lower-cased, IS its parsed origin
  * (optionally plus `/`), so anything WHATWG normalisation would change (dot
@@ -983,8 +984,8 @@ export interface PeersParse {
  * reply. A malformed entry, a duplicate name and an entry naming `ownMachine`
  * are each dropped with a warning (the `SYNC_REPOS` rule: never guess), never a
  * boot failure: a dropped peer only leaves that machine's checks `unknown`. A
- * set list with no `ownMachine` adds one warning: it is never consulted. Pure:
- * the boot line logs the warnings.
+ * set list with no `ownMachine` adds one warning: neither the step checks nor
+ * the boot line consult it then. Pure: the boot line logs the warnings.
  */
 export function parsePeers(raw: string | undefined = process.env.MUNINN_PEERS, ownMachine: string | null = resolveMachineName()): PeersParse {
   const peers = new Map<string, string>();
@@ -1023,7 +1024,7 @@ export function parsePeers(raw: string | undefined = process.env.MUNINN_PEERS, o
     peers.set(name, url.origin);
   });
   if (ownMachine === null && entries.some((e) => e !== "")) {
-    warnings.push("MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked");
+    warnings.push("MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked, and the boot line shows no peer rows");
   }
   return { peers, warnings };
 }

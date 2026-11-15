@@ -12,7 +12,10 @@
  *   off refuses the whole reply, and the row reads «<name>: no answer».
  * - Each peer is read inside {@link PEER_BOOT_LINE_TIMEOUT_MS}, apart from the
  *   local line; an answer is kept {@link PEER_BOOT_LINE_TTL_MS} under the
- *   machine's own key, a failure is not kept but opens the shared down window.
+ *   machine's own key, a failure is not kept but opens this reader's down
+ *   window: the step-check client's code (`createDownWindow`), its own
+ *   instance, so an older muninn that 404s this route never makes the step
+ *   checks skip a peer that answers them.
  * - The answering route returns only its own line, never its peers': two
  *   instances that list each other never loop.
  */

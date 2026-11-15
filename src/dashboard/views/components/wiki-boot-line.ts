@@ -6,7 +6,7 @@
  * PROCESS-WIDE, not per wiki: one muninn, one checkout, so one state here
  * serves every wiki the reader shows.
  *
- * With `MUNINN_PEERS` set (P1b) the payload carries `machine` and `peers`: the
+ * With `MUNINN_PEERS` and `MUNINN_MACHINE` set (P1b) the payload carries `machine` and `peers`: the
  * block then holds one row per machine, this one first and each prefixed with
  * its name, a restart row in the attention colour and a peer that gave no
  * answer muted. Without peers the block is the single line it always was.
@@ -73,8 +73,9 @@ export function bootLineView(body: unknown): BootLineView | null {
   return { ...view, rows };
 }
 
-/** What `bootLineChanged` compares besides the text: everything the block's markup carries. */
-const keyOf = (v: BootLineView) => (v.rows ? JSON.stringify(v.rows) : "");
+/** What `bootLineChanged` compares besides the text: everything the block shows. A row's `why` is only its tooltip
+ *  and alternates for one down peer between asks («timed out», «unreachable a moment ago»), so it is synced in place. */
+const keyOf = (v: BootLineView) => (v.rows ? JSON.stringify(v.rows.map(({ why: _why, ...shown }) => shown)) : "");
 const textOf = (v: BootLineView) => (v.rows ? v.rows.map((r) => r.text).join("") : v.text);
 const outerRestart = (v: BootLineView) => !v.rows && v.restart;
 
@@ -95,19 +96,34 @@ export function bootLineHtml(view: BootLineView | null = line): string {
   return `<div class="wiki-boot-line${outerRestart(view) ? " restart" : ""}" data-boot-row="${esc(view.row)}"${key ? ` data-boot-key="${esc(key)}"` : ""} title="${TITLE}">${inner}</div>`;
 }
 
-/** Does `card` need {@link placeBootLine}? False when its last child already is the current block: a re-insert would end a selection on it. */
-export function bootLineChanged(card: Element | null): boolean {
+/** Each row's tooltip set to `view`'s reason, on the block in place (rows in the same order: the keys matched). */
+function syncTitles(el: Element, view: BootLineView): void {
+  if (!view.rows) return;
+  const rows = el.querySelectorAll(":scope > .wiki-boot-row");
+  view.rows.forEach((r, i) => {
+    const row = rows[i];
+    if (!row) return;
+    if (r.why) {
+      if (row.getAttribute("title") !== r.why) row.setAttribute("title", r.why);
+    } else row.removeAttribute("title");
+  });
+}
+
+/** Does `card` need {@link placeBootLine}? False when its last child already shows the current block: a re-insert
+ *  would end a selection on it. Then a row's reason that alone changed is set on its `title` in place. */
+export function bootLineChanged(card: Element | null, view: BootLineView | null = line): boolean {
   if (!card || typeof card.querySelector !== "function") return false;
   const el = card.querySelector(":scope > .wiki-boot-line");
-  if (!line) return !!el;
-  return (
+  if (!view) return !!el;
+  const changed =
     !el ||
     el !== card.lastElementChild ||
-    el.getAttribute("data-boot-row") !== line.row ||
-    (el.getAttribute("data-boot-key") ?? "") !== keyOf(line) ||
-    el.textContent !== textOf(line) ||
-    el.classList.contains("restart") !== outerRestart(line)
-  );
+    el.getAttribute("data-boot-row") !== view.row ||
+    (el.getAttribute("data-boot-key") ?? "") !== keyOf(view) ||
+    el.textContent !== textOf(view) ||
+    el.classList.contains("restart") !== outerRestart(view);
+  if (!changed) syncTitles(el, view);
+  return changed;
 }
 
 /** Puts the current block at the end of `card`, replacing the one there (none when there is no line). */

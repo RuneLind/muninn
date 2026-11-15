@@ -11,11 +11,13 @@
  * it is admin-only under `MUNINN_AUTH` by default-deny. Registered in the
  * `wiki` group beside the step checks: a pod has no such route, and no `.git`.
  *
- * With `MUNINN_PEERS` set (P1b) the payload also carries `machine` (this
- * machine's name, the local line's prefix) and `peers`: each peer's own line,
- * read in parallel with the local one through `boot-line-peer.ts`, each bound
- * apart, so a slow peer reads «no answer» and never blanks the local row.
- * Without peers both keys are absent and no peer is asked.
+ * With `MUNINN_PEERS` AND `MUNINN_MACHINE` set (P1b) the payload also carries
+ * `machine` (this machine's name, the local line's prefix) and `peers`: each
+ * peer's own line, read in parallel with the local one through
+ * `boot-line-peer.ts`, each bound apart, so a slow peer reads «no answer» and
+ * never blanks the local row. Without either, both keys are absent and no peer
+ * is asked: peers need this machine's name exactly as step checks do, and an
+ * unnamed muninn listing its own url would otherwise ask itself.
  */
 
 import type { Hono } from "hono";
@@ -32,8 +34,6 @@ const log = getLog("dashboard", "wiki-boot-line");
 
 export const BOOT_LINE_PATH = "/api/wiki/boot-line";
 const ORIGIN_KEY = "boot-line:origin-head";
-/** The local line's prefix when peers are listed but `MUNINN_MACHINE` is not set. */
-export const UNNAMED_MACHINE = "this machine";
 
 export interface BootLineRouteDeps {
   record: () => Promise<BootRecord>;
@@ -48,9 +48,9 @@ export interface BootLineRouteDeps {
   /** Test seam: the bound expires when the promise settles ({@link readBootLine}'s `expiry`). */
   expiry?: () => Promise<unknown>;
   now?: () => number;
-  /** `MUNINN_MACHINE`, or null: the local line's prefix when there are peers. */
+  /** `MUNINN_MACHINE`, or null: the local line's prefix when there are peers; null asks no peer. */
   machine?: string | null;
-  /** The peers' lines; absent when `MUNINN_PEERS` lists none. */
+  /** The peers' lines; absent when `MUNINN_PEERS` lists none or `MUNINN_MACHINE` is unset. */
   peers?: BootLinePeerReader;
 }
 
@@ -60,7 +60,7 @@ export type BootLinePayload = BootLine & { machine?: string; peers?: BootLinePee
 const sharedCache = new ProbeCache();
 
 export const realBootLineDeps = (config?: Pick<Config, "machine" | "peers">): BootLineRouteDeps => {
-  const peers = config ? sharedBootLinePeerReader(config.peers) : undefined;
+  const peers = config?.machine ? sharedBootLinePeerReader(config.peers) : undefined;
   return { record: bootRecord, git: realGit, slots: sharedGitSlots, cache: sharedCache, machine: config?.machine ?? null, ...(peers ? { peers } : {}) };
 };
 
@@ -82,12 +82,14 @@ export function registerWikiBootLineRoute(app: Hono, depsFor: () => BootLineRout
   app.get(BOOT_LINE_PATH, async (c) => {
     try {
       const deps = depsFor();
+      const machine = deps.machine ?? null;
+      const reader = machine ? deps.peers : undefined;
       // Started together; the reader never rejects and bounds each peer itself.
-      const peers = deps.peers ? deps.peers().catch(() => null) : null;
+      const peers = reader ? reader().catch(() => null) : null;
       const line = await readOwnBootLine(deps);
-      if (!deps.peers) return c.json(line);
+      if (!reader || !machine) return c.json(line);
       const rows = (await peers) ?? [];
-      const payload: BootLinePayload = { ...line, machine: deps.machine ?? UNNAMED_MACHINE, peers: rows };
+      const payload: BootLinePayload = { ...line, machine, peers: rows };
       return c.json(payload);
     } catch (err) {
       log.error("Boot line failed: {error}", { error: err instanceof Error ? err.message : String(err) });
