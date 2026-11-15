@@ -240,6 +240,15 @@ describe("spawn group scan", () => {
   const ALLOWED = "Import from child_process only `spawn`, names ending in `Sync`, and types, each as a named, un-renamed import";
   const NEED_SPAWN = "The scan reads `detached: true` only in a bare object literal that is the call's last argument, or in a top-level, unexported `const` declared once in the file and used only as such options.";
   const NEED_RP = "The scan reads `processGroup: true` only in a bare object literal that is the call's fourth argument, or in a top-level, unexported `const` declared once in the file and used only as such options.";
+  // For a last (or fourth) argument that is no object literal: it may be the command, so the remedy cannot read as "hoist it".
+  const NEED_END_SPAWN = "The scan reads the group only from options that end the call: if that argument is the command, add an options literal holding `detached: true` after it; if it is the options, put `detached: true` in a literal there (`{ ...opts, detached: true }`), or in a top-level, unexported `const` holding that literal, declared once in the file and used only as such options.";
+  const NEED_END_RP = "The scan reads the group only from runProc's fourth argument: put `processGroup: true` in a literal there (`{ ...opts, processGroup: true }`), or in a top-level, unexported `const` holding that literal, declared once in the file and used only as such options.";
+  const FIT_DONE = "For a child that runs to completion, use `runProc(…, { processGroup: true })`";
+  const FIT_LONG = "For a long-lived or streaming child, end the `spawn` call with an options literal holding `detached: true`";
+  const RP_FIT = "Pass `{ processGroup: true }`: runProc then registers the group so muninn's shutdown and Ctrl-C reach it.";
+  const UNREAD_SPAWN = [HARM, FIT_DONE, FIT_LONG, NEED_END_SPAWN];
+  const UNREAD_RP = [HARM, RP_FIT, NEED_END_RP];
+  const NOT_CALLED = ["not called", "used as a value"];
 
   /** [form, source, words the message must hold, words it must not]. */
   const MESSAGES: [string, string, string[], string[]][] = [
@@ -281,21 +290,52 @@ describe("spawn group scan", () => {
     ["inline options cast with as", `Bun.spawn(["git"], { detached: true } as Opts);`, ["its options are wrapped in a type assertion", NEED_SPAWN], [HARM, "`as const`"]],
     ["inline options cast with angle brackets", `Bun.spawn(["git"], <Opts>{ detached: true });`, ["its options are wrapped in a type assertion", NEED_SPAWN], [HARM]],
     ["a string command and no options", `spawn("ls");`, ["`spawn(…)`: no top-level `detached: true` in its last argument", HARM], ["not an object literal", "The scan reads"]],
-    ["a declared const with no initializer", `declare const O: Opts;\nBun.spawn(["git"], O);`, ["`O` has no initializer", NEED_SPAWN], [HARM]],
-    ["a let with no initializer", `let O;\nrunProc(c, 5, "x", O);`, ["`O` has no initializer", NEED_RP], ["`let`", HARM]],
-    ["a const shadowed by a parameter", `const O = { processGroup: true };\nfunction f(O) {}\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file"], ["also appears", HARM]],
-    ["a const shadowed by an import", `import { O } from "./o.ts";\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file"], ["also appears", HARM]],
+    ["a declared const with no initializer", `declare const O: Opts;\nBun.spawn(["git"], O);`, ["its last argument is `O`", "`O` has no initializer", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["a let with no initializer", `let O;\nrunProc(c, 5, "x", O);`, ["its fourth argument is `O`", "`O` has no initializer", ...UNREAD_RP], ["`let`", NEED_RP]],
+    ["a const shadowed by a parameter", `const O = { processGroup: true };\nfunction f(O) {}\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file", ...UNREAD_RP], ["also appears"]],
+    ["a const shadowed by an import", `import { O } from "./o.ts";\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file", ...UNREAD_RP], ["also appears"]],
     ["a spread of a qualifying const", `const G = { detached: true };\nBun.spawn(["git"], { ...G });`, ["the scan does not look inside a spread", NEED_SPAWN], [HARM]],
     ["a spread argument", `runProc(cmd, 1000, ...extra, { processGroup: true });`, ["a spread argument hides which argument holds the options", NEED_RP], [HARM]],
-    ["let options", `let O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `let` or `var`, not `const`", NEED_RP], [HARM]],
-    ["an exported const", `export const O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is exported"], [HARM]],
-    ["a const inside a function", `function f() { const O = { processGroup: true };\nreturn runProc(c, 5, "x", O); }`, ["`O` is not declared at the top level of the file"], [HARM]],
-    ["a const declared twice", `const O = { processGroup: true };\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file"], [HARM]],
-    ["a const shadowed in a function", `const O = { processGroup: true };\nfunction f() { const O = {};\nreturn runProc(c, 5, "x", O); }`, ["`O` is declared more than once in this file"], ["top level"]],
-    ["a const used elsewhere", `const O = { processGroup: true };\nuse(O);\nrunProc(c, 5, "x", O);`, ["`O` also appears on line 2 other than as these options"], [HARM]],
-    ["a const cast to another type", `const O = { processGroup: true } as Opts;\nrunProc(c, 5, "x", O);`, ["`O`'s initializer is not a plain object literal"], [HARM]],
-    ["a name not declared in the file", `Bun.spawn(["git"], opts);`, ["`opts` is not declared in this file as a `const`", NEED_SPAWN], [HARM]],
-    ["a parameter as the options", `function f(o) { return Bun.spawn(["git"], o); }`, ["`o` is not declared in this file as a `const`"], [HARM]],
+    ["let options", `let O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `let` or `var`, not `const`", ...UNREAD_RP], [NEED_RP]],
+    ["an exported const", `export const O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is exported", ...UNREAD_RP], []],
+    ["a const inside a function", `function f() { const O = { processGroup: true };\nreturn runProc(c, 5, "x", O); }`, ["`O` is not declared at the top level of the file", ...UNREAD_RP], [NEED_RP]],
+    ["a const declared twice", `const O = { processGroup: true };\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file", ...UNREAD_RP], []],
+    ["a const shadowed in a function", `const O = { processGroup: true };\nfunction f() { const O = {};\nreturn runProc(c, 5, "x", O); }`, ["`O` is declared more than once in this file", ...UNREAD_RP], ["top level"]],
+    ["a const used elsewhere", `const O = { processGroup: true };\nuse(O);\nrunProc(c, 5, "x", O);`, ["`O` also appears on line 2 other than as these options", ...UNREAD_RP], []],
+    ["a const cast to another type", `const O = { processGroup: true } as Opts;\nrunProc(c, 5, "x", O);`, ["`O`'s initializer is not a plain object literal", ...UNREAD_RP], []],
+    ["a name not declared in the file", `Bun.spawn(["git"], opts);`, ["its last argument is `opts`", "`opts` is not declared in this file as a `const`", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["a parameter as the options", `function f(o) { return Bun.spawn(["git"], o); }`, ["`o` is not declared in this file as a `const`", ...UNREAD_SPAWN], []],
+    // N1: the last argument may be the command, held in a name or built by an expression.
+    ["a command in a function-local const", `function f() { const cmd = ["git", "status"]; return Bun.spawn(cmd); }`,
+      ["`Bun.spawn(…)`: its last argument is `cmd` and the scan cannot read options from it (`cmd` is not declared at the top level of the file), so it finds no `detached: true`, and a kill", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["a command in a hoisted const", `const cmd = ["git", "status"];\nBun.spawn(cmd);`, ["`cmd`'s initializer is not a plain object literal", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["a command in a parameter", `function f(args) { return Bun.spawn(args); }`, ["its last argument is `args`", "`args` is not declared in this file as a `const`", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["child_process args in a parameter", CP + `function f(a) { return spawn("git", a); }`, ["its last argument is `a`", ...UNREAD_SPAWN], [NEED_SPAWN]],
+    ["a command built by an expression", `Bun.spawn(s.split(" "));`, ['its last argument is `s.split(" ")` and the scan cannot read options from it (it is not an object literal)', ...UNREAD_SPAWN], ["its options are not an object literal", NEED_SPAWN]],
+    ["a long expression is cut short", `Bun.spawn(buildTheCommandLineFrom(configuration, extraArguments));`, ["its last argument is `buildTheCommandLineFrom(configuration, e…`"], ["extraArguments"]],
+    ["an expression of exactly 40 characters is shown whole", `Bun.spawn(buildTheCommandLineFrom(configurations1));`, ["its last argument is `buildTheCommandLineFrom(configurations1)` and"], ["configurations1…"]],
+    ["an expression over lines is shown on one", `Bun.spawn(s\n  .split(" "));`, ['its last argument is `s .split(" ")` and'], []],
+    ["a wrapped command", `Bun.spawn(["git"] as const);`, ['its last argument is `["git"] as const`', ...UNREAD_SPAWN], ["its options are wrapped", NEED_SPAWN]],
+    ["runProc with a parameter as options", `function f(o) { return runProc(c, 5, "x", o); }`, ["`runProc(…)`: its fourth argument is `o`", "`o` is not declared in this file as a `const`", ...UNREAD_RP], [NEED_RP, "detached"]],
+    ["runProc with a call as options", `runProc(c, 5, "x", mk());`, ["its fourth argument is `mk()`", "(it is not an object literal)", ...UNREAD_RP], ["its options are not an object literal", NEED_RP, "detached"]],
+    // N2: a binding renamed TO a spawner's name, as against a spawner renamed away.
+    ["a name renamed to runProc in an import", `import { foo as runProc } from "./r";`,
+      ["`foo` renamed to `runProc` in `foo as runProc`", "`runProc` is reserved for the real spawner", "Pick another name for `foo`"], ["cannot check the calls behind a rename", "un-renamed"]],
+    ["a name renamed to spawn in an import", `import { foo as spawn } from "./r";`, ["`spawn` is reserved for the real spawner", "Pick another name for `foo`"], ["cannot check the calls behind a rename"]],
+    ["a name renamed to spawn in an export", `const foo = 1;\nexport { foo as spawn };`, ["`foo` renamed to `spawn`", "`spawn` is reserved for the real spawner"], ["cannot check the calls behind a rename"]],
+    ["runProc renamed to spawn reads as a rename away", `import { runProc as spawn } from "./r";`, ["only under their own names", "un-renamed (`{ runProc }`)"], ["reserved"]],
+    ["spawn renamed away in an export", `export { spawn as sp } from "bun";`, ["only under their own names", "un-renamed (`{ spawn }`)"], ["reserved"]],
+    // N3: called, through a callee shape the scan does not read.
+    ["(runProc<T>)(…)", `(runProc<string>)(c, 5, "x", { processGroup: true });`,
+      ["`runProc` called through `(runProc<string>)`", "the scan reads a call's options only when its callee is `runProc`, `x.runProc`, or `(a ?? b)` / `(a || b)`", "`runProc<T>(…)`", "`{ processGroup: true }` as its fourth argument"], [...NOT_CALLED, "detached"]],
+    ["new (Bun.spawn<…>)()", `new (Bun.spawn<"pipe">)();`, ["`spawn` called through `new (Bun.spawn<\"pipe\">)`", "only when its callee is `spawn` or `x.spawn`, called without `new`", "ending the call with an options literal holding `detached: true`"], [...NOT_CALLED, "processGroup"]],
+    ["new Bun.spawn(…)", `new Bun.spawn(["git"], { detached: true });`, ["`spawn` called through `new Bun.spawn`", "called without `new`"], NOT_CALLED],
+    ["Bun.spawn!(…)", `Bun.spawn!(["git"], { detached: true });`, ["`spawn` called through `Bun.spawn!`", "only when its callee is `spawn` or `x.spawn`"], NOT_CALLED],
+    ["(Bun.spawn as any)(…)", `(Bun.spawn as any)(["git"], { detached: true });`, ["called through `(Bun.spawn as any)`"], NOT_CALLED],
+    ["(Bun.spawn satisfies X)(…)", `(Bun.spawn satisfies X)(["git"], { detached: true });`, ["called through `(Bun.spawn satisfies X)`"], NOT_CALLED],
+    ["(Bun.spawn)(…)", `(Bun.spawn)(["git"], { detached: true });`, ["called through `(Bun.spawn)`"], NOT_CALLED],
+    ["(x ?? runProc)(…)", `(x ?? runProc)(c, 5, "x", { processGroup: true });`, ["`runProc` called through `(x ?? runProc)`", "with a runProc name on each side"], NOT_CALLED],
+
     ["spawn, spread after detached", `Bun.spawn(["git"], { detached: true, ...o });`, ["a spread follows `detached: true` and may override it", "Move the spread before the key."], ["processGroup"]],
     ["runProc, spread after processGroup", `runProc(c, 5, "x", { processGroup: true, ...o });`, ["a spread follows `processGroup: true`", "Move the spread before the key."], ["detached"]],
   ];
@@ -306,6 +346,58 @@ describe("spawn group scan", () => {
       for (const s of never) expect(m).not.toContain(s);
       expect(m).toEndWith(WAY_OUT);
       expect(m).not.toContain("list the line");
+    });
+  }
+
+  test("every name in an unread callee is told it is called, not that it is a value", () => {
+    for (const source of [
+      `(Bun.spawn ?? runProc)(c, 5, "x", ${G});`, `(a.runProc && runProc)(c, 5, "x", ${G});`, `((a.runProc ?? runProc))(c, 5, "x", ${G});`,
+      `(runProc ?? x)(c, 5, "x", ${G});`, `(runProc || x)(c, 5, "x", ${G});`, `(Bun.spawn ?? spawn)(["git"], { detached: true });`,
+      `(a ? runProc : b.runProc)(c, 5, "x", ${G});`, `(a.runProc, runProc)(c, 5, "x", ${G});`,
+    ]) {
+      const sites = scanSource("src/a.ts", source);
+      expect(sites.length).toBeGreaterThan(0);
+      for (const s of sites) {
+        const m = siteMessage(s);
+        expect(m).toContain("called through `(");
+        expect(m).toContain("the scan reads a call's options only when its callee is");
+        for (const no of NOT_CALLED) expect(m).not.toContain(no);
+      }
+    }
+  });
+
+  test("a name that is only a value keeps the value message", () => {
+    for (const source of [`const b = Bun.spawn as any;`, `f(runProc)();`, `const r = runProc ?? x;`, `runProc.call(null, c, 5, "x", ${G});`, `class A extends spawn {}`, `(runProc ? a : b)(c, 5, "x", ${G});`]) {
+      const m = msg(source);
+      expect(m).toContain("used as a value, not called");
+      expect(m).not.toContain("called through");
+    }
+  });
+
+  /** Each new message's remedy, applied to its form, passes the guard. */
+  const REMEDIES: [string, string][] = [
+    ["a command in a local const, ended with detached", `function f() { const cmd = ["git", "status"]; return Bun.spawn(cmd, { detached: true }); }`],
+    ["a command in a local const, through runProc", RP + `function f() { const cmd = ["git", "status"]; return runProc(cmd, 5, "x", ${G}); }`],
+    ["a hoisted command const, ended with detached", `const cmd = ["git", "status"];\nBun.spawn(cmd, { detached: true });`],
+    ["a command parameter, ended with detached", `function f(args) { return Bun.spawn(args, { detached: true }); }`],
+    ["child_process args, ended with detached", CP + `function f(a) { return spawn("git", a, { detached: true }); }`],
+    ["an expression command, ended with detached", `Bun.spawn(s.split(" "), { detached: true });`],
+    ["an expression command, through runProc", `runProc(s.split(" "), 5, "x", ${G});`],
+    ["a wrapped command, ended with detached", `Bun.spawn(["git"] as const, { detached: true });`],
+    ["options in a parameter, spread into a literal", `function f(o) { return Bun.spawn(["git"], { ...o, detached: true }); }`],
+    ["options in a const, as a qualifying const", `const O = { detached: true };\nfunction f(cmd) { return Bun.spawn(cmd, O); }`],
+    ["runProc options in a parameter, spread into a literal", `function f(o) { return runProc(c, 5, "x", { ...o, processGroup: true }); }`],
+    ["runProc options from a call, spread into a literal", `runProc(c, 5, "x", { ...mk(), processGroup: true });`],
+    ["a binding renamed to another name (import)", `import { foo as runFoo } from "./r";\nimport { bar as spawner } from "./s";`],
+    ["a binding renamed to another name (export)", `const foo = 1;\nexport { foo as spawnChild };`],
+    ["(runProc<T>)(…) as runProc<T>(…)", `runProc<string>(c, 5, "x", ${G});`],
+    ["new (Bun.spawn<…>)() as a plain call", `Bun.spawn<"pipe">(["git"], { detached: true });`],
+    ["Bun.spawn!, as, satisfies and parens dropped", `Bun.spawn(["git"], { detached: true });`],
+    ["(x ?? runProc) as (deps.runProc ?? runProc)", `(deps.runProc ?? runProc)(c, 5, "x", ${G});`],
+  ];
+  for (const [form, source] of REMEDIES) {
+    test(`remedy passes: ${form}`, () => {
+      expect(scanSource("src/a.ts", source)).toEqual([]);
     });
   }
 

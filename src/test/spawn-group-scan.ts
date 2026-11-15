@@ -118,6 +118,23 @@ function calleeCall(n: ts.Node): ts.CallExpression | null {
   return ts.isCallExpression(c) && c.expression === e && calleeName(c.expression) ? c : null;
 }
 
+/**
+ * The call or `new` whose callee holds `n` in a shape `calleeCall` does not read: under parentheses, `!`, a
+ * cast, `satisfies`, type arguments, `??`/`||`/`&&`/comma or a ternary branch, or directly under `new`.
+ */
+function unreadCallee(n: ts.Node): ts.CallExpression | ts.NewExpression | null {
+  let e: ts.Node = ts.isPropertyAccessExpression(n.parent) && n.parent.name === n ? n.parent : n;
+  for (;;) {
+    const p = e.parent;
+    if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && p.expression === e) return p;
+    const through = UNWRAP(p) || ts.isExpressionWithTypeArguments(p)
+      || (ts.isBinaryExpression(p) && (OR.has(p.operatorToken.kind) || p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || p.operatorToken.kind === ts.SyntaxKind.CommaToken))
+      || (ts.isConditionalExpression(p) && p.condition !== e);
+    if (!through) return null;
+    e = p;
+  }
+}
+
 const optionsArg = (c: ts.CallExpression, name: Name) => (name === RUN_PROC ? c.arguments[3] : c.arguments.at(-1));
 
 /**
@@ -169,7 +186,8 @@ function constInit(id: ts.Identifier, ids: Map<string, ts.Identifier[]>, sf: ts.
   return lit ? { lit } : { why: `${x} is not declared in this file as a \`const\`` };
 }
 
-type Verdict = { v: "ok" } | { v: "spread" } | { v: "missing"; why?: string };
+/** `unread`: the options slot holds something other than an object literal, which may be the command itself. */
+type Verdict = { v: "ok" } | { v: "spread" } | { v: "missing"; why?: string; unread?: { shown: string; reason: string } };
 
 /** The last property that could set `key` must be `key: true`, with no spread after it. */
 function keyVerdict(o: ts.ObjectLiteralExpression, key: string): Verdict {
@@ -199,18 +217,22 @@ function callVerdict(c: ts.CallExpression, name: Name, ids: Map<string, ts.Ident
   const arg = optionsArg(c, name);
   if (c.arguments.some(ts.isSpreadElement)) return { v: "missing", why: "a spread argument hides which argument holds the options" };
   if (!arg) return { v: "missing" };
+  const text = arg.getText(sf).replace(/\s+/g, " ");
+  const unread = (reason: string): Verdict => ({ v: "missing", unread: { shown: text.length > 40 ? `${text.slice(0, 40)}…` : text, reason } });
   let lit: ts.Expression = arg;
   if (ts.isIdentifier(arg)) {
     const r = constInit(arg, ids, sf);
-    if ("why" in r) return { v: "missing", why: r.why };
+    if ("why" in r) return unread(r.why);
     lit = r.lit;
-    if (!ts.isObjectLiteralExpression(lit)) return { v: "missing", why: `\`${arg.text}\`'s initializer is not a plain object literal` };
+    if (!ts.isObjectLiteralExpression(lit)) return unread(`\`${arg.text}\`'s initializer is not a plain object literal`);
   }
   if (ts.isObjectLiteralExpression(lit)) return keyVerdict(lit, KEY[name]);
   // A command array or string in the last slot is a call with no options at all.
   if (ts.isArrayLiteralExpression(lit) || ts.isStringLiteralLike(lit)) return { v: "missing" };
-  const wrap = WRAPPER.find(([is]) => is(lit))?.[1];
-  return { v: "missing", why: wrap ? `its options are wrapped in ${wrap}` : "its options are not an object literal" };
+  let inner = lit;
+  while (WRAPPER.some(([is]) => is(inner))) inner = (inner as ts.ParenthesizedExpression).expression;
+  if (!ts.isObjectLiteralExpression(inner)) return unread("it is not an object literal");
+  return { v: "missing", why: `its options are wrapped in ${WRAPPER.find(([is]) => is(lit))![1]}` };
 }
 
 /** Sites in one file, in source order. */
@@ -260,17 +282,29 @@ export function scanSource(file: string, source: string): Site[] {
     const spec = n.parent;
     if (ts.isImportSpecifier(spec) || ts.isExportSpecifier(spec)) {
       const typeOnly = spec.isTypeOnly || spec.parent.parent.isTypeOnly;
-      if (!typeOnly && spec.propertyName && spec.propertyName.text !== spec.name.text) add(spec, "value", `\`${name}\` renamed in \`${spec.getText(sf)}\``, WHY.rename(spec.propertyName.text));
+      // The only rename site. `n` is the original name (a spawner renamed away) or the new one (a binding renamed
+      // to a spawner's name); `runProc as spawn` is both and is one site, reported as the first, a rename away.
+      if (!typeOnly && spec.propertyName && spec.propertyName.text !== spec.name.text) {
+        const from = spec.propertyName.text;
+        if (n === spec.propertyName) add(spec, "value", `\`${name}\` renamed in \`${spec.getText(sf)}\``, WHY.rename(from));
+        else add(spec, "value", `\`${from}\` renamed to \`${name}\` in \`${spec.getText(sf)}\``, WHY.renameTo(from, name));
+      }
       continue;
     }
     const call = calleeCall(n);
     if (!call) {
+      const through = ts.isStringLiteralLike(n) ? null : unreadCallee(n);
       if (ts.isStringLiteralLike(n)) add(n, "value", `the string "${name}"`, WHY.string);
-      else add(n, "value", `\`${name}\` used as a value, not called`, WHY.value[name]);
+      else if (through) {
+        const callee = `${ts.isNewExpression(through) ? "new " : ""}${through.expression.getText(sf)}`;
+        add(n, "value", `\`${name}\` called through \`${callee}\``, WHY.calledThrough[name]);
+      } else add(n, "value", `\`${name}\` used as a value, not called`, WHY.value[name]);
     } else {
       const v = callVerdict(call, name, ids, sf);
-      if (v.v === "spread") add(n, "spread", `\`${call.expression.getText(sf)}(…)\``, WHY.spread(KEY[name]), call);
-      else if (v.v === "missing") add(n, name, `\`${call.expression.getText(sf)}(…)\``, v.why ? `${v.why}. ${WHY.need[name]}` : WHY.missing[name], call);
+      const what = `\`${call.expression.getText(sf)}(…)\``;
+      if (v.v === "spread") add(n, "spread", what, WHY.spread(KEY[name]), call);
+      else if (v.v === "missing" && v.unread) add(n, name, what, WHY.unread[name](v.unread.shown, v.unread.reason), call);
+      else if (v.v === "missing") add(n, name, what, v.why ? `${v.why}. ${WHY.need[name]}` : WHY.missing[name], call);
     }
   }
   return [...sites.values()].sort((a, b) => a.line - b.line);
@@ -279,6 +313,17 @@ export function scanSource(file: string, source: string): Site[] {
 const HARM = "a kill (timeout, abort, `.kill()`) reaches only the direct child: grandchildren survive it, and a caller reading the child's pipes waits for them.";
 const FIT = "For a child that runs to completion, use `runProc(…, { processGroup: true })` (src/utils/run-proc.ts), which registers the group so muninn's shutdown and Ctrl-C reach it. "
   + "For a long-lived or streaming child, end the `spawn` call with an options literal holding `detached: true`; that child is outside runProc's shutdown registry, so it needs its own kill of `-proc.pid` and its own exit handling.";
+const RP_FIT = "Pass `{ processGroup: true }`: runProc then registers the group so muninn's shutdown and Ctrl-C reach it.";
+const HELD = "a top-level, unexported `const` holding that literal, declared once in the file and used only as such options.";
+// Two consts, not one object: a `.spawn` property access would be a site of the scan's own.
+const NEED_END_SPAWN = "The scan reads the group only from options that end the call: if that argument is the command, add an options literal holding `detached: true` after it; "
+  + `if it is the options, put \`detached: true\` in a literal there (\`{ ...opts, detached: true }\`), or in ${HELD}`;
+const NEED_END_RP = `The scan reads the group only from runProc's fourth argument: put \`processGroup: true\` in a literal there (\`{ ...opts, processGroup: true }\`), or in ${HELD}`;
+const UNREAD = (slot: string, shown: string, reason: string, key: string) =>
+  `its ${slot} argument is \`${shown}\` and the scan cannot read options from it (${reason}), so it finds no \`${key}: true\`, and ${HARM}`;
+const CALLED_THROUGH = (shapes: string, typed: string, options: string) =>
+  `the scan reads a call's options only when its callee is ${shapes}, called without \`new\`, so it cannot check this call. `
+  + `Call it in one of those shapes, with no parentheses, \`!\`, cast, \`satisfies\` or operator around the name (type arguments go on the call itself: \`${typed}\`), ${options}.`;
 const ALLOWED = "Import from child_process only `spawn`, names ending in `Sync`, and types, each as a named, un-renamed import (`import { execFileSync } from \"node:child_process\"`).";
 const NEED = (key: string, slot: string) =>
   `The scan reads \`${key}: true\` only in a bare object literal that is the call's ${slot} argument, or in a top-level, unexported \`const\` declared once in the file and used only as such options.`;
@@ -287,9 +332,17 @@ const WAY_OUT = `If the code is right as it stands (never killed, data and not c
 const WHY = {
   missing: {
     spawn: `no top-level \`detached: true\` in its last argument, so ${HARM} ${FIT}`,
-    runProc: `no top-level \`processGroup: true\` in its options (fourth) argument, so ${HARM} Pass \`{ processGroup: true }\`: runProc then registers the group so muninn's shutdown and Ctrl-C reach it.`,
+    runProc: `no top-level \`processGroup: true\` in its options (fourth) argument, so ${HARM} ${RP_FIT}`,
   },
   need: { spawn: NEED("detached", "last"), runProc: NEED("processGroup", "fourth") },
+  unread: {
+    spawn: (shown: string, reason: string) => `${UNREAD("last", shown, reason, "detached")} ${FIT} ${NEED_END_SPAWN}`,
+    runProc: (shown: string, reason: string) => `${UNREAD("fourth", shown, reason, "processGroup")} ${RP_FIT} ${NEED_END_RP}`,
+  },
+  calledThrough: {
+    spawn: CALLED_THROUGH("`spawn` or `x.spawn`", "Bun.spawn<T>(…)", "ending the call with an options literal holding `detached: true`"),
+    runProc: CALLED_THROUGH("`runProc`, `x.runProc`, or `(a ?? b)` / `(a || b)` in parentheses with a runProc name on each side", "runProc<T>(…)", "with `{ processGroup: true }` as its fourth argument"),
+  },
   spread: (key: string) => `a spread follows \`${key}: true\` and may override it. Move the spread before the key.`,
   value: {
     spawn: "the scan cannot follow a name used as a value to its calls, so it cannot tell whether they are grouped. Call `spawn` directly, with an options literal holding `detached: true` as its last argument.",
@@ -298,6 +351,8 @@ const WHY = {
   string: "a string spelled exactly like a spawner's name can reach it unchecked, as in `x[\"spawn\"](…)`, so the scan refuses every such string. Call a spawner by its plain name (`x.spawn(…)`); a string that is data, such as an error code, is listed.",
   rename: (from: string) =>
     `the scan follows \`runProc\` and \`spawn\` only under their own names, so it cannot check the calls behind a rename. Import or export the name un-renamed (\`{ ${from} }\`), and give no other binding that name.`,
+  renameTo: (from: string, to: string) =>
+    `\`${to}\` is reserved for the real spawner: the scan would hold \`${from}\`'s calls to \`${to}\`'s rule, and a reader would take them for the real \`${to}\`. Pick another name for \`${from}\`.`,
   moduleImport: `the scan checks child_process only through named imports. ${ALLOWED}`,
 };
 
