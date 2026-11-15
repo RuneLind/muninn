@@ -8,7 +8,8 @@
  * - The reply is checked whole ({@link readPeerBootLine}): `v`, `machine` equal
  *   to the name asked, a known row kind, every field present with its type,
  *   the text and unread names under their caps and passed through the peer
- *   channel's unsafe-character strip, the branch by {@link BRANCH_RE}. Anything
+ *   channel's unsafe-character strip plus an invisible-character one (a text
+ *   empty after both refuses), the branch by {@link BRANCH_RE}. Anything
  *   off refuses the whole reply, and the row reads «<name>: no answer».
  * - Each peer is read inside {@link PEER_BOOT_LINE_TIMEOUT_MS}, apart from the
  *   local line; an answer is kept {@link PEER_BOOT_LINE_TTL_MS} under the
@@ -88,6 +89,11 @@ function clamp(s: string, max: number): string {
 
 const KEYS = ["row", "restart", "text", "commit", "pr", "branch", "at", "unread"] as const;
 
+/** What `oneLine` leaves and a row must not show: zero-width and other invisible characters, the tag block and
+ *  lone surrogates (`\p{Cs}` under `u` matches only an unpaired half). Removed, not spaced, before `oneLine`. */
+const INVISIBLE = /[\u00AD\u200B-\u200D\u2060-\u2064\uFEFF\u{E0000}-\u{E007F}]|\p{Cs}/gu;
+const shown = (s: string, max: number) => oneLine(s.replace(INVISIBLE, ""), max);
+
 /** `machine`'s reply, or why it is refused. Pure. */
 export function readPeerBootLine(body: unknown, machine: string): { value: PeerBootLine } | { refused: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { refused: "not a JSON object" };
@@ -100,7 +106,7 @@ export function readPeerBootLine(body: unknown, machine: string): { value: PeerB
   if (typeof l.row !== "string" || !ROWS.has(l.row)) return { refused: "answered a row muninn does not know" };
   if (typeof l.restart !== "boolean") return { refused: "sent a restart flag that is not true or false" };
   if (typeof l.text !== "string" || l.text.length > PEER_TEXT_MAX) return { refused: "sent a text that is not text or is too long" };
-  const text = oneLine(l.text, PEER_TEXT_MAX);
+  const text = shown(l.text, PEER_TEXT_MAX);
   if (text === "") return { refused: "sent an empty text" };
   if (l.commit !== null && (typeof l.commit !== "string" || !COMMIT_RE.test(l.commit))) return { refused: "sent a commit that is not a sha" };
   if (l.pr !== null && (typeof l.pr !== "number" || !Number.isSafeInteger(l.pr) || l.pr <= 0)) return { refused: "sent a PR that is not a number" };
@@ -110,7 +116,7 @@ export function readPeerBootLine(body: unknown, machine: string): { value: PeerB
   const unread: string[] = [];
   for (const u of l.unread) {
     if (typeof u !== "string" || u.length > PEER_UNREAD_MAX) return { refused: "sent an unread name muninn does not take" };
-    const one = oneLine(u, PEER_UNREAD_MAX);
+    const one = shown(u, PEER_UNREAD_MAX);
     if (one) unread.push(one);
   }
   return {

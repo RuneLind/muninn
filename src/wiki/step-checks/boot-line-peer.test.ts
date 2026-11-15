@@ -110,6 +110,33 @@ describe("readPeerBootLine", () => {
     expect("value" in got && got.value.unread).toEqual(["the checkout"]);
   });
 
+  test("invisible characters in the text and unread names are removed, the rest kept", () => {
+    const cases: [string, string][] = [
+      ["zero-width space, non-joiner, joiner", "\u200B\u200C\u200D"],
+      ["word joiner to invisible plus", "\u2060\u2061\u2062\u2063\u2064"],
+      ["byte-order mark", "\uFEFF"],
+      ["soft hyphen", "\u00AD"],
+      ["tag block", "\u{E0000}\u{E0041}\u{E007F}"],
+      ["lone high surrogate", "\uD800"],
+      ["lone low surrogate", "\uDC00"],
+    ];
+    for (const [name, chars] of cases) {
+      const got = readPeerBootLine(reply({ text: `started${chars}from x`, unread: [`ori${chars}gin`] }), "mini");
+      expect({ name, value: "value" in got ? [got.value.text, got.value.unread] : got }).toEqual({ name, value: ["startedfrom x", ["origin"]] });
+    }
+    // A valid surrogate pair (an emoji) is one character and stays.
+    const emoji = readPeerBootLine(reply({ text: "started from x \u{1F680}" }), "mini");
+    expect("value" in emoji && emoji.value.text).toBe("started from x \u{1F680}");
+  });
+
+  test("a text made only of invisible characters and spaces refuses the reply; such an unread name is dropped", () => {
+    for (const text of ["\u200B", "\u200B \u2060\uFEFF\u00AD ", "\u{E0041}\u{E0042}", "\uD800 \uDC00", " \u200D "]) {
+      expect({ text, refused: refused(reply({ text })) }).toEqual({ text, refused: "sent an empty text" });
+    }
+    const got = readPeerBootLine(reply({ unread: ["\u200B\u00AD", "origin"] }), "mini");
+    expect("value" in got && got.value.unread).toEqual(["origin"]);
+  });
+
   test("an absolute-path-looking string is just text: kept as text, for the client to escape", () => {
     const got = readPeerBootLine(reply({ text: "started from /Users/someone/<b>muninn</b>" }), "mini");
     expect("value" in got && got.value.text).toBe("started from /Users/someone/<b>muninn</b>");
@@ -279,6 +306,32 @@ describe("createBootLinePeerReader", () => {
     expect((await a)[0]!.answered).toBe(true);
     expect((await b)[0]!.answered).toBe(true);
     expect(calls).toBe(1);
+  });
+
+  test("peers are read in parallel: every peer is asked before any answers, and rows come in config order whatever order they answer", async () => {
+    const peers = new Map([
+      ["a", "https://a.test"],
+      ["b", "https://b.test"],
+      ["c", "https://c.test"],
+    ]);
+    const asked: string[] = [];
+    const release = new Map<string, () => void>();
+    const fetch = async (url: string) => {
+      const host = new URL(url).host.replace(".test", "");
+      asked.push(host);
+      await new Promise<void>((r) => release.set(host, r));
+      return json(reply({}, { machine: host }));
+    };
+    const rows = createBootLinePeerReader({ peers, fetch, timeoutMs: 5_000 })();
+    for (let i = 0; i < 20 && asked.length < 3; i++) await new Promise((r) => setTimeout(r, 1));
+    // A sequential read would have asked only "a" here: "b" waits on "a"'s answer.
+    expect(asked).toEqual(["a", "b", "c"]);
+    for (const host of ["c", "a", "b"]) release.get(host)!();
+    expect((await rows).map((r) => [r.machine, r.answered])).toEqual([
+      ["a", true],
+      ["b", true],
+      ["c", true],
+    ]);
   });
 
   test("its down window is its own: a boot-line failure for a peer never makes the step-check client skip that peer", async () => {

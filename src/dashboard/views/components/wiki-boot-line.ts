@@ -38,6 +38,8 @@ export interface BootLineRowView {
   muted: boolean;
   row: string | null;
   why: string | null;
+  /** The row's own tooltip: this muninn's for the local row, the machine's for an answer, the reason for no answer. */
+  title: string | null;
 }
 
 export interface BootLineView {
@@ -60,14 +62,16 @@ export function bootLineView(body: unknown): BootLineView | null {
   if (!b || typeof b.text !== "string" || typeof b.row !== "string") return null;
   const view: BootLineView = { row: b.row, text: b.text, restart: b.restart === true, rows: null };
   if (!Array.isArray(b.peers) || typeof b.machine !== "string") return view;
-  const rows: BootLineRowView[] = [{ machine: b.machine, text: `${b.machine}: ${b.text}`, restart: view.restart, muted: false, row: b.row, why: null }];
+  const rows: BootLineRowView[] = [{ machine: b.machine, text: `${b.machine}: ${b.text}`, restart: view.restart, muted: false, row: b.row, why: null, title: TITLE }];
   for (const raw of b.peers) {
     const p = raw as { machine?: unknown; answered?: unknown; text?: unknown; restart?: unknown; row?: unknown; why?: unknown } | null;
     if (!p || typeof p.machine !== "string") continue;
     if (p.answered === true && typeof p.text === "string" && typeof p.row === "string") {
-      rows.push({ machine: p.machine, text: `${p.machine}: ${p.text}`, restart: p.restart === true, muted: false, row: p.row, why: null });
+      const title = `What ${p.machine}'s muninn started from, as it answered just now`;
+      rows.push({ machine: p.machine, text: `${p.machine}: ${p.text}`, restart: p.restart === true, muted: false, row: p.row, why: null, title });
     } else {
-      rows.push({ machine: p.machine, text: `${p.machine}: no answer`, restart: false, muted: true, row: null, why: typeof p.why === "string" ? p.why : null });
+      const why = typeof p.why === "string" ? p.why : null;
+      rows.push({ machine: p.machine, text: `${p.machine}: no answer`, restart: false, muted: true, row: null, why, title: why });
     }
   }
   return { ...view, rows };
@@ -75,7 +79,7 @@ export function bootLineView(body: unknown): BootLineView | null {
 
 /** What `bootLineChanged` compares besides the text: everything the block shows. A row's `why` is only its tooltip
  *  and alternates for one down peer between asks («timed out», «unreachable a moment ago»), so it is synced in place. */
-const keyOf = (v: BootLineView) => (v.rows ? JSON.stringify(v.rows.map(({ why: _why, ...shown }) => shown)) : "");
+const keyOf = (v: BootLineView) => (v.rows ? JSON.stringify(v.rows.map(({ why: _why, title: _title, ...shown }) => shown)) : "");
 const textOf = (v: BootLineView) => (v.rows ? v.rows.map((r) => r.text).join("") : v.text);
 const outerRestart = (v: BootLineView) => !v.rows && v.restart;
 
@@ -84,27 +88,28 @@ const TITLE = "What this muninn started from, and what moved in its checkout sin
 function rowHtml(r: BootLineRowView): string {
   const cls = `wiki-boot-row${r.restart ? " restart" : ""}${r.muted ? " muted" : ""}`;
   const row = r.row !== null ? ` data-boot-row="${esc(r.row)}"` : "";
-  const title = r.why ? ` title="${esc(r.why)}"` : "";
+  const title = r.title ? ` title="${esc(r.title)}"` : "";
   return `<div class="${cls}" data-boot-machine="${esc(r.machine)}"${row}${title}>${esc(r.text)}</div>`;
 }
 
-/** The block's markup for `view` (the current line when omitted). */
+/** The block's markup for `view` (the current line when omitted). With rows the block has no tooltip: each row has its own. */
 export function bootLineHtml(view: BootLineView | null = line): string {
   if (!view) return "";
   const key = keyOf(view);
   const inner = view.rows ? view.rows.map(rowHtml).join("") : esc(view.text);
-  return `<div class="wiki-boot-line${outerRestart(view) ? " restart" : ""}" data-boot-row="${esc(view.row)}"${key ? ` data-boot-key="${esc(key)}"` : ""} title="${TITLE}">${inner}</div>`;
+  const title = view.rows ? "" : ` title="${TITLE}"`;
+  return `<div class="wiki-boot-line${outerRestart(view) ? " restart" : ""}" data-boot-row="${esc(view.row)}"${key ? ` data-boot-key="${esc(key)}"` : ""}${title}>${inner}</div>`;
 }
 
-/** Each row's tooltip set to `view`'s reason, on the block in place (rows in the same order: the keys matched). */
+/** Each row's tooltip set to `view`'s, on the block in place (rows in the same order: the keys matched). */
 function syncTitles(el: Element, view: BootLineView): void {
   if (!view.rows) return;
   const rows = el.querySelectorAll(":scope > .wiki-boot-row");
   view.rows.forEach((r, i) => {
     const row = rows[i];
     if (!row) return;
-    if (r.why) {
-      if (row.getAttribute("title") !== r.why) row.setAttribute("title", r.why);
+    if (r.title) {
+      if (row.getAttribute("title") !== r.title) row.setAttribute("title", r.title);
     } else row.removeAttribute("title");
   });
 }

@@ -31,8 +31,8 @@ describe("bootLineView / bootLineHtml", () => {
     const html = bootLineHtml(view);
     // The outer block never takes the restart colour when it holds rows: each row carries its own.
     expect(html).toStartWith(`<div class="wiki-boot-line" data-boot-row="same" data-boot-key="`);
-    expect(html).toContain(`<div class="wiki-boot-row" data-boot-machine="laptop" data-boot-row="same">laptop: `);
-    expect(html).toContain(`<div class="wiki-boot-row restart" data-boot-machine="mini" data-boot-row="newer">mini: `);
+    expect(html).toContain(`<div class="wiki-boot-row" data-boot-machine="laptop" data-boot-row="same" title="What this muninn started from, and what moved in its checkout since">laptop: `);
+    expect(html).toContain(`<div class="wiki-boot-row restart" data-boot-machine="mini" data-boot-row="newer" title="What mini&#39;s muninn started from, as it answered just now">mini: `);
     expect(html).toContain(`<div class="wiki-boot-row muted" data-boot-machine="old" title="the peer answered HTTP 404">old: no answer</div>`);
     expect(html.indexOf("laptop: ")).toBeLessThan(html.indexOf("mini: "));
   });
@@ -87,6 +87,55 @@ describe("bootLineChanged", () => {
     // A reason dropped: the title goes with it.
     expect(bootLineChanged(card, withPeers([{ machine: "mini", answered: false }]))).toBe(false);
     expect(row.hasAttribute("title")).toBe(false);
+  });
+
+  const LOCAL_TITLE = "What this muninn started from, and what moved in its checkout since";
+  const titleOf = (card: Element, machine: string) => card.querySelector(`[data-boot-machine="${machine}"]`)!.getAttribute("title");
+  /** What `placeBootLine` does with the current line, for a view the test holds. */
+  const place = (card: Element, view: ReturnType<typeof withPeers>) => {
+    card.querySelector(":scope > .wiki-boot-line")?.remove();
+    card.insertAdjacentHTML("beforeend", bootLineHtml(view));
+  };
+  const answered = { machine: "mini", answered: true, row: "same", restart: false, text: "started from aaaaaaaa" };
+
+  test("each row's tooltip is its own: the local row says this muninn, an answered peer names its machine", () => {
+    const card = cardWith(bootLineHtml(withPeers([answered])));
+    expect(titleOf(card, "laptop")).toBe(LOCAL_TITLE);
+    expect(titleOf(card, "mini")).toBe("What mini's muninn started from, as it answered just now");
+    // No row inherits the block's tooltip: the block carries none when it holds rows.
+    expect(card.querySelector(":scope > .wiki-boot-line")!.hasAttribute("title")).toBe(false);
+  });
+
+  test("a peer going failed → answered → failed ends each step with the right title; an unchanged view keeps the block", () => {
+    const card = cardWith(bootLineHtml(withPeers([down("the peer timed out")])));
+    expect(titleOf(card, "mini")).toBe("the peer timed out");
+    const up = withPeers([answered]);
+    expect(bootLineChanged(card, up)).toBe(true);
+    place(card, up);
+    expect(titleOf(card, "mini")).toBe("What mini's muninn started from, as it answered just now");
+    const block = card.lastElementChild;
+    expect(bootLineChanged(card, up)).toBe(false);
+    expect(card.lastElementChild).toBe(block);
+    expect(titleOf(card, "mini")).toBe("What mini's muninn started from, as it answered just now");
+    expect(titleOf(card, "laptop")).toBe(LOCAL_TITLE);
+    const again = withPeers([down("the peer answered HTTP 500")]);
+    expect(bootLineChanged(card, again)).toBe(true);
+    place(card, again);
+    expect(titleOf(card, "mini")).toBe("the peer answered HTTP 500");
+    // A reason change alone syncs in place and never touches the local row's title.
+    expect(bootLineChanged(card, withPeers([down("the peer was unreachable a moment ago (answered HTTP 500)")]))).toBe(false);
+    expect(titleOf(card, "mini")).toBe("the peer was unreachable a moment ago (answered HTTP 500)");
+    expect(titleOf(card, "laptop")).toBe(LOCAL_TITLE);
+  });
+
+  test('a machine name with "<>& stays text in the row and in its title', () => {
+    const name = `m"<b>&amp;`;
+    const card = cardWith(bootLineHtml(withPeers([{ ...answered, machine: name }])));
+    const row = card.querySelectorAll(":scope > .wiki-boot-line > .wiki-boot-row")[1]!;
+    expect(row.querySelector("b")).toBeNull();
+    expect(row.getAttribute("data-boot-machine")).toBe(name);
+    expect(row.getAttribute("title")).toBe(`What ${name}'s muninn started from, as it answered just now`);
+    expect(row.textContent).toBe(`${name}: started from aaaaaaaa`);
   });
 
   test("a visible change replaces the block: a peer answering, a peer added", () => {
