@@ -4,8 +4,17 @@
  * down-windows each peer on its own.
  */
 import { describe, expect, test } from "bun:test";
-import type { BootLine } from "./boot-line.ts";
-import { BOOT_LINE_PEER_PATH, createBootLinePeerReader, readPeerBootLine, toPeerBootLine, type PeerBootLine } from "./boot-line-peer.ts";
+import { startFacts, type BootLine } from "./boot-line.ts";
+import {
+  BOOT_LINE_PEER_PATH,
+  createBootLinePeerReader,
+  PEER_TEXT_MAX,
+  PEER_UNREAD_COUNT_MAX,
+  PEER_UNREAD_MAX,
+  readPeerBootLine,
+  toPeerBootLine,
+  type PeerBootLine,
+} from "./boot-line-peer.ts";
 
 const LINE: PeerBootLine = {
   row: "newer",
@@ -121,6 +130,40 @@ describe("toPeerBootLine", () => {
     expect(toPeerBootLine({ ...line, start: { ...line.start, ref: "refs/tags/v1" } as BootLine["start"] }).branch).toBeNull();
     expect(toPeerBootLine({ ...line, start: { known: false, reason: "no git", at: 3 } })).toMatchObject({ commit: null, pr: null, branch: null, at: null });
   });
+
+  test("a line over the asker's caps is clamped on the way out, and the asker takes it with its row and restart flag", () => {
+    // A real-looking long ref: the start facts name it, and the «elsewhere» text names it again.
+    const ref = `refs/heads/${"feature/owner-step-drain-boot-line-peer-rows-and-the-restart-cue-".repeat(15)}x`;
+    const at = new Date(2026, 10, 14, 20, 58).getTime();
+    const record = { known: true as const, dir: "/x", commit: "409bfd1a".repeat(5), ref, pr: 864, tracked: { state: "clean" as const }, at };
+    const text = [startFacts(record, at, "main"), "the checkout has moved off the start commit: restart", "origin has commits this checkout lacks"].join(" · ");
+    expect(text.length).toBeGreaterThan(PEER_TEXT_MAX);
+    const line: BootLine = {
+      row: "moved-off",
+      restart: true,
+      text,
+      start: { known: true, commit: record.commit, ref, pr: 864, at, tracked: "clean" },
+      unread: [...Array(12)].map((_, i) => `part ${i} ${"y".repeat(120)}`),
+      readAt: at,
+    };
+    const sent = toPeerBootLine(line);
+    expect(sent.text.length).toBe(PEER_TEXT_MAX);
+    expect(sent.text.endsWith("…")).toBe(true);
+    expect(sent.unread.length).toBe(PEER_UNREAD_COUNT_MAX);
+    for (const u of sent.unread) expect(u.length).toBeLessThanOrEqual(PEER_UNREAD_MAX);
+    expect(sent.unread[0]!.endsWith("…")).toBe(true);
+    const got = readPeerBootLine(JSON.parse(JSON.stringify({ v: 1, machine: "mini", line: sent })), "mini");
+    expect("value" in got && got.value).toMatchObject({ row: "moved-off", restart: true, text: sent.text, unread: sent.unread });
+  });
+
+  test("a clamp never leaves half a surrogate pair at the cut", () => {
+    const base: BootLine = { row: "same", restart: false, text: `${"x".repeat(PEER_TEXT_MAX - 2)}😀😀`, start: { known: false, reason: "no git", at: 1 }, unread: [], readAt: 1 };
+    const sent = toPeerBootLine(base);
+    expect(sent.text.length).toBeLessThanOrEqual(PEER_TEXT_MAX);
+    expect(sent.text).toBe(`${"x".repeat(PEER_TEXT_MAX - 2)}…`);
+    // At the cap exactly, nothing is cut.
+    expect(toPeerBootLine({ ...base, text: "x".repeat(PEER_TEXT_MAX) }).text).toBe("x".repeat(PEER_TEXT_MAX));
+  });
 });
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -176,6 +219,47 @@ describe("createBootLinePeerReader", () => {
     ok = true;
     expect((await read())[0]!.answered).toBe(true);
     expect(calls).toBe(3);
+  });
+
+  test("a peer that keeps failing logs once when it starts, once when its reason changes, and once when it answers again", async () => {
+    let clock = 1_000_000;
+    let status = 404;
+    const logged: { level: string; msg: string; props: Record<string, unknown> }[] = [];
+    const log = {
+      warn: (msg: string, props: Record<string, unknown>) => logged.push({ level: "warn", msg, props }),
+      info: (msg: string, props: Record<string, unknown>) => logged.push({ level: "info", msg, props }),
+      debug: (msg: string, props: Record<string, unknown>) => logged.push({ level: "debug", msg, props }),
+    };
+    const fetch = async () => (status === 200 ? json(reply()) : json({}, status));
+    const read = createBootLinePeerReader({ peers: new Map([["mini", "https://mini.test"]]), fetch, ttlMs: 20_000, downMs: 15_000, now: () => clock, log });
+    const loud = () => logged.filter((l) => l.level !== "debug");
+    // Five asks a minute apart, each past the down window: five requests, one log.
+    for (let i = 0; i < 5; i++) {
+      expect((await read())[0]).toMatchObject({ answered: false, why: "the peer answered HTTP 404" });
+      clock += 60_000;
+    }
+    expect(loud()).toHaveLength(1);
+    expect(loud()[0]).toMatchObject({ level: "warn", props: { machine: "mini", reason: "answered HTTP 404" } });
+    // A changed reason: one more.
+    status = 500;
+    await read();
+    clock += 60_000;
+    await read();
+    clock += 60_000;
+    expect(loud()).toHaveLength(2);
+    expect(loud()[1]).toMatchObject({ level: "warn", props: { reason: "answered HTTP 500" } });
+    // It answers again: one log, and later answers add none.
+    status = 200;
+    expect((await read())[0]!.answered).toBe(true);
+    clock += 60_000;
+    await read();
+    expect(loud()).toHaveLength(3);
+    expect(loud()[2]).toMatchObject({ level: "info", props: { machine: "mini" } });
+    // Failing again after the recovery is a new start: logged.
+    status = 404;
+    clock += 60_000;
+    await read();
+    expect(loud()).toHaveLength(4);
   });
 
   test("concurrent reads share one request per peer", async () => {

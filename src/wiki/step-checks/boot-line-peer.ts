@@ -33,7 +33,7 @@ export const PEER_BOOT_ROUTE_BOUND_MS = 3_000;
 export const PEER_BOOT_LINE_TTL_MS = 20_000;
 /** One line and its envelope are well under 4 KiB. */
 export const PEER_BOOT_LINE_MAX_BYTES = 16 * 1024;
-/** The longest text taken; a longer one refuses the reply. */
+/** The longest text taken; a longer one refuses the reply. {@link toPeerBootLine} clamps to these caps, so a healthy peer never trips them. */
 export const PEER_TEXT_MAX = 1_000;
 /** The longest unread name taken, and how many. */
 export const PEER_UNREAD_MAX = 100;
@@ -60,7 +60,7 @@ export interface PeerBootLine {
 /** One peer row of `GET /api/wiki/boot-line`'s `peers`. */
 export type BootLinePeerRow = ({ machine: string; answered: true } & PeerBootLine) | { machine: string; answered: false; why: string };
 
-/** This instance's line in the closed shape it answers peers with. */
+/** This instance's line in the closed shape it answers peers with, clamped to the caps {@link readPeerBootLine} refuses past. */
 export function toPeerBootLine(line: BootLine): PeerBootLine {
   const s = line.start;
   const ref = s.known ? s.ref : null;
@@ -68,13 +68,19 @@ export function toPeerBootLine(line: BootLine): PeerBootLine {
   return {
     row: line.row,
     restart: line.restart,
-    text: line.text,
+    text: clamp(line.text, PEER_TEXT_MAX),
     commit: s.known ? s.commit.slice(0, 8) : null,
     pr: s.known ? s.pr : null,
     branch: branch !== null && BRANCH_RE.test(branch) && !branch.includes("..") ? branch : null,
     at: s.known ? s.at : null,
-    unread: line.unread,
+    unread: line.unread.slice(0, PEER_UNREAD_COUNT_MAX).map((u) => clamp(u, PEER_UNREAD_MAX)),
   };
+}
+
+/** `s` cut to `max` UTF-16 units with a visible «…», never splitting a surrogate pair. */
+function clamp(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, "")}…`;
 }
 
 const KEYS = ["row", "restart", "text", "commit", "pr", "branch", "at", "unread"] as const;
@@ -119,7 +125,12 @@ export interface BootLinePeerDeps {
   downMs?: number;
   maxBytes?: number;
   now?: () => number;
+  /** Test seam: where the reader's failure and recovery lines go. */
+  log?: PeerReaderLog;
 }
+
+type LogFn = (msg: string, props: Record<string, unknown>) => void;
+export type PeerReaderLog = { warn: LogFn; info: LogFn; debug: LogFn };
 
 /** Reads every peer's line; never rejects, and each peer is bounded by `timeoutMs` on its own. */
 export type BootLinePeerReader = () => Promise<BootLinePeerRow[]>;
@@ -132,11 +143,19 @@ export function createBootLinePeerReader(deps: BootLinePeerDeps): BootLinePeerRe
   const downMs = deps.downMs ?? PEER_DOWN_WINDOW_MS;
   const maxBytes = deps.maxBytes ?? PEER_BOOT_LINE_MAX_BYTES;
   const now = stampSource(deps.now);
+  const out: PeerReaderLog = deps.log ?? log;
+  // The card asks every minute and the window lasts 15 s, so each ask of a peer that stays down
+  // opens a new window: only a peer's first failure, a changed reason and its recovery are warned.
+  const failing = new Map<string, string>();
   const down = createDownWindow({
     downMs,
     now,
-    onOpen: (machine, { reason, err }) =>
-      log.warn("Boot-line peer {machine} failed ({reason}); its row reads no answer for {seconds} s", { machine, reason, seconds: Math.round(downMs / 1000), ...failureLogFields(err) }),
+    onOpen: (machine, { reason, err }) => {
+      const fields = { machine, reason, seconds: Math.round(downMs / 1000), ...failureLogFields(err) };
+      if (failing.get(machine) === reason) out.debug("Boot-line peer {machine} still fails ({reason})", fields);
+      else out.warn("Boot-line peer {machine} failed ({reason}); its row reads no answer until it answers", fields);
+      failing.set(machine, reason);
+    },
   });
   const cache = new Map<string, { row: BootLinePeerRow; at: Stamp }>();
   const inFlight = new Map<string, Promise<BootLinePeerRow>>();
@@ -146,6 +165,7 @@ export function createBootLinePeerReader(deps: BootLinePeerDeps): BootLinePeerRe
     const got = await boundedPeerGet(`${base}${BOOT_LINE_PEER_PATH}?${qs}`, { fetch: doFetch, timeoutMs, maxBytes }, (body) => readPeerBootLine(body, machine));
     down.settle(machine, "failure" in got ? got.failure : undefined);
     if ("failure" in got) return { machine, answered: false, why: `the peer ${got.failure.reason}` };
+    if (failing.delete(machine)) out.info("Boot-line peer {machine} answers again", { machine });
     const row: BootLinePeerRow = { machine, answered: true, ...got.value };
     cache.set(machine, { row, at: now() });
     return row;
