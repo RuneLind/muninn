@@ -143,7 +143,8 @@
       "scripts/test-chain.test.ts",
       "scripts/test-par.test.ts",
       "scripts/boundary-crossing.test.ts",
-      "src/test/layer-direction.test.ts"
+      "src/test/layer-direction.test.ts",
+      "src/test/spawn-process-group.test.ts"
     ],
     "unit-2": [
       "scripts/wiki-stale.test.ts",
