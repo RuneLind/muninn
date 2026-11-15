@@ -85,20 +85,21 @@ export function layerOf(file: string): Layer | null {
 
 export const rank = (layer: Layer): number => LAYERS.indexOf(layer);
 
-/** Every non-test `.ts` file under `src/` and `db/`, repo-relative, sorted. */
-export function sourceFiles(root: string): string[] {
+/** Every non-test `.ts` file under `src/` and `db/`, repo-relative, sorted. Another
+ *  guard passes its own top directories and file-name pattern. */
+export function sourceFiles(root: string, tops: readonly string[] = ["src", "db"], name: RegExp = /\.ts$/): string[] {
   const out: string[] = [];
   const walk = (rel: string) => {
     for (const e of readdirSync(path.join(root, rel), { withFileTypes: true })) {
       const p = `${rel}/${e.name}`;
       if (e.isDirectory()) {
         if (!e.name.startsWith(".") && e.name !== "node_modules") walk(p);
-      } else if (e.isFile() && e.name.endsWith(".ts") && !e.name.endsWith(".d.ts") && !BUN_TEST_FILE.test(e.name)) {
+      } else if (e.isFile() && name.test(e.name) && !e.name.endsWith(".d.ts") && !BUN_TEST_FILE.test(e.name)) {
         out.push(p);
       }
     }
   };
-  for (const top of ["src", "db"]) walk(top);
+  for (const top of tops) walk(top);
   return out.sort();
 }
 
