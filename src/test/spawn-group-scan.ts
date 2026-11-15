@@ -31,6 +31,8 @@ export interface Site {
   line: number;
   kind: SiteKind;
   what: string;
+  /** Why this form is refused and what to do, before the shared way out. */
+  why: string;
 }
 
 const KEY = { spawn: "detached", runProc: "processGroup" } as const;
@@ -97,37 +99,60 @@ function calleeCall(n: ts.Node): ts.CallExpression | null {
 
 const optionsArg = (c: ts.CallExpression, name: Name) => (name === RUN_PROC ? c.arguments[3] : c.arguments.at(-1));
 
-/** The initializer of a top-level, non-exported `const`, past an `as const`; `callVerdict` checks it is an object literal. */
-function topConstInit(id: ts.Identifier): ts.Expression | null {
+/**
+ * For a declaration of `id`: the initializer of a top-level, non-exported `const`, past an `as const`
+ * (`callVerdict` checks it is an object literal), or why it does not qualify. Null when `id` declares no variable.
+ */
+function topConstInit(id: ts.Identifier): ts.Expression | string | null {
   const d = id.parent;
-  if (!ts.isVariableDeclaration(d) || d.name !== id || !d.initializer) return null;
+  if (!ts.isVariableDeclaration(d) || d.name !== id) return null;
+  if (!d.initializer) return "has no initializer";
   const stmt = d.parent.parent;
-  if (!(d.parent.flags & ts.NodeFlags.Const) || !ts.isVariableStatement(stmt) || !ts.isSourceFile(stmt.parent)) return null;
-  if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return null;
+  if (!(d.parent.flags & ts.NodeFlags.Const)) return "is declared with `let` or `var`, not `const`";
+  if (!ts.isVariableStatement(stmt) || !ts.isSourceFile(stmt.parent)) return "is not declared at the top level of the file";
+  if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return "is exported";
   return ts.isAsExpression(d.initializer) && ts.isConstTypeReference(d.initializer.type) ? d.initializer.expression : d.initializer;
 }
 
-/** `X`'s initializer, when its one declaration is a qualifying top-level const and every other `X` is a checked call's options. */
-function constInit(id: ts.Identifier, ids: Map<string, ts.Identifier[]>): ts.Expression | null {
+/** A name that declares something other than a variable: a parameter, a destructured binding, a function, class or import. */
+function declaresOther(u: ts.Identifier): boolean {
+  const p = u.parent;
+  return (ts.isParameter(p) || ts.isBindingElement(p) || ts.isFunctionDeclaration(p) || ts.isClassDeclaration(p) || ts.isImportSpecifier(p)
+    || ts.isImportClause(p) || ts.isNamespaceImport(p) || ts.isImportEqualsDeclaration(p)) && p.name === u;
+}
+
+/**
+ * `X`'s initializer, when its one declaration is a qualifying top-level const and every other `X` is a checked
+ * call's options; otherwise the condition that failed.
+ */
+function constInit(id: ts.Identifier, ids: Map<string, ts.Identifier[]>, sf: ts.SourceFile): { lit: ts.Expression } | { why: string } {
+  const uses = ids.get(id.text) ?? [];
+  const x = `\`${id.text}\``;
+  const vars = uses.filter((u) => ts.isVariableDeclaration(u.parent) && u.parent.name === u).length;
+  // Two variable declarations never qualify (two qualifying ones, or one that is a non-option use), so naming that first changes no verdict.
+  if (vars > 1) return { why: `${x} is declared more than once in this file` };
   let lit: ts.Expression | null = null;
-  for (const u of ids.get(id.text) ?? []) {
+  for (const u of uses) {
     const decl = topConstInit(u);
-    if (decl && lit) return null;
+    if (typeof decl === "string") return { why: `${x} ${decl}` };
     if (decl) lit = decl;
     else {
       const c = u.parent;
       const name = ts.isCallExpression(c) ? calleeName(c.expression) : null;
-      if (!name || optionsArg(c as ts.CallExpression, name) !== u) return null;
+      if (!name || optionsArg(c as ts.CallExpression, name) !== u) {
+        if (!declaresOther(u)) return { why: `${x} also appears on line ${sf.getLineAndCharacterOfPosition(u.getStart(sf)).line + 1} other than as these options` };
+        return { why: vars ? `${x} is declared more than once in this file` : `${x} is not declared in this file as a \`const\`` };
+      }
     }
   }
-  return lit;
+  return lit ? { lit } : { why: `${x} is not declared in this file as a \`const\`` };
 }
 
-type Verdict = "ok" | "spread" | "missing";
+type Verdict = { v: "ok" } | { v: "spread" } | { v: "missing"; why?: string };
 
 /** The last property that could set `key` must be `key: true`, with no spread after it. */
 function keyVerdict(o: ts.ObjectLiteralExpression, key: string): Verdict {
-  let v: Verdict = "missing";
+  let v: Verdict["v"] = "missing";
   for (const p of o.properties) {
     if (ts.isSpreadAssignment(p)) {
       if (v === "ok") v = "spread";
@@ -135,21 +160,46 @@ function keyVerdict(o: ts.ObjectLiteralExpression, key: string): Verdict {
       v = ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.initializer.kind === ts.SyntaxKind.TrueKeyword ? "ok" : "missing";
     }
   }
-  return v;
+  if (v === "missing" && o.properties.some(ts.isSpreadAssignment)) {
+    return { v, why: `its options hold a spread and no \`${key}: true\` of their own, and the scan does not look inside a spread` };
+  }
+  return { v };
 }
 
-function callVerdict(c: ts.CallExpression, name: Name, ids: Map<string, ts.Identifier[]>): Verdict {
+const WRAPPER: [(e: ts.Node) => boolean, string][] = [
+  [(e) => ts.isAsExpression(e) && ts.isConstTypeReference(e.type), "`as const`"],
+  [ts.isSatisfiesExpression, "`satisfies`"],
+  [ts.isParenthesizedExpression, "parentheses"],
+  [(e) => ts.isAsExpression(e) || ts.isTypeAssertionExpression(e), "a type assertion"],
+];
+
+/** A verdict without `why` on a missing key means the options were read and hold no `key: true`. */
+function callVerdict(c: ts.CallExpression, name: Name, ids: Map<string, ts.Identifier[]>, sf: ts.SourceFile): Verdict {
   const arg = optionsArg(c, name);
-  if (!arg || c.arguments.some(ts.isSpreadElement)) return "missing";
-  const lit = ts.isIdentifier(arg) ? constInit(arg, ids) : arg;
-  return lit && ts.isObjectLiteralExpression(lit) ? keyVerdict(lit, KEY[name]) : "missing";
+  if (c.arguments.some(ts.isSpreadElement)) return { v: "missing", why: "a spread argument hides which argument holds the options" };
+  if (!arg) return { v: "missing" };
+  let lit: ts.Expression = arg;
+  if (ts.isIdentifier(arg)) {
+    const r = constInit(arg, ids, sf);
+    if ("why" in r) return { v: "missing", why: r.why };
+    lit = r.lit;
+    if (!ts.isObjectLiteralExpression(lit)) return { v: "missing", why: `\`${arg.text}\`'s initializer is not a plain object literal` };
+  }
+  if (ts.isObjectLiteralExpression(lit)) return keyVerdict(lit, KEY[name]);
+  // A command array or string in the last slot is a call with no options at all.
+  if (ts.isArrayLiteralExpression(lit) || ts.isStringLiteralLike(lit)) return { v: "missing" };
+  const wrap = WRAPPER.find(([is]) => is(lit))?.[1];
+  return { v: "missing", why: wrap ? `its options are wrapped in ${wrap}` : "its options are not an object literal" };
 }
 
 /** Sites in one file, in source order. */
 export function scanSource(file: string, source: string): Site[] {
   const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, SCRIPT_KIND[path.extname(file)] ?? ts.ScriptKind.TS);
-  if ((sf as unknown as { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics.length > 0) {
-    return [{ path: file, line: 1, kind: "parse", what: "TypeScript parse errors" }];
+  const diag = (sf as unknown as { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics[0];
+  if (diag) {
+    const line = sf.getLineAndCharacterOfPosition(diag.start ?? 0).line + 1;
+    const text = ts.flattenDiagnosticMessageText(diag.messageText, " ");
+    return [{ path: file, line, kind: "parse", what: `TypeScript parse error "${text}"`, why: "the scan does not trust a tree recovered from a syntax error. Fix the syntax." }];
   }
   const ids = new Map<string, ts.Identifier[]>();
   const nodes: ts.Node[] = [];
@@ -163,9 +213,9 @@ export function scanSource(file: string, source: string): Site[] {
   const sites = new Map<ts.Node, Site>();
   // Keyed by node: a renamed child_process import is one site under both rules, and so is a call
   // with both runProc names in its callee.
-  const add = (at: ts.Node, kind: SiteKind, what: string, key: ts.Node = at): void => {
+  const add = (at: ts.Node, kind: SiteKind, what: string, why: string, key: ts.Node = at): void => {
     const line = sf.getLineAndCharacterOfPosition(at.getStart(sf)).line + 1;
-    if (!sites.has(key)) sites.set(key, { path: file, line, kind, what });
+    if (!sites.has(key)) sites.set(key, { path: file, line, kind, what, why });
   };
   for (const n of nodes) {
     if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && MODULE.test(n.moduleSpecifier.text)) {
@@ -173,50 +223,75 @@ export function scanSource(file: string, source: string): Site[] {
       if (clause?.isTypeOnly) continue;
       const named = clause?.namedBindings && ts.isNamedImports(clause.namedBindings) ? clause.namedBindings.elements : undefined;
       if (!named?.length || clause!.name) {
-        add(n.moduleSpecifier, "module", `a default, namespace or bare import of "${n.moduleSpecifier.text}"`);
+        add(n.moduleSpecifier, "module", `a default, namespace or bare import of "${n.moduleSpecifier.text}"`, WHY.moduleImport);
         continue;
       }
       for (const s of named) {
         const keeps = !s.propertyName || s.propertyName.text === s.name.text;
         if (s.isTypeOnly || (keeps && (s.name.text === SPAWN || s.name.text.endsWith("Sync")))) continue;
-        add(s, "module", `\`${s.getText(sf)}\` imported from "${n.moduleSpecifier.text}"`);
+        add(s, "module", `\`${s.getText(sf)}\` imported from "${n.moduleSpecifier.text}"`, moduleNameWhy(s.propertyName?.text ?? s.name.text));
       }
     } else if (ts.isStringLiteralLike(n) && MODULE.test(n.text) && !ts.isImportDeclaration(n.parent) && !inType(n)) {
-      add(n, "module", `"${n.text}" used other than as a named import`);
+      add(n, "module", `"${n.text}" used other than as a named import`, WHY.moduleImport);
     }
     if (!(ts.isIdentifier(n) || ts.isStringLiteralLike(n)) || !isName(n.text) || inType(n) || declaredName(n)) continue;
     const name = n.text;
     const spec = n.parent;
     if (ts.isImportSpecifier(spec) || ts.isExportSpecifier(spec)) {
       const typeOnly = spec.isTypeOnly || spec.parent.parent.isTypeOnly;
-      if (!typeOnly && spec.propertyName && spec.propertyName.text !== spec.name.text) add(spec, "value", `\`${name}\` renamed in \`${spec.getText(sf)}\``);
+      if (!typeOnly && spec.propertyName && spec.propertyName.text !== spec.name.text) add(spec, "value", `\`${name}\` renamed in \`${spec.getText(sf)}\``, WHY.rename(spec.propertyName.text));
       continue;
     }
     const call = calleeCall(n);
-    if (!call) add(n, "value", `\`${name}\` used as a value, not called`);
-    else {
-      const v = callVerdict(call, name, ids);
-      if (v !== "ok") add(n, v === "spread" ? "spread" : name, `\`${call.expression.getText(sf)}(…)\``, call);
+    if (!call) {
+      if (ts.isStringLiteralLike(n)) add(n, "value", `the string "${name}"`, WHY.string);
+      else add(n, "value", `\`${name}\` used as a value, not called`, WHY.value[name]);
+    } else {
+      const v = callVerdict(call, name, ids, sf);
+      if (v.v === "spread") add(n, "spread", `\`${call.expression.getText(sf)}(…)\``, WHY.spread(KEY[name]), call);
+      else if (v.v === "missing") add(n, name, `\`${call.expression.getText(sf)}(…)\``, v.why ? `${v.why}. ${WHY.need[name]}` : WHY.missing[name], call);
     }
   }
   return [...sites.values()].sort((a, b) => a.line - b.line);
 }
 
 const HARM = "a kill (timeout, abort, `.kill()`) reaches only the direct child: grandchildren survive it, and a caller reading the child's pipes waits for them.";
-const GROUP = "Use `runProc(…, { processGroup: true })` (src/utils/run-proc.ts), which registers the group so muninn's shutdown and Ctrl-C reach it; a raw `spawn` with `detached: true` is the alternative and then needs its own kill of `-proc.pid` and its own exit handling.";
-const WAY_OUT = `If the site is correct as it stands (never killed, or grouped in a way this scan cannot read), add or raise \`<path> <count>\` in ${ALLOWLIST} and say why in the PR.`;
+const FIT = "For a child that runs to completion, use `runProc(…, { processGroup: true })` (src/utils/run-proc.ts), which registers the group so muninn's shutdown and Ctrl-C reach it. "
+  + "For a long-lived or streaming child, end the `spawn` call with an options literal holding `detached: true`; that child is outside runProc's shutdown registry, so it needs its own kill of `-proc.pid` and its own exit handling.";
+const ALLOWED = "Import from child_process only `spawn`, names ending in `Sync`, and types, each as a named, un-renamed import (`import { execFileSync } from \"node:child_process\"`).";
+const NEED = (key: string, slot: string) =>
+  `The scan reads \`${key}: true\` only in a bare object literal that is the call's ${slot} argument, or in a top-level, unexported \`const\` declared once in the file and used only as such options.`;
+const WAY_OUT = `If the code is right as it stands (never killed, data and not code, or grouped in a way the scan cannot read), add or raise \`<path> <count>\` in ${ALLOWLIST} and give the reason in the PR.`;
 
-const BODY: Record<SiteKind, string> = {
-  spawn: `no top-level \`detached: true\` in its last argument, which must be an object literal or a same-file const; ${HARM} ${GROUP}`,
-  runProc: `no top-level \`processGroup: true\` in its options (fourth) argument, which must be an object literal or a same-file const; ${HARM} Pass \`{ processGroup: true }\`: runProc then registers the group so muninn's shutdown and Ctrl-C reach it.`,
-  spread: `a spread follows \`detached: true\` / \`processGroup: true\` and may override it; ${HARM} Move the spread before the key.`,
-  value: `the scan can check only a direct call with its options literal; ${HARM} Call it directly with the literal, or list the line.`,
-  module: `\`exec\` and \`execFile\` ignore \`detached\`, and other child_process forms cannot be checked; ${HARM} Use \`spawn\` or \`runProc\`. ${GROUP}`,
-  parse: "the scan does not trust a tree recovered from a syntax error. Fix the syntax.",
+const WHY = {
+  missing: {
+    spawn: `no top-level \`detached: true\` in its last argument, so ${HARM} ${FIT}`,
+    runProc: `no top-level \`processGroup: true\` in its options (fourth) argument, so ${HARM} Pass \`{ processGroup: true }\`: runProc then registers the group so muninn's shutdown and Ctrl-C reach it.`,
+  },
+  need: { spawn: NEED("detached", "last"), runProc: NEED("processGroup", "fourth") },
+  spread: (key: string) => `a spread follows \`${key}: true\` and may override it. Move the spread before the key.`,
+  value: {
+    spawn: "the scan cannot follow a name used as a value to its calls, so it cannot tell whether they are grouped. Call `spawn` directly, with an options literal holding `detached: true` as its last argument.",
+    runProc: "the scan cannot follow a name used as a value to its calls, so it cannot tell whether they are grouped. For an injected dependency, call it in the shape the scan reads: `(deps.runProc ?? runProc)(…, { processGroup: true })`.",
+  },
+  string: "a string spelled exactly like a spawner's name can reach it unchecked, as in `x[\"spawn\"](…)`, so the scan refuses every such string. Call a spawner by its plain name (`x.spawn(…)`); a string that is data, such as an error code, is listed.",
+  rename: (from: string) =>
+    `the scan follows \`runProc\` and \`spawn\` only under their own names, so it cannot check the calls behind a rename. Import or export the name un-renamed (\`{ ${from} }\`), and give no other binding that name.`,
+  moduleImport: `the scan checks child_process only through named imports. ${ALLOWED}`,
 };
 
+/** A refused named import from child_process, by the name it imports. */
+function moduleNameWhy(imported: string): string {
+  if (imported === SPAWN || imported.endsWith("Sync")) return `the scan follows child_process names only un-renamed. Import it as \`{ ${imported} }\`.`;
+  if (imported === "exec" || imported === "execFile") {
+    return `\`${imported}\` ignores \`detached\`, so its child stays in muninn's process group and a kill misses the child's own children. ${FIT}`;
+  }
+  if (imported === "fork") return `the scan does not model \`fork\` (it honours \`detached\`, but the scan does not check its options). ${FIT}`;
+  return `the scan does not model \`${imported}\`. ${ALLOWED}`;
+}
+
 export function siteMessage(s: Site): string {
-  return `${s.path}:${s.line} ${s.what}: ${BODY[s.kind]}${s.kind === "parse" ? "" : ` ${WAY_OUT}`}`;
+  return `${s.path}:${s.line} ${s.what}: ${s.why} ${WAY_OUT}`;
 }
 
 /** `<path> <count>` lines; malformed, duplicate and unsorted lines go to `format`. */

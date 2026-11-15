@@ -171,14 +171,82 @@ describe("spawn group scan", () => {
   });
 
   const msg = (source: string) => siteMessage(scanSource("src/a.ts", source)[0]!);
-  const HARM = "a kill (timeout, abort, `.kill()`) reaches only the direct child: grandchildren survive it, and a caller reading the child's pipes waits for them";
-  const WAY_OUT = `add or raise \`<path> <count>\` in ${ALLOWLIST} and say why in the PR`;
+  const HARM = "reaches only the direct child";
+  const WAY_OUT = `If the code is right as it stands (never killed, data and not code, or grouped in a way the scan cannot read), add or raise \`<path> <count>\` in ${ALLOWLIST} and give the reason in the PR.`;
+  const ALLOWED = "Import from child_process only `spawn`, names ending in `Sync`, and types, each as a named, un-renamed import";
+  const NEED_SPAWN = "The scan reads `detached: true` only in a bare object literal that is the call's last argument, or in a top-level, unexported `const` declared once in the file and used only as such options.";
+  const NEED_RP = "The scan reads `processGroup: true` only in a bare object literal that is the call's fourth argument, or in a top-level, unexported `const` declared once in the file and used only as such options.";
 
-  test("spawn message: harm, runProc first, then detached with its own -pid kill, and the way out", () => {
+  /** [form, source, words the message must hold, words it must not]. */
+  const MESSAGES: [string, string, string[], string[]][] = [
+    // A remedy that fits the form.
+    ["a string that is exactly spawn (an error code)", `const e = { ok: false, reason: "spawn" };`,
+      ['the string "spawn"', 'as in `x["spawn"](…)`', "a string that is data, such as an error code, is listed"], [HARM, "directly with the literal"]],
+    ["a case label", `switch (x) { case "spawn": break; }`, ['the string "spawn"', "refuses every such string"], [HARM]],
+    ["a comparison", `if (e === "runProc") f();`, ['the string "runProc"', "refuses every such string"], [HARM]],
+    ["a kind tag", `const k = { kind: "spawn" };`, ['the string "spawn"'], [HARM]],
+    ["an index access with the name", `Bun["spawn"](["git"], { detached: true });`, ['the string "spawn"', "Call a spawner by its plain name (`x.spawn(…)`)"], [HARM]],
+    ["a renamed child_process spawn", `import { spawn as sp } from "node:child_process";`,
+      ["only un-renamed", "Import it as `{ spawn }`."], ["`exec`", "directly", HARM]],
+    ["a renamed child_process Sync name", `import { execFileSync as efs } from "node:child_process";`,
+      ["only un-renamed", "Import it as `{ execFileSync }`."], ["ignore", HARM]],
+    ["a non-Sync name renamed to a Sync name", `import { exec as execSync } from "child_process";`, ["`exec` ignores `detached`"], ["Import it as"]],
+    ["a renamed runProc import", `import { runProc as rp } from "./run-proc.ts";`,
+      ["only under their own names", "Import or export the name un-renamed (`{ runProc }`)"], ["directly", HARM]],
+    ["a renamed runProc export", `export { runProc as rp } from "./run-proc.ts";`, ["un-renamed (`{ runProc }`)"], [HARM]],
+    ["a renamed spawn import from bun", `import { spawn as sp } from "bun";`, ["un-renamed (`{ spawn }`)"], [HARM, "`{ runProc }`"]],
+    ["a namespace import", `import * as cp from "node:child_process";`, ["only through named imports", ALLOWED], [HARM, "Use `spawn` or `runProc`"]],
+    ["a default import", `import cp from "node:child_process";`, [ALLOWED], [HARM]],
+    ["a require", `const cp = require("node:child_process");`, ['"node:child_process" used other than as a named import', ALLOWED], [HARM]],
+    ["a dynamic import", `const cp = import("node:child_process");`, [ALLOWED], [HARM]],
+    ["an export-from", `export { execSync } from "node:child_process";`, [ALLOWED], [HARM]],
+    ["a fork import", `import { fork } from "node:child_process";`,
+      ["does not model `fork`", "it honours `detached`", "For a child that runs to completion"], ["`exec`", "ignore"]],
+    ["an exec import", `import { exec } from "child_process";`, ["`exec` ignores `detached`", "stays in muninn's process group", "For a long-lived or streaming child"], ["`fork`"]],
+    ["an execFile import", `import { execFile } from "node:child_process";`, ["`execFile` imported from \"node:child_process\"", "`execFile` ignores `detached`"], []],
+    ["another child_process value", `import { ChildProcess } from "node:child_process";`, ["does not model `ChildProcess`", ALLOWED], [HARM]],
+    // What the reader needs to act.
+    ["runProc aliased as a value", `const run = opts.run ?? runProc;`,
+      ["`runProc` used as a value", "cannot follow a name used as a value to its calls", "`(deps.runProc ?? runProc)(…, { processGroup: true })`"], [HARM, "directly with the literal"]],
+    ["runProc in an object shorthand", `const deps = { runProc };`, ["`(deps.runProc ?? runProc)(…, { processGroup: true })`"], [HARM]],
+    ["runProc passed as an argument", `use(runProc);`, ["cannot follow a name used as a value"], [HARM]],
+    ["spawn as a value", `const sp = Bun.spawn;`, ["cannot follow a name used as a value", "Call `spawn` directly, with an options literal holding `detached: true` as its last argument."], [HARM, "deps.runProc"]],
+    ["inline options as const", `runProc(c, 5, "x", { processGroup: true } as const);`, ["its options are wrapped in `as const`", NEED_RP], ["must be an object literal or a same-file const", HARM]],
+    ["inline options with satisfies", `Bun.spawn(["git"], { detached: true } satisfies O);`, ["its options are wrapped in `satisfies`", NEED_SPAWN], [HARM]],
+    ["inline options in parentheses", `Bun.spawn(["git"], ({ detached: true }));`, ["its options are wrapped in parentheses", NEED_SPAWN], [HARM]],
+    ["a spread of a qualifying const", `const G = { detached: true };\nBun.spawn(["git"], { ...G });`, ["the scan does not look inside a spread", NEED_SPAWN], [HARM]],
+    ["a spread argument", `runProc(cmd, 1000, ...extra, { processGroup: true });`, ["a spread argument hides which argument holds the options", NEED_RP], [HARM]],
+    ["let options", `let O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `let` or `var`, not `const`", NEED_RP], [HARM]],
+    ["an exported const", `export const O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is exported"], [HARM]],
+    ["a const inside a function", `function f() { const O = { processGroup: true };\nreturn runProc(c, 5, "x", O); }`, ["`O` is not declared at the top level of the file"], [HARM]],
+    ["a const declared twice", `const O = { processGroup: true };\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file"], [HARM]],
+    ["a const shadowed in a function", `const O = { processGroup: true };\nfunction f() { const O = {};\nreturn runProc(c, 5, "x", O); }`, ["`O` is declared more than once in this file"], ["top level"]],
+    ["a const used elsewhere", `const O = { processGroup: true };\nuse(O);\nrunProc(c, 5, "x", O);`, ["`O` also appears on line 2 other than as these options"], [HARM]],
+    ["a const cast to another type", `const O = { processGroup: true } as Opts;\nrunProc(c, 5, "x", O);`, ["`O`'s initializer is not a plain object literal"], [HARM]],
+    ["a name not declared in the file", `Bun.spawn(["git"], opts);`, ["`opts` is not declared in this file as a `const`", NEED_SPAWN], [HARM]],
+    ["a parameter as the options", `function f(o) { return Bun.spawn(["git"], o); }`, ["`o` is not declared in this file as a `const`"], [HARM]],
+    ["spawn, spread after detached", `Bun.spawn(["git"], { detached: true, ...o });`, ["a spread follows `detached: true` and may override it", "Move the spread before the key."], ["processGroup"]],
+    ["runProc, spread after processGroup", `runProc(c, 5, "x", { processGroup: true, ...o });`, ["a spread follows `processGroup: true`", "Move the spread before the key."], ["detached"]],
+  ];
+  for (const [form, source, want, never] of MESSAGES) {
+    test(`message for ${form}`, () => {
+      const m = msg(source);
+      for (const s of want) expect(m).toContain(s);
+      for (const s of never) expect(m).not.toContain(s);
+      expect(m).toEndWith(WAY_OUT);
+      expect(m).not.toContain("list the line");
+    });
+  }
+
+  test("spawn message: which child each remedy fits, and the detached form's own kill and exit handling", () => {
     const m = msg(`\nBun.spawn(["git"]);`);
-    expect(m).toStartWith("src/a.ts:2 `Bun.spawn(…)`: no top-level `detached: true` in its last argument");
-    for (const s of [HARM, "Use `runProc(…, { processGroup: true })`", "shutdown and Ctrl-C reach it", "its own kill of `-proc.pid` and its own exit handling", WAY_OUT]) expect(m).toContain(s);
-    expect(m.indexOf("runProc(…, { processGroup")).toBeLessThan(m.indexOf("detached: true` is the alternative"));
+    expect(m).toStartWith("src/a.ts:2 `Bun.spawn(…)`: no top-level `detached: true` in its last argument, so a kill (timeout, abort, `.kill()`) reaches only the direct child");
+    for (const s of [
+      "For a child that runs to completion, use `runProc(…, { processGroup: true })`", "shutdown and Ctrl-C reach it",
+      "For a long-lived or streaming child, end the `spawn` call with an options literal holding `detached: true`",
+      "outside runProc's shutdown registry, so it needs its own kill of `-proc.pid` and its own exit handling", WAY_OUT,
+    ]) expect(m).toContain(s);
+    expect(m.indexOf("runs to completion")).toBeLessThan(m.indexOf("long-lived or streaming"));
   });
 
   test("runProc message names the fourth argument and processGroup, not detached", () => {
@@ -187,24 +255,9 @@ describe("spawn group scan", () => {
     expect(m).not.toContain("detached");
   });
 
-  test("spread message says to move the spread before the key", () => {
-    const m = msg(`Bun.spawn(["git"], { detached: true, ...o });`);
-    for (const s of ["a spread follows", "Move the spread before the key.", HARM, WAY_OUT]) expect(m).toContain(s);
-  });
-
-  test("value message says to call it directly or list the line", () => {
-    const m = msg(`const run = opts.run ?? runProc;`);
-    for (const s of ["`runProc` used as a value", "Call it directly with the literal, or list the line.", HARM, WAY_OUT]) expect(m).toContain(s);
-  });
-
-  test("module message says exec/execFile ignore detached and to use spawn or runProc", () => {
-    const m = msg(`import { execFile } from "node:child_process";`);
-    for (const s of ["`execFile` imported from \"node:child_process\"", "`exec` and `execFile` ignore `detached`", "Use `spawn` or `runProc`.", HARM, WAY_OUT]) expect(m).toContain(s);
-  });
-
-  test("parse message says to fix the syntax and offers no allowlist way out", () => {
-    const m = msg(`Bun.spawn(;`);
-    expect(m).toBe("src/a.ts:1 TypeScript parse errors: the scan does not trust a tree recovered from a syntax error. Fix the syntax.");
+  test("parse message names the first diagnostic and its line, then the way out", () => {
+    const m = msg(`\nBun.spawn(["git"], { detached: true );`);
+    expect(m).toBe(`src/a.ts:2 TypeScript parse error "',' expected.": the scan does not trust a tree recovered from a syntax error. Fix the syntax. ${WAY_OUT}`);
   });
 });
 
@@ -228,7 +281,7 @@ describe("scannedFiles on a synthetic tree", () => {
 });
 
 describe("allowlist rules", () => {
-  const site = (p: string, line: number): Site => ({ path: p, line, kind: "spawn", what: "`Bun.spawn(…)`" });
+  const site = (p: string, line: number): Site => ({ path: p, line, kind: "spawn", what: "`Bun.spawn(…)`", why: "no top-level `detached: true` in its last argument." });
 
   test("parse: comments and blanks skipped; malformed, zero, duplicate and out-of-order lines reported", () => {
     const { counts, format } = parseCounts(["# header", "", "src/a.ts 2", "src/b.ts 0", "src/b.ts", "src/c.ts 1", "src/c.ts 3", "src/a2.ts 1", "src/z.ts x"].join("\n"));
