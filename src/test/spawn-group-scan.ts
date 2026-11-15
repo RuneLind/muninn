@@ -56,20 +56,41 @@ export function scannedFiles(root: string): string[] {
   return sourceFiles(root, ["src", "scripts", "db"], /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/).filter((f) => f !== RUN_PROC_FILE);
 }
 
-/** Type positions hold no value; a class's `extends` clause is an expression, though. */
+/**
+ * Type positions hold no value. TypeScript counts every `ExpressionWithTypeArguments` as a type node, but only
+ * an `implements` clause is erased (an interface's `extends` is, through the interface): a class's `extends`
+ * and an instantiation expression (`Bun.spawn<…>`) are values.
+ */
 function inType(n: ts.Node): boolean {
   for (let p = n.parent; p && !ts.isSourceFile(p); p = p.parent) {
-    const h = p.parent;
-    if (ts.isExpressionWithTypeArguments(p) && ts.isHeritageClause(h) && h.token === ts.SyntaxKind.ExtendsKeyword && ts.isClassLike(h.parent)) return false;
-    if (ts.isTypeNode(p) || ts.isInterfaceDeclaration(p) || ts.isTypeAliasDeclaration(p)) return true;
+    if (ts.isExpressionWithTypeArguments(p)) {
+      if (ts.isHeritageClause(p.parent) && p.parent.token === ts.SyntaxKind.ImplementsKeyword) return true;
+    } else if (ts.isTypeNode(p) || ts.isInterfaceDeclaration(p) || ts.isTypeAliasDeclaration(p)) return true;
   }
   return false;
 }
 
+const UNWRAP = (e: ts.Node) => ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e) || ts.isTypeAssertionExpression(e);
+
+/** An object or array literal that is a destructuring assignment's target, directly or nested in one. */
+function assignTarget(lit: ts.Node): boolean {
+  for (let e = lit; ;) {
+    let p = e.parent;
+    while (UNWRAP(p)) [e, p] = [p, p.parent];
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken) return p.left === e;
+    if (ts.isForOfStatement(p) || ts.isForInStatement(p)) return p.initializer === e;
+    if (ts.isArrayLiteralExpression(p)) e = p;
+    else if (ts.isPropertyAssignment(p) || ts.isSpreadElement(p) || ts.isSpreadAssignment(p)) e = p.parent;
+    else return false;
+  }
+}
+
+/** A name that declares something. A key in a destructuring assignment's target reads the property instead. */
 function declaredName(n: ts.Node): boolean {
   const p = n.parent;
+  if (ts.isPropertyAssignment(p)) return p.name === n && !assignTarget(p.parent);
   const decl = ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isMethodDeclaration(p) || ts.isParameter(p)
-    || ts.isPropertyDeclaration(p) || ts.isPropertyAssignment(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p);
+    || ts.isPropertyDeclaration(p) || ts.isGetAccessor(p) || ts.isSetAccessor(p);
   return decl && p.name === n;
 }
 
