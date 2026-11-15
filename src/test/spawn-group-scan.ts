@@ -135,7 +135,12 @@ function unreadCallee(n: ts.Node): ts.CallExpression | ts.NewExpression | null {
   }
 }
 
-const optionsArg = (c: ts.CallExpression, name: Name) => (name === RUN_PROC ? c.arguments[3] : c.arguments.at(-1));
+// Read from the whole BlockScoped field, never one bit: `await using` is Const | Using.
+const DECL_KEYWORD = new Map<number, string>([
+  [ts.NodeFlags.Const, "const"], [ts.NodeFlags.Let, "let"], [ts.NodeFlags.Using, "using"], [ts.NodeFlags.AwaitUsing, "await using"],
+]);
+
+const optionsArg =(c: ts.CallExpression, name: Name) => (name === RUN_PROC ? c.arguments[3] : c.arguments.at(-1));
 
 /**
  * For a declaration of `id`: the initializer of a top-level, non-exported `const`, past an `as const`
@@ -146,7 +151,8 @@ function topConstInit(id: ts.Identifier): ts.Expression | string | null {
   if (!ts.isVariableDeclaration(d) || d.name !== id) return null;
   if (!d.initializer) return "has no initializer";
   const stmt = d.parent.parent;
-  if (!(d.parent.flags & ts.NodeFlags.Const)) return "is declared with `let` or `var`, not `const`";
+  const kw = DECL_KEYWORD.get(d.parent.flags & ts.NodeFlags.BlockScoped) ?? "var";
+  if (kw !== "const") return `is declared with \`${kw}\`, not \`const\``;
   if (!ts.isVariableStatement(stmt) || !ts.isSourceFile(stmt.parent)) return "is not declared at the top level of the file";
   if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return "is exported";
   return ts.isAsExpression(d.initializer) && ts.isConstTypeReference(d.initializer.type) ? d.initializer.expression : d.initializer;
@@ -242,7 +248,7 @@ export function scanSource(file: string, source: string): Site[] {
   if (diag) {
     const line = sf.getLineAndCharacterOfPosition(diag.start ?? 0).line + 1;
     const text = ts.flattenDiagnosticMessageText(diag.messageText, " ");
-    return [{ path: file, line, kind: "parse", what: `TypeScript parse error "${text}"`, why: "the scan does not trust a tree recovered from a syntax error. Fix the syntax." }];
+    return [{ path: file, line, kind: "parse", what: `TypeScript parse error "${text}"`, why: "the scan does not trust a tree recovered from a syntax error, so it reads nothing else in this file until it parses and listing the file would hide every site in it. Fix the syntax." }];
   }
   const ids = new Map<string, ts.Identifier[]>();
   const nodes: ts.Node[] = [];
@@ -366,8 +372,9 @@ function moduleNameWhy(imported: string): string {
   return `the scan does not model \`${imported}\`. ${ALLOWED}`;
 }
 
+/** A parse site gets no way out: listing its file would hide every site the file holds. */
 export function siteMessage(s: Site): string {
-  return `${s.path}:${s.line} ${s.what}: ${s.why} ${WAY_OUT}`;
+  return `${s.path}:${s.line} ${s.what}: ${s.why}${s.kind === "parse" ? "" : ` ${WAY_OUT}`}`;
 }
 
 /** `<path> <count>` lines; malformed, duplicate and unsorted lines go to `format`. */

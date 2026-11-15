@@ -109,6 +109,7 @@ const CASES: [string, string, SiteKind[]][] = [
   ["({ a: { spawn: s } satisfies T } = x)", `({ a: { spawn: s } satisfies T } = x);`, ["value"]],
   ["({ a: { spawn: s }! } = x)", `({ a: { spawn: s }! } = x);`, ["value"]],
   ["({ a: <T>{ spawn: s } } = x)", `({ a: <T>{ spawn: s } } = x);`, ["value"]],
+  ["({ a: { spawn: s }! as any } = x), two wrappers", `({ a: { spawn: s }! as any } = x);`, ["value"]],
   ["({ ...{ spawn: s } } = x)", `({ ...{ spawn: s } } = x);`, ["value"]],
   ["const { spawn: s } = Bun is a binding element", `const { spawn: s } = Bun;`, ["value"]],
   ["({ spawn } = Bun) shorthand", `({ spawn } = Bun);`, ["value"]],
@@ -289,6 +290,7 @@ describe("spawn group scan", () => {
     ["inline options in parentheses", `Bun.spawn(["git"], ({ detached: true }));`, ["its options are wrapped in parentheses", NEED_SPAWN], [HARM]],
     ["inline options cast with as", `Bun.spawn(["git"], { detached: true } as Opts);`, ["its options are wrapped in a type assertion", NEED_SPAWN], [HARM, "`as const`"]],
     ["inline options cast with angle brackets", `Bun.spawn(["git"], <Opts>{ detached: true });`, ["its options are wrapped in a type assertion", NEED_SPAWN], [HARM]],
+    ["inline options under two wrappers", `Bun.spawn(cmd, ({ detached: true }) as X);`, ["its options are wrapped in a type assertion", NEED_SPAWN], [HARM, "cannot read options"]],
     ["a string command and no options", `spawn("ls");`, ["`spawn(…)`: no top-level `detached: true` in its last argument", HARM], ["not an object literal", "The scan reads"]],
     ["a declared const with no initializer", `declare const O: Opts;\nBun.spawn(["git"], O);`, ["its last argument is `O`", "`O` has no initializer", ...UNREAD_SPAWN], [NEED_SPAWN]],
     ["a let with no initializer", `let O;\nrunProc(c, 5, "x", O);`, ["its fourth argument is `O`", "`O` has no initializer", ...UNREAD_RP], ["`let`", NEED_RP]],
@@ -296,7 +298,10 @@ describe("spawn group scan", () => {
     ["a const shadowed by an import", `import { O } from "./o.ts";\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file", ...UNREAD_RP], ["also appears"]],
     ["a spread of a qualifying const", `const G = { detached: true };\nBun.spawn(["git"], { ...G });`, ["the scan does not look inside a spread", NEED_SPAWN], [HARM]],
     ["a spread argument", `runProc(cmd, 1000, ...extra, { processGroup: true });`, ["a spread argument hides which argument holds the options", NEED_RP], [HARM]],
-    ["let options", `let O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `let` or `var`, not `const`", ...UNREAD_RP], [NEED_RP]],
+    ["let options", `let O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `let`, not `const`", ...UNREAD_RP], [NEED_RP, "`var`"]],
+    ["var options", `var O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `var`, not `const`", ...UNREAD_RP], [NEED_RP, "`let`"]],
+    ["using options", `using O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `using`, not `const`", ...UNREAD_RP], [NEED_RP, "`let`", "`var`"]],
+    ["await using options", `await using O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared with `await using`, not `const`", ...UNREAD_RP], [NEED_RP, "`let`", "`var`"]],
     ["an exported const", `export const O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is exported", ...UNREAD_RP], []],
     ["a const inside a function", `function f() { const O = { processGroup: true };\nreturn runProc(c, 5, "x", O); }`, ["`O` is not declared at the top level of the file", ...UNREAD_RP], [NEED_RP]],
     ["a const declared twice", `const O = { processGroup: true };\nconst O = { processGroup: true };\nrunProc(c, 5, "x", O);`, ["`O` is declared more than once in this file", ...UNREAD_RP], []],
@@ -345,6 +350,7 @@ describe("spawn group scan", () => {
       for (const s of want) expect(m).toContain(s);
       for (const s of never) expect(m).not.toContain(s);
       expect(m).toEndWith(WAY_OUT);
+      expect(m.split(WAY_OUT)).toHaveLength(2);
       expect(m).not.toContain("list the line");
     });
   }
@@ -418,9 +424,10 @@ describe("spawn group scan", () => {
     expect(m).not.toContain("detached");
   });
 
-  test("parse message names the first diagnostic and its line, then the way out", () => {
+  test("parse message names the first diagnostic and its line, and offers no allowlist way out", () => {
     const m = msg(`\nBun.spawn(["git"], { detached: true );`);
-    expect(m).toBe(`src/a.ts:2 TypeScript parse error "',' expected.": the scan does not trust a tree recovered from a syntax error. Fix the syntax. ${WAY_OUT}`);
+    expect(m).toBe(`src/a.ts:2 TypeScript parse error "',' expected.": the scan does not trust a tree recovered from a syntax error, so it reads nothing else in this file until it parses and listing the file would hide every site in it. Fix the syntax.`);
+    for (const s of [ALLOWLIST, "add or raise", "If the code is right"]) expect(m).not.toContain(s);
   });
 });
 
