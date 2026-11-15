@@ -44,6 +44,7 @@ import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
+import { askBootLine, placeBootLine } from "./wiki-boot-line.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -1112,6 +1113,8 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   pendingFocus = null;
   el.innerHTML = html;
   paintedCardHtml = html;
+  // Outside `html`: the line's own landing places it, so it never repaints the card under a press or a selection.
+  placeBootLine(el);
   ensureWorkChecks();
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
@@ -1282,6 +1285,9 @@ function loadWorkMap(): void {
       if (slot.kind !== "card") return;
       workBody = body as WorkMapGetBody & { map: AnyWorkMap };
       paintWorkCard();
+      askBootLine(() => {
+        if (slot.kind === "card") placeBootLine(document.getElementById("wikiWorkCard"));
+      });
       // A wiki outside the decision triage's scope answers 404: the card shows no Decisions section.
       if (!isThemeMap(workBody.map)) loadInbox(withWiki("/api/wiki/decision-inbox"));
     })

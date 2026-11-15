@@ -38,6 +38,15 @@ import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import { killLiveProcessGroups } from "./utils/run-proc.ts";
+import { startBootRecord } from "./wiki/step-checks/boot-record.ts";
+
+// The commit this process starts from (the Your work card's boot line). The
+// first statement: the static imports above are already evaluated, so the
+// record covers only code loaded after this point (dynamic imports, files read
+// on first use): a pull landing while they load puts a newer commit on the
+// record than the code they loaded. Never
+// awaited: a slow git gives an unknown record, not a slow start.
+void startBootRecord();
 
 // `loadConfig()` throws on every fail-closed config condition — a missing
 // DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has

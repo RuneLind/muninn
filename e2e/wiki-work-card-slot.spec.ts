@@ -24,6 +24,10 @@
  *  7. **A page declared after the run (P6)** joins its effort on a listing
  *     refresh though the run did not move: its step on the board, and first on
  *     the effort page.
+ *  8. **The boot line** (its GET stubbed: CI's checkout is shallow, and no
+ *     spec reaches GitHub) is the card's last child, a «restart» row takes
+ *     the attention colour, its late landing does not repaint the card, and
+ *     it goes with the card when the map goes.
  *
  * One muninn on its own port over the temp wikis `wiki-work-card-fixture.ts`
  * seeds. `SCHEDULER_ENABLED=false` keeps the work-map loop off and every wiki
@@ -73,6 +77,8 @@ import {
   DIGEST_OK,
   organizable,
   useWorkCardServer,
+  BOOT,
+  BOOT_LINE_STUB,
 } from "./wiki-work-card-fixture.ts";
 
 const PORT = e2ePort("wiki-work-card-slot");
@@ -944,4 +950,39 @@ test("a checks answer landing mid-press waits for the release, then paints", asy
   await page.mouse.up();
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await expect(checking).toHaveCount(0);
+});
+
+// The boot line (mimir plan «Drain the owner-step queue», P1). The rows are unit-tested on real git
+// (boot-line.test.ts); here the GET answers a fixed «restart» row, held until the card has settled.
+const RESTART_TEXT = "started from 409bfd1a (#864) on 14.11 20:58 · the checkout holds 1 newer PR: #865: restart";
+
+test("the boot line: the card's last child, «restart» in the attention colour, no repaint when it lands, gone with the map", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  // After the fixture's stub, so it wins.
+  await page.route("**/api/wiki/boot-line*", async (route) => {
+    await held;
+    await route.fulfill({ json: { ...BOOT_LINE_STUB, row: "newer", restart: true, text: RESTART_TEXT } });
+  });
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-boot-line")).toHaveCount(0);
+  // A marker the next repaint would wipe; it holds before the line lands, so a loss after is the line's doing.
+  await card.locator("[data-wm-need]").first().evaluate((el) => el.setAttribute("data-before-line", ""));
+  await page.waitForTimeout(500);
+  await expect(card.locator("[data-before-line]")).toHaveCount(1);
+  release();
+  const line = card.locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(RESTART_TEXT);
+  await expect(line).toHaveAttribute("data-boot-row", "newer");
+  await expect(card.locator("[data-before-line]")).toHaveCount(1);
+  expect(await card.evaluate((el) => el.lastElementChild?.classList.contains("wiki-boot-line") ?? false)).toBe(true);
+  expect(await line.evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--tone-warn"));
+  // The map goes on an in-app adopt (a wiki switch is a full navigation in this reader): no line shows.
+  await rm(path.join(roots[BOOT]!, ".work-map.json"));
+  await forceAdopt(page, BOOT);
+  await expect(card).toBeHidden();
+  await expect(page.locator(".wiki-boot-line:visible")).toHaveCount(0);
 });

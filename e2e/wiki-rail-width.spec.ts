@@ -36,6 +36,12 @@ import {
   RAIL_WIDTH_KEY_STEP,
   RAIL_WIDTH_MAX,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-rail-width");
 const BASE = `http://127.0.0.1:${PORT}`;
