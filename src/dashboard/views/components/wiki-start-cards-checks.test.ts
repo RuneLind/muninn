@@ -65,7 +65,8 @@ beforeEach(async () => {
   (globalThis as { document?: unknown }).document = { getElementById: (id: string) => (id === "wikiWorkCard" ? card : null) };
   globalThis.fetch = ((url: string) => {
     // The Decisions section's own GETs (wiki-work-inbox.ts): out of scope here, and not a checks fetch.
-    if (url.includes("/api/wiki/decision-inbox") || url.includes("/api/wiki/decision-triage/")) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+    // The boot line's GET (wiki-boot-line.ts) likewise.
+    if (url.includes("/api/wiki/decision-inbox") || url.includes("/api/wiki/decision-triage/") || url.includes("/api/wiki/boot-line")) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
     fetches++;
     expect(url).toContain("/api/wiki/work-map/checks");
     return answer();

@@ -67,7 +67,7 @@ export interface ProbeDeps {
  * stays under the answer's `ANSWER_BOUND_MS`.
  */
 export const PROBE_BOUND_MS: Record<CheckProbe["kind"], number> = { env: 2_000, migration: 3_000, checkout: 6_500, pushed: 7_000, restart: 1_000 };
-const GIT_LOCAL_MS = 2_000;
+export const GIT_LOCAL_MS = 2_000;
 export const LS_REMOTE_MS = 5_000;
 
 const ok = (why: string): ProbeResult => ({ state: "ok", why });
@@ -187,18 +187,29 @@ async function refusePartialClone(dir: string, label: string, git: GitRun): Prom
  * local origin ({@link refuseLocalOrigin}).
  */
 export async function checkoutCurrent(dir: string, label: string, rawGit: GitRun): Promise<ProbeResult> {
+  return (await checkoutCompare(dir, label, rawGit)).result;
+}
+
+/** {@link checkoutCurrent}'s answer, with origin's default branch and tip beside it once `ls-remote` read them (null before that). */
+export async function checkoutCompare(dir: string, label: string, rawGit: GitRun): Promise<{ result: ProbeResult; head: { branch: string; tip: string } | null }> {
+  const bare = (result: ProbeResult) => ({ result, head: null });
   const git = checkoutGit(rawGit);
   const partial = await refusePartialClone(dir, label, git);
-  if (partial) return partial;
+  if (partial) return bare(partial);
   const busy = await refuseInProgress(dir, label, git);
-  if (busy) return busy;
+  if (busy) return bare(busy);
   // `false`: checkout proves what origin's URL serves, not where a push goes, so core.sshCommand is not refused.
   const local = await refuseLocalOrigin(dir, label, false, git);
-  if (local) return local;
+  if (local) return bare(local);
   const remote = await git(dir, ["ls-remote", "--symref", "origin", "HEAD"], { timeoutMs: LS_REMOTE_MS, maxLines: 20 });
-  if (!remote.ok || remote.capped) return unknown(`${gitFailure(remote, "git ls-remote")}: origin's default branch is unknown`);
+  if (!remote.ok || remote.capped) return bare(unknown(`${gitFailure(remote, "git ls-remote")}: origin's default branch is unknown`));
   const head = parseSymrefHead(remote.stdout);
-  if (!head) return unknown("origin's answer names no single default branch and tip");
+  if (!head) return bare(unknown("origin's answer names no single default branch and tip"));
+  return { result: await containsTip(dir, label, head, git), head };
+}
+
+/** Whether `dir`'s HEAD contains origin's `tip`; `git` carries {@link CHECKOUT_GIT_ENV}. */
+async function containsTip(dir: string, label: string, head: { branch: string; tip: string }, git: GitRun): Promise<ProbeResult> {
   const { branch, tip } = head;
   const short = tip.slice(0, 7);
   // A full sha that is not here: exit 1 with nothing on stderr (measured). Any other failure proves nothing.

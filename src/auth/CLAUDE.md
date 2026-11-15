@@ -357,7 +357,8 @@ atlas), the spawning wiki reads (plan-card, the work map's GitHub check, the
 decision inbox, felles-status, and `/api/wiki/step-checks`, whose probes spawn
 git and run one network `ls-remote` per named repo, only on a wiki in Done's
 triage scope and never on a `WIKI_READONLY_ROOTS` root, plus its peer half
-`/api/checks/answer`, the same probes run for the other machine), the MCP-status probe and
+`/api/checks/answer`, the same probes run for the other machine, and
+`/api/wiki/boot-line`, git in muninn's own checkout and one `ls-remote` per 30 s), the MCP-status probe and
 the two WS upgrade paths. A second list,
 `REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
 whose `?refresh=1` forces a rebuild — `/api/wiki/pages`,

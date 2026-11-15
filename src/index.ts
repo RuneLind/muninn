@@ -38,6 +38,12 @@ import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import { killLiveProcessGroups } from "./utils/run-proc.ts";
+import { startBootRecord } from "./wiki/step-checks/boot-record.ts";
+
+// The commit this process starts from, read before any dynamic import so a pull
+// landing during start cannot put newer code on the record than what loaded.
+// Never awaited here: `GET /api/wiki/boot-line` reads it.
+void startBootRecord();
 
 // `loadConfig()` throws on every fail-closed config condition — a missing
 // DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has

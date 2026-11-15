@@ -137,6 +137,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // to run probes for itself, the same git spawns. A server-side fetch sends
   // neither Origin nor Sec-Fetch-Site, so it passes.
   "/api/checks/answer",
+  // The Your work card's boot line SPAWNS git in muninn's own checkout, one
+  // network `ls-remote` per 30-second cache window. The card's same-origin fetch passes.
+  "/api/wiki/boot-line",
   // The felles status SPAWNS Bun and a gcloud bucket listing per uncached
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.

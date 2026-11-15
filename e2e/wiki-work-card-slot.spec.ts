@@ -24,6 +24,8 @@
  *  7. **A page declared after the run (P6)** joins its effort on a listing
  *     refresh though the run did not move: its step on the board, and first on
  *     the effort page.
+ *  8. **The boot line** sits on the card, survives the card's repaint, and is
+ *     absent on a wiki with no map (its GET stubbed).
  *
  * One muninn on its own port over the temp wikis `wiki-work-card-fixture.ts`
  * seeds. `SCHEDULER_ENABLED=false` keeps the work-map loop off and every wiki
@@ -944,4 +946,37 @@ test("a checks answer landing mid-press waits for the release, then paints", asy
   await page.mouse.up();
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await expect(checking).toHaveCount(0);
+});
+
+// The boot line (mimir plan «Drain the owner-step queue», P1). CI's checkout is detached and shallow, so the
+// route's GET is answered with a fixed payload; the rows themselves are unit-tested in boot-line.test.ts.
+const BOOT_TEXT = "started from 409bfd1a (#864) on 14.11 20:58 · the checkout holds 1 newer PR: #865: restart";
+
+test("the boot line sits on the card through a repaint, and a wiki without a map shows none", async ({ page }) => {
+  let asked = 0;
+  await page.route("**/api/wiki/boot-line*", (route) => {
+    asked++;
+    return route.fulfill({ json: { row: "newer", text: BOOT_TEXT, defaultBranch: "main", readAt: 0, record: { known: false, reason: "stubbed", at: 0 } } });
+  });
+  // The checks answer is held until the line has landed: its arrival repaints the card.
+  let releaseChecks: () => void = () => {};
+  const gate = new Promise<void>((r) => { releaseChecks = r; });
+  await page.route("**/api/wiki/work-map/checks*", async (route) => {
+    await gate;
+    await route.fulfill({ json: checksBody() });
+  });
+  await openStart(page, BOARD);
+  const card = boardCard(page);
+  const line = card.locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_TEXT);
+  await expect(line).toHaveAttribute("data-boot-row", "newer");
+  await card.locator(".wiki-wm-strip").evaluate((el) => el.setAttribute("data-before-repaint", ""));
+  releaseChecks();
+  await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
+  await expect(line).toHaveText(BOOT_TEXT);
+  expect(asked).toBe(1);
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: { digest: null } }));
+  await openStart(page, NONE);
+  await expect(page.locator("#wikiWorkCard")).toBeHidden();
+  await expect(page.locator(".wiki-boot-line")).toHaveCount(0);
 });
