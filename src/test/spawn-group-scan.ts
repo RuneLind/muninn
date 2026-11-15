@@ -87,31 +87,31 @@ function calleeName(e: ts.Expression): Name | null {
     : null;
 }
 
-/** The call `n` is the checked callee of. */
-function calleeCall(n: ts.Identifier, name: Name): ts.CallExpression | null {
+/** The call `n` is the checked callee of. Its name is `n`'s: `calleeName` takes only identifiers, and its `??`/`||` form only two runProc names. */
+function calleeCall(n: ts.Node): ts.CallExpression | null {
   let e: ts.Node = ts.isPropertyAccessExpression(n.parent) && n.parent.name === n ? n.parent : n;
   if (ts.isBinaryExpression(e.parent) && ts.isParenthesizedExpression(e.parent.parent)) e = e.parent.parent;
   const c = e.parent;
-  return ts.isCallExpression(c) && c.expression === e && calleeName(c.expression) === name ? c : null;
+  return ts.isCallExpression(c) && c.expression === e && calleeName(c.expression) ? c : null;
 }
 
 const optionsArg = (c: ts.CallExpression, name: Name) => (name === RUN_PROC ? c.arguments[3] : c.arguments.at(-1));
 
-function topConstLiteral(id: ts.Identifier): ts.ObjectLiteralExpression | null {
+/** The initializer of a top-level, non-exported `const`, past an `as const`; `callVerdict` checks it is an object literal. */
+function topConstInit(id: ts.Identifier): ts.Expression | null {
   const d = id.parent;
   if (!ts.isVariableDeclaration(d) || d.name !== id || !d.initializer) return null;
   const stmt = d.parent.parent;
   if (!(d.parent.flags & ts.NodeFlags.Const) || !ts.isVariableStatement(stmt) || !ts.isSourceFile(stmt.parent)) return null;
   if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return null;
-  const init = ts.isAsExpression(d.initializer) && ts.isConstTypeReference(d.initializer.type) ? d.initializer.expression : d.initializer;
-  return ts.isObjectLiteralExpression(init) ? init : null;
+  return ts.isAsExpression(d.initializer) && ts.isConstTypeReference(d.initializer.type) ? d.initializer.expression : d.initializer;
 }
 
-/** `X`'s object literal, when its one declaration is a qualifying top-level const and every other `X` is a checked call's options. */
-function constLiteral(id: ts.Identifier, ids: Map<string, ts.Identifier[]>): ts.ObjectLiteralExpression | null {
-  let lit: ts.ObjectLiteralExpression | null = null;
+/** `X`'s initializer, when its one declaration is a qualifying top-level const and every other `X` is a checked call's options. */
+function constInit(id: ts.Identifier, ids: Map<string, ts.Identifier[]>): ts.Expression | null {
+  let lit: ts.Expression | null = null;
   for (const u of ids.get(id.text) ?? []) {
-    const decl = topConstLiteral(u);
+    const decl = topConstInit(u);
     if (decl && lit) return null;
     if (decl) lit = decl;
     else {
@@ -141,7 +141,7 @@ function keyVerdict(o: ts.ObjectLiteralExpression, key: string): Verdict {
 function callVerdict(c: ts.CallExpression, name: Name, ids: Map<string, ts.Identifier[]>): Verdict {
   const arg = optionsArg(c, name);
   if (!arg || c.arguments.some(ts.isSpreadElement)) return "missing";
-  const lit = ts.isIdentifier(arg) ? constLiteral(arg, ids) : arg;
+  const lit = ts.isIdentifier(arg) ? constInit(arg, ids) : arg;
   return lit && ts.isObjectLiteralExpression(lit) ? keyVerdict(lit, KEY[name]) : "missing";
 }
 
@@ -192,7 +192,7 @@ export function scanSource(file: string, source: string): Site[] {
       if (!typeOnly && spec.propertyName && spec.propertyName.text !== spec.name.text) add(spec, "value", `\`${name}\` renamed in \`${spec.getText(sf)}\``);
       continue;
     }
-    const call = ts.isIdentifier(n) ? calleeCall(n, name) : null;
+    const call = calleeCall(n);
     if (!call) add(n, "value", `\`${name}\` used as a value, not called`);
     else {
       const v = callVerdict(call, name, ids);

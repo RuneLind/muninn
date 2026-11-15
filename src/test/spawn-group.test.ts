@@ -50,7 +50,13 @@ const CASES: [string, string, SiteKind[]][] = [
   ["typeof runProc in a type", RP + `type R = typeof runProc;\ninterface D { run?: typeof runProc }`, []],
   ["a runProc function declaration", `function runProc() {}`, []],
   ["a runProc parameter, method and property", `class A { runProc = 1; runProc2(runProc: number) {} }\nconst o = { runProc: f };`, []],
-  ["class extends a runProc call is a value", `class A extends mixin(runProc) {}`, ["value"]],
+  ["a function expression, method and accessors named runProc/spawn", `const f = function runProc() {};\nclass A { runProc() {} get spawn() { return 1; } set spawn(v) {} }`, []],
+  ["a type alias named runProc", `type runProc = string;`, []],
+  ["type-only import renaming runProc", `import type { runProc as R } from "./run-proc.ts";\nexport type { spawn as S } from "bun";`, []],
+  ["an import alias that keeps the name", `import { runProc as runProc } from "./run-proc.ts";`, []],
+  ["runProc as the object of x.runProc", `runProc.runProc(c, 5, "x", ${G});`, ["value"]],
+  ["runProc as an argument of a grouped runProc call", `runProc(runProc, 5, "x", ${G});`, ["value"]],
+  ["class extends a runProc call is a value",`class A extends mixin(runProc) {}`, ["value"]],
 
   // spawn
   ["Bun.spawn with detached: true", `Bun.spawn(["git"], { stdout: "pipe", detached: true });`, []],
@@ -85,7 +91,8 @@ const CASES: [string, string, SiteKind[]][] = [
   ["fork import", `import { fork } from "child_process";`, ["module"]],
   ["one site per bad specifier", `import { exec, spawn, fork } from "child_process";`, ["module", "module"]],
   ["renamed spawn import is one site", `import { spawn as sp } from "node:child_process";\nsp("git");`, ["module"]],
-  ["renamed Sync import", `import { execSync as es } from "node:child_process";`, ["module"]],
+  ["a non-Sync name renamed to a Sync name", `import { exec as execSync } from "child_process";`, ["module"]],
+  ["renamed Sync import",`import { execSync as es } from "node:child_process";`, ["module"]],
   ["default import", `import cp from "node:child_process";`, ["module"]],
   ["namespace import", `import * as cp from "node:child_process";\ncp.execFileSync("git");`, ["module"]],
   ["default plus named import", `import cp, { spawn } from "node:child_process";`, ["module"]],
@@ -109,7 +116,10 @@ const CASES: [string, string, SiteKind[]][] = [
   ["const passed to Object.assign", `const O = ${G};\nObject.assign(O, x);\nrunProc(c, 5, "x", O);`, ["runProc"]],
   ["const passed elsewhere", `const O = ${G};\nuse(O);\nrunProc(c, 5, "x", O);`, ["runProc"]],
   ["const in the wrong argument slot", `const O = ${G};\nrunProc(c, 5, O, O);`, ["runProc"]],
-  ["const not an object literal", `const O = make();\nrunProc(c, 5, "x", O);`, ["runProc"]],
+  ["const declared twice at top level", `const O = ${G};\nconst O = ${G};\nrunProc(c, 5, "x", O);`, ["runProc"]],
+  ["const cast to another type", `const O = ${G} as Opts;\nrunProc(c, 5, "x", O);`, ["runProc"]],
+  ["const also used in a call through nested parens", `const O = ${G};\n((a.runProc ?? runProc))(c, 5, "x", O);\nrunProc(c, 5, "x", O);`, ["value", "value", "runProc"]],
+  ["const not an object literal",`const O = make();\nrunProc(c, 5, "x", O);`, ["runProc"]],
 
   // fail closed on the literal
   ["shorthand detached", `const detached = true;\nBun.spawn(["git"], { detached });`, ["spawn"]],
@@ -148,13 +158,16 @@ describe("spawn group scan", () => {
     expect(scanSource("src/x.ts", `const x = 1;\nconst p = Bun.spawn(\n  ["git"],\n  {},\n);`).map((s) => s.line)).toEqual([2]);
     expect(scanSource("src/x.ts", `Bun.spawn(["a"]);\n\nimport { exec } from "child_process";\nBun.spawn(["b"]);`).map((s) => `${s.kind}:${s.line}`))
       .toEqual(["spawn:1", "module:3", "spawn:4"]);
+    // The module site is found at the import before the renamed name inside it.
+    expect(scanSource("src/x.ts", `import cp, {\n  runProc as rp,\n} from "child_process";`).map((s) => `${s.kind}:${s.line}`)).toEqual(["value:2", "module:3"]);
   });
 
   test("parses by extension: JSX text is not code, and a .ts file with JSX has parse errors", () => {
     expect(scanSource("src/x.tsx", `const e = <p>Bun.spawn(["git"])</p>;`)).toEqual([]);
     expect(scanSource("src/x.jsx", `const e = <p>Bun.spawn(["git"])</p>;\nBun.spawn(["git"]);`).map((s) => s.kind)).toEqual(["spawn"]);
     expect(scanSource("src/x.mjs", `Bun.spawn(["git"]);`).map((s) => s.kind)).toEqual(["spawn"]);
-    expect(scanSource("src/x.ts", `const e = <p>x</p>;`).map((s) => s.kind)).toEqual(["parse"]);
+    for (const ext of [".js", ".mjs", ".cjs"]) expect(scanSource(`src/x${ext}`, `const e = <p>Bun.spawn(["git"])</p>;`)).toEqual([]);
+    for (const ext of [".ts", ".mts", ".cts"]) expect(scanSource(`src/x${ext}`, `const e = <p>x</p>;`).map((s) => s.kind)).toEqual(["parse"]);
   });
 
   const msg = (source: string) => siteMessage(scanSource("src/a.ts", source)[0]!);
