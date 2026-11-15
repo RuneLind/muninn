@@ -1,0 +1,39 @@
+# Spawn sites allowed today (src/test/spawn-group-scan.ts), as <path> <count>, keyed per file.
+# A fixed site lowers its count, and a line at zero is removed. A raised count or a new line is a reviewed exception the PR body explains.
+# Nothing compares this list with the base branch: review is the only check on its growth.
+scripts/backfill-wiki-pubdates.ts 1
+scripts/count-tests.ts 1
+scripts/preview-role.ts 1
+scripts/probe-claude-cli-meta.ts 1
+scripts/probe-toolsearch-deferral.ts 1
+scripts/replay-youtube.ts 4
+scripts/smoke-vertex.ts 1
+scripts/test-chain.ts 1
+scripts/test-par.ts 1
+scripts/test-stream-json.ts 1
+src/ai/executor.ts 1
+src/ai/tool-surface.ts 1
+src/benchmarks/judge.ts 1
+src/benchmarks/process-utils.ts 1
+src/benchmarks/serena-benchmark.ts 1
+src/benchmarks/worktree.ts 1
+src/benchmarks/yggdrasil-manager.ts 2
+src/dashboard/routes/benchmark-routes.ts 1
+src/dashboard/routes/wiki-felles-publish.ts 2
+src/dashboard/routes/wiki-plan-card.ts 1
+src/dashboard/routes/wiki-stamp.ts 1
+src/gcp/access-token.ts 1
+src/hivemind/broker.ts 1
+src/scheduler/executor.ts 1
+src/serena/manager.ts 3
+src/summaries/frames.ts 1
+src/vimeo/whisper.ts 1
+src/voice/stt.ts 2
+src/voice/tts.ts 3
+src/watchers/x.ts 1
+src/wiki/commit.ts 1
+src/wiki/git-dates.ts 2
+src/wiki/stale-confirm.ts 1
+src/wiki/work-map/gh-check.ts 1
+src/youtube/discover.ts 1
+src/youtube/probe.ts 1
