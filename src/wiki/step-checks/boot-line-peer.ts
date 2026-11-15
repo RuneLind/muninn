@@ -89,10 +89,19 @@ function clamp(s: string, max: number): string {
 
 const KEYS = ["row", "restart", "text", "commit", "pr", "branch", "at", "unread"] as const;
 
-/** What `oneLine` leaves and a row must not show: zero-width and other invisible characters, the tag block and
- *  lone surrogates (`\p{Cs}` under `u` matches only an unpaired half). Removed, not spaced, before `oneLine`. */
-const INVISIBLE = /[\u00AD\u200B-\u200D\u2060-\u2064\uFEFF\u{E0000}-\u{E007F}]|\p{Cs}/gu;
-const shown = (s: string, max: number) => oneLine(s.replace(INVISIBLE, ""), max);
+/** Removed, not spaced, before `oneLine`: Default_Ignorable_Code_Point (zero-width, fillers, variation selectors,
+ *  the tag block), format (Cf), private use (Co), unassigned (Cn), U+2800 BRAILLE PATTERN BLANK, and lone
+ *  surrogates (`\p{Cs}` under `u` matches only an unpaired half). Emoji sequences lose their joiners and
+ *  selectors. Line and paragraph separators are left to `oneLine`, which spaces them: removed, they would join
+ *  two words. */
+const INVISIBLE = /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Co}\p{Cn}\u{2800}]|\p{Cs}/gu;
+/** A text with no visible character left: only white space and space separators. `oneLine`'s `\s` trim empties
+ *  every such text today; this holds if that changes. */
+const NOTHING_VISIBLE = /^[\p{White_Space}\p{Z}]*$/u;
+const shown = (s: string, max: number) => {
+  const one = oneLine(s.replace(INVISIBLE, ""), max);
+  return NOTHING_VISIBLE.test(one) ? "" : one;
+};
 
 /** `machine`'s reply, or why it is refused. Pure. */
 export function readPeerBootLine(body: unknown, machine: string): { value: PeerBootLine } | { refused: string } {

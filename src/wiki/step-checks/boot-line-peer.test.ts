@@ -137,6 +137,58 @@ describe("readPeerBootLine", () => {
     expect("value" in got && got.value.unread).toEqual(["origin"]);
   });
 
+  const hex = (c: number) => `U+${c.toString(16).toUpperCase().padStart(4, "0")}`;
+  const isSurrogate = (c: number) => c >= 0xd800 && c <= 0xdfff;
+
+  // The expected set is built here from properties, not from the production pattern.
+  test("every code point that renders blank, sent alone as the text, refuses the reply", () => {
+    const blank = /^[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Co}\p{Zl}\p{Zp}\p{Zs}\p{Cc}\u{2800}]$/u;
+    const accepted: string[] = [];
+    let swept = 0;
+    for (let c = 0; c <= 0x10ffff; c++) {
+      if (isSurrogate(c)) continue;
+      const ch = String.fromCodePoint(c);
+      if (!blank.test(ch)) continue;
+      swept++;
+      if (refused(reply({ text: ch })) !== "sent an empty text") accepted.push(hex(c));
+    }
+    expect(swept).toBeGreaterThan(140_000);
+    expect(accepted).toEqual([]);
+  });
+
+  test("a sample of unassigned code points, sent alone, refuses the reply", () => {
+    const sample = [0x0378, 0x0379, 0x1fffe, 0x50000, 0x10ffff];
+    for (const c of sample) expect(/^\p{Cn}$/u.test(String.fromCodePoint(c))).toBe(true);
+    const accepted = sample.filter((c) => refused(reply({ text: String.fromCodePoint(c) })) !== "sent an empty text").map(hex);
+    expect(accepted).toEqual([]);
+  });
+
+  test("no letter, digit, punctuation or symbol is stripped, except the four Hangul fillers and the braille blank", () => {
+    const visible = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
+    const removed: string[] = [];
+    for (let c = 0; c <= 0x10ffff; c++) {
+      if (isSurrogate(c)) continue;
+      const ch = String.fromCodePoint(c);
+      if (!visible.test(ch)) continue;
+      const got = readPeerBootLine(reply({ text: `a${ch}b` }), "mini");
+      if (!("value" in got) || got.value.text !== `a${ch}b`) removed.push(hex(c));
+    }
+    // Default_Ignorable letters (category Lo) and U+2800 (So) render blank and go on purpose.
+    expect(removed).toEqual(["U+115F", "U+1160", "U+2800", "U+3164", "U+FFA0"]);
+  });
+
+  test("Norwegian, a plain emoji and CJK come through unchanged", () => {
+    for (const text of ["bl\u00E5b\u00E6rsyltet\u00F8y p\u00E5 \u00C6r\u00F8", "started \u{1F680} from x", "\u{5DF2}\u{91CD}\u{542F} \u{8D77}\u{52A8}"]) {
+      const got = readPeerBootLine(reply({ text }), "mini");
+      expect("value" in got && got.value.text).toBe(text);
+    }
+  });
+
+  test("an unread name of only a Hangul filler, a variation selector or the braille blank is dropped", () => {
+    const got = readPeerBootLine(reply({ unread: ["\u{3164}", "\u{FE0F}", "\u{2800}", "\u{3164}\u{FE0F} \u{2800}", "origin"] }), "mini");
+    expect("value" in got && got.value.unread).toEqual(["origin"]);
+  });
+
   test("an absolute-path-looking string is just text: kept as text, for the client to escape", () => {
     const got = readPeerBootLine(reply({ text: "started from /Users/someone/<b>muninn</b>" }), "mini");
     expect("value" in got && got.value.text).toBe("started from /Users/someone/<b>muninn</b>");
