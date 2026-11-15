@@ -173,7 +173,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves to 876,200.
 // Its fix round (an unchanged line left in place, asks only while the card shows, an abort bound):
 // 876,593 (298,292 gzipped), so the pin moves to 876,800.
-const WIKI_CLIENT_MAX_BYTES = 876_800;
+// 2026-11-15, the boot line's peer rows (one row per machine in the block): 877,813 (298,680 gzipped),
+// so the pin moves to 878,000.
+const WIKI_CLIENT_MAX_BYTES = 878_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

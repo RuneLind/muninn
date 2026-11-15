@@ -137,6 +137,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // to run probes for itself, the same git spawns. A server-side fetch sends
   // neither Origin nor Sec-Fetch-Site, so it passes.
   "/api/checks/answer",
+  // The peer half of the boot line below: the other machine's muninn asks this
+  // one for its own line, the same git spawns. Server-side fetch: passes.
+  "/api/checks/boot-line",
   // The Your work card's boot line SPAWNS git in muninn's own checkout on every
   // read, and a network `ls-remote` once per 30 s. The card's same-origin fetch passes.
   "/api/wiki/boot-line",

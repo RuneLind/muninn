@@ -68,7 +68,8 @@ import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
 import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
 import { registerChecksAnswerRoute } from "./checks-answer.ts";
-import { registerWikiBootLineRoute } from "./wiki-boot-line.ts";
+import { realBootLineDeps, registerWikiBootLineRoute } from "./wiki-boot-line.ts";
+import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
 import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
 import { realTriageRunDeps, registerWikiDecisionTriageRunRoute } from "./wiki-decision-triage-run.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
@@ -2176,7 +2177,9 @@ export function registerWikiToolRoutes(
   // The other machine's step-checks route asks this one to answer probes for itself.
   registerChecksAnswerRoute(app, config);
   // The Your work card's boot line: the commit this process started from, and what moved in its checkout since.
-  registerWikiBootLineRoute(app);
+  registerWikiBootLineRoute(app, () => realBootLineDeps(config));
+  // The other machine's boot line asks this one for its own line (never relayed onward).
+  registerChecksBootLineRoute(app, config);
   // The triage's status line and /models card: the nightly log on this machine.
   registerWikiDecisionTriageStatusRoutes(app, () => realTriageStatusDeps(config));
   // Run now beside that line: one model-off pass through the loop's own half.

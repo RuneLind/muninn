@@ -2815,7 +2815,8 @@ function buildWikiPageCss(): string {
     .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
     .wiki-wm-status.warn { color: var(--tone-warn); }
     .wiki-boot-line { font-size: 11.5px; color: var(--text-soft); margin: 8px 0 0; overflow-wrap: anywhere; }
-    .wiki-boot-line.restart { color: var(--tone-warn); }
+    .wiki-boot-line.restart, .wiki-boot-row.restart { color: var(--tone-warn); }
+    .wiki-boot-row.muted { color: var(--text-faint); }
     /* Equal cells. The floor is "follow-ups", the strip's longest word, plus the cell's padding, and five fit the 485 px a 1265 viewport leaves.
        P1's 112 px does not. A wider fallback font runs a word into the padding; a cell's words never break. */
     .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin: 2px 0 8px; }
