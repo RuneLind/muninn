@@ -29,7 +29,8 @@
  *     the attention colour, its late landing does not repaint the card, and
  *     it goes with the card when the map goes. An unchanged landing keeps the
  *     node (a selection on it survives), a changed one waits out a held press,
- *     no ask goes out while no card shows, and a request that never answers
+ *     no ask goes out while no card shows, a return to the card from an
+ *     article asks again, and a request that never answers
  *     is aborted so the next ask goes out.
  *
  * One muninn on its own port over the temp wikis `wiki-work-card-fixture.ts`
@@ -1067,6 +1068,21 @@ test("the boot line: no asks while an article shows instead of the card", async 
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await page.waitForTimeout(300);
   expect(asks.count()).toBe(before);
+});
+
+test("the boot line: a return to the card from an article asks again, though the map is not reloaded", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? {} : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const line = boardCard(page).locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await boardCard(page).locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.clock.runFor(10 * BOOT_ASK_MS);
+  expect(asks.count()).toBe(1);
+  await page.goBack();
+  await expect.poll(() => asks.count()).toBe(2);
+  await expect(line).toHaveText(RESTART_TEXT);
 });
 
 test("the boot line: a request that never answers is aborted, and the next ask goes out", async ({ page }) => {

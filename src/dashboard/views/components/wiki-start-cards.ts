@@ -896,6 +896,8 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   }
   if (slot.kind === "card") paintWorkCard();
   if ((slot.kind === "card" || slot.kind === "card-loading") && (!workBody || workBody.map.runAtMs < slot.runAt!)) loadWorkMap();
+  // The card shown again from the cached body (a return from an article) loads no map, so the line asks here.
+  else if (e.type === "mount" && slot.kind === "card" && workBody) askBootLine(placeLandedBootLine, workCardShowing);
 }
 
 /** `declarationKey` of the listing the card last painted from (P6). */

@@ -18,7 +18,7 @@
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
 import type { ProbeSlots } from "./answer.ts";
 import { prOfSubject, readTracked, withCheckoutEnv, type BootRecord, type TrackedState } from "./boot-record.ts";
-import { checkoutCompare, GIT_LOCAL_MS, LS_REMOTE_MS, type OriginHeadRead, type ProbeResult } from "./probes.ts";
+import { checkoutCompare, GIT_LOCAL_MS, LS_REMOTE_MS, readOriginHead, type OriginHeadRead, type ProbeResult } from "./probes.ts";
 
 export type BootRow = "start-unknown" | "unread" | "elsewhere" | "moved-off" | "newer" | "same";
 
@@ -197,6 +197,12 @@ export async function readBootLine(record: BootRecord | Promise<BootRecord>, dep
   });
   const bound = <T>(p: Promise<T>) => Promise.race([p, expiry]);
   const git = bootLineGit(deps.git, deps.slots, () => expired);
+  // Origin's read can be shared with other requests (the route caches it), so it runs on a git this
+  // request cannot cancel: a cancelled `ls-remote` would land in the shared entry as a timeout. Once the
+  // bound expired it is not begun at all; the answer is already sent.
+  const sharedGit = bootLineGit(deps.git, deps.slots);
+  const readOrigin = deps.originHead ?? readOriginHead;
+  const originHead: OriginHeadRead = async (dir) => (expired ? { why: "git ls-remote not run: the boot line's bound expired" } : readOrigin(dir, sharedGit));
   try {
     const rec = await bound(Promise.resolve(record));
     if (rec === TIMED_OUT) {
@@ -207,7 +213,7 @@ export async function readBootLine(record: BootRecord | Promise<BootRecord>, dep
     const [row, tracked, origin] = await Promise.all([
       bound(readRow(rec, git).catch(failed("the row read"))),
       bound(readTracked(rec.dir, git).catch(failed("the status read"))),
-      bound(checkoutCompare(rec.dir, "the checkout", git, deps.originHead).catch((err) => ({ result: { state: "unknown", why: failed("the origin read")(err).why } as ProbeResult, head: null }))),
+      bound(checkoutCompare(rec.dir, "the checkout", git, originHead).catch((err) => ({ result: { state: "unknown", why: failed("the origin read")(err).why } as ProbeResult, head: null }))),
     ]);
     const unread: string[] = [];
     const t = now();

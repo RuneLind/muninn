@@ -130,6 +130,94 @@ describe("GET /api/wiki/boot-line", () => {
     expect(calls).toBe(0);
   });
 
+  describe("a request whose bound expired never hands its origin read to another request", () => {
+    /** Lets the expired request's remaining steps (microtasks and cancelled calls) run out. */
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    };
+    const never = () => new Promise<void>(() => {});
+    /** One route, per-request deps over one shared origin cache; counts the real `ls-remote --symref` runs. */
+    function twoRequests(record: BootRecord) {
+      const cache = new ProbeCache();
+      const symref = { runs: 0 };
+      const counted = (base: GitRun): GitRun => (cwd, args, opts) => {
+        if (args[0] === "ls-remote" && args[1] === "--symref") symref.runs++;
+        return base(cwd, args, opts);
+      };
+      const perRequest: BootLineRouteDeps[] = [];
+      const a = new Hono();
+      registerWikiBootLineRoute(a, () => perRequest.shift()!);
+      const ask = (over: Partial<BootLineRouteDeps>) => {
+        const raw = over.git ?? NETWORK;
+        perRequest.push({ record: async () => record, slots: new ProbeSlots(4), cache, ...over, git: counted(raw) });
+        return get(a);
+      };
+      return { ask, symref };
+    }
+
+    test("B after A's bound expired before A reached ls-remote: B reads origin for real", async () => {
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const { ask, symref } = twoRequests(record);
+      // A's bound expires while its `ls-remote --get-url` (the call before origin's read) is running.
+      let expireA!: () => void;
+      const expiryA = new Promise<void>((resolve) => (expireA = resolve));
+      let getUrlDone!: Promise<void>;
+      const slowGetUrl: GitRun = async (cwd, args, opts) => {
+        if (args[0] === "ls-remote" && args[1] === "--get-url") {
+          expireA();
+          getUrlDone = settle();
+          await getUrlDone;
+        }
+        return NETWORK(cwd, args, opts);
+      };
+      const a = await ask({ git: slowGetUrl, expiry: () => expiryA });
+      expect(a.body.unread).toContain("origin");
+      await getUrlDone;
+      await settle();
+      // A's own origin read, due after its bound, never began.
+      expect(symref.runs).toBe(0);
+      const b = await ask({ expiry: never });
+      expect(b.body.text).not.toContain("origin not read");
+      expect(b.body.unread).toEqual([]);
+      expect(symref.runs).toBe(1);
+    });
+
+    test("B shares A's in-flight read whose ls-remote had not started when A's bound expired: B gets origin's answer", async () => {
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const { ask, symref } = twoRequests(record);
+      // A's one slot is held while its `ls-remote --symref` waits for it; A's bound expires then.
+      const slotsA = new ProbeSlots(1);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let blocker: Promise<void> | null = null;
+      const blocking: GitRun = (cwd, args, opts) => {
+        if (args[0] === "ls-remote" && args[1] === "--get-url" && !blocker) blocker = slotsA.run(() => held);
+        return NETWORK(cwd, args, opts);
+      };
+      let originStarted!: () => void;
+      const started = new Promise<void>((resolve) => (originStarted = resolve));
+      const originHead: OriginHeadRead = (dir, git) => (originStarted(), readOriginHead(dir, git));
+      let expireA!: () => void;
+      const expiryA = new Promise<void>((resolve) => (expireA = resolve));
+      const a = ask({ git: blocking, slots: slotsA, originHead, expiry: () => expiryA });
+      await started;
+      await settle();
+      expireA();
+      expect((await a).body.unread).toContain("origin");
+      expect(symref.runs).toBe(0);
+      // B's local reads run on its own slots; its origin read is A's cache entry, still waiting.
+      const b = ask({ expiry: never });
+      await settle();
+      release();
+      const body = (await b).body;
+      expect(body.text).not.toContain("origin not read");
+      expect(body.unread).toEqual([]);
+      expect(symref.runs).toBe(1);
+    });
+  });
+
   test("a start record still being read past the bound: says so", async () => {
     const { body } = await get(app({ record: () => new Promise(() => {}), boundMs: 50 }));
     expect(body).toMatchObject({ row: "start-unknown", unread: ["the start record"] });

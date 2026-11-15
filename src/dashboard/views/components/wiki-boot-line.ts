@@ -6,12 +6,13 @@
  * PROCESS-WIDE, not per wiki: one muninn, one checkout, so one state here
  * serves every wiki the reader shows.
  *
- * `wiki-start-cards.ts` calls {@link placeBootLine} after each card paint and
- * {@link askBootLine} on each map load; this module asks again when the tab
- * becomes visible and once a minute while it is, both only while the card
- * shows, so a restart or a pull shows without a reload. The line goes in as the card's last child, outside the
- * HTML the card compares, so its landing never repaints the card. A failed
- * read shows no line and waits for the next ask like any other.
+ * `wiki-start-cards.ts` calls {@link placeBootLine} after each card paint, and
+ * {@link askBootLine} on each map load and on each return to the card from its
+ * cached body; this module asks again when the tab becomes visible and once a
+ * minute, both only while the card shows, so a restart or a pull shows without
+ * a reload. The line goes in as the card's last child, outside the HTML the
+ * card compares, so its landing never repaints the card. A failed read shows
+ * no line and waits for the next ask like any other.
  */
 
 import type { BootLine } from "../../../wiki/step-checks/boot-line.ts";
@@ -72,8 +73,8 @@ function ask(): void {
 
 /**
  * Asks for the line now; `onLanded` places it once it lands. The first call also starts the visible-tab asks,
- * which go out only while `isShowing` says the card is on screen: each ask runs git on the server, and a
- * return to the card asks through the map load anyway.
+ * which go out only while `isShowing` says the card is on screen: each ask runs git on the server, and the
+ * caller asks again when the card comes back (a map load, or a return to it from the cached body).
  */
 export function askBootLine(onLanded: () => void, isShowing: () => boolean): void {
   landed = onLanded;

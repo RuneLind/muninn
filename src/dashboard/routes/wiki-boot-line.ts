@@ -27,7 +27,7 @@ const ORIGIN_KEY = "boot-line:origin-head";
 
 export interface BootLineRouteDeps {
   record: () => Promise<BootRecord>;
-  /** The raw runner: the route adds the env and the slots. */
+  /** The raw runner: `readBootLine` adds the env, the slots and the cancel. */
   git: GitRun;
   slots: ProbeSlots;
   /** Holds origin's answer only. */
