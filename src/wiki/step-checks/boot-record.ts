@@ -123,7 +123,8 @@ export async function takeBootRecord(dir: string, rawGit: GitRun = realGit, now:
   const tracked = await readTracked(top, git);
   if ("why" in tracked) return atStart(tracked.why);
   if (tracked.oid !== commit) return unknown("the checkout moved while muninn started");
-  const subject = await git(top, ["log", "-1", "--format=%s", commit], { timeoutMs: GIT_LOCAL_MS, maxLines: 2 });
+  // `--no-show-signature`: a user's `log.showSignature` adds verify lines to stdout.
+  const subject = await git(top, ["log", "--no-show-signature", "-1", "--format=%s", commit], { timeoutMs: GIT_LOCAL_MS, maxLines: 2 });
   if (!subject.ok || subject.exitCode !== 0) return atStart(gitWhy(subject, "git log"));
   return { known: true, dir: top, commit, ref, pr: prOfSubject(subject.stdout.trim()), tracked: tracked.tracked, at };
 }

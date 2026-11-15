@@ -16,7 +16,7 @@ import type { Hono } from "hono";
 import { getLog } from "../../logging.ts";
 import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import { ProbeCache, sharedGitSlots, type ProbeSlots } from "../../wiki/step-checks/answer.ts";
-import { bootLineGit, readBootLine } from "../../wiki/step-checks/boot-line.ts";
+import { readBootLine } from "../../wiki/step-checks/boot-line.ts";
 import { bootRecord, type BootRecord } from "../../wiki/step-checks/boot-record.ts";
 import { readOriginHead, type OriginHeadRead } from "../../wiki/step-checks/probes.ts";
 
@@ -35,6 +35,8 @@ export interface BootLineRouteDeps {
   /** The uncached origin read; a test counts its calls. */
   originHead?: OriginHeadRead;
   boundMs?: number;
+  /** Test seam: the bound expires when the promise settles ({@link readBootLine}'s `expiry`). */
+  expiry?: () => Promise<unknown>;
   now?: () => number;
 }
 
@@ -49,9 +51,11 @@ export function registerWikiBootLineRoute(app: Hono, depsFor: () => BootLineRout
       const read = deps.originHead ?? readOriginHead;
       const cachedOrigin: OriginHeadRead = (dir, git) => deps.cache.getKey(ORIGIN_KEY, () => read(dir, git));
       const line = await readBootLine(deps.record(), {
-        git: bootLineGit(deps.git, deps.slots),
+        git: deps.git,
+        slots: deps.slots,
         originHead: cachedOrigin,
         ...(deps.boundMs !== undefined ? { boundMs: deps.boundMs } : {}),
+        ...(deps.expiry ? { expiry: deps.expiry() } : {}),
         ...(deps.now ? { now: deps.now } : {}),
       });
       return c.json(line);

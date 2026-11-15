@@ -57,6 +57,20 @@ export function bootFixture(): BootFixture {
   return { base, remote, work, clone };
 }
 
+/**
+ * `dir`'s later commits signed with a fresh SSH key, and `log.showSignature` on as a
+ * user's config can set it. With an empty allowed-signers file `git log` prints two
+ * lines on stdout («Good "git" signature with …», «No principal matched.») before each
+ * signed commit's format line (measured, git 2.x with ssh-keygen).
+ */
+export function signCommits(dir: string): void {
+  const key = path.join(dir, "..", `sign-key-${n++}`);
+  execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", key], { stdio: "ignore" });
+  writeFileSync(`${key}.allowed`, "");
+  const config = [["gpg.format", "ssh"], ["user.signingkey", key], ["gpg.ssh.allowedSignersFile", `${key}.allowed`], ["commit.gpgsign", "true"], ["log.showSignature", "true"]] as const;
+  for (const [k, v] of config) sh(dir, "config", k, v);
+}
+
 /** `count` empty commits on `dir`'s current branch after HEAD, subjects from `subject(i)`, in ONE `git fast-import`. */
 export function manyCommits(dir: string, count: number, subject: (i: number) => string): void {
   const branch = sh(dir, "symbolic-ref", "HEAD");

@@ -93,12 +93,41 @@ describe("GET /api/wiki/boot-line", () => {
     const record = await takeBootRecord(clone, NETWORK);
     push(work, "Keep focus (#865)");
     pull(clone);
-    const hangs: GitRun = (cwd, args, opts) => (args[0] === "ls-remote" && args[1] === "--symref" ? new Promise(() => {}) : NETWORK(cwd, args, opts));
-    const started = Date.now();
-    const { body } = await get(app({ record: async () => record, git: hangs, boundMs: 1_500 }));
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // The bound expires once the row (its last call, `log`) and the status are read and origin
+    // hangs in `ls-remote`: no machine speed decides what was read in time.
+    let expire!: () => void;
+    const expiry = new Promise<void>((resolve) => (expire = resolve));
+    const waiting = new Set(["log", "status", "ls-remote"]);
+    const done = (what: string) => {
+      waiting.delete(what);
+      // A macrotask later: the reads' remaining steps after their last call are microtasks.
+      if (waiting.size === 0) setTimeout(expire, 0);
+    };
+    const hangs: GitRun = async (cwd, args, opts) => {
+      if (args[0] === "ls-remote" && args[1] === "--symref") return done("ls-remote"), new Promise(() => {});
+      const res = await NETWORK(cwd, args, opts);
+      for (const what of ["log", "status"]) if (args.includes(what)) done(what);
+      return res;
+    };
+    const { body } = await get(app({ record: async () => record, git: hangs, expiry: () => expiry }));
     expect(body).toMatchObject({ row: "newer", restart: true, unread: ["origin"] });
     expect(body.text).toEndWith(" · the checkout holds 1 newer PR: #865: restart · origin not read: timed out");
+  });
+
+  test("past the bound, the request's git calls that have not started never start", async () => {
+    const slots = new ProbeSlots(1);
+    let release!: () => void;
+    const held = slots.run(() => new Promise<void>((resolve) => (release = resolve)));
+    let calls = 0;
+    const counting: GitRun = async () => (calls++, { ok: false, stdout: "", stderr: "fatal: no", exitCode: 128 });
+    const record: BootRecord = { known: true, dir: "/nowhere", commit: "a".repeat(40), ref: "refs/heads/main", pr: null, tracked: { state: "clean" }, at: 0 };
+    const { body } = await get(app({ record: async () => record, git: counting, slots, boundMs: 50 }));
+    expect(body).toMatchObject({ row: "unread", unread: ["the checkout", "tracked files", "origin"] });
+    release();
+    await held;
+    // Slots hand over first in, first out: this runs after every call queued before it.
+    await slots.run(async () => {});
+    expect(calls).toBe(0);
   });
 
   test("a start record still being read past the bound: says so", async () => {

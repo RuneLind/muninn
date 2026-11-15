@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootFixture, commit, sh } from "../../test/boot-git-fixture.ts";
+import { bootFixture, commit, sh, signCommits } from "../../test/boot-git-fixture.ts";
 import { hermeticGit } from "../../test/hermetic-git.ts";
 import { testTempDirSync } from "../../test/temp-dir.ts";
 import type { GitRun } from "../decision-triage/git.ts";
@@ -29,6 +29,13 @@ describe("the boot record", () => {
     const { clone } = bootFixture();
     mkdirSync(path.join(clone, "src/wiki"), { recursive: true });
     expect(known(await record(path.join(clone, "src/wiki"))).dir).toBe(clone);
+  });
+
+  test("log.showSignature on and a signed start commit: the subject is still read", async () => {
+    const { clone } = bootFixture();
+    signCommits(clone);
+    const sha = commit(clone, "Signed start (#866)");
+    expect(known(await record(clone))).toMatchObject({ commit: sha, pr: 866 });
   });
 
   test("a detached start: ref null", async () => {

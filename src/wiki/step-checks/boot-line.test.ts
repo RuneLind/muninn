@@ -7,12 +7,13 @@
 import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import { bootFixture, commit, manyCommits, pull, push, sh } from "../../test/boot-git-fixture.ts";
+import { bootFixture, commit, manyCommits, pull, push, sh, signCommits } from "../../test/boot-git-fixture.ts";
 import { hermeticGit, networkOrigin } from "../../test/hermetic-git.ts";
 import type { GitRun } from "../decision-triage/git.ts";
 import { ProbeSlots } from "./answer.ts";
-import { bootLineGit, formatStartTime, readBootLine, trackedText } from "./boot-line.ts";
-import { takeBootRecord, type BootRecord } from "./boot-record.ts";
+import { BOOT_LINE_BOUND_MS, bootLineGit, formatStartTime, readBootLine, readRow, trackedText } from "./boot-line.ts";
+import { readTracked, takeBootRecord, type BootRecord } from "./boot-record.ts";
+import { checkoutCompare } from "./probes.ts";
 
 const NETWORK = networkOrigin("https://example.invalid/muninn.git");
 const AT = new Date(2026, 10, 14, 20, 58).getTime();
@@ -20,7 +21,7 @@ const NOW = new Date(2026, 10, 15, 9, 0).getTime();
 const START = formatStartTime(AT, NOW);
 
 const record = (dir: string, git: GitRun = NETWORK) => takeBootRecord(dir, git, () => AT);
-const lineOf = (rec: BootRecord, git: GitRun = NETWORK) => readBootLine(rec, { git: bootLineGit(git, new ProbeSlots(4)), now: () => NOW });
+const lineOf = (rec: BootRecord, git: GitRun = NETWORK) => readBootLine(rec, { git, slots: new ProbeSlots(4), now: () => NOW });
 const known = (rec: BootRecord) => {
   if (!rec.known) throw new Error(`unknown record: ${rec.reason}`);
   return rec;
@@ -55,6 +56,16 @@ describe("the rows", () => {
     push(work, "Keep focus (#865)");
     pull(clone);
     expect((await lineOf(rec)).text).toEndWith(" · the checkout holds 1 newer PR: #865 and 1 commit without a PR number: restart");
+  });
+
+  test("log.showSignature on and signed newer commits: each commit counted once", async () => {
+    const { clone, work } = bootFixture();
+    const rec = known(await record(clone));
+    signCommits(work);
+    signCommits(clone);
+    push(work, "Keep focus (#865)");
+    pull(clone);
+    expect((await lineOf(rec)).text).toEndWith(" · the checkout holds 1 newer PR: #865: restart");
   });
 
   test("more than 8 PRs: oldest first, then «and N more»", async () => {
@@ -236,6 +247,17 @@ describe("the tracked-files addendum", () => {
     expect(line.text).toBe(`started from ${short(rec.commit)} (#864) on ${START} · the checkout holds 1 newer PR: #865: restart · tracked files not read: git status failed`);
   });
 
+  test("too large to compare at start and now: «tracked files» is in unread, as the text says", async () => {
+    const { clone } = bootFixture();
+    writeFileSync(path.join(clone, "f"), "edited\n");
+    const capped: GitRun = async (cwd, args, opts) => (args.includes("diff") ? { ok: true, stdout: "diff --git", capped: true } : NETWORK(cwd, args, opts));
+    const rec = known(await record(clone, capped));
+    expect(rec.tracked).toEqual({ state: "too-large" });
+    const line = await lineOf(rec, capped);
+    expect(line).toMatchObject({ row: "same", unread: ["tracked files"] });
+    expect(line.text).toEndWith(" · tracked files not read: the difference from HEAD is too large to compare");
+  });
+
   test("the pairs trackedText cannot see in a real repo", () => {
     expect(trackedText({ state: "too-large" }, { state: "too-large" })).toBe("tracked files not read: the difference from HEAD is too large to compare");
     expect(trackedText({ state: "too-large" }, { state: "clean" })).toBe("tracked files have changed since start");
@@ -282,6 +304,53 @@ describe("the origin addendum", () => {
     const rec = known(await record(clone));
     sh(clone, "config", "remote.origin.promisor", "true");
     expect((await lineOf(rec)).text).toEndWith(" · origin not read: the checkout is a partial clone: muninn does not look up objects it would have to fetch");
+  });
+});
+
+describe("the bound", () => {
+  /** Each call's own bound, summed over one part's chain of calls (they run one after another). */
+  const chain = async (read: (git: GitRun) => Promise<unknown>) => {
+    let ms = 0;
+    let calls = 0;
+    await read((cwd, args, opts) => ((ms += opts?.timeoutMs ?? 0), calls++, NETWORK(cwd, args, opts)));
+    return { ms, calls };
+  };
+
+  test("covers each part's longest chain of calls, every call slow but inside its own bound", async () => {
+    const newer = bootFixture();
+    const newerRec = known(await record(newer.clone));
+    push(newer.work, "Keep focus (#865)");
+    pull(newer.clone);
+    const movedOff = bootFixture();
+    const movedOffRec = known(await record(movedOff.clone));
+    sh(movedOff.clone, "checkout", "-q", "--orphan", "tmp");
+    commit(movedOff.clone, "other root");
+    sh(movedOff.clone, "branch", "-f", "main", "HEAD");
+    sh(movedOff.clone, "checkout", "-q", "main");
+    writeFileSync(path.join(newer.clone, "g"), "edited\n");
+    const chains = {
+      newer: await chain((git) => readRow(newerRec, git)),
+      movedOff: await chain((git) => readRow(movedOffRec, git)),
+      dirty: await chain((git) => readTracked(newer.clone, git)),
+      origin: await chain((git) => checkoutCompare(movedOff.work, "the checkout", git)),
+    };
+    // The longest chains: the row's 5 local calls, status + diff, and origin's 5 local calls + ls-remote.
+    expect(Object.values(chains).map((c) => c.calls)).toEqual([5, 5, 2, 6]);
+    for (const c of Object.values(chains)) expect(c.ms).toBeLessThanOrEqual(BOOT_LINE_BOUND_MS);
+  });
+
+  test("a call made after the bound expired takes no slot and never runs", async () => {
+    let slotted = 0;
+    const slots = new (class extends ProbeSlots {
+      override run<T>(fn: () => Promise<T>): Promise<T> {
+        slotted++;
+        return super.run(fn);
+      }
+    })(1);
+    let ran = 0;
+    const git = bootLineGit(async () => (ran++, { ok: true, stdout: "", exitCode: 0 }), slots, () => true);
+    expect(await git("/x", ["status"], {})).toMatchObject({ ok: false, timedOut: true });
+    expect({ slotted, ran }).toEqual({ slotted: 0, ran: 0 });
   });
 });
 

@@ -18,7 +18,7 @@
 import type { GitResult, GitRun } from "../decision-triage/git.ts";
 import type { ProbeSlots } from "./answer.ts";
 import { prOfSubject, readTracked, withCheckoutEnv, type BootRecord, type TrackedState } from "./boot-record.ts";
-import { checkoutCompare, GIT_LOCAL_MS, type OriginHeadRead, type ProbeResult } from "./probes.ts";
+import { checkoutCompare, GIT_LOCAL_MS, LS_REMOTE_MS, type OriginHeadRead, type ProbeResult } from "./probes.ts";
 
 export type BootRow = "start-unknown" | "unread" | "elsewhere" | "moved-off" | "newer" | "same";
 
@@ -40,8 +40,13 @@ export interface BootLine {
 export const NEWER_MAX = 500;
 /** PR numbers named on the line; the rest are counted. */
 export const PRS_SHOWN = 8;
-/** The whole line's bound: `ls-remote`'s 5 s plus local reads waiting for a slot. */
-export const BOOT_LINE_BOUND_MS = 7_000;
+/**
+ * The whole line's bound: the longest part's chain of calls run one after
+ * another, each at its own bound — origin's 5 local calls and `ls-remote` (the
+ * row needs 5 local calls, tracked files 2). Time spent waiting for a slot is
+ * not in it: past it a part answers «not read».
+ */
+export const BOOT_LINE_BOUND_MS = 5 * GIT_LOCAL_MS + LS_REMOTE_MS;
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -57,10 +62,19 @@ export function formatStartTime(ms: number, now: number): string {
 /** `refs/heads/x` → `x`; any other ref stays whole. */
 const branchName = (ref: string) => (ref.startsWith("refs/heads/") ? ref.slice(11) : ref);
 
-/** `git` with {@link withCheckoutEnv}'s switches on every call, each call holding one of `slots`. */
-export function bootLineGit(raw: GitRun, slots: ProbeSlots): GitRun {
+const CANCELLED: GitResult = { ok: false, stdout: "", stderr: "the boot line's bound expired", timedOut: true };
+
+/**
+ * `git` with {@link withCheckoutEnv}'s switches on every call, each call holding one of `slots`.
+ * Once `cancelled()` holds, a call not yet started never starts (checked before and after the
+ * slot wait): the answer is already sent. A call already running ends on its own timeout.
+ */
+export function bootLineGit(raw: GitRun, slots: ProbeSlots, cancelled: () => boolean = () => false): GitRun {
   const git = withCheckoutEnv(raw);
-  return (cwd, args, opts) => slots.run(() => git(cwd, args, opts));
+  return async (cwd, args, opts) => {
+    if (cancelled()) return CANCELLED;
+    return slots.run(async () => (cancelled() ? CANCELLED : git(cwd, args, opts)));
+  };
 }
 
 type Known = BootRecord & { known: true };
@@ -116,7 +130,8 @@ export async function readRow(record: Known, git: GitRun): Promise<RowAnswer> {
     const notShallow = shallow.exitCode === 0 && shallow.stdout.trim() === "false";
     return { row: "moved-off", text: notShallow ? "the checkout has moved off the start commit: restart" : MOVED_SINCE, restart: true };
   }
-  const log = await git(dir, ["log", "--first-parent", "--format=%s", `${record.commit}..${head}`], { timeoutMs: GIT_LOCAL_MS, maxLines: NEWER_MAX });
+  // `--no-show-signature`: a user's `log.showSignature` adds verify lines to stdout.
+  const log = await git(dir, ["log", "--no-show-signature", "--first-parent", "--format=%s", `${record.commit}..${head}`], { timeoutMs: GIT_LOCAL_MS, maxLines: NEWER_MAX });
   if (!log.ok || (!log.capped && log.exitCode !== 0)) return { why: gitWhy(log, "git log") };
   const subjects = log.stdout.split("\n").filter((s) => s !== "");
   return { row: "newer", text: newerText(subjects, !!log.capped) ?? MOVED_SINCE, restart: true };
@@ -148,12 +163,15 @@ export function startFacts(record: Known, now: number, defaultBranch: string | n
 }
 
 export interface BootLineDeps {
-  /** Already carrying the env and the slots ({@link bootLineGit}). */
+  /** The raw runner: {@link readBootLine} adds the env, the slots and the cancel ({@link bootLineGit}). */
   git: GitRun;
+  slots: ProbeSlots;
   /** Origin's default branch and tip; the route passes a cached read. Defaults to a live `ls-remote`. */
   originHead?: OriginHeadRead;
   now?: () => number;
   boundMs?: number;
+  /** Test seam: the bound expires when this settles, in place of the `boundMs` timer. */
+  expiry?: Promise<unknown>;
 }
 
 const TIMED_OUT = Symbol("timed out");
@@ -168,17 +186,23 @@ export async function readBootLine(record: BootRecord | Promise<BootRecord>, dep
   const now = deps.now ?? Date.now;
   const readAt = now();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
   const expiry = new Promise<typeof TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(TIMED_OUT), deps.boundMs ?? BOOT_LINE_BOUND_MS);
+    const expire = () => {
+      expired = true;
+      resolve(TIMED_OUT);
+    };
+    if (deps.expiry) deps.expiry.then(expire, expire);
+    else timer = setTimeout(expire, deps.boundMs ?? BOOT_LINE_BOUND_MS);
   });
   const bound = <T>(p: Promise<T>) => Promise.race([p, expiry]);
+  const git = bootLineGit(deps.git, deps.slots, () => expired);
   try {
     const rec = await bound(Promise.resolve(record));
     if (rec === TIMED_OUT) {
       return { row: "start-unknown", restart: false, text: "start commit not read yet: the start record is still being read", start: { known: false, reason: "still being read", at: readAt }, unread: ["the start record"], readAt };
     }
     if (!rec.known) return { row: "start-unknown", restart: false, text: `start commit unknown: ${rec.reason}`, start: rec, unread: [], readAt };
-    const { git } = deps;
     const failed = (what: string) => (err: unknown) => ({ why: `${what} failed: ${err instanceof Error ? err.message : String(err)}` });
     const [row, tracked, origin] = await Promise.all([
       bound(readRow(rec, git).catch(failed("the row read"))),
@@ -204,6 +228,8 @@ export async function readBootLine(record: BootRecord | Promise<BootRecord>, dep
       unread.push("tracked files");
       parts.push(`tracked files not read: ${tracked === TIMED_OUT ? "timed out" : tracked.why}`);
     } else {
+      // Both past the bound: the text says «not read», so unread names it too.
+      if (rec.tracked.state === "too-large" && tracked.tracked.state === "too-large") unread.push("tracked files");
       const text = trackedText(rec.tracked, tracked.tracked);
       if (text) parts.push(text);
     }
