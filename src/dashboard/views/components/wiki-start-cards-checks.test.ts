@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { WORK_MAP_VERSION } from "../../../wiki/work-map/schema.ts";
 import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import { initStartCards, mountStartCards } from "./wiki-start-cards.ts";
+import { BOOT_LINE_ABORT_MS } from "./wiki-boot-line.ts";
 
 const T0 = Date.parse("2026-11-02T12:00:00Z");
 const MINUTE = 60_000;
@@ -70,7 +71,9 @@ beforeEach(async () => {
     expect(url).toContain("/api/wiki/work-map/checks");
     return answer();
   }) as unknown as typeof fetch;
-  globalThis.setTimeout = ((fn: () => void) => {
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    // The boot line's abort timer: not a checks retry.
+    if (ms === BOOT_LINE_ABORT_MS) return 0;
     timers.push(fn);
     return 1;
   }) as unknown as typeof setTimeout;

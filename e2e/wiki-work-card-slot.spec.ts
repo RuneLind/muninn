@@ -27,7 +27,10 @@
  *  8. **The boot line** (its GET stubbed: CI's checkout is shallow, and no
  *     spec reaches GitHub) is the card's last child, a «restart» row takes
  *     the attention colour, its late landing does not repaint the card, and
- *     it goes with the card when the map goes.
+ *     it goes with the card when the map goes. An unchanged landing keeps the
+ *     node (a selection on it survives), a changed one waits out a held press,
+ *     no ask goes out while no card shows, and a request that never answers
+ *     is aborted so the next ask goes out.
  *
  * One muninn on its own port over the temp wikis `wiki-work-card-fixture.ts`
  * seeds. `SCHEDULER_ENABLED=false` keeps the work-map loop off and every wiki
@@ -985,4 +988,110 @@ test("the boot line: the card's last child, «restart» in the attention colour,
   await forceAdopt(page, BOOT);
   await expect(card).toBeHidden();
   await expect(page.locator(".wiki-boot-line:visible")).toHaveCount(0);
+});
+
+/** Routes the boot-line GET through `answer`, called with the request's 1-based number; counts every request. */
+async function routeBootLine(page: Page, answer: (n: number) => object | null): Promise<{ count: () => number }> {
+  // The test above removes BOOT's map; each of these needs the card.
+  await writeFile(path.join(roots[BOOT]!, ".work-map.json"), mapJson(BOOT, Date.now() - 2 * HOUR), "utf8");
+  let n = 0;
+  await page.route("**/api/wiki/boot-line*", async (route) => {
+    const body = answer(++n);
+    // null: the request never answers (a laptop asleep, a server stalled mid-restart).
+    if (body === null) return new Promise<void>(() => {});
+    await route.fulfill({ json: { ...BOOT_LINE_STUB, ...body } });
+  });
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  return { count: () => n };
+}
+
+const BOOT_ASK_MS = 60_000;
+
+test("the boot line: an unchanged landing leaves the node, so a selection on it survives", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const line = boardCard(page).locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await line.evaluate((el) => {
+    el.setAttribute("data-before-ask", "");
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(r);
+  });
+  const before = asks.count();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(before);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveAttribute("data-before-ask", "");
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(BOOT_LINE_STUB.text);
+  // With nothing selected the node stays too: no guard holds, so only the unchanged check keeps it.
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const second = asks.count();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(second);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveAttribute("data-before-ask", "");
+});
+
+test("the boot line: a changed landing under a held press is placed on the release", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? {} : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  const line = card.locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  const start = await pressPoint(card);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(1);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await page.mouse.up();
+  await expect(line).toHaveText(RESTART_TEXT);
+  expect(await card.evaluate((el) => el.lastElementChild?.classList.contains("wiki-boot-line") ?? false)).toBe(true);
+});
+
+test("the boot line: no asks while an article shows instead of the card", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  await expect(boardCard(page).locator(":scope > .wiki-boot-line")).toHaveText(BOOT_LINE_STUB.text);
+  await boardCard(page).locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.waitForTimeout(300);
+  const before = asks.count();
+  await page.clock.runFor(3 * BOOT_ASK_MS);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.waitForTimeout(300);
+  expect(asks.count()).toBe(before);
+});
+
+test("the boot line: a request that never answers is aborted, and the next ask goes out", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? null : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  await expect.poll(() => asks.count()).toBe(1);
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBe(2);
+  await expect(boardCard(page).locator(":scope > .wiki-boot-line")).toHaveText(RESTART_TEXT);
+});
+
+test("the boot line: no asks once the map is dropped and the card hides", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  await expect(card.locator(":scope > .wiki-boot-line")).toHaveText(BOOT_LINE_STUB.text);
+  await rm(path.join(roots[BOOT]!, ".work-map.json"));
+  await forceAdopt(page, BOOT);
+  await expect(card).toBeHidden();
+  await page.waitForTimeout(300);
+  const before = asks.count();
+  await page.clock.runFor(3 * BOOT_ASK_MS);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.waitForTimeout(300);
+  expect(asks.count()).toBe(before);
 });
