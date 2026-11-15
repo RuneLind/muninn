@@ -38,6 +38,8 @@ const CASES: [string, string, string[]][] = [
   ["Bun.spawn, conditional spread", `Bun.spawn(["git"], { ...(t ? { detached: true } : {}) });`, ["spawn Bun.spawn"]],
   ["Bun.spawn, detached: false", `Bun.spawn(["git"], { detached: false });`, ["spawn Bun.spawn"]],
   ["Bun.spawn, detached: true then false", `Bun.spawn(["git"], { detached: true, detached: false });`, ["spawn Bun.spawn"]],
+  ["Bun.spawn, detached: true then a quoted key", `Bun.spawn(["git"], { detached: true, "detached": false });`, ["spawn Bun.spawn"]],
+  ["Bun.spawn, detached: true then shorthand", `Bun.spawn(["git"], { detached: true, detached });`, ["spawn Bun.spawn"]],
   ["Bun.spawn, shorthand detached", `const detached = true;\nBun.spawn(["git"], { detached });`, ["spawn Bun.spawn"]],
   ["Bun.spawn, quoted key", `Bun.spawn(["git"], { "detached": true });`, ["spawn Bun.spawn"]],
   ["Bun.spawn, computed key", `Bun.spawn(["git"], { ["detached"]: true });`, ["spawn Bun.spawn"]],
@@ -59,6 +61,7 @@ const CASES: [string, string, string[]][] = [
   ["runProc through ??", RP + `await (deps.run ?? runProc)(["git"], 5, "x", {});`, ["runProc runProc"]],
   ["runProc alias", `import { runProc as rp } from "./run-proc.ts";\nawait rp(["git"], 5, "x");`, ["runProc runProc"]],
   ["runProc namespace", `import * as R from "../utils/run-proc.ts";\nawait R.runProc(["git"], 5, "x");`, ["runProc runProc"]],
+  ["sites in line order", CP + `spawn("git");\nexport * from "child_process";`, ["spawn child_process.spawn", `reference re-export from "child_process"`]],
   ["multi-line call reports the call's line", `const x = 1;\nconst p = Bun.spawn(\n  ["git"],\n  { stdout: "pipe" },\n);`, ["spawn Bun.spawn"]],
 
   // fail closed: references the scan cannot resolve
@@ -91,6 +94,7 @@ const CASES: [string, string, string[]][] = [
   ["Bun.spawn, spread before detached", `Bun.spawn(["git"], { ...o, detached: true });`, []],
   ["Bun.spawn, same-file const options", `const O = { detached: true } as const;\nBun.spawn(["git"], O);`, []],
   ["node spawn with detached: true", CP + `spawn("git", args, { detached: true });`, []],
+  ["node spawn(cmd, options) with detached: true", CP + `spawn("git", { detached: true });`, []],
   ["node execFile with detached: true and a callback", CP + `execFile("git", ["x"], { detached: true }, cb);`, []],
   ["runProc with processGroup: true", RP + `await runProc(["git"], 5, "x", { quietTimeout: true, processGroup: true });`, []],
   ["runProc through ?? with processGroup", RP + `await (deps.runProc ?? runProc)(["git"], 5, "x", { processGroup: true });`, []],
@@ -100,6 +104,7 @@ const CASES: [string, string, string[]][] = [
   ["node *Sync forms", `import { spawnSync, execFileSync, execSync } from "node:child_process";\nspawnSync("git");\nexecFileSync("git");\nexecSync("ls");`, []],
   ["node namespace *Sync", `import * as cp from "node:child_process";\ncp.execFileSync("git");`, []],
   ["type-only child_process import", `import type { ChildProcess } from "node:child_process";\nlet c: ChildProcess;`, []],
+  ["type-only import of a spawner, re-exported as a type", `import type { spawn } from "node:child_process";\nexport type { spawn };`, []],
   ["obj.spawn( is not a spawner", `pool.spawn(["git"]);\nthis.spawn();`, []],
   ["respawn( is not a spawner", `respawn(["git"]);`, []],
   ["unimported spawn( is not a spawner", `spawn("git");`, []],
@@ -128,6 +133,8 @@ describe("spawn group scan", () => {
 
   test("scans .tsx and .js sources", () => {
     expect(scanSource("src/x.tsx", `const e = <div/>;\nBun.spawn(["git"]);`)).toHaveLength(1);
+    // JSX text is not code: read as .ts, this line would parse as a call.
+    expect(scanSource("src/x.tsx", `const e = <p>Bun.spawn(["git"])</p>;`)).toEqual([]);
     expect(scanSource("src/x.js", `Bun.spawn(["git"]);`)).toHaveLength(1);
   });
 
