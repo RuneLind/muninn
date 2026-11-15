@@ -46,6 +46,12 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-rail-efforts");
 const LEDGER_PORT = e2ePort("wiki-rail-efforts/ledger");

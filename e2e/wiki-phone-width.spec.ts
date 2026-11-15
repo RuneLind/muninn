@@ -51,6 +51,12 @@ import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { e2ePort } from "./ports.ts";
 import { PANES_KEY } from "../src/dashboard/views/components/wiki-panes.ts";
 import { RAIL_WIDTH_DEFAULT } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-phone-width");
 const BASE = `http://127.0.0.1:${PORT}`;

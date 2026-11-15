@@ -24,6 +24,14 @@
  *  7. **A page declared after the run (P6)** joins its effort on a listing
  *     refresh though the run did not move: its step on the board, and first on
  *     the effort page.
+ *  8. **The boot line** (its GET stubbed: CI's checkout is shallow, and no
+ *     spec reaches GitHub) is the card's last child, a «restart» row takes
+ *     the attention colour, its late landing does not repaint the card, and
+ *     it goes with the card when the map goes. An unchanged landing keeps the
+ *     node (a selection on it survives), a changed one waits out a held press,
+ *     no ask goes out while no card shows, a return to the card from an
+ *     article asks again, and a request that never answers
+ *     is aborted so the next ask goes out.
  *
  * One muninn on its own port over the temp wikis `wiki-work-card-fixture.ts`
  * seeds. `SCHEDULER_ENABLED=false` keeps the work-map loop off and every wiki
@@ -73,6 +81,8 @@ import {
   DIGEST_OK,
   organizable,
   useWorkCardServer,
+  BOOT,
+  BOOT_LINE_STUB,
 } from "./wiki-work-card-fixture.ts";
 
 const PORT = e2ePort("wiki-work-card-slot");
@@ -944,4 +954,160 @@ test("a checks answer landing mid-press waits for the release, then paints", asy
   await page.mouse.up();
   await expect(card.locator("[data-before-repaint]")).toHaveCount(0);
   await expect(checking).toHaveCount(0);
+});
+
+// The boot line (mimir plan «Drain the owner-step queue», P1). The rows are unit-tested on real git
+// (boot-line.test.ts); here the GET answers a fixed «restart» row, held until the card has settled.
+const RESTART_TEXT = "started from 409bfd1a (#864) on 14.11 20:58 · the checkout holds 1 newer PR: #865: restart";
+
+test("the boot line: the card's last child, «restart» in the attention colour, no repaint when it lands, gone with the map", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  // After the fixture's stub, so it wins.
+  await page.route("**/api/wiki/boot-line*", async (route) => {
+    await held;
+    await route.fulfill({ json: { ...BOOT_LINE_STUB, row: "newer", restart: true, text: RESTART_TEXT } });
+  });
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  await expect(card.locator(".wiki-boot-line")).toHaveCount(0);
+  // A marker the next repaint would wipe; it holds before the line lands, so a loss after is the line's doing.
+  await card.locator("[data-wm-need]").first().evaluate((el) => el.setAttribute("data-before-line", ""));
+  await page.waitForTimeout(500);
+  await expect(card.locator("[data-before-line]")).toHaveCount(1);
+  release();
+  const line = card.locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(RESTART_TEXT);
+  await expect(line).toHaveAttribute("data-boot-row", "newer");
+  await expect(card.locator("[data-before-line]")).toHaveCount(1);
+  expect(await card.evaluate((el) => el.lastElementChild?.classList.contains("wiki-boot-line") ?? false)).toBe(true);
+  expect(await line.evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--tone-warn"));
+  // The map goes on an in-app adopt (a wiki switch is a full navigation in this reader): no line shows.
+  await rm(path.join(roots[BOOT]!, ".work-map.json"));
+  await forceAdopt(page, BOOT);
+  await expect(card).toBeHidden();
+  await expect(page.locator(".wiki-boot-line:visible")).toHaveCount(0);
+});
+
+/** Routes the boot-line GET through `answer`, called with the request's 1-based number; counts every request. */
+async function routeBootLine(page: Page, answer: (n: number) => object | null): Promise<{ count: () => number }> {
+  // The test above removes BOOT's map; each of these needs the card.
+  await writeFile(path.join(roots[BOOT]!, ".work-map.json"), mapJson(BOOT, Date.now() - 2 * HOUR), "utf8");
+  let n = 0;
+  await page.route("**/api/wiki/boot-line*", async (route) => {
+    const body = answer(++n);
+    // null: the request never answers (a laptop asleep, a server stalled mid-restart).
+    if (body === null) return new Promise<void>(() => {});
+    await route.fulfill({ json: { ...BOOT_LINE_STUB, ...body } });
+  });
+  await page.route("**/api/wiki/digest*", (route) => route.fulfill({ json: DIGEST_OK }));
+  return { count: () => n };
+}
+
+const BOOT_ASK_MS = 60_000;
+
+test("the boot line: an unchanged landing leaves the node, so a selection on it survives", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const line = boardCard(page).locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await line.evaluate((el) => {
+    el.setAttribute("data-before-ask", "");
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(r);
+  });
+  const before = asks.count();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(before);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveAttribute("data-before-ask", "");
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(BOOT_LINE_STUB.text);
+  // With nothing selected the node stays too: no guard holds, so only the unchanged check keeps it.
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const second = asks.count();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(second);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveAttribute("data-before-ask", "");
+});
+
+test("the boot line: a changed landing under a held press is placed on the release", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? {} : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  const line = card.locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  const start = await pressPoint(card);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBeGreaterThan(1);
+  await page.waitForTimeout(300);
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await page.mouse.up();
+  await expect(line).toHaveText(RESTART_TEXT);
+  expect(await card.evaluate((el) => el.lastElementChild?.classList.contains("wiki-boot-line") ?? false)).toBe(true);
+});
+
+test("the boot line: no asks while an article shows instead of the card", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  await expect(boardCard(page).locator(":scope > .wiki-boot-line")).toHaveText(BOOT_LINE_STUB.text);
+  await boardCard(page).locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.waitForTimeout(300);
+  const before = asks.count();
+  await page.clock.runFor(3 * BOOT_ASK_MS);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.waitForTimeout(300);
+  expect(asks.count()).toBe(before);
+});
+
+test("the boot line: a return to the card from an article asks again, though the map is not reloaded", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? {} : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const line = boardCard(page).locator(":scope > .wiki-boot-line");
+  await expect(line).toHaveText(BOOT_LINE_STUB.text);
+  await boardCard(page).locator('.wiki-wm-summary a[data-relpath="plans/alpha.mdx"]').first().click();
+  await expect(page.locator(".wiki-start")).toHaveCount(0);
+  await page.clock.runFor(10 * BOOT_ASK_MS);
+  expect(asks.count()).toBe(1);
+  await page.goBack();
+  await expect.poll(() => asks.count()).toBe(2);
+  await expect(line).toHaveText(RESTART_TEXT);
+});
+
+test("the boot line: a request that never answers is aborted, and the next ask goes out", async ({ page }) => {
+  const asks = await routeBootLine(page, (n) => (n === 1 ? null : { row: "newer", restart: true, text: RESTART_TEXT }));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  await expect.poll(() => asks.count()).toBe(1);
+  await page.clock.runFor(BOOT_ASK_MS);
+  await expect.poll(() => asks.count()).toBe(2);
+  await expect(boardCard(page).locator(":scope > .wiki-boot-line")).toHaveText(RESTART_TEXT);
+});
+
+test("the boot line: no asks once the map is dropped and the card hides", async ({ page }) => {
+  const asks = await routeBootLine(page, () => ({}));
+  await page.clock.install();
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  await expect(card.locator(":scope > .wiki-boot-line")).toHaveText(BOOT_LINE_STUB.text);
+  await rm(path.join(roots[BOOT]!, ".work-map.json"));
+  await forceAdopt(page, BOOT);
+  await expect(card).toBeHidden();
+  await page.waitForTimeout(300);
+  const before = asks.count();
+  await page.clock.runFor(3 * BOOT_ASK_MS);
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await page.waitForTimeout(300);
+  expect(asks.count()).toBe(before);
 });

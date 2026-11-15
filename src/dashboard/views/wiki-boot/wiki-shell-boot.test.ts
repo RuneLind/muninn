@@ -372,8 +372,8 @@ describe("wiki-browser.ts — listener order", () => {
       [l.target, l.type, ...(l.capture ? ["capture"] : []), ...l.opts, handlerFingerprint(l.source)].join(" ");
     const PINNED = [
       "document input 2lr9x", "document toggle capture 1hmo1", "document click capture xplwj",
-      "document selectionchange 2rr9w", "document pointerdown capture 1kth3", "document pointerup capture g28bu",
-      "document pointercancel capture g28bu", "document contextmenu capture g28bu",
+      "document selectionchange rtkc8", "document pointerdown capture 1kth3", "document pointerup capture klszq",
+      "document pointercancel capture klszq", "document contextmenu capture klszq",
       "document pointermove capture 1qtti", "document click 23ej6", "document keydown hlssx", "document keydown yo4j6",
       "document change e5k9f", "document mouseover 1s9vt", "document focusin 1s9vt", "document mouseout 3fqd2",
       "document focusout 78yv1", "document keydown capture 3m8dl", "window resize 9x9xn",

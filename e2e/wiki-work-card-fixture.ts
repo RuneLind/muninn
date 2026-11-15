@@ -2,7 +2,8 @@
  * The fixture the three Your work card specs share (`wiki-work-card-slot`,
  * `-board` and `-strip`, split from one file that spanned 190 s in run 42352843754 so no shard waits on it):
  * the temp wikis, their seeded `.work-map.json` files, the muninn each spec
- * boots on its own port, and the helpers more than one of them reads.
+ * boots on its own port, and the helpers more than one of them reads. Every
+ * other spec that renders the card imports `stubBootLine` from here too.
  *
  * One muninn per spec file over the temp wikis. `SCHEDULER_ENABLED=false`
  * keeps the work-map loop off and every wiki not organizable. No model calls.
@@ -57,6 +58,8 @@ export const STRIP_KEEP_MORE = "e2e-wm-strip-keep-more";
 export const STRIP_KEEP_OPEN = "e2e-wm-strip-keep-open";
 /** A themes map a test adopts page changes under. */
 export const THEME_HOLD = "e2e-wm-theme-hold";
+/** The boot line test: a map it removes mid-test. */
+export const BOOT = "e2e-wm-boot";
 /** The GitHub check: the checks GET is stubbed, since a spec server never spawns `gh`. */
 export const GH = "e2e-wm-gh";
 /** Each loses its map mid-test and gets it back with the same run time. */
@@ -250,8 +253,31 @@ export async function seedWiki(name: string, runAtMs: number | null, needsYou?: 
   if (runAtMs !== null) await writeFile(path.join(root, ".work-map.json"), mapJson(name, runAtMs, needsYou), "utf8");
 }
 
-/** Seed the wikis and boot this spec file's muninn on `port`; kill it and remove the wikis after. */
+/** The boot line every card spec sees (`GET /api/wiki/boot-line`), unless a test routes its own after this. */
+export const BOOT_LINE_STUB = {
+  row: "same",
+  restart: false,
+  text: "started from 409bfd1a (#864) on 14.11 20:58",
+  start: { known: true, commit: "409bfd1a".padEnd(40, "0"), ref: "refs/heads/main", pr: 864, at: 0, tracked: "clean" },
+  unread: [],
+  readAt: 0,
+};
+
+/**
+ * Answers the card's boot-line GET with {@link BOOT_LINE_STUB}, so no card spec runs git in this
+ * checkout or reaches GitHub through the route. Every spec that renders the card calls it in a
+ * `beforeEach`; a later `page.route` for the same URL wins over it.
+ */
+export async function stubBootLine(page: Page, body: object = BOOT_LINE_STUB): Promise<void> {
+  await page.route("**/api/wiki/boot-line*", (route) => route.fulfill({ json: body }));
+}
+
+/** Seed the wikis and boot this spec file's muninn on `port`; kill it and remove the wikis after. Stubs the boot line for every test. */
 export function useWorkCardServer(port: number): void {
+  test.beforeEach(async ({ page }) => {
+    await stubBootLine(page);
+  });
+
   test.beforeAll(async () => {
     base = `http://127.0.0.1:${port}`;
     const now = Date.now();
@@ -299,6 +325,7 @@ export function useWorkCardServer(port: number): void {
     // No title: `pageTitle` falls back to the stem.
     await writeFile(path.join(roots[STRIP_LONG]!, `plans/${"s".repeat(180)}.mdx`), waitPage("x", ["O1"], dayBefore(now, 2)).replace("title: x\n", ""), "utf8");
     await seedWiki(THEME_HOLD, now - 2 * HOUR);
+    await seedWiki(BOOT, now - 2 * HOUR);
     await seedWiki(GH, now - 2 * HOUR, [
       { title: "Merge the fix", kind: "followup", why: "", action: "Merge #369", pages: [] },
       { title: "Closed one", kind: "followup", why: "", action: "Close #12", pages: [] },
@@ -332,7 +359,7 @@ export function useWorkCardServer(port: number): void {
         WIKI_ANSWER_WIKIS: [STRIP, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, SWEEP, BOARD, BOARD_ADOPT, BOARD_QUIET, BOARD_TALL, BOARD_NO_WAIT].join(","),
         WIKI_ANSWER_OWNER: "Test Owner (T000001)",
         WIKI_ANSWER_GROUPS: "utvikler=T000001",
-        WIKI_EXTRA: [BOARD, BOARD_ADOPT, BOARD_QUIET, BOARD_TALL, BOARD_NO_WAIT, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
+        WIKI_EXTRA: [BOARD, BOARD_ADOPT, BOARD_QUIET, BOARD_TALL, BOARD_NO_WAIT, GH, GH_DROP_OK, GH_DROP_FAIL, GH_DROP_DONE, GH_ADOPT, FRESH, STALE, DONE, NONE, LONG, FLIP, GROW, GROW_ERR, GROW_LATE, FB, SWEEP, DECL, STRIP, STRIP_OFF, STRIP_GROW, STRIP_LONG, STRIP_KEEP_CELL, STRIP_KEEP_MORE, STRIP_KEEP_OPEN, THEME_HOLD, BOOT, P_LOAD, P_LATE, P_LATE5, P_POST, P_POLL, P_FOCUS, P_DUP, P_WHY].map((n) => `${n}=${roots[n]}`).join(","),
       },
       stdio: "ignore",
     });

@@ -24,6 +24,12 @@ import { e2eEnv, schedulerOnEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-decision-run-now");
 const BASE = `http://127.0.0.1:${PORT}`;
