@@ -170,7 +170,8 @@ export class ProbeSlots {
   }
 }
 
-const sharedGitSlots = new ProbeSlots(GIT_PROBE_SLOTS);
+/** The one process-wide set of git slots: the step-check probes and the boot line (`boot-line.ts`) share it. */
+export const sharedGitSlots = new ProbeSlots(GIT_PROBE_SLOTS);
 
 export interface AnswerDeps {
   probes: ProbeDeps;

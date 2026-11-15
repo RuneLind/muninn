@@ -35,6 +35,12 @@ import { assertPortFree, waitForOwnServer } from "./own-server.ts";
 import { paintedMeasure, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 import { activityStrip, sessionsFromDay } from "../src/dashboard/views/components/wiki-effort-page.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-effort-page");
 const BASE = `http://127.0.0.1:${PORT}`;

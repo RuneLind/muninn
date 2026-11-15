@@ -44,6 +44,7 @@ import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
 import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
+import { askBootLine, bootLineChanged, placeBootLine } from "./wiki-boot-line.ts";
 import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
@@ -895,6 +896,8 @@ function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
   }
   if (slot.kind === "card") paintWorkCard();
   if ((slot.kind === "card" || slot.kind === "card-loading") && (!workBody || workBody.map.runAtMs < slot.runAt!)) loadWorkMap();
+  // The card shown again from the cached body (a return from an article) loads no map, so the line asks here.
+  else if (e.type === "mount" && slot.kind === "card" && workBody) askBootLine(placeLandedBootLine, workCardShowing);
 }
 
 /** `declarationKey` of the listing the card last painted from (P6). */
@@ -1058,12 +1061,30 @@ let pointerHeld = false;
  *  and a paint then would end the drag. `paintWorkCard` waits on if a selection still touches the card. */
 function flushWaitingPaint(): void {
   if (paintWaiting && !pointerHeld) paintWorkCardIfChanged();
+  if (bootLineWaiting) placeLandedBootLine();
+}
+
+let bootLineWaiting = false;
+
+/** A landed boot line that changed waits out a press or a selection on the card, as the card's own repaint does. */
+function placeLandedBootLine(): void {
+  const el = document.getElementById("wikiWorkCard");
+  bootLineWaiting = false;
+  if (slot.kind !== "card" || !el || !bootLineChanged(el)) return;
+  if (pointerHeld || selectionTouchesCard(el)) bootLineWaiting = true;
+  else placeBootLine(el);
+}
+
+/** The card is on screen: the slot holds it and its element is in the document and laid out. */
+function workCardShowing(): boolean {
+  const el = document.getElementById("wikiWorkCard");
+  return slot.kind === "card" && !!el && el.isConnected && el.getClientRects().length > 0;
 }
 
 /** After any click: the browser dispatches it right after this event, ahead of a timer. */
 function onPointerEnd(): void {
   pointerHeld = false;
-  if (paintWaiting) setTimeout(flushWaitingPaint, 0);
+  if (paintWaiting || bootLineWaiting) setTimeout(flushWaitingPaint, 0);
 }
 
 function pageHref(rel: string): string {
@@ -1112,6 +1133,9 @@ function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
   pendingFocus = null;
   el.innerHTML = html;
   paintedCardHtml = html;
+  // Outside `html`: the line's own landing places it, so it never repaints the card under a press or a selection.
+  placeBootLine(el);
+  bootLineWaiting = false;
   ensureWorkChecks();
   if (typeof el.querySelectorAll === "function") {
     el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
@@ -1282,6 +1306,7 @@ function loadWorkMap(): void {
       if (slot.kind !== "card") return;
       workBody = body as WorkMapGetBody & { map: AnyWorkMap };
       paintWorkCard();
+      askBootLine(placeLandedBootLine, workCardShowing);
       // A wiki outside the decision triage's scope answers 404: the card shows no Decisions section.
       if (!isThemeMap(workBody.map)) loadInbox(withWiki("/api/wiki/decision-inbox"));
     })

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { WORK_MAP_VERSION } from "../../../wiki/work-map/schema.ts";
 import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
 import { initStartCards, mountStartCards } from "./wiki-start-cards.ts";
+import { BOOT_LINE_ABORT_MS } from "./wiki-boot-line.ts";
 
 const T0 = Date.parse("2026-11-02T12:00:00Z");
 const MINUTE = 60_000;
@@ -64,13 +65,15 @@ beforeEach(async () => {
   Date.now = () => now;
   (globalThis as { document?: unknown }).document = { getElementById: (id: string) => (id === "wikiWorkCard" ? card : null) };
   globalThis.fetch = ((url: string) => {
-    // The Decisions section's own GETs (wiki-work-inbox.ts): out of scope here, and not a checks fetch.
-    if (url.includes("/api/wiki/decision-inbox") || url.includes("/api/wiki/decision-triage/")) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+    // The Decisions section's own GETs (wiki-work-inbox.ts) and the boot line's (wiki-boot-line.ts): out of scope here, and not a checks fetch.
+    if (url.includes("/api/wiki/decision-inbox") || url.includes("/api/wiki/decision-triage/") || url.includes("/api/wiki/boot-line")) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
     fetches++;
     expect(url).toContain("/api/wiki/work-map/checks");
     return answer();
   }) as unknown as typeof fetch;
-  globalThis.setTimeout = ((fn: () => void) => {
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    // The boot line's abort timer: not a checks retry.
+    if (ms === BOOT_LINE_ABORT_MS) return 0;
     timers.push(fn);
     return 1;
   }) as unknown as typeof setTimeout;
