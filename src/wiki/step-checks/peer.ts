@@ -27,10 +27,12 @@
 
 import type { CheckProbe } from "../../format/check-tag.ts";
 import { getLog } from "../../logging.ts";
-import { readBounded } from "../../utils/bounded-fetch.ts";
 import { MAX_PROBES_PER_PAGE, noPeer, PROBE_TTL_MS, type PeerAnswerer } from "./answer.ts";
+import { boundedPeerGet, createDownWindow, failureLogFields, type FetchLike, type PeerFailure } from "./peer-request.ts";
 import type { ProbeResult, ProbeState } from "./probes.ts";
 import { stampSource, within, type Stamp } from "./two-clock.ts";
+
+export { fetchFailureWhy } from "./peer-request.ts";
 
 export const CHECKS_ANSWER_PATH = "/api/checks/answer";
 /** The wire version both sides speak. */
@@ -48,33 +50,25 @@ const WHY_MAX = 300;
 /** C0/C1 controls, U+2028/2029 and the bidi controls: a newline in a why would forge a line of the chip title, which joins lines with \n. */
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 
+/** Peer text as one line of plain text, cut at `max`: the unsafe characters become spaces, runs of space one. */
+export function oneLine(text: string, max: number): string {
+  return text.replace(UNSAFE, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 /** A peer's why as one line of plain text, cut at {@link WHY_MAX}. */
 export function oneLineWhy(why: string): string {
-  return why.replace(UNSAFE, " ").replace(/\s+/g, " ").trim().slice(0, WHY_MAX);
+  return oneLine(why, WHY_MAX);
 }
 
 const log = getLog("wiki", "step-checks-peer");
 
-/** A failed fetch's why, from what Bun exposes as `name`/`code` (observed on Bun 1.3: a refused redirect is `code: "UnexpectedRedirect"`, an abort a DOMException named `AbortError`/`TimeoutError`). */
-export function fetchFailureWhy(err: unknown): string {
-  const e = err as { name?: unknown; code?: unknown } | null;
-  if (e?.name === "AbortError" || e?.name === "TimeoutError") return "timed out";
-  if (e?.code === "UnexpectedRedirect") return "answered with a redirect";
-  return "could not be reached";
-}
-
-/** Bun's fetch messages quote the url (query included): never let it into the log. */
-const scrubUrls = (msg: string) => msg.replace(/\bhttps?:\/\/[^\s"'<>]*/gi, "<url>").slice(0, 300);
-
 /** A request's results, and the reason when it failed as a whole. */
 interface Outcome {
   results: ProbeResult[];
-  failure?: { reason: string; err?: unknown };
+  failure?: PeerFailure;
 }
 
 const STATES: ReadonlySet<string> = new Set<ProbeState>(["ok", "not-yet", "unknown"]);
-
-type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface PeerClientDeps {
   peers: ReadonlyMap<string, string>;
@@ -135,82 +129,35 @@ export function createPeerAnswerer(deps: PeerClientDeps): PeerAnswerer {
   const downMs = deps.downMs ?? PEER_DOWN_WINDOW_MS;
   const cache = new Map<string, Entry>();
   const batches = new Map<string, Pending[]>();
-  /** Per machine: when its window opened, and why. Bounded by the configured peers. */
-  const down = new Map<string, { openedAt: Stamp; reason: string }>();
-
   // Both timers are live only while their age is in [0, limit) on the wall AND the monotonic clock (`within`): a wall step
   // forward and a sleep expire them early, a wall step back expires them no later than the monotonic limit (two-clock.ts names the one residual).
-  const isDown = (machine: string, t: Stamp) => {
-    const d = down.get(machine);
-    return d && within(d.openedAt, downMs, t) ? d : null;
-  };
+  const down = createDownWindow({
+    downMs,
+    now,
+    onOpen: (machine, { reason, err }) =>
+      log.warn("Step-check peer {machine} failed ({reason}); its probes answer unknown for {seconds} s", {
+        machine,
+        reason,
+        seconds: Math.round(downMs / 1000),
+        ...failureLogFields(err),
+      }),
+  });
+  const isDown = down.isDown;
   const fresh = (e: Entry, t: Stamp) => e.settledAt === null || within(e.settledAt, ttlMs, t);
 
-  const settle = (machine: string, outcome: Outcome) => {
-    if (!outcome.failure) {
-      down.delete(machine);
-      return;
-    }
-    const t = now();
-    // Already down: a request that was in flight when the window opened; no second log line.
-    if (isDown(machine, t)) return;
-    const { reason, err } = outcome.failure;
-    down.set(machine, { openedAt: t, reason });
-    const e = err as { name?: unknown; code?: unknown; message?: unknown } | undefined;
-    log.warn("Step-check peer {machine} failed ({reason}); its probes answer unknown for {seconds} s", {
-      machine,
-      reason,
-      seconds: Math.round(downMs / 1000),
-      errorName: typeof e?.name === "string" ? e.name : undefined,
-      errorCode: typeof e?.code === "string" || typeof e?.code === "number" ? e.code : undefined,
-      errorMessage: typeof e?.message === "string" ? scrubUrls(e.message) : undefined,
-    });
-  };
+  // A request that was in flight when the window opened finds it open: no second log line.
+  const settle = (machine: string, outcome: Outcome) => down.settle(machine, outcome.failure);
 
   const request = async (machine: string, base: string, asked: readonly CheckProbe[]): Promise<Outcome> => {
-    const fail = (reason: string, err?: unknown): Outcome => ({
-      results: asked.map((): ProbeResult => ({ state: "unknown", why: `the peer for ${machine} ${reason}` })),
-      failure: { reason, err },
-    });
     const qs = new URLSearchParams({ v: String(CHECKS_ANSWER_VERSION), machine });
     for (const p of asked) qs.append("p", `${p.kind}:${p.value}`);
-    const url = `${base}${CHECKS_ANSWER_PATH}?${qs}`;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const ctl = new AbortController();
-    const timeout = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => {
-        ctl.abort();
-        resolve("timeout");
-      }, timeoutMs);
-    });
-    const exchange = async (): Promise<Outcome> => {
-      let res: Response;
-      try {
-        res = await doFetch(url, { redirect: "error", signal: ctl.signal, headers: { accept: "application/json" } });
-      } catch (err) {
-        return fail(fetchFailureWhy(err), err);
-      }
-      // An unread body is released by the abort in `finally`.
-      if (res.status === 429 && !res.redirected) return fail("is busy");
-      if (res.status !== 200 || res.redirected) return fail(`answered HTTP ${res.status}`);
-      if (!(res.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) return fail("did not answer JSON");
-      let body: unknown;
-      try {
-        body = JSON.parse(await readBounded(res, maxBytes, base));
-      } catch {
-        return fail("sent a reply muninn cannot read");
-      }
+    const got = await boundedPeerGet(`${base}${CHECKS_ANSWER_PATH}?${qs}`, { fetch: doFetch, timeoutMs, maxBytes }, (body) => {
       const read = readPeerReply(body, machine, asked);
-      return "refused" in read ? fail(read.refused) : { results: read };
-    };
-    try {
-      const got = await Promise.race([exchange(), timeout]);
-      return got === "timeout" ? fail("timed out") : got;
-    } finally {
-      clearTimeout(timer);
-      // Releases the connection and any body left unread; a no-op once the body was read.
-      ctl.abort();
-    }
+      return "refused" in read ? read : { value: read };
+    });
+    if ("value" in got) return { results: got.value };
+    const { reason } = got.failure;
+    return { results: asked.map((): ProbeResult => ({ state: "unknown", why: `the peer for ${machine} ${reason}` })), failure: got.failure };
   };
 
   const flush = (machine: string, base: string) => {

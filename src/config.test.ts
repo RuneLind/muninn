@@ -635,8 +635,8 @@ describe("parsePeers (MUNINN_PEERS)", () => {
   });
 
   // Finding 3 (PR #852): with no MUNINN_MACHINE every named machine answers before a
-  // peer is asked, so a set peer list does nothing; say so once.
-  const UNUSED = "MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked";
+  // peer is asked, and the boot line asks no peer (PR #871), so a set peer list does nothing; say so once.
+  const UNUSED = "MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked, and the boot line shows no peer rows";
   test("MUNINN_PEERS set, MUNINN_MACHINE unset or invalid: one warning that the list is unused", () => {
     expect(parsePeers("mini=https://mini.test", null).warnings).toEqual([UNUSED]);
     expect(parsePeers("mini=https://mini.test", resolveMachineName("Not A Name")).warnings).toEqual([UNUSED]);

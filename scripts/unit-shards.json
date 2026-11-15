@@ -73,6 +73,7 @@
       "src/dashboard/routes/checks-answer.test.ts",
       "src/dashboard/routes/step-checks-peer.test.ts",
       "src/dashboard/routes/wiki-boot-line.test.ts",
+      "src/dashboard/routes/checks-boot-line.test.ts",
       "src/dashboard/routes/wiki-decision-triage-status.test.ts",
       "src/dashboard/routes/wiki-decision-triage-run.test.ts",
       "src/dashboard/routes/wiki-plan-card.test.ts",

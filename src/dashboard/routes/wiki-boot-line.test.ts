@@ -16,7 +16,9 @@ import { ProbeCache, ProbeSlots } from "../../wiki/step-checks/answer.ts";
 import type { BootLine } from "../../wiki/step-checks/boot-line.ts";
 import { takeBootRecord, type BootRecord } from "../../wiki/step-checks/boot-record.ts";
 import { CHECKOUT_GIT_ENV, readOriginHead, type OriginHeadRead } from "../../wiki/step-checks/probes.ts";
-import { BOOT_LINE_PATH, registerWikiBootLineRoute, type BootLineRouteDeps } from "./wiki-boot-line.ts";
+import { createBootLinePeerReader } from "../../wiki/step-checks/boot-line-peer.ts";
+import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
+import { BOOT_LINE_PATH, realBootLineDeps, registerWikiBootLineRoute, type BootLinePayload, type BootLineRouteDeps } from "./wiki-boot-line.ts";
 
 const NETWORK = networkOrigin("https://example.invalid/muninn.git");
 
@@ -227,6 +229,102 @@ describe("GET /api/wiki/boot-line", () => {
     const { status, body } = await get(app({ record: () => Promise.reject(new Error("boom")) }));
     expect(status).toBe(500);
     expect(body).toEqual({ error: "the boot line could not be read" } as unknown as BootLine);
+  });
+
+  describe("peer rows (MUNINN_PEERS)", () => {
+    /** A second muninn's peer route on its own repo, reached through a fetch that dispatches in process. */
+    async function peerApp(machine: string) {
+      const { clone, work } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      push(work, "Peer rows (#870)");
+      pull(clone);
+      const a = new Hono();
+      registerChecksBootLineRoute(a, { machine }, () => ({ record: async () => record, git: NETWORK, slots: new ProbeSlots(4), cache: new ProbeCache(), machine }));
+      return a;
+    }
+    const hang = (init: RequestInit) => new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+
+    test("one answering, one 404, one timing out, one malformed: each its own row, the local line whole", async () => {
+      const mini = await peerApp("mini");
+      const urls: string[] = [];
+      const fetch = async (url: string, init: RequestInit) => {
+        urls.push(url);
+        const u = new URL(url);
+        if (u.host === "mini.test") return mini.request(u.pathname + u.search);
+        if (u.host === "old.test") return new Hono().request(u.pathname + u.search);
+        if (u.host === "junk.test") return new Response('{"v":1,"machine":"junk","line":{"row":"same"}}', { headers: { "content-type": "application/json" } });
+        return hang(init);
+      };
+      const peers = createBootLinePeerReader({
+        peers: new Map([["mini", "https://mini.test"], ["old", "https://old.test"], ["slow", "https://slow.test"], ["junk", "https://junk.test"]]),
+        fetch,
+        timeoutMs: 150,
+      });
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const { status, body } = await get(app({ record: async () => record, machine: "laptop", peers }));
+      const payload = body as BootLinePayload;
+      expect(status).toBe(200);
+      expect(payload.row).toBe("same");
+      expect(payload.machine).toBe("laptop");
+      expect(payload.peers!.map((p) => [p.machine, p.answered])).toEqual([["mini", true], ["old", false], ["slow", false], ["junk", false]]);
+      const m = payload.peers![0]!;
+      expect(m.answered && m.text).toContain("the checkout holds 1 newer PR: #870: restart");
+      expect(m).toMatchObject({ row: "newer", restart: true, branch: "main", pr: 864 });
+      expect(payload.peers!.slice(1).map((p) => !p.answered && p.why)).toEqual(["the peer answered HTTP 404", "the peer timed out", "the peer sent no restart"]);
+      expect(urls.every((u) => u.endsWith("/api/checks/boot-line?v=1"))).toBe(true);
+    });
+
+    test("a slow peer never delays the local line past the peer's bound, nor blanks it", async () => {
+      const peers = createBootLinePeerReader({ peers: new Map([["slow", "https://slow.test"]]), fetch: (_u, init) => hang(init), timeoutMs: 200 });
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const started = performance.now();
+      const { body } = await get(app({ record: async () => record, machine: "laptop", peers }));
+      const took = performance.now() - started;
+      const payload = body as BootLinePayload;
+      expect(payload.row).toBe("same");
+      expect(payload.text).toStartWith("started from ");
+      expect(payload.peers).toEqual([{ machine: "slow", answered: false, why: "the peer timed out" }]);
+      expect(took).toBeLessThan(2_000);
+    });
+
+    test("peers are read in parallel with the local line, not after it", async () => {
+      let peerStarted = false;
+      let release!: (r: BootRecord) => void;
+      const held = new Promise<BootRecord>((r) => (release = r));
+      const peers = async () => ((peerStarted = true), []);
+      const pending = get(app({ record: () => held, machine: "laptop", peers }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(peerStarted).toBe(true);
+      release({ known: false, reason: "no git", at: 0 });
+      expect(((await pending).body as BootLinePayload).peers).toEqual([]);
+    });
+
+    test("no peers configured: no peer reader, no request, and the payload has no peer keys", async () => {
+      expect(realBootLineDeps({ machine: "laptop", peers: new Map() }).peers).toBeUndefined();
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const { raw } = await get(app({ record: async () => record, machine: "laptop" }));
+      expect(raw).not.toContain('"peers"');
+      expect(raw).not.toContain('"machine"');
+      expect(raw).not.toContain("laptop");
+    });
+
+    test("listed peers without MUNINN_MACHINE: no peer reader is built", () => {
+      // A laptop listing its own url under a name it does not carry would otherwise ask itself on every card ask.
+      expect(realBootLineDeps({ machine: null, peers: new Map([["laptop", "http://127.0.0.1:3010"]]) }).peers).toBeUndefined();
+    });
+
+    test("a peer reader without MUNINN_MACHINE: no request, and the payload has no peer keys", async () => {
+      let asked = 0;
+      const { clone } = bootFixture();
+      const record = await takeBootRecord(clone, NETWORK);
+      const { raw } = await get(app({ record: async () => record, machine: null, peers: async () => (asked++, []) }));
+      expect(asked).toBe(0);
+      expect(raw).not.toContain('"peers"');
+      expect(raw).not.toContain('"machine"');
+    });
   });
 
   test("the payload never carries the checkout's path", async () => {

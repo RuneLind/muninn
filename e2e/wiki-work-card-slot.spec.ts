@@ -42,7 +42,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { e2ePort } from "./ports.ts";
-import { token } from "./contrast.ts";
+import { paintedContrast, token } from "./contrast.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 import {
   FRESH,
@@ -1110,4 +1110,44 @@ test("the boot line: no asks once the map is dropped and the card hides", async 
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await page.waitForTimeout(300);
   expect(asks.count()).toBe(before);
+});
+
+// Peer rows (P1b): with `MUNINN_PEERS` the payload carries `machine` and `peers`, and the block holds one
+// row per machine inside the card's last child. The reply check is unit-tested (boot-line-peer.test.ts).
+test("the boot line: peer rows render after the local line in the same last block, restart in the attention colour, «no answer» muted", async ({ page }) => {
+  const MINI_TEXT = "started from c0231f48 (#864) on 15.11 17:16 · the checkout holds 1 newer PR: #870: restart";
+  await routeBootLine(page, () => ({
+    machine: "laptop",
+    peers: [
+      { machine: "mini", answered: true, row: "newer", restart: true, text: MINI_TEXT, commit: "c0231f48", pr: 864, branch: "main", at: 0, unread: [] },
+      { machine: "old", answered: false, why: "the peer answered HTTP 404" },
+    ],
+  }));
+  await openSettled(page, BOOT);
+  const card = boardCard(page);
+  const block = card.locator(":scope > .wiki-boot-line");
+  const rows = block.locator(":scope > .wiki-boot-row");
+  await expect(rows).toHaveText([`laptop: ${BOOT_LINE_STUB.text}`, `mini: ${MINI_TEXT}`, "old: no answer"]);
+  expect(await card.evaluate((el) => el.lastElementChild?.classList.contains("wiki-boot-line") ?? false)).toBe(true);
+  await expect(block).toHaveCount(1);
+  expect(await rows.nth(1).evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--tone-warn"));
+  expect(await rows.nth(0).evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-soft"));
+  await expect(rows.nth(2)).toHaveAttribute("title", "the peer answered HTTP 404");
+  // 11.5 px text: AA is 4.5:1, in both themes, against what the card paints behind it.
+  for (const theme of [
+    { stored: "light", scheme: "dark" as const },
+    { stored: "dark", scheme: "light" as const },
+  ]) {
+    await page.emulateMedia({ colorScheme: theme.scheme });
+    await page.evaluate((v) => localStorage.setItem("muninn-theme", v), theme.stored);
+    await openSettled(page, BOOT);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme.stored);
+    await expect(rows).toHaveCount(3);
+    expect(await paintedContrast(rows.nth(2)), `${theme.stored} «no answer» row`).toBeGreaterThanOrEqual(4.5);
+    expect(await paintedContrast(rows.nth(1)), `${theme.stored} restart row`).toBeGreaterThanOrEqual(4.5);
+  }
+  // «no answer» is the calm row's colour (--text-faint fails 4.5:1 on the card) set apart by italics.
+  expect(await rows.nth(2).evaluate((el) => getComputedStyle(el).color)).toBe(await token(page, "--text-soft"));
+  expect(await rows.nth(2).evaluate((el) => getComputedStyle(el).fontStyle)).toBe("italic");
+  expect(await rows.nth(1).evaluate((el) => getComputedStyle(el).fontStyle)).toBe("normal");
 });
