@@ -71,6 +71,33 @@ describe("scanXrefPage — prose", () => {
     expect(prose("Q-5 on [[plans/cases|the cases page]], D3 i **[[plans/cases]]**, Q-5c on [the page](cases.mdx).")).toEqual([]);
   });
 
+  test("a hyphen between two ids is a range, not a glued id", () => {
+    expect(scan("See D3-D5 on the cases page, and Q-R4-D7 on the log page.").mentions.map((m) => m.ids)).toEqual([["D3", "D5"]]);
+    expect(scan(STEP_PAGE("Settle D1-D2 and Q-R4 first.")).mentions).toEqual([{ kind: "step", ids: ["D1", "D2"], line: 5, snippet: "D1, D2" }]);
+  });
+
+  test("a run does not cross a blank line or a list item", () => {
+    expect(scan("List D3\n\nD4 on the cases page.").mentions).toMatchObject([{ ids: ["D4"], line: 3, snippet: "D4 on the cases" }]);
+    expect(scan("We use D3 on\n\nNext paragraph.").mentions).toEqual([]);
+    expect(scan("- D3\n- D4 on the cases page.\n\n* D5\n* D6 on the log page.\n\n## About D7\nD8 on the log page.").mentions.map((m) => [m.ids, m.line])).toEqual([
+      [["D4"], 2],
+      [["D6"], 5],
+      [["D8"], 8],
+    ]);
+    // One paragraph over two lines is still one run.
+    expect(scan("Both D3,\nD4 and\nD5 on\nthe cases page.").mentions).toMatchObject([{ ids: ["D3", "D4", "D5"], line: 1 }]);
+  });
+
+  test("an HTML comment is not read, and the text closes over it", () => {
+    expect(scan("<!-- D3 on foo -->\n\n<!--\nQ-5 on the cases page\n-->\n\nD4 on the cases page.").mentions).toMatchObject([{ ids: ["D4"], line: 7 }]);
+    expect(prose("Q-5 on <!-- the card -->[[plans/cases]] and D3 <!-- x --> on the log page.")).toEqual(["D3 on the log"]);
+    // A comment never closed hides nothing.
+    expect(prose("<!-- open\n\nD4 on the cases page.")).toEqual(["D4 on the cases"]);
+    const t = performance.now();
+    expect(scan(`${"<!-- D3 on x ".repeat(20_000)}\n\n<NextMoves>`).mentions.length).toBe(20_000);
+    expect(performance.now() - t).toBeLessThan(2000);
+  });
+
   test("the line is the source line of the run's first id", () => {
     const [m] = scan("---\ntitle: T\n---\n\nFirst.\n\nThen *Q-5* on\nthe cases page.").mentions;
     expect(m).toMatchObject({ kind: "prose", ids: ["Q-5"], line: 7, connector: "on" });
@@ -338,6 +365,15 @@ describe("xrefRunsBeforeConnector — every run a connector follows", () => {
 
   test("the connector may stand on the next line", () => {
     expect(runs("Se Q-5c\npå\n[[x]]")).toEqual([{ ids: ["Q-5c"], connector: "på", after: "[[x]]" }]);
+  });
+
+  test("a blank line or a list marker ends a run, in a gap and in the connector", () => {
+    expect(runs("D3\n\nD4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
+    expect(runs("D3,\n \nD4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
+    expect(runs("D3\n- D4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
+    expect(runs("D3 -\nD4 på siden").map((r) => r.ids)).toEqual([["D3", "D4"]]);
+    expect(runs("D3 på\n\nsiden")).toEqual([]);
+    expect(runs("D3\n\npå siden")).toEqual([]);
   });
 
   test("no connector, a word or a tracker key gives no run", () => {

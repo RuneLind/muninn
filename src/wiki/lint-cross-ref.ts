@@ -57,6 +57,9 @@ export const CROSS_REF_LINT_CHECKS = ["cross-page-id-unlinked", "step-query-miss
 
 const GAP_RE = new RegExp(`^${RUN_GAP_SRC}$`, "u");
 const CONNECTOR_AT_RE = new RegExp(XREF_CONNECTOR_SRC, "uy");
+/** White space that ends a block: a blank line, or a `-` list marker opening
+ *  the next line. The reader reads one block's text at a time. */
+const BLOCK_BREAK_RE = /\n[ \t]*(?:\n|-[ \t])/;
 
 export interface XrefConnectedRun {
   /** The run's ids, tracker keys cut as `findXrefRun` cuts them. */
@@ -85,10 +88,11 @@ export function xrefRunsBeforeConnector(text: string, trackerProjects: readonly 
   tokens.forEach((t, k) => {
     run.push(t);
     const next = tokens[k + 1];
-    if (next && GAP_RE.test(text.slice(t.end, next.start))) return;
+    const gap = next ? text.slice(t.end, next.start) : null;
+    if (gap !== null && GAP_RE.test(gap) && !BLOCK_BREAK_RE.test(gap)) return;
     CONNECTOR_AT_RE.lastIndex = t.end;
     const m = CONNECTOR_AT_RE.exec(text);
-    if (m) {
+    if (m && !BLOCK_BREAK_RE.test(m[0])) {
       let from = run.length;
       while (from > 0 && !isTrackerKey(run[from - 1]!.id, trackerProjects)) from--;
       const kept = run.slice(from);
@@ -127,22 +131,42 @@ const STATE_AHEAD_RE = new RegExp(
 );
 /** A date after the connector: `on 14.11`, `i 2025`. A bare page number (`i 8371`) is none. */
 const DATE_AHEAD_RE = /^(?:\d{1,2}\.\d{1,2}|(?:19|20)\d{2}(?![\p{L}\p{N}-]))/u;
+/** An ATX heading line. */
+const HEADING_LINE_RE = /^ {0,3}#{1,6}[ \t]/;
 /** A step's clauses: split at `;` and at a sentence end. */
 const CLAUSE_SPLIT_RE = /;|(?<=[.!?])\s+/;
 
+/** `text` with every closed `<!-- … -->` removed, its line breaks kept: the
+ *  reader skips a comment, so the text on its two sides meets. One pass; a
+ *  comment never closed stays as text. */
+function dropComments(text: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = text.indexOf("<!--", at);
+    const close = open === -1 ? -1 : text.indexOf("-->", open + 4);
+    if (close === -1) return out + text.slice(at);
+    out += text.slice(at, open) + text.slice(open, close).replace(/[^\n]/g, "");
+    at = close + 3;
+  }
+}
+
 /** One line or step as the checks read it: code spans, attribute values, link
- *  insides and URLs holed out, `*` emphasis removed. Offsets are not the
- *  source's once a `*` is gone; line breaks are kept. */
+ *  insides and URLs holed out, comments and `*` emphasis removed (a `*` list
+ *  marker stays, so two items are not one run). Offsets are not the source's
+ *  once something is removed; line breaks are kept. */
 function readable(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => maskLineCodeSpans(line).replace(/\n/g, HOLE))
-    .join("\n")
+  return dropComments(
+    text
+      .split("\n")
+      .map((line) => maskLineCodeSpans(line).replace(/\n/g, HOLE))
+      .join("\n"),
+  )
     .replace(TAG_RE, (tag) => tag.replace(/=(?:"[^"]*"|'[^']*')/g, (v) => `=${hole(v.slice(1))}`))
     .replace(WIKILINK_RE, (_, inner: string) => `[[${hole(inner)}]]`)
     .replace(MD_LINK_TARGET_RE, (_, target: string) => `](${hole(target)})`)
     .replace(URL_RE, hole)
-    .replace(/\*+/g, "");
+    .replace(/^([ \t]*\*)(?=[ \t])|\*+/gm, (_, marker?: string) => marker ?? "");
 }
 
 const clean = (s: string): string => s.replaceAll(HOLE, "").replace(/\s+/g, " ").trim();
@@ -235,20 +259,36 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
   const local = localLabels(content);
 
   const { lines, body, exempt } = stateExemptLines(content);
-  const text = readable(lines.map((l, i) => (i < body || exempt.has(i) ? "" : l)).join("\n"));
-  // `Q-R4` holds no `R4`.
-  const glued = (src: string, start: number) => src[start - 1] === "-";
+  // A heading is a block of its own with no blank line after it: the hole ends it.
+  const text = readable(lines.map((l, i) => (i < body || exempt.has(i) ? "" : HEADING_LINE_RE.test(l) ? l + HOLE : l)).join("\n"));
+  // `Q-R4` holds no `R4`: an id right after a hyphen is part of a longer
+  // word, unless the hyphen follows another id (`D3-D5`, a range).
+  const gluedIn = (src: string) => {
+    const ends = new Set(xrefIdsIn(src).map((t) => t.end));
+    return (start: number) => src[start - 1] === "-" && !ends.has(start - 1);
+  };
+  const glued = gluedIn(text);
+  // Runs come in page order: count line breaks once, not from the top per run.
+  let line = 1;
+  let counted = 0;
+  const lineAt = (offset: number): number => {
+    for (let nl = text.indexOf("\n", counted); nl !== -1 && nl < offset; nl = text.indexOf("\n", counted)) {
+      line++;
+      counted = nl + 1;
+    }
+    return line;
+  };
   for (const run of xrefRunsBeforeConnector(text, trackerProjects)) {
     const after = text.slice(run.end);
     if (LINK_AHEAD_RE.test(after)) continue;
     if (STATE_AHEAD_RE.test(`${run.connector} ${after}`) || DATE_AHEAD_RE.test(after)) continue;
-    if (run.ids.some((r) => glued(text, r.start))) continue;
+    if (run.ids.some((r) => glued(r.start))) continue;
     const first = run.ids[0]!;
     const words = /^\S+(?:[ \t]\S+)?/.exec(after)?.[0] ?? "";
     mentions.push({
       kind: "prose",
       ids: run.ids.map((r) => r.id),
-      line: text.slice(0, first.start).split("\n").length,
+      line: lineAt(first.start),
       snippet: clean(`${text.slice(first.start, run.end)}${words}`).replace(/[.,;:)]+$/, ""),
       connector: run.connector,
     });
@@ -261,7 +301,8 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
     const line = stepLine(lines, item);
     // The ids a connector follows are the prose rule's, linked or not.
     const connected = new Set(xrefRunsBeforeConnector(step, trackerProjects).flatMap((r) => r.ids.map((i) => i.start)));
-    const loose = [...new Set(xrefIdsIn(step).filter((t) => isId(t.id) && !connected.has(t.start) && !glued(step, t.start)).map((t) => t.id))];
+    const gluedStep = gluedIn(step);
+    const loose = [...new Set(xrefIdsIn(step).filter((t) => isId(t.id) && !connected.has(t.start) && !gluedStep(t.start)).map((t) => t.id))];
     if (loose.length) mentions.push({ kind: "step", ids: loose, line, snippet: loose.join(", ") });
     const clauses = step
       .split(CLAUSE_SPLIT_RE)
