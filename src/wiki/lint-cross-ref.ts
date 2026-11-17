@@ -48,14 +48,15 @@ import { countedNextMovesLanes, parseBlocks, type Block } from "../format/markdo
 import { decisionLogEntries, eachComponent } from "../format/question.ts";
 import { lookupPageFile, parseQueryAttrs, type PageFiles } from "../format/query-block.ts";
 import { STATUS_STATES } from "../format/report-top.ts";
-import { isTrackerKey, XREF_CONNECTOR_SRC, XREF_ID_SRC, XREF_RUN_SRC, xrefIdsIn, type XrefKind, type XrefRunId } from "./core/cross-ref.ts";
+import { isTrackerKey, RUN_GAP_SRC, XREF_CONNECTOR_SRC, XREF_ID_SRC, xrefIdsIn, type XrefKind, type XrefRunId } from "./core/cross-ref.ts";
 import { stateExemptLines } from "./lint-state.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LintFinding } from "./lint.ts";
 
 export const CROSS_REF_LINT_CHECKS = ["cross-page-id-unlinked", "step-query-missing-case"] as const;
 
-const RUN_CONNECTOR_RE = new RegExp(`(${XREF_RUN_SRC})(${XREF_CONNECTOR_SRC})`, "gu");
+const GAP_RE = new RegExp(`^${RUN_GAP_SRC}$`, "u");
+const CONNECTOR_AT_RE = new RegExp(XREF_CONNECTOR_SRC, "uy");
 
 export interface XrefConnectedRun {
   /** The run's ids, tracker keys cut as `findXrefRun` cuts them. */
@@ -72,17 +73,29 @@ export interface XrefConnectedRun {
  * stands: the grammar `findXrefRun` (`core/cross-ref.ts`) reads backwards
  * from a wikilink, read forwards. What follows the connector is the caller's
  * to judge. Here and not in `core/`: that file is in the reader's bundle.
+ *
+ * One pass over the id tokens, each gap and each run end tested once: a
+ * regex over `run + connector` re-read the rest of a run from every id in it,
+ * so 20,000 ids with no connector took 13 s.
  */
 export function xrefRunsBeforeConnector(text: string, trackerProjects: readonly string[] = []): XrefConnectedRun[] {
   const out: XrefConnectedRun[] = [];
-  for (const m of text.matchAll(RUN_CONNECTOR_RE)) {
-    const ids: XrefRunId[] = [];
-    for (const t of xrefIdsIn(m[1]!)) ids.push({ id: t.id, start: m.index + t.start, end: m.index + t.end });
-    let k = ids.length;
-    while (k > 0 && !isTrackerKey(ids[k - 1]!.id, trackerProjects)) k--;
-    const kept = ids.slice(k);
-    if (kept.length) out.push({ ids: kept, connector: m[2]!.trim(), end: m.index + m[0].length });
-  }
+  const tokens = xrefIdsIn(text);
+  let run: XrefRunId[] = [];
+  tokens.forEach((t, k) => {
+    run.push(t);
+    const next = tokens[k + 1];
+    if (next && GAP_RE.test(text.slice(t.end, next.start))) return;
+    CONNECTOR_AT_RE.lastIndex = t.end;
+    const m = CONNECTOR_AT_RE.exec(text);
+    if (m) {
+      let from = run.length;
+      while (from > 0 && !isTrackerKey(run[from - 1]!.id, trackerProjects)) from--;
+      const kept = run.slice(from);
+      if (kept.length) out.push({ ids: kept, connector: m[0].trim(), end: t.end + m[0].length });
+    }
+    run = [];
+  });
   return out;
 }
 
@@ -193,11 +206,16 @@ export function localLabels(content: string): Set<string> {
   return out;
 }
 
-/** The 1-based line of `content` that holds the start of `text`. */
-function lineOf(lines: readonly string[], text: string): number | undefined {
-  const head = text.split("\n")[0]!.trim().slice(0, 60);
-  if (!head) return undefined;
-  const at = lines.findIndex((l) => l.includes(head));
+const LIST_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
+
+/** The 1-based line of the step `text`: the first list item after the page's
+ *  first `<NextMoves` that opens with the step's first line. A line that only
+ *  quotes the step (prose, the frontmatter) is not it. */
+function stepLine(lines: readonly string[], text: string): number | undefined {
+  const head = text.split("\n")[0]!.trim();
+  const from = lines.findIndex((l) => l.includes("<NextMoves"));
+  if (!head || from === -1) return undefined;
+  const at = lines.findIndex((l, i) => i > from && LIST_MARKER_RE.test(l) && l.replace(LIST_MARKER_RE, "").trim().startsWith(head));
   return at === -1 ? undefined : at + 1;
 }
 
@@ -240,7 +258,7 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
   const { lanes } = countedNextMovesLanes(parseBlocks(splitFrontmatter(content).body));
   for (const item of lanes.flatMap((l) => l.items)) {
     const step = readable(item);
-    const line = lineOf(lines, item);
+    const line = stepLine(lines, item);
     // The ids a connector follows are the prose rule's, linked or not.
     const connected = new Set(xrefRunsBeforeConnector(step, trackerProjects).flatMap((r) => r.ids.map((i) => i.start)));
     const loose = [...new Set(xrefIdsIn(step).filter((t) => isId(t.id) && !connected.has(t.start) && !glued(step, t.start)).map((t) => t.id))];
@@ -331,11 +349,13 @@ export async function checkCrossRefs(scans: ReadonlyMap<string, XrefPageScan>, d
           if (!page) continue;
           const card = await deps.cardText(page, id);
           if (card === null) continue;
+          // The card's keys, whole: `CASE-102345` does not list `CASE-10234`.
           // A card that names no case key is a general query, and one key is
           // an example row as often as a list.
-          if (caseKeysIn(card, deps.trackerProjects).length < 2) continue;
+          const listed = new Set(caseKeysIn(card, deps.trackerProjects));
+          if (listed.size < 2) continue;
           for (const key of clause.cases) {
-            if (card.includes(key)) continue;
+            if (listed.has(key)) continue;
             findings.push({
               check: "step-query-missing-case",
               relPath,

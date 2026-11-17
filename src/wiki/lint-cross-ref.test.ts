@@ -146,6 +146,16 @@ describe("scanXrefPage — steps", () => {
     expect(s.mentions.map((m) => [m.kind, m.ids])).toEqual([["prose", ["Q-7"]]]);
   });
 
+  test("a step's line is its own, not an earlier line that quotes it", () => {
+    const quotes = ["---", "description: Run Q-5 for CASE-10001.", "---", "", "As said: Run Q-5 for CASE-10001.", "", "- Run Q-5 for CASE-10001.", ""];
+    const s = scan([...quotes, STEP_PAGE("Run Q-5 for CASE-10001.")].join("\n"));
+    expect(s.mentions.filter((m) => m.kind === "step").map((m) => m.line)).toEqual([13]);
+    expect(s.steps.map((st) => st.line)).toEqual([13]);
+    // Inside the lane too: a prose line with the step's words is no list item.
+    const lane = ["<NextMoves>", "", '<Lane kind="you">', "", "Run Q-5 for CASE-10001.", "", "1. Run Q-5 for CASE-10001.", "", "</Lane>", "", "</NextMoves>"];
+    expect(scan(lane.join("\n")).steps.map((st) => st.line)).toEqual([7]);
+  });
+
   test("a clause that names an id and a case key, with the step's link targets", () => {
     const s = scan(STEP_PAGE("Run Q-5 on [[plans/cases#q-5|the cases page]] for CASE-10001 and DEMO-8308; T-4 found nothing. CASE-10009 waits."));
     expect(s.steps).toEqual([{ line: 5, clauses: [{ ids: ["Q-5"], cases: ["CASE-10001"] }], links: ["plans/cases"] }]);
@@ -248,6 +258,12 @@ describe("checkCrossRefs", () => {
       expect(await run(pages, near)).toEqual([]);
     });
 
+    test("a longer key that starts with the step's key does not list it", async () => {
+      const card = '<Query id="Q-8" question="Which?">\n\n```sql\nSELECT * FROM t WHERE k IN (\'CASE-102345\', \'CASE-20000\');\n```\n\n</Query>';
+      const pages = { "plans/a.mdx": STEP_PAGE("Run Q-8 on [[plans/cases|the cases page]] for CASE-10234."), "plans/cases.mdx": card };
+      expect((await run(pages, near)).map((f) => [f.check, f.detail])).toEqual([["step-query-missing-case", "CASE-10234"]]);
+    });
+
     test("the page's own card is read too", async () => {
       const page = `${CASES_PAGE}\n\n${STEP_PAGE("Run Q-5 for CASE-10777.")}`;
       const found = await run({ "a.mdx": page }, {});
@@ -335,6 +351,14 @@ describe("xrefRunsBeforeConnector — every run a connector follows", () => {
     const t = performance.now();
     expect(xrefRunsBeforeConnector(Array.from({ length: 200 }, (_, k) => `A${k}`).join("\n"))).toEqual([]);
     expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  test("20,000 ids with no connector are read in linear time, as a row and as a page", () => {
+    const row = Array.from({ length: 20_000 }, (_, k) => `A${k}`).join(", ");
+    const t = performance.now();
+    expect(xrefRunsBeforeConnector(row)).toEqual([]);
+    expect(scan(row).mentions).toEqual([]);
+    expect(performance.now() - t).toBeLessThan(1000);
   });
 
   test("the offsets point at the ids in the given text", () => {

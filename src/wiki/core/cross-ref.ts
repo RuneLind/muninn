@@ -32,9 +32,7 @@ const ID_RE_SRC = `${NO_ALNUM_BEFORE}${XREF_ID_SRC}${NO_ALNUM_AFTER}`;
 /** The words between a run and what it points at, white space on both sides.
  *  The wiki linter reads the same grammar forwards (`lint-cross-ref.ts`). */
 export const XREF_CONNECTOR_SRC = String.raw`[\s ]+(?:i|in|på|on)[\s ]+`;
-/** A run of ids. */
-export const XREF_RUN_SRC = `${ID_RE_SRC}(?:${RUN_GAP_SRC}${ID_RE_SRC})*`;
-const RUN_RE = new RegExp(`${XREF_RUN_SRC}(?=${XREF_CONNECTOR_SRC}$)`, "u");
+const RUN_RE = new RegExp(`${ID_RE_SRC}(?:${RUN_GAP_SRC}${ID_RE_SRC})*(?=${XREF_CONNECTOR_SRC}$)`, "u");
 const ID_GLOBAL_RE = new RegExp(ID_RE_SRC, "gu");
 const ID_WHOLE_RE = new RegExp(`^${XREF_ID_SRC}$`, "u");
 
