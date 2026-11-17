@@ -273,7 +273,8 @@ const TASK_MARK_RE = /^\[([ xX])\][ \t]*([\s\S]*)$/;
  * (`NextMovesLane.items`), and the line is the one it recorded for the item
  * (`listItemLines`), so a done item, a settled block or prose with the same
  * words takes no step's line. A `<Checklist>` or `<RunChecklist>` row takes
- * its block's line. The steps are the lane's own (`NextMovesLane.items`), in
+ * its block's opening line; the parser has the row's own, which this walk
+ * does not read yet. The steps are the lane's own (`NextMovesLane.items`), in
  * order, plus any empty item, which names nothing; a test compares the two
  * walks.
  */
