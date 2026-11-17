@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach } from "bun:test";
+import { countedNextMovesLanes, parseBlocks } from "../format/markdown-ast.ts";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -204,6 +205,58 @@ describe("scanXrefPage — steps", () => {
     // Inside the lane too: a prose line with the step's words is no list item.
     const lane = ["<NextMoves>", "", '<Lane kind="you">', "", "Run Q-5 for CASE-10001.", "", "1. Run Q-5 for CASE-10001.", "", "</Lane>", "", "</NextMoves>"];
     expect(scan(lane.join("\n")).steps.map((st) => st.line)).toEqual([7]);
+  });
+
+  describe("a step's line is the parser's", () => {
+    const STEP = "Run Q-5 for CASE-10001.";
+    const lane = (...body: string[]) => ["<NextMoves>", "", '<Lane kind="you">', "", ...body, "", "</Lane>", "", "</NextMoves>"];
+    const linesOf = (page: string[]) => {
+      const s = scan(page.join("\n"));
+      return { mentions: s.mentions.filter((m) => m.kind === "step").map((m) => m.line), steps: s.steps.map((st) => st.line) };
+    };
+
+    test("a done item with the same words comes first", () => {
+      expect(linesOf(lane(`- [x] ${STEP}`, `- [ ] ${STEP}`))).toEqual({ mentions: [6], steps: [6] });
+    });
+
+    test("a settled block above holds the same step", () => {
+      const page = ["<Historic>", "", ...lane(`- ${STEP}`), "", "</Historic>", "", ...lane(`- ${STEP}`)];
+      expect(linesOf(page)).toEqual({ mentions: [19], steps: [19] });
+    });
+
+    test("a list item outside the lanes, and prose that names the tag", () => {
+      const page = ["Text about `<NextMoves>` blocks.", "", `- ${STEP}`, "", ...lane(`- ${STEP}`)];
+      expect(linesOf(page)).toEqual({ mentions: [9], steps: [9] });
+    });
+
+    test("two steps that open alike, and the same step twice", () => {
+      expect(linesOf(lane(`- ${STEP.slice(0, -1)} again later.`, `- ${STEP}`, `- ${STEP}`))).toEqual({ mentions: [5, 6, 7], steps: [5, 6, 7] });
+    });
+
+    test("a checkbox with no space after it, a numbered item and a second line", () => {
+      expect(linesOf(lane(`- [ ]${STEP}`, "", "1. Run Q-7 for", "   CASE-10002."))).toEqual({ mentions: [5, 7], steps: [5, 7] });
+    });
+
+    test("the steps read are the lane's own, in every shape a lane holds them", () => {
+      const page = [
+        ...lane("- T-1 first", "- [x] T-2 done", "- [ ] T-3 open", "- [ ]", "", "Prose with T-4.", "", "1. T-5 numbered", "2. [X] T-6 done"),
+        "",
+        ...lane("<Checklist>", "", "- [ ] T-7 row", "- [x] T-8 done", "", "</Checklist>", "", "<RunChecklist>", "", "- [ ] T-9 run", "  - Command: `x`", "- [x] T-10 done", "", "</RunChecklist>"),
+      ].join("\n");
+      const items = countedNextMovesLanes(parseBlocks(page)).lanes.flatMap((l) => l.items);
+      expect(items.map((i) => /T-\d+/.exec(i)![0])).toEqual(["T-1", "T-3", "T-5", "T-7", "T-9"]);
+      expect(scan(page).mentions.map((m) => [m.kind, m.ids.join(","), m.line])).toEqual([
+        ["step", "T-1", 5],
+        ["step", "T-3", 7],
+        ["step", "T-5", 12],
+        ["step", "T-7", 23],
+        ["step", "T-9", 30],
+      ]);
+    });
+
+    test("a <Checklist> row takes its block's line", () => {
+      expect(linesOf(lane("<Checklist>", "", `- [x] ${STEP}`, `- [ ] ${STEP}`, "", "</Checklist>"))).toEqual({ mentions: [5], steps: [5] });
+    });
   });
 
   test("a clause that names an id and a case key, with the step's link targets", () => {

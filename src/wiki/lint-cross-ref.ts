@@ -47,7 +47,8 @@
  */
 
 import { maskLineCodeSpans } from "../format/code-spans.ts";
-import { countedNextMovesLanes, parseBlocks, type Block } from "../format/markdown-ast.ts";
+import { frontmatterBodyLine } from "../format/frontmatter-fence.ts";
+import { countedNextMovesLanes, listItemLines, parseBlocks, parseChecklist, runChecklistSteps, type Block, type NextMovesLane } from "../format/markdown-ast.ts";
 import { decisionLogEntries, eachComponent } from "../format/question.ts";
 import { lookupPageFile, parseQueryAttrs, type PageFiles } from "../format/query-block.ts";
 import { STATUS_STATES } from "../format/report-top.ts";
@@ -258,17 +259,37 @@ export function localLabels(content: string): Set<string> {
   return out;
 }
 
-const LIST_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
+/** A list item's task mark, as the parser reads it (`CHECKLIST_MARK_RE`). */
+const TASK_MARK_RE = /^\[([ xX])\][ \t]*([\s\S]*)$/;
 
-/** The 1-based line of the step `text`: the first list item after the page's
- *  first `<NextMoves` that opens with the step's first line. A line that only
- *  quotes the step (prose, the frontmatter) is not it. */
-function stepLine(lines: readonly string[], text: string): number | undefined {
-  const head = text.split("\n")[0]!.trim();
-  const from = lines.findIndex((l) => l.includes("<NextMoves"));
-  if (!head || from === -1) return undefined;
-  const at = lines.findIndex((l, i) => i > from && LIST_MARKER_RE.test(l) && l.replace(LIST_MARKER_RE, "").trim().startsWith(head));
-  return at === -1 ? undefined : at + 1;
+/**
+ * A lane's open steps, each with its first source line (1-based on the page,
+ * `bodyLine` being the lines before the body). The walk is the parser's
+ * (`NextMovesLane.items`), and the line is the one it recorded for the item
+ * (`listItemLines`), so a done item, a settled block or prose with the same
+ * words takes no step's line. A `<Checklist>` or `<RunChecklist>` row takes
+ * its block's line. The steps are the lane's own (`NextMovesLane.items`), in
+ * order, plus any empty item, which names nothing; a test compares the two
+ * walks.
+ */
+function laneStepLines(lane: NextMovesLane, bodyLine: number): { text: string; line?: number }[] {
+  const out: { text: string; line?: number }[] = [];
+  const at = (line: number | undefined) => (line === undefined ? undefined : bodyLine + line + 1);
+  for (const b of lane.children) {
+    if (b.type === "ul" || b.type === "ol") {
+      const lines = listItemLines(b);
+      b.items.forEach((item, k) => {
+        const m = TASK_MARK_RE.exec(item);
+        const text = m ? (m[1] === " " ? m[2]! : null) : item;
+        if (text !== null) out.push({ text, line: at(lines?.[k]?.[0]) });
+      });
+    } else if (b.type === "component" && b.name === "Checklist") {
+      for (const row of parseChecklist(b.children)) if (!row.checked) out.push({ text: row.text, line: at(b.line) });
+    } else if (b.type === "component" && b.name === "RunChecklist") {
+      for (const row of runChecklistSteps(b.children)) if (!row.checked) out.push({ text: row.text, line: at(b.line) });
+    }
+  }
+  return out;
 }
 
 /**
@@ -322,10 +343,10 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
   }
 
   if (!hasMoves) return { defined, local, mentions, steps };
-  const { lanes } = countedNextMovesLanes(parseBlocks(splitFrontmatter(content).body));
-  for (const item of lanes.flatMap((l) => l.items)) {
+  const bodyLine = frontmatterBodyLine(content.replace(/\r\n/g, "\n"));
+  const { lanes } = countedNextMovesLanes(parseBlocks(content.split(/\r?\n/).slice(bodyLine).join("\n")));
+  for (const { text: item, line } of lanes.flatMap((l) => laneStepLines(l, bodyLine))) {
     const step = readable(item);
-    const line = stepLine(lines, item);
     // The ids a connector follows are the prose rule's, linked or not.
     const connected = new Set(runsByBlock(step, trackerProjects).flatMap((r) => r.ids.map((i) => i.start)));
     const gluedStep = gluedIn(step);
