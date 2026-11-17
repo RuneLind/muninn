@@ -339,6 +339,10 @@ describe("the linter's linked form is the reader's", () => {
     ["Q-5 på [label](plans/a.md) x.", [], ["Q-5"]],
     ["Q-5 på <!-- c -->[[A]] x.", [], ["Q-5"]],
     ["Q-5 på `code` [[A]] x.", [], ["Q-5"]],
+    // A `---` line, a component tag line and a table cell end the reader's text; lint still reads a run.
+    ["D3 på\n---\n[[A]] x.", [], ["D3"]],
+    ["Se D3 på\n<Callout>\n[[A]]\n</Callout>", [], ["D3"]],
+    ["| a | b |\n|---|---|\n| D3 på | [[A]] x |", [], ["D3"]],
     // The connector ends its block: neither side reads a run.
     ["Q-5 på\n\n[[A]] x.", [], []],
     ["D3 på\n- [[A]] x.", [], []],
@@ -386,6 +390,13 @@ describe("the linter's linked form is the reader's", () => {
     expect([readerIds("_Q-5_ på [[A]] x."), lintIds("_Q-5_ på siden x.")]).toEqual([["Q-5"], []]);
     expect([readerIds("~~Q-5~~ på [[A]] x."), lintIds("~~Q-5~~ på siden x.")]).toEqual([["Q-5"], []]);
     expect([readerIds("> D3 på [[A]] x."), lintIds("> D3 på siden x.")]).toEqual([["D3"], []]);
+    // A line straight after a list item: the reader ends the item, lint reads on.
+    expect([readerIds("- D3 på\n[[A]] x."), lintIds("- D3 på\n[[A]] x."), lintIds("- D3 på\nsiden x.")]).toEqual([[], [], ["D3"]]);
+    expect([readerIds("- D3,\nD4 på [[A]] x."), lintIds("- D3,\nD4 på siden x.")]).toEqual([["D4"], ["D3,D4"]]);
+    // A hyphen that opens a line with no space after it glues the id for lint.
+    expect([readerIds("D3,\n-D4 på [[A]] x."), lintIds("D3,\n-D4 på siden x.")]).toEqual([["D4"], []]);
+    // Literal text in the reader, taken as the linked form by lint.
+    for (const md of ["Q-5 på ~~~~[[A]]~~~~ x.", "Q-5 på [[|]] x.", "Q-5 på _[[A]]_x."]) expect([md, readerIds(md), lintIds(md)]).toEqual([md, [], []]);
     // An emphasis mark never closed is literal text in the reader; lint takes it as opened.
     expect([readerIds("Q-5 på _[[A]] x."), lintIds("Q-5 på _[[A]] x.")]).toEqual([[], []]);
     expect([readerIds("Q-5 på *[[A]] x."), lintIds("Q-5 på *[[A]] x.")]).toEqual([[], []]);

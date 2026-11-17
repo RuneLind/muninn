@@ -117,7 +117,9 @@ const MD_LINK_TARGET_RE = /\]\(([^)\s]*)\)/g;
 const URL_RE = /\bhttps?:\/\/\S+/g;
 /** A wikilink right after the connector, the only form the reader links. A
  *  `_` or a `~~` may open around it (`*` is gone by then); `__`, a lone `~` and
- *  `~~~` are literal text in the reader, and `[[]]` is no link. */
+ *  `~~~` are literal text in the reader, and `[[]]` is no link. Taken as linked
+ *  here and not in the reader: four or more `~`, `[[|]]`, a `_` that closes
+ *  inside a word, and a mark that never closes. */
 const LINK_AHEAD_RE = /^(?:_(?!_)|~~)*\[\[(?!\]\])/;
 /** A case key: capitals, `-`, four or more digits. */
 const CASE_KEY_RE = /(?<![\p{L}\p{N}-])\p{Lu}{2,}-[0-9]{4,}(?![\p{L}\p{N}])/gu;
@@ -138,9 +140,12 @@ const HEADING_LINE_RE = /^ {0,3}#{1,6}[ \t]/;
 /** A line that opens a list item. */
 const LIST_ITEM_LINE_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]/;
 
-/** The spans of `text` the reader reads one at a time, as `[start, end)`: a
- *  blank line ends a block, a list item or a heading line opens one, and a
- *  heading line is a block of its own. */
+/** The blocks of `text` as `[start, end)`: a blank line ends a block, a list
+ *  item or a heading line opens one, and a heading line is a block of its own.
+ *  This is close to the text the reader reads one block at a time, not the
+ *  renderer's rule: a line straight after a list item stays in the item here
+ *  (the reader ends the item there), and a `---` line, a component tag line
+ *  and a table cell end no block. `wiki-cross-refs.test.ts` pins both sides. */
 function blockSpans(text: string): [number, number][] {
   const out: [number, number][] = [];
   let open = -1;

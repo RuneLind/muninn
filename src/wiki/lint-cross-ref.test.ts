@@ -192,6 +192,12 @@ describe("scanXrefPage — steps", () => {
     expect(s.mentions).toEqual([{ kind: "step", ids: ["Q-5", "CASE-10001", "T-4"], line: 5, snippet: "Q-5, CASE-10001, T-4" }]);
   });
 
+  test("a step's connected ids are read block by block too", () => {
+    // The item's second line opens a block, so the connector ends the first: Q-5 is loose.
+    const s = scan(STEP_PAGE("Settle Q-5 on\n   # [[plans/cases]]"));
+    expect(s.mentions.map((m) => [m.kind, m.ids])).toEqual([["step", ["Q-5"]]]);
+  });
+
   test("an id a connector follows is the prose rule's, linked or not", () => {
     const s = scan(STEP_PAGE("Run Q-5c on [[plans/cases|the cases page]] and Q-7 on the other page."));
     expect(s.mentions.map((m) => [m.kind, m.ids])).toEqual([["prose", ["Q-7"]]]);
