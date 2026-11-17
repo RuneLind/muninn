@@ -208,6 +208,7 @@ import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYS
 import { isReservedBasename } from "./frontmatter-lists.ts";
 import { EFFORT_ID_RE } from "./work-map/ids.ts";
 import { checkLogKinds, LOG_KIND_LINT_CHECKS } from "./lint-log-kind.ts";
+import { checkCrossRefs, CROSS_REF_LINT_CHECKS, queryCardText, scanXrefPage, type XrefPageScan } from "./lint-cross-ref.ts";
 import { checkPlanFold, FOLD_LINT_CHECKS } from "./lint-fold.ts";
 import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
@@ -256,6 +257,7 @@ export const LINT_CHECKS = [
   ...GENRE_LINT_CHECKS,
   ...LOG_KIND_LINT_CHECKS,
   ...FOLD_LINT_CHECKS,
+  ...CROSS_REF_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -1151,6 +1153,37 @@ export async function pageTextFiles(root: string, page: Pick<PageTextRef, "relPa
   return judgesComponents(page) ? loadPageFiles(root, page.relPath, content) : new Map();
 }
 
+/** Checks 29 and 30 over the scanned pages: a page's neighbours are the pages
+ *  it links to and the pages of its `series:`. */
+async function checkXrefs(
+  index: WikiIndex,
+  scans: ReadonlyMap<string, XrefPageScan>,
+  trackerProjects: readonly string[],
+  readFile: (absPath: string) => Promise<string | null>,
+): Promise<LintFinding[]> {
+  const byKey = new Map(index.pages.map((p) => [normalizeRelPath(p.relPath), p]));
+  const bySeries = new Map<string, string[]>();
+  for (const p of index.pages) {
+    const series = p.series?.trim();
+    if (series) bySeries.set(series, [...(bySeries.get(series) ?? []), p.relPath]);
+  }
+  const series = (relPath: string) => bySeries.get(byKey.get(normalizeRelPath(relPath))?.series?.trim() ?? "") ?? [];
+  return checkCrossRefs(scans, {
+    neighbours: (relPath) => {
+      const linked = (index.outgoing.get(normalizeRelPath(relPath)) ?? []).map((k) => byKey.get(k)?.relPath).filter((p): p is string => !!p);
+      return [...new Set([...linked, ...series(relPath)])].filter((p) => p !== relPath);
+    },
+    resolve: (target) => index.resolve(target)?.relPath,
+    cardText: async (relPath, id) => {
+      const page = byKey.get(normalizeRelPath(relPath));
+      const content = page ? await readFile(path.join(index.root, page.relPath)) : null;
+      return page && content !== null ? queryCardText(content, await pageTextFiles(index.root, page, content), id) : null;
+    },
+    connector: index.readerConfig?.language === "no" ? "på" : "on",
+    trackerProjects,
+  });
+}
+
 /**
  * Run every hygiene check over a built wiki index. Returns findings + per-check
  * counts + a timestamp. Report-only: nothing is written. `deps.readFile` is
@@ -1174,6 +1207,9 @@ export async function lintWiki(
   // the loop over the hub pages the loop collected.
   const systemMapPages: SystemMapPage[] = [];
   const foldCheck = index.readerConfig?.foldCheck ?? null;
+  // Checks 29 and 30 read what every page defines before they can judge one.
+  const trackerProjects = (index.readerConfig?.trackers ?? []).flatMap((t) => t.projects);
+  const xrefScans = new Map<string, XrefPageScan>();
 
   for (const page of index.pages) {
     // Check 24 — a status word after a link to a plan that says otherwise
@@ -1186,7 +1222,10 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
-    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], await pageTextFiles(index.root, page, content)));
+    const files = await pageTextFiles(index.root, page, content);
+    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], files));
+    // A reserved or culled page defines ids and is linted for none.
+    xrefScans.set(page.relPath, scanXrefPage(content, trackerProjects, !reservedBasename(page.relPath) && !page.culled));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.
@@ -1220,6 +1259,8 @@ export async function lintWiki(
   if (systemMapPages.length > 0) {
     findings.push(...(await checkSystemMapDrift(index, systemMapPages, (relPath) => readFile(path.join(index.root, relPath)))));
   }
+
+  findings.push(...(await checkXrefs(index, xrefScans, trackerProjects, readFile)));
 
   findings.push(...checkOrphans(index));
   // Index-level, not per-page: the subject of this finding is a page the loop

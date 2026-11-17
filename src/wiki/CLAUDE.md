@@ -36,7 +36,7 @@ Writing to a wiki:
 - A spawned Bun child passes `--no-env-file` and an allowlisted env: without the flag Bun reloads muninn's `.env` from its working directory, and every secret the allowlist left out comes back.
 - Code enumerating a wiki's dirty files skips `.wiki-write.lock` and `.wiki-stamp.*.tmp` through `isWikiWriteArtifact`: the lock is taken on every registered root, and not every root's `.gitignore` names them.
 - A lint check writes nothing: `lintWiki(index, deps)` only reads and a `fix` is a payload. Rows and Accept: `src/gardener/CLAUDE.md`.
-- The queue's full rationale is in `src/gardener/CLAUDE.md`, and the sync loop's locking and deferral contract in `src/sync/CLAUDE.md`, stated once.
+- The queue's full rationale is in `src/gardener/CLAUDE.md`, and the sync loop's locking and deferral contract in `src/sync/CLAUDE.md`.
 
 Read-only, two independent switches, neither implying the other:
 
@@ -130,10 +130,11 @@ Pages and routes:
 - Lint check 26 — genre and its picture (`lint-genre.ts`)
 - Lint check 27 — log kinds (`log-kind`, `lint-log-kind.ts`)
 - `plan-not-folded`
+- `lint-cross-ref.ts`
 - Decision chain route and dry run
 - Stale check — free half (`stale.ts`, `GET /api/wiki/stale`, `scripts/wiki-stale.ts`)
 - Stale check — model half (`stale-confirm.ts`, `wiki_stale_verdicts`, the STALE tab) [trap]
-- Stale check — the counts everywhere (PR 2b: `wiki-stale-summary.ts`, `wiki-stale-marks.ts`)
+- Stale check — the counts everywhere (`wiki-stale-summary.ts`, `wiki-stale-marks.ts`)
 - Stale check — the fix paths (PR 3: `stale-fix.ts`, `stale-fix-verdicts.ts`, Apply, Send to Gardener) [trap]
 - Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
