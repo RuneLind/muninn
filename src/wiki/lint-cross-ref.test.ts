@@ -67,8 +67,14 @@ describe("scanXrefPage — prose", () => {
     ]);
   });
 
-  test("a wikilink or a markdown link after the connector is the linked form", () => {
-    expect(prose("Q-5 on [[plans/cases|the cases page]], D3 i **[[plans/cases]]**, Q-5c on [the page](cases.mdx).")).toEqual([]);
+  test("only a wikilink right after the connector is the linked form, emphasis around it aside", () => {
+    expect(prose("Q-5 on [[plans/cases|the cases page]], D3 i **[[plans/cases]]**, D4 on _[[plans/cases]]_ and D5 on ~~[[plans/cases]]~~.")).toEqual([]);
+  });
+
+  test("a quote, a bracket or a markdown link after the connector is not the linked form", () => {
+    // The reader links none of these: its text before the link does not end in the connector.
+    const page = "Q-5 on «[[plans/cases]]», D3 on ([[plans/cases]]), D4 on \"[[plans/cases]]\" and Q-5c on [the page](cases.mdx).";
+    expect(scan(page).mentions.map((m) => m.ids)).toEqual([["Q-5"], ["D3"], ["D4"], ["Q-5c"]]);
   });
 
   test("a hyphen between two ids is a range, not a glued id", () => {

@@ -114,9 +114,9 @@ const WIKILINK_RE = /\[\[([^\]\n]*)\]\]/g;
 /** `[label](target)`: the label stays text, the target goes. */
 const MD_LINK_TARGET_RE = /\]\(([^)\s]*)\)/g;
 const URL_RE = /\bhttps?:\/\/\S+/g;
-/** A wikilink or a markdown link right after the connector, emphasis and an
- *  opening bracket or quote aside. */
-const LINK_AHEAD_RE = /^[_(«"'“]*\[/;
+/** A wikilink right after the connector, the only form the reader links;
+ *  emphasis or strikethrough may open around it (`*` is gone by then). */
+const LINK_AHEAD_RE = /^[_~]*\[\[/;
 /** A case key: capitals, `-`, four or more digits. */
 const CASE_KEY_RE = /(?<![\p{L}\p{N}-])\p{Lu}{2,}-[0-9]{4,}(?![\p{L}\p{N}])/gu;
 /** The case keys in `text`, tracker keys left out. */
