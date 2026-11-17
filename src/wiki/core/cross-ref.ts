@@ -15,19 +15,26 @@ export const XREF_CLASS = "wiki-xref";
 /** The linked item's anchor on a cross-page link; `navTargetFrom` reads it. */
 export const NAV_ANCHOR_ATTR = "data-anchor";
 
-/** One id: letters, an optional `-`, digits (`D9`, `Q-16`, `A003`, `P2`). The
- *  sides are checked by the callers' lookarounds. */
-export const XREF_ID_SRC = String.raw`\p{L}+-?[0-9]+`;
-/** What may stand between two ids of one run: a list or range separator. The
- *  in-page linker's `RUN_GAP_RE` is this source anchored. */
-export const RUN_GAP_SRC = String.raw`\s*(?:[,/&–—-]|og|and|eller|or|til|to)?\s*`;
+/** One id: letters, an optional `-`, digits, then at most one lower-case
+ *  letter (`D9`, `Q-16`, `A003`, `P2`, `Q-5c`). The sides are checked by the
+ *  callers' lookarounds. */
+export const XREF_ID_SRC = String.raw`\p{L}+-?[0-9]+\p{Ll}?`;
+/** What may stand between two ids of one run: a list or range separator, or
+ *  white space alone. The in-page linker's `RUN_GAP_RE` is this source
+ *  anchored. Two alternatives that cannot both match one gap: with the
+ *  separator optional between two `\s*`, a row of ids with no connector after
+ *  it backtracked twice per gap (24 ids took 8 s). */
+export const RUN_GAP_SRC = String.raw`(?:\s*(?:[,/&–—-]|og|and|eller|or|til|to)\s*|\s*)`;
 
 const NO_ALNUM_BEFORE = String.raw`(?<![\p{L}\p{N}])`;
 const NO_ALNUM_AFTER = String.raw`(?![\p{L}\p{N}])`;
 const ID_RE_SRC = `${NO_ALNUM_BEFORE}${XREF_ID_SRC}${NO_ALNUM_AFTER}`;
-/** The words between a run and its wikilink. */
-const CONNECTOR_SRC = String.raw`[\s ]+(?:i|in|på|on)[\s ]+$`;
-const RUN_RE = new RegExp(`${ID_RE_SRC}(?:${RUN_GAP_SRC}${ID_RE_SRC})*(?=${CONNECTOR_SRC})`, "u");
+/** The words between a run and what it points at, white space on both sides.
+ *  The wiki linter reads the same grammar forwards (`lint-cross-ref.ts`). */
+export const XREF_CONNECTOR_SRC = String.raw`[\s ]+(?:i|in|på|on)[\s ]+`;
+/** A run of ids. */
+export const XREF_RUN_SRC = `${ID_RE_SRC}(?:${RUN_GAP_SRC}${ID_RE_SRC})*`;
+const RUN_RE = new RegExp(`${XREF_RUN_SRC}(?=${XREF_CONNECTOR_SRC}$)`, "u");
 const ID_GLOBAL_RE = new RegExp(ID_RE_SRC, "gu");
 const ID_WHOLE_RE = new RegExp(`^${XREF_ID_SRC}$`, "u");
 
@@ -44,7 +51,7 @@ export function isXrefId(s: string): boolean {
 /** An id of a configured tracker project (`MELOSYS-8308` with project
  *  `MELOSYS`) is a key, never a cross-page id. */
 export function isTrackerKey(id: string, trackerProjects: readonly string[]): boolean {
-  const m = /^(\p{L}+)-?[0-9]+$/u.exec(id);
+  const m = /^(\p{L}+)-?[0-9]+\p{Ll}?$/u.exec(id);
   return !!m && trackerProjects.includes(m[1]!.toUpperCase());
 }
 

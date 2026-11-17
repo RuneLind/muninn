@@ -25,6 +25,8 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "effort-unknown": "effort: values that name no effort in the work map",
   "log-kind": "log.md entries whose kind is outside logKinds",
   "plan-not-folded": "Shipped plans that name no durable page (folded_into)",
+  "cross-page-id-unlinked": "Ids another page defines, named with no link to it",
+  "step-query-missing-case": "Next-move steps whose query card lacks a case they name",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
   "plan-no-ledger": "Plans with two or more PRs and no PR ledger on the page",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",

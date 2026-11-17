@@ -46,6 +46,8 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "effort-unknown": { one: "unknown declared effort", many: "unknown declared efforts" },
   "log-kind": { one: "log entry with an unlisted kind", many: "log entries with an unlisted kind" },
   "plan-not-folded": { one: "shipped plan that names no durable page", many: "shipped plans that name no durable page" },
+  "cross-page-id-unlinked": { one: "id from another page with no link to it", many: "ids from another page with no link to them" },
+  "step-query-missing-case": { one: "step whose query lacks a case it names", many: "steps whose query lacks a case they name" },
   "ledger-row-state": { one: "PR ledger row with no readable state", many: "PR ledger rows with no readable state" },
   "plan-no-ledger": { one: "plan with two or more PRs and no PR ledger", many: "plans with two or more PRs and no PR ledger" },
   "chain-close-conflict": { one: "contradicted «Lukker» close", many: "contradicted «Lukker» closes" },

@@ -6,13 +6,19 @@ const ids = (text: string, projects: string[] = []) => findXrefRun(text, project
 describe("the cross-page id token", () => {
   test("letters, an optional hyphen, digits — any prefix", () => {
     for (const id of ["D9", "Q-16", "A003", "P2", "Å3", "MEL-601780"]) expect(isXrefId(id), id).toBe(true);
-    for (const id of ["omtalt", "10", "D", "D-", "Q-A", "D9a", "D 9", "-D9"]) expect(isXrefId(id), id).toBe(false);
+    for (const id of ["omtalt", "10", "D", "D-", "Q-A", "D 9", "-D9"]) expect(isXrefId(id), id).toBe(false);
+  });
+
+  test("at most one lower-case letter after the digits", () => {
+    for (const id of ["Q-5c", "Q-13b", "T-6b", "D9a"]) expect(isXrefId(id), id).toBe(true);
+    for (const id of ["Q-5cd", "Q-5C", "Q-5c1", "D9-a"]) expect(isXrefId(id), id).toBe(false);
   });
 
   test("a tracker key is one only for a configured project", () => {
     expect(isTrackerKey("MELOSYS-8308", ["MELOSYS"])).toBe(true);
     expect(isTrackerKey("MELOSYS-8308", [])).toBe(false);
     expect(isTrackerKey("D9", ["MELOSYS"])).toBe(false);
+    expect(isTrackerKey("MELOSYS-8308b", ["MELOSYS"])).toBe(true);
   });
 });
 
@@ -43,7 +49,14 @@ describe("findXrefRun — the run before `i`/`in`/`på`/`on` and a wikilink", ()
     expect(ids("D9 og ")).toBeNull();
     // A digit before the letters: no id starts inside a token.
     expect(ids("5D9 i ")).toBeNull();
-    expect(ids("D9x i ")).toBeNull();
+    expect(ids("D9xy i ")).toBeNull();
+    expect(ids("D9X i ")).toBeNull();
+  });
+
+  test("an id with a letter suffix is read whole, alone and in a run", () => {
+    expect(ids("Kjør Q-5c på ")).toEqual(["Q-5c"]);
+    expect(ids("Q-5b og Q-5c på ")).toEqual(["Q-5b", "Q-5c"]);
+    expect(ids("Q-5, Q-10c i ")).toEqual(["Q-5", "Q-10c"]);
   });
 
   test("a tracker key is never an id; the run keeps only the ids after it", () => {
@@ -54,6 +67,13 @@ describe("findXrefRun — the run before `i`/`in`/`på`/`on` and a wikilink", ()
     expect(ids("MELOSYS-8308 på ")).toEqual(["MELOSYS-8308"]);
   });
 
+  test("a long row of ids with no connector answers at once", () => {
+    const row = `${Array.from({ length: 200 }, (_, k) => `A${k}`).join(" ")} x `;
+    const t = performance.now();
+    expect(ids(row)).toBeNull();
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
   test("a non-breaking space counts as a space", () => {
     expect(ids("D9 i ")).toEqual(["D9"]);
   });
@@ -61,7 +81,7 @@ describe("findXrefRun — the run before `i`/`in`/`på`/`on` and a wikilink", ()
 
 describe("parseXrefIds", () => {
   test("comma-separated ids, whole, first occurrence, capped", () => {
-    expect(parseXrefIds(" D1, Q-3,D1,,omtalt,<x>,O2 ")).toEqual(["D1", "Q-3", "O2"]);
+    expect(parseXrefIds(" D1, Q-3,D1,,omtalt,<x>,O2,Q-5c ")).toEqual(["D1", "Q-3", "O2", "Q-5c"]);
     expect(parseXrefIds(undefined)).toEqual([]);
     const many = Array.from({ length: XREF_MAX_IDS + 5 }, (_, k) => `D${k}`).join(",");
     expect(parseXrefIds(many)).toHaveLength(XREF_MAX_IDS);

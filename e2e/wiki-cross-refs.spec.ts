@@ -57,6 +57,12 @@ const pageA = (o1Tail: string) =>
     "",
     "</Query>",
     "",
+    '<Query id="T-6b" question="A lettered query?" answer="Late.">',
+    "",
+    "Body.",
+    "",
+    "</Query>",
+    "",
     '<CaseBoard src="a-cases.yaml" />',
     "",
     ...filler(60, "A"),
@@ -100,6 +106,8 @@ const PAGE_B = [
   "Suffix: O5 on [[plans/a]].",
   "",
   "Two kinds: O2 i [[plans/a]].",
+  "",
+  "Letter: T-6b på [[plans/a]].",
   "",
   "Prose: Q-1 i prod.",
   "",
@@ -185,7 +193,7 @@ test.describe("Wiki reader: cross-page ids", () => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     const calls = await open(page, "plans/b.md");
-    await expect(page.locator(".wiki-article a.wiki-xref")).toHaveCount(8);
+    await expect(page.locator(".wiki-article a.wiki-xref")).toHaveCount(9);
     expect(await xrefs(page)).toEqual([
       "O1→plans/a.md#o1",
       "D1→plans/a.md#d1",
@@ -196,6 +204,8 @@ test.describe("Wiki reader: cross-page ids", () => {
       "D1→plans/a.md#d1",
       // The Query card holds `o5`, so A's item has the allocator's `o5-2`.
       "O5→plans/a.md#o5-2",
+      // An id with a letter after its digits is one id.
+      "T-6b→plans/a.md#t-6b",
     ]);
     // `**D1** i [[…]]`: the link sits inside the bold.
     await expect(page.locator(".wiki-article strong > a.wiki-xref")).toHaveText("D1");
