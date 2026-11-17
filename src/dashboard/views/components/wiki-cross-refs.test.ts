@@ -6,6 +6,7 @@ import type { XrefAnswer, XrefTarget } from "../../../wiki/core/cross-ref.ts";
 import { navTargetFrom } from "../../../wiki/core/wiki-nav.ts";
 import { linkRefs } from "./wiki-ref-links.ts";
 import { fetchAndResolveXrefs, resolveXrefRuns, wrapXrefRuns, xrefPeekLines, type XrefCandidate } from "./wiki-cross-refs.ts";
+import { scanXrefPage } from "../../../wiki/lint-cross-ref.ts";
 
 /** The browser half (the click through page navigation, the scroll and the
  *  hover card) is driven in e2e/wiki-cross-refs.spec.ts. Assertions compare
@@ -298,5 +299,96 @@ describe("the hover card's lines", () => {
       { cls: "xref-text", text: "How many?" },
       { cls: "xref-answer", text: "Twelve." },
     ]);
+  });
+});
+
+/** Lint check 29 (`src/wiki/lint-cross-ref.ts`) reads the page source and the
+ *  reader the rendered page. This table runs both over one text, so a form
+ *  the two read differently fails here and not as a finding on a page. */
+describe("the linter's linked form is the reader's", () => {
+  const readerIds = (md: string) => ids(withB(md, (a) => wrapXrefRuns(a)).out);
+  const lintIds = (md: string) => scanXrefPage(md, []).mentions.map((m) => m.ids.join(","));
+  /** The same text with every link written as a plain word. */
+  const plain = (md: string) => md.replace(/\[\[[^\]]*\]\]|\[[^\]]*\]\([^)]*\)/g, "siden");
+
+  // [text, the runs the reader takes as candidates, the runs lint reports]
+  const LINK_FORMS: [string, string[], string[]][] = [
+    ["Q-5 på [[A]] x.", ["Q-5"], []],
+    ["Q-5 på [[A|label]] x.", ["Q-5"], []],
+    ["Q-5 på [[Nope]] x.", ["Q-5"], []],
+    ["Q-5 på _[[A]]_ x.", ["Q-5"], []],
+    ["Q-5 på *[[A]]* x.", ["Q-5"], []],
+    ["Q-5 på **[[A]]** x.", ["Q-5"], []],
+    ["Q-5 på ~~[[A]]~~ x.", ["Q-5"], []],
+    ["Q-5 på _~~[[A]]~~_ x.", ["Q-5"], []],
+    ["Q-5 på ~~**[[A]]**~~ x.", ["Q-5"], []],
+    ["_Q-5 på [[A]]_ x.", ["Q-5"], []],
+    ["**Q-5** på [[A]] x.", ["Q-5"], []],
+    ["Q-5 **på** [[A]] x.", ["Q-5"], []],
+    ["Q-5 på\n[[A]] x.", ["Q-5"], []],
+    ["Q-5\npå [[A]] x.", ["Q-5"], []],
+    ["Q-5 på [[A]] og D3 på [[A]] x.", ["Q-5", "D3"], []],
+    ["Q-5 på «[[A]]» x.", [], ["Q-5"]],
+    ["Q-5 på ([[A]]) x.", [], ["Q-5"]],
+    ['Q-5 på "[[A]]" x.', [], ["Q-5"]],
+    ["Q-5 på '[[A]]' x.", [], ["Q-5"]],
+    ["Q-5 på __[[A]]__ x.", [], ["Q-5"]],
+    ["Q-5 på ~[[A]]~ x.", [], ["Q-5"]],
+    ["Q-5 på ~~~[[A]]~~~ x.", [], ["Q-5"]],
+    ["Q-5 på [[]] x.", [], ["Q-5"]],
+    ["Q-5 på [label](plans/a.md) x.", [], ["Q-5"]],
+    ["Q-5 på <!-- c -->[[A]] x.", [], ["Q-5"]],
+    ["Q-5 på `code` [[A]] x.", [], ["Q-5"]],
+    // The connector ends its block: neither side reads a run.
+    ["Q-5 på\n\n[[A]] x.", [], []],
+    ["D3 på\n- [[A]] x.", [], []],
+    ["D3 på\n## [[A]]", [], []],
+    ["Q-5 <!-- c --> på [[A]] x.", [], []],
+    ["`Q-5` på [[A]] x.", [], []],
+  ];
+
+  test("lint reports a run exactly where the reader takes no candidate", () => {
+    for (const [md, reader, lint] of LINK_FORMS) {
+      expect([md, readerIds(md), lintIds(md)]).toEqual([md, reader, lint]);
+      // Never both: a run the reader links is no finding.
+      expect([md, reader.length > 0 && lint.length > 0]).toEqual([md, false]);
+    }
+  });
+
+  // [text, the run the reader takes]: lint reads the same run off the plain form.
+  const RUN_FORMS: [string, string[]][] = [
+    ["- D3\n- D4 på [[A]] x.", ["D4"]],
+    ["* D3\n* D4 på [[A]] x.", ["D4"]],
+    ["1. D3\n2. D4 på [[A]] x.", ["D4"]],
+    ["D3\n\nD4 på [[A]] x.", ["D4"]],
+    ["## About D3\nD4 på [[A]] x.", ["D4"]],
+    ["D3. D4 på [[A]] x.", ["D4"]],
+    ["D3 + D4 på [[A]] x.", ["D4"]],
+    ["D3,\nD4 på [[A]] x.", ["D3,D4"]],
+    ["D3 og\nD4 på [[A]] x.", ["D3,D4"]],
+    ["D3  \nD4 på [[A]] x.", ["D3,D4"]],
+    ["D3-D5 på [[A]] x.", ["D3,D5"]],
+    ["D3–D5 på [[A]] x.", ["D3,D5"]],
+    ["D3, D4 og Q-16c på [[A]] x.", ["D3,D4,Q-16c"]],
+    ["| a | b |\n|---|---|\n| D3 | D4 på [[A]] x |", ["D4"]],
+  ];
+
+  test("the ids of a run are the same on both sides", () => {
+    for (const [md, run] of RUN_FORMS) {
+      expect([md, readerIds(md), lintIds(md), lintIds(plain(md))]).toEqual([md, run, [], run]);
+    }
+  });
+
+  test("where the two differ on purpose", () => {
+    // `Q-R4` holds no `R4` for lint; the reader asks the linked page for it and finds none.
+    expect([readerIds("Q-R4 på [[A]] x."), lintIds("Q-R4 på siden x.")]).toEqual([["R4"], []]);
+    // Lint reads no id through `_` or `~~` emphasis, and no blockquote line.
+    expect([readerIds("_Q-5_ på [[A]] x."), lintIds("_Q-5_ på siden x.")]).toEqual([["Q-5"], []]);
+    expect([readerIds("~~Q-5~~ på [[A]] x."), lintIds("~~Q-5~~ på siden x.")]).toEqual([["Q-5"], []]);
+    expect([readerIds("> D3 på [[A]] x."), lintIds("> D3 på siden x.")]).toEqual([["D3"], []]);
+    // An emphasis mark never closed is literal text in the reader; lint takes it as opened.
+    expect([readerIds("Q-5 på _[[A]] x."), lintIds("Q-5 på _[[A]] x.")]).toEqual([[], []]);
+    expect([readerIds("Q-5 på *[[A]] x."), lintIds("Q-5 på *[[A]] x.")]).toEqual([[], []]);
+    expect([readerIds("Q-5 på ~~[[A]] x."), lintIds("Q-5 på ~~[[A]] x.")]).toEqual([[], []]);
   });
 });

@@ -75,6 +75,10 @@ describe("scanXrefPage — prose", () => {
     // The reader links none of these: its text before the link does not end in the connector.
     const page = "Q-5 on «[[plans/cases]]», D3 on ([[plans/cases]]), D4 on \"[[plans/cases]]\" and Q-5c on [the page](cases.mdx).";
     expect(scan(page).mentions.map((m) => m.ids)).toEqual([["Q-5"], ["D3"], ["D4"], ["Q-5c"]]);
+    expect(scan("Q-5 on '[[plans/cases]]' and D3 on “[[plans/cases]]”.").mentions.map((m) => m.ids)).toEqual([["Q-5"], ["D3"]]);
+    // Literal text in the reader, not emphasis: `__`, a lone `~`, `~~~`. And `[[]]` is no link.
+    const literal = "D3 on __[[plans/cases]]__, D4 on ~[[plans/cases]]~, D5 on ~~~[[plans/cases]]~~~ and D6 on [[]].";
+    expect(scan(literal).mentions.map((m) => m.ids)).toEqual([["D3"], ["D4"], ["D5"], ["D6"]]);
   });
 
   test("a hyphen between two ids is a range, not a glued id", () => {
@@ -94,14 +98,27 @@ describe("scanXrefPage — prose", () => {
     expect(scan("Both D3,\nD4 and\nD5 on\nthe cases page.").mentions).toMatchObject([{ ids: ["D3", "D4", "D5"], line: 1 }]);
   });
 
-  test("an HTML comment is not read, and the text closes over it", () => {
-    expect(scan("<!-- D3 on foo -->\n\n<!--\nQ-5 on the cases page\n-->\n\nD4 on the cases page.").mentions).toMatchObject([{ ids: ["D4"], line: 7 }]);
-    expect(prose("Q-5 on <!-- the card -->[[plans/cases]] and D3 <!-- x --> on the log page.")).toEqual(["D3 on the log"]);
-    // A comment never closed hides nothing.
-    expect(prose("<!-- open\n\nD4 on the cases page.")).toEqual(["D4 on the cases"]);
-    const t = performance.now();
-    expect(scan(`${"<!-- D3 on x ".repeat(20_000)}\n\n<NextMoves>`).mentions.length).toBe(20_000);
-    expect(performance.now() - t).toBeLessThan(2000);
+  test("an HTML comment is text, as the reader draws it", () => {
+    expect(scan("<!-- D3 on foo -->").mentions.map((m) => m.ids)).toEqual([["D3"]]);
+    // The reader's text before the link ends in the comment, not in the connector.
+    expect(scan("Q-5 on <!-- the card -->[[plans/cases]].").mentions.map((m) => m.ids)).toEqual([["Q-5"]]);
+    // A comment between the id and the connector: no run, with or without another run on the page.
+    expect(scan("D3 <!-- x --> on the log page.").mentions).toEqual([]);
+    expect(scan("D3 <!-- x --> on the log page.\n\nQ-9 on the other page.").mentions.map((m) => m.ids)).toEqual([["Q-9"]]);
+  });
+
+  test("a connector that ends its block points at nothing", () => {
+    for (const next of ["- the cases page", "* the cases page", "1. the cases page", "## The cases page", "\nThe cases page."]) {
+      expect([next, scan(`We settled D3 on\n${next}`).mentions]).toEqual([next, []]);
+    }
+    expect(scan("We settled D3 on  \n\nNext.").mentions).toEqual([]);
+    // Inside a paragraph the next line is the same block.
+    expect(scan("We settled D3 on\nthe cases page.").mentions.map((m) => m.ids)).toEqual([["D3"]]);
+  });
+
+  test("a star that opens a line is a list marker only before white space", () => {
+    expect(scan("D3,\n*D4* on the cases page.").mentions.map((m) => m.ids)).toEqual([["D3", "D4"]]);
+    expect(scan("D3,\n* D4 on the cases page.").mentions.map((m) => m.ids)).toEqual([["D4"]]);
   });
 
   test("the line is the source line of the run's first id", () => {
@@ -371,15 +388,6 @@ describe("xrefRunsBeforeConnector — every run a connector follows", () => {
 
   test("the connector may stand on the next line", () => {
     expect(runs("Se Q-5c\npå\n[[x]]")).toEqual([{ ids: ["Q-5c"], connector: "på", after: "[[x]]" }]);
-  });
-
-  test("a blank line or a list marker ends a run, in a gap and in the connector", () => {
-    expect(runs("D3\n\nD4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
-    expect(runs("D3,\n \nD4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
-    expect(runs("D3\n- D4 på siden").map((r) => r.ids)).toEqual([["D4"]]);
-    expect(runs("D3 -\nD4 på siden").map((r) => r.ids)).toEqual([["D3", "D4"]]);
-    expect(runs("D3 på\n\nsiden")).toEqual([]);
-    expect(runs("D3\n\npå siden")).toEqual([]);
   });
 
   test("no connector, a word or a tracker key gives no run", () => {

@@ -26,7 +26,10 @@
  *
  * Not read: frontmatter, code fences and spans, `<Timeline>`, `<DecisionLog>`
  * and `<Historic>`, blockquote lines and table header rows (`stateExemptLines`,
- * check 14's masks), a tag's attribute values, and the inside of a link.
+ * check 14's masks), a tag's attribute values, and the inside of a link. An
+ * HTML comment is read: the reader draws it as text. A run, its connector and
+ * what follows are read inside one block (a paragraph, a list item, a heading
+ * line), as the reader reads one block's text.
  *
  * A label the page gives a row of its own is not another page's id: an id in
  * a heading, a bold id that opens a list item, a paragraph or a table cell,
@@ -39,7 +42,7 @@
  * hits on melosys-kode-wiki were false (2026-11-17).
  *
  * Three more shapes are never a finding: an id glued after a hyphen (`Q-R4`
- * holds no `R4`), a connector that opens a state phrase (`Q-1 i prod`,
+ * holds no `R4`; `D3-D5` is a range of two ids), a connector that opens a state phrase (`Q-1 i prod`,
  * `STATUS_STATES`), and a connector before a date (`O5 on 14.11`, `D3 i 2025`).
  */
 
@@ -57,9 +60,6 @@ export const CROSS_REF_LINT_CHECKS = ["cross-page-id-unlinked", "step-query-miss
 
 const GAP_RE = new RegExp(`^${RUN_GAP_SRC}$`, "u");
 const CONNECTOR_AT_RE = new RegExp(XREF_CONNECTOR_SRC, "uy");
-/** White space that ends a block: a blank line, or a `-` list marker opening
- *  the next line. The reader reads one block's text at a time. */
-const BLOCK_BREAK_RE = /\n[ \t]*(?:\n|-[ \t])/;
 
 export interface XrefConnectedRun {
   /** The run's ids, tracker keys cut as `findXrefRun` cuts them. */
@@ -75,7 +75,8 @@ export interface XrefConnectedRun {
  * Every id run in `text` that `i`, `in`, `på` or `on` follows, wherever it
  * stands: the grammar `findXrefRun` (`core/cross-ref.ts`) reads backwards
  * from a wikilink, read forwards. What follows the connector is the caller's
- * to judge. Here and not in `core/`: that file is in the reader's bundle.
+ * to judge. It reads one block's text (`runsByBlock` splits a page). Here and
+ * not in `core/`: that file is in the reader's bundle.
  *
  * One pass over the id tokens, each gap and each run end tested once: a
  * regex over `run + connector` re-read the rest of a run from every id in it,
@@ -88,11 +89,10 @@ export function xrefRunsBeforeConnector(text: string, trackerProjects: readonly 
   tokens.forEach((t, k) => {
     run.push(t);
     const next = tokens[k + 1];
-    const gap = next ? text.slice(t.end, next.start) : null;
-    if (gap !== null && GAP_RE.test(gap) && !BLOCK_BREAK_RE.test(gap)) return;
+    if (next && GAP_RE.test(text.slice(t.end, next.start))) return;
     CONNECTOR_AT_RE.lastIndex = t.end;
     const m = CONNECTOR_AT_RE.exec(text);
-    if (m && !BLOCK_BREAK_RE.test(m[0])) {
+    if (m) {
       let from = run.length;
       while (from > 0 && !isTrackerKey(run[from - 1]!.id, trackerProjects)) from--;
       const kept = run.slice(from);
@@ -114,9 +114,10 @@ const WIKILINK_RE = /\[\[([^\]\n]*)\]\]/g;
 /** `[label](target)`: the label stays text, the target goes. */
 const MD_LINK_TARGET_RE = /\]\(([^)\s]*)\)/g;
 const URL_RE = /\bhttps?:\/\/\S+/g;
-/** A wikilink right after the connector, the only form the reader links;
- *  emphasis or strikethrough may open around it (`*` is gone by then). */
-const LINK_AHEAD_RE = /^[_~]*\[\[/;
+/** A wikilink right after the connector, the only form the reader links. A
+ *  `_` or a `~~` may open around it (`*` is gone by then); `__`, a lone `~` and
+ *  `~~~` are literal text in the reader, and `[[]]` is no link. */
+const LINK_AHEAD_RE = /^(?:_(?!_)|~~)*\[\[(?!\]\])/;
 /** A case key: capitals, `-`, four or more digits. */
 const CASE_KEY_RE = /(?<![\p{L}\p{N}-])\p{Lu}{2,}-[0-9]{4,}(?![\p{L}\p{N}])/gu;
 /** The case keys in `text`, tracker keys left out. */
@@ -133,35 +134,62 @@ const STATE_AHEAD_RE = new RegExp(
 const DATE_AHEAD_RE = /^(?:\d{1,2}\.\d{1,2}|(?:19|20)\d{2}(?![\p{L}\p{N}-]))/u;
 /** An ATX heading line. */
 const HEADING_LINE_RE = /^ {0,3}#{1,6}[ \t]/;
+/** A line that opens a list item. */
+const LIST_ITEM_LINE_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]/;
+
+/** The spans of `text` the reader reads one at a time, as `[start, end)`: a
+ *  blank line ends a block, a list item or a heading line opens one, and a
+ *  heading line is a block of its own. */
+function blockSpans(text: string): [number, number][] {
+  const out: [number, number][] = [];
+  let open = -1;
+  let at = 0;
+  for (const line of text.split("\n")) {
+    const heading = HEADING_LINE_RE.test(line);
+    if (open !== -1 && (line.trim() === "" || heading || LIST_ITEM_LINE_RE.test(line))) {
+      out.push([open, at - 1]);
+      open = -1;
+    }
+    if (line.trim() !== "") {
+      if (open === -1) open = at;
+      if (heading) {
+        out.push([open, at + line.length]);
+        open = -1;
+      }
+    }
+    at += line.length + 1;
+  }
+  if (open !== -1) out.push([open, text.length]);
+  return out;
+}
+
+/** {@link xrefRunsBeforeConnector} over each block of `text`, offsets into
+ *  `text`, with the rest of the run's block. A connector that ends its block
+ *  has nothing to point at and gives no run. */
+function runsByBlock(text: string, trackerProjects: readonly string[]): (XrefConnectedRun & { after: string })[] {
+  return blockSpans(text).flatMap(([from, to]) =>
+    xrefRunsBeforeConnector(text.slice(from, to), trackerProjects)
+      .map((r) => ({
+        ids: r.ids.map((i) => ({ id: i.id, start: i.start + from, end: i.end + from })),
+        connector: r.connector,
+        end: r.end + from,
+        after: text.slice(r.end + from, to),
+      }))
+      .filter((r) => r.after.trim() !== ""),
+  );
+}
 /** A step's clauses: split at `;` and at a sentence end. */
 const CLAUSE_SPLIT_RE = /;|(?<=[.!?])\s+/;
 
-/** `text` with every closed `<!-- … -->` removed, its line breaks kept: the
- *  reader skips a comment, so the text on its two sides meets. One pass; a
- *  comment never closed stays as text. */
-function dropComments(text: string): string {
-  let out = "";
-  let at = 0;
-  for (;;) {
-    const open = text.indexOf("<!--", at);
-    const close = open === -1 ? -1 : text.indexOf("-->", open + 4);
-    if (close === -1) return out + text.slice(at);
-    out += text.slice(at, open) + text.slice(open, close).replace(/[^\n]/g, "");
-    at = close + 3;
-  }
-}
-
 /** One line or step as the checks read it: code spans, attribute values, link
- *  insides and URLs holed out, comments and `*` emphasis removed (a `*` list
- *  marker stays, so two items are not one run). Offsets are not the source's
- *  once something is removed; line breaks are kept. */
+ *  insides and URLs holed out, `*` emphasis removed (a `*` list marker stays:
+ *  it opens a block). An HTML comment stays: the reader draws it as text.
+ *  Offsets are not the source's once a `*` is gone; line breaks are kept. */
 function readable(text: string): string {
-  return dropComments(
-    text
-      .split("\n")
-      .map((line) => maskLineCodeSpans(line).replace(/\n/g, HOLE))
-      .join("\n"),
-  )
+  return text
+    .split("\n")
+    .map((line) => maskLineCodeSpans(line).replace(/\n/g, HOLE))
+    .join("\n")
     .replace(TAG_RE, (tag) => tag.replace(/=(?:"[^"]*"|'[^']*')/g, (v) => `=${hole(v.slice(1))}`))
     .replace(WIKILINK_RE, (_, inner: string) => `[[${hole(inner)}]]`)
     .replace(MD_LINK_TARGET_RE, (_, target: string) => `](${hole(target)})`)
@@ -259,8 +287,7 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
   const local = localLabels(content);
 
   const { lines, body, exempt } = stateExemptLines(content);
-  // A heading is a block of its own with no blank line after it: the hole ends it.
-  const text = readable(lines.map((l, i) => (i < body || exempt.has(i) ? "" : HEADING_LINE_RE.test(l) ? l + HOLE : l)).join("\n"));
+  const text = readable(lines.map((l, i) => (i < body || exempt.has(i) ? "" : l)).join("\n"));
   // `Q-R4` holds no `R4`: an id right after a hyphen is part of a longer
   // word, unless the hyphen follows another id (`D3-D5`, a range).
   const gluedIn = (src: string) => {
@@ -278,8 +305,8 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
     }
     return line;
   };
-  for (const run of xrefRunsBeforeConnector(text, trackerProjects)) {
-    const after = text.slice(run.end);
+  for (const run of runsByBlock(text, trackerProjects)) {
+    const after = run.after;
     if (LINK_AHEAD_RE.test(after)) continue;
     if (STATE_AHEAD_RE.test(`${run.connector} ${after}`) || DATE_AHEAD_RE.test(after)) continue;
     if (run.ids.some((r) => glued(r.start))) continue;
@@ -300,7 +327,7 @@ export function scanXrefPage(content: string, trackerProjects: readonly string[]
     const step = readable(item);
     const line = stepLine(lines, item);
     // The ids a connector follows are the prose rule's, linked or not.
-    const connected = new Set(xrefRunsBeforeConnector(step, trackerProjects).flatMap((r) => r.ids.map((i) => i.start)));
+    const connected = new Set(runsByBlock(step, trackerProjects).flatMap((r) => r.ids.map((i) => i.start)));
     const gluedStep = gluedIn(step);
     const loose = [...new Set(xrefIdsIn(step).filter((t) => isId(t.id) && !connected.has(t.start) && !gluedStep(t.start)).map((t) => t.id))];
     if (loose.length) mentions.push({ kind: "step", ids: loose, line, snippet: loose.join(", ") });
