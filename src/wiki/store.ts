@@ -277,6 +277,24 @@ export interface WikiReaderConfig {
    * `owner/repo#n`). A bad field warns and is dropped.
    */
   prGrammar?: PrGrammar | null;
+  /**
+   * Discuss (mimir plan muninn-wiki-discuss): `"discuss": {"handoff": true}`
+   * offers «Ask Claude Code» in the reader, which copies a prompt naming the
+   * page's path and the passage's lines. Absent ⇒ off. A bad block or value
+   * warns and reads as off. Cosmetic, so it may live here: losing the file
+   * hides two controls that call no model.
+   */
+  discuss?: { handoff: boolean };
+}
+
+/** `.wiki-reader.json`'s `discuss` block: `{handoff: boolean}`, else off with a warning. */
+export function parseDiscussReaderConfig(raw: unknown): { handoff: boolean; warning?: string } {
+  if (raw === undefined) return { handoff: false };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { handoff: false, warning: "is not an object — ignoring it" };
+  const h = (raw as Record<string, unknown>).handoff;
+  if (h === undefined) return { handoff: false };
+  if (typeof h !== "boolean") return { handoff: false, warning: "handoff is not true or false — ignoring it" };
+  return { handoff: h };
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -2250,6 +2268,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   if (whatsNew.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
   }
+  const discuss = parseDiscussReaderConfig(obj.discuss);
+  if (discuss.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "discuss", reason: discuss.warning });
+  }
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
@@ -2281,6 +2303,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
     whatsNew: { mode: whatsNew.mode },
+    discuss: { handoff: discuss.handoff },
     prGrammar: prGrammar.grammar,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),

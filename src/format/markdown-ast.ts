@@ -680,6 +680,31 @@ export function stripFactWrappers(body: string): string {
   );
 }
 
+/**
+ * {@link stripFactWrappers} with an offset map: `map[i]` is the offset in `body`
+ * of `text[i]`, so a position found in the stripped text maps back to the file.
+ * Removes exactly what the strip removes (the same scan and protected regions);
+ * `text` equals `stripFactWrappers(body)`, which a test pins.
+ */
+export function stripFactWrappersWithMap(body: string): { text: string; map: number[] } {
+  const identity = (): { text: string; map: number[] } => ({ text: body, map: Array.from({ length: body.length }, (_, i) => i) });
+  if (!body || body.indexOf("Fact") === -1) return identity();
+  const regions = factProtectedRegions(body);
+  const parts: string[] = [];
+  const map: number[] = [];
+  let at = 0;
+  for (const m of body.matchAll(FACT_TAG_SCAN_RE)) {
+    const start = m.index!;
+    if (inProtectedRegion(start, regions)) continue;
+    for (let i = at; i < start; i++) map.push(i);
+    parts.push(body.slice(at, start));
+    at = start + m[0].length;
+  }
+  for (let i = at; i < body.length; i++) map.push(i);
+  parts.push(body.slice(at));
+  return { text: parts.join(""), map };
+}
+
 /** How many `<Fact …>` OPENING tags a body carries — i.e. how many inline marks a
  *  re-annotation is about to supersede. Reported to the reviewer rather than left
  *  as a silent deletion. Counts only what {@link stripFactWrappers} would remove,

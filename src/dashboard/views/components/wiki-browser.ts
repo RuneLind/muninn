@@ -385,6 +385,8 @@ import {
   type SeriesPort,
 } from "./wiki-series-controller.ts";
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
+import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
+import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -865,6 +867,8 @@ const NO_SESSION_TITLE =
 function renderBreadcrumb(m: WikiListing): void {
   // A page render starts over: the previous page's provenance load is not wanted.
   abortProvLoad();
+  // Off until this page's payload says its wiki offers it (Discuss P1).
+  setDiscussHandoffEnabled(false);
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
   // targets the page the reader just left, and its anchor button has been
@@ -1000,6 +1004,7 @@ function hideBreadcrumb(): void {
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
   clearOutgoingTitles();
+  setDiscussHandoffEnabled(false); // start, issue graph, Ask answer, effort page: panel closed
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1518,6 +1523,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       if (currentPageHash === null && typeof data.hash === "string") currentPageHash = data.hash;
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
+      // «Ask Claude Code» for the whole page; an explainer's selection is in its iframe.
+      setDiscussHandoffEnabled(data.reader?.discussHandoff === true);
       // The same gate as a markdown page: an explainer with inferred keys has
       // provenance too. Its head rendered before this payload, so the strip is
       // inserted when the block lands (`placeProvStrip`), with no placeholder.
@@ -1662,6 +1669,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
         // The breadcrumb is the previous page's; its lens chip goes with that article.
         removeLensChip(document.getElementById("wikiBreadcrumb"));
+        setDiscussHandoffEnabled(false); // and «Ask Claude Code», which would ask about it
         // Its stale report goes with it: the tab says the page did not load (A12).
         staleForFailedPage();
         // The PREVIOUS page's `currentName` deliberately survives a failed load, so
@@ -1722,6 +1730,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // queries, cases) and the `line refs` toggle, all counted off the
       // rendered article. No-op on a page with none of them.
       const reader = data.reader;
+      // Discuss P1: «Ask Claude Code» where the wiki opts in, for an admin.
+      setDiscussHandoffEnabled(reader?.discussHandoff === true);
       const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
@@ -1835,6 +1845,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
       removeLensChip(document.getElementById("wikiBreadcrumb"));
+      setDiscussHandoffEnabled(false);
       staleForFailedPage();
       renderList();
     });
@@ -2136,31 +2147,6 @@ const EXPLAIN_MAX_CHARS = 1500;
 // Captured at selection time — BEFORE any click can collapse the selection.
 let pillSel = "";
 let pillHeading = "";
-
-/** Nearest preceding h1–h4 above the selection, within `.wiki-article`. Walks up
- *  the ancestor chain from the selection's start, scanning previous siblings (and
- *  their inner headings) at each level. Trimmed text, may be empty. */
-function nearestHeading(range: Range): string {
-  const startEl =
-    range.startContainer.nodeType === 1
-      ? (range.startContainer as Element)
-      : range.startContainer.parentElement;
-  const article = startEl?.closest(".wiki-article");
-  if (!article || !startEl) return "";
-  const HEAD = /^H[1-4]$/;
-  let node: Element | null = startEl;
-  while (node && node !== article) {
-    let sib: Element | null = node.previousElementSibling;
-    while (sib) {
-      if (HEAD.test(sib.tagName)) return (sib.textContent || "").trim();
-      const inner = sib.querySelectorAll ? sib.querySelectorAll("h1,h2,h3,h4") : null;
-      if (inner && inner.length) return (inner[inner.length - 1]!.textContent || "").trim();
-      sib = sib.previousElementSibling;
-    }
-    node = node.parentElement;
-  }
-  return "";
-}
 
 /** Reveal / hide the breadcrumb's Explain button. The button is (re)rendered
  *  hidden by `renderBreadcrumb` on every page load, so a lookup-by-id is enough;
@@ -2828,6 +2814,7 @@ export function boot(): { dispose(): void } {
   });
   initWikiVisuals();
   initRailResize();
+  initDiscussHandoff({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath });
   initPaneToggles();
   // The one-time cleanup that ships with the removal of `Recently opened`: the
   // `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
@@ -3358,8 +3345,8 @@ export function boot(): { dispose(): void } {
   document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
     setTimeout(maybeShowExplainPill, 0);
   });
-  // Dismiss on: selection collapse, article scroll, Escape, any mousedown outside
-  // the pill (the pill's own mousedown stops propagation, so it self-excludes).
+  // Dismiss on: selection collapse, article scroll, Escape, and a mousedown
+  // outside the buttons the handler below names (its `closest()` checks).
   document.addEventListener("selectionchange", () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) hideExplainPill();
@@ -3369,7 +3356,7 @@ export function boot(): { dispose(): void } {
   });
   // A mousedown on the Explain button activates it (preventDefault keeps the
   // selection alive so `activateExplain` reads its captured passage); a mousedown
-  // anywhere else dismisses the button. One handler so the two never race.
+  // on any button not named below dismisses it. One handler so the two never race.
   document.addEventListener("mousedown", (e) => {
     const t = e.target as HTMLElement;
     if (t.closest && t.closest("#wikiExplainBtn")) {
@@ -3389,6 +3376,9 @@ export function boot(): { dispose(): void } {
       activateFactcheckArticle();
       return;
     }
+    // «Ask Claude Code» (its own module acts on the click): hiding the pill
+    // here would move either button out from under the pointer before mouseup.
+    if (t.closest && t.closest("#wikiDiscussHandoffBtn, #wikiDiscussHandoffPageBtn")) return;
     hideExplainPill();
   });
   // ── Explainer-iframe bridge ───────────────────────────────────────────

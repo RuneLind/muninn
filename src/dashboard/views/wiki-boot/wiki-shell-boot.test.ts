@@ -380,6 +380,8 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
       "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
       "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy",
+      // Discuss P1 (`initDiscussHandoff`): show or hide the control on a settled selectionchange (the selection is read on click), keep the selection on a press, act on click, Escape.
+      "document selectionchange 3v0f0", "document mousedown 124c0", "document click 3pvli", "document keydown 27uoi",
       // Issue #623: the rail panel closes on Back/Forward and on leaving the narrow width.
       "window popstate 3fyct", "[object eventtarget] change 1g0ma", "document click 1wxv0",
       "document keydown 1wnp1", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
@@ -397,7 +399,7 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
       "document click 1ha77", "document change 1typa", "document input smycp", "document keydown 2bnv5",
       "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s", "#articleWrap mouseup 2roml",
-      "document selectionchange 33rjq", "document keydown crscu", "document mousedown m9lmg", "window message 30vgu",
+      "document selectionchange 33rjq", "document keydown crscu", "document mousedown 25hct", "window message 30vgu",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",
     ];
