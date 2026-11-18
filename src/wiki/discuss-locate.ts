@@ -134,7 +134,71 @@ function tagEnd(text: string, i: number): number {
 /** A block component whose body the reader does not show, opened alone at a line's start. */
 const HIDDEN_BODY_OPEN_RE = /^\s*<(Diagram|Embed)\b/;
 
-const TABLE_RULE_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+/**
+ * The lines of a block whose body the reader never shows as text, tags
+ * included: it draws a Diagram from its `src` and frames an Embed, so the
+ * body's words (and any heading in it) are not on screen. Shared by the
+ * collapse and {@link pageHeadings}, so the two cannot disagree.
+ */
+function hiddenBodyLines(
+  text: string,
+  lines: readonly string[],
+  lineStart: readonly number[],
+  bodyFrom: number,
+  skip: ReadonlySet<number>,
+  code: ReadonlySet<number>,
+): Set<number> {
+  const out = new Set<number>();
+  for (let k = bodyFrom; k < lines.length; k++) {
+    if (skip.has(k) || code.has(k)) continue;
+    const m = HIDDEN_BODY_OPEN_RE.exec(lines[k]!);
+    if (!m) continue;
+    const end = tagEnd(text, lineStart[k]! + m[0].length - m[1]!.length - 1);
+    if (end === -1 || /\/\s*>$/.test(text.slice(lineStart[k]!, end))) continue;
+    let close = k;
+    while (close < lines.length && !lines[close]!.includes(`</${m[1]}>`)) close++;
+    if (close === lines.length) continue;
+    for (let j = k; j <= close; j++) out.add(j);
+    k = close;
+  }
+  return out;
+}
+
+/** The page's lines as the collapse reads them: fact wrappers stripped (tags
+ *  only, so line numbers stay the file's), frontmatter, sentinel and fence
+ *  marker lines in `skip`, fence bodies in `code`, hidden bodies in `hidden`. */
+function readerLines(raw: string) {
+  const { text, map: rawOf } = stripFactWrappersWithMap(raw.replace(/\0/g, " "));
+  const lines = text.split("\n");
+  const lineStart: number[] = [];
+  {
+    let at = 0;
+    for (const l of lines) {
+      lineStart.push(at);
+      at += l.length + 1;
+    }
+  }
+  const bodyFrom = frontmatterBodyLine(text);
+  const skip = new Set<number>();
+  for (let k = 0; k < bodyFrom; k++) skip.add(k);
+  for (const s of findLiveSentinelBlocks(text)) {
+    skip.add(s.startLine);
+    skip.add(s.endLine);
+  }
+  const code = new Set<number>();
+  for (const f of readerFences(text)) {
+    skip.add(f.opener);
+    skip.add(f.closer);
+    for (let k = f.opener + 1; k < f.closer; k++) {
+      if (f.lang.toLowerCase() === "mermaid") skip.add(k);
+      else code.add(k);
+    }
+  }
+  const hidden = hiddenBodyLines(text, lines, lineStart, bodyFrom, skip, code);
+  return { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden };
+}
+
+const TABLE_RULE_RE =/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
 const COMPONENT_TAG_RE = /<\/?([A-Z][A-Za-z0-9]*)/y;
 const WIKILINK_AT_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/y;
 const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
@@ -158,47 +222,8 @@ const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
  * shows them as written.
  */
 export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {}): LocateCollapse {
-  const { text, map: rawOf } = stripFactWrappersWithMap(raw.replace(/\0/g, " "));
-  const lines = text.split("\n");
-  const lineStart: number[] = [];
-  {
-    let at = 0;
-    for (const l of lines) {
-      lineStart.push(at);
-      at += l.length + 1;
-    }
-  }
-  const bodyFrom = frontmatterBodyLine(text);
-  const skip = new Set<number>();
-  for (let k = 0; k < bodyFrom; k++) skip.add(k);
-  for (const s of findLiveSentinelBlocks(text)) {
-    skip.add(s.startLine);
-    skip.add(s.endLine);
-  }
-  /** 0 = prose, 1 = code kept verbatim. */
-  const code = new Set<number>();
-  for (const f of readerFences(text)) {
-    skip.add(f.opener);
-    skip.add(f.closer);
-    for (let k = f.opener + 1; k < f.closer; k++) {
-      if (f.lang.toLowerCase() === "mermaid") skip.add(k);
-      else code.add(k);
-    }
-  }
-  // A block whose body the reader never shows as text: it draws a Diagram
-  // from its `src` and frames an Embed, so the body's words are not on screen.
-  for (let k = bodyFrom; k < lines.length; k++) {
-    if (skip.has(k) || code.has(k)) continue;
-    const m = HIDDEN_BODY_OPEN_RE.exec(lines[k]!);
-    if (!m) continue;
-    const end = tagEnd(text, lineStart[k]! + m[0].length - m[1]!.length - 1);
-    if (end === -1 || /\/\s*>$/.test(text.slice(lineStart[k]!, end))) continue;
-    let close = k;
-    while (close < lines.length && !lines[close]!.includes(`</${m[1]}>`)) close++;
-    if (close === lines.length) continue;
-    for (let j = k; j <= close; j++) skip.add(j);
-    k = close;
-  }
+  const { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden } = readerLines(raw);
+  for (const k of hidden) skip.add(k);
   if (opts.stripTitle) {
     const want = opts.stripTitle.trim().toLowerCase();
     for (let k = bodyFrom; k < lines.length; k++) {
@@ -342,16 +367,17 @@ export interface PageHeading {
  *  (`## C#` is «C#»), and a CRLF line's `\r` is white space. */
 const HEADING_LINE_RE = /^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t\r]*$/;
 
-/** The page's markdown headings outside fences and frontmatter, with their
- *  sections' line ranges. */
+/** The page's markdown headings outside fences, frontmatter and the bodies the
+ *  reader hides ({@link hiddenBodyLines}), with their sections' line ranges. */
 export function pageHeadings(raw: string): PageHeading[] {
   const lines = raw.split("\n");
   const bodyFrom = frontmatterBodyLine(raw);
   const fenced = new Set<number>();
   for (const f of readerFences(raw)) for (let k = f.opener; k <= f.closer; k++) fenced.add(k);
+  const { hidden } = readerLines(raw);
   const found: { level: number; text: string; line: number }[] = [];
   for (let k = bodyFrom; k < lines.length; k++) {
-    if (fenced.has(k)) continue;
+    if (fenced.has(k) || hidden.has(k)) continue;
     const m = HEADING_LINE_RE.exec(lines[k]!);
     if (m) found.push({ level: m[1]!.length, text: m[2]!.trim(), line: k });
   }
@@ -405,7 +431,8 @@ export interface LocateRequest {
  *  - `exact`: one match whose neighbours in the source agree with the
  *    client's context ({@link contextAccepts});
  *  - `section`: no such single match, so the section of the heading the
- *    client sent, with `reason` saying why;
+ *    client sent, when only one heading has that text and it holds a match
+ *    (if there are any), with `reason` saying why;
  *  - `none`: neither a single match nor a heading section. No range then.
  */
 export type LocateFound = "exact" | "section" | "none";
@@ -473,31 +500,37 @@ export const CONTEXT_PARTIAL_MIN = 8;
 const MAX_SCORED = 400;
 
 /**
- * One side of a match, compared outward from the match:
- *  - `full`: the client's side agrees for all its key characters, at least
- *    {@link CONTEXT_FULL_MIN} of them (or both reach the page's edge there);
- *  - `agrees`: agrees, but too few characters to count as full;
- *  - `open`: nothing to compare (the client's side is empty, or the source's
- *    runs out first);
- *  - `partial`: disagrees, but only past {@link CONTEXT_PARTIAL_MIN} characters;
- *  - `contradicted`: disagrees nearer than that.
+ * One side of a match, compared outward from the match. It disagrees at the
+ * first position where a character differs, where the source runs out before
+ * the client's text, or where the client reaches the page's edge and the
+ * source goes on. Then:
+ *  - `full`: no disagreement, and the client sent at least
+ *    {@link CONTEXT_FULL_MIN} key characters, or both reach the page's edge;
+ *  - `agrees`: no disagreement, 1 to {@link CONTEXT_FULL_MIN} − 1 characters;
+ *  - `open`: the client sent nothing and is not at the page's edge;
+ *  - `partial`: the first disagreement is at {@link CONTEXT_PARTIAL_MIN} or later;
+ *  - `contradicted`: it is nearer.
+ * Only `full` counts toward acceptance; only `contradicted` blocks it.
  */
 export type SideState = "full" | "agrees" | "open" | "partial" | "contradicted";
 
 /** Compare the client's side with the source's, outward from the match: the
- *  left side from its end, the right side from its start. */
-export function sideState(client: string, source: string, side: "left" | "right", atEdge: boolean): SideState {
+ *  left side from its end, the right side from its start. `clientAtEdge`: the
+ *  client's text stops at the article's edge; `sourceAtEdge`: the source's
+ *  window reaches the collapsed page's edge. The test file holds the table. */
+export function sideState(client: string, source: string, side: "left" | "right", clientAtEdge: boolean, sourceAtEdge: boolean): SideState {
   const L = client.length;
-  const n = Math.min(L, source.length);
+  const S = source.length;
+  const n = Math.min(L, S);
   let a = 0;
-  if (side === "left") while (a < n && client[L - 1 - a] === source[source.length - 1 - a]) a++;
+  if (side === "left") while (a < n && client[L - 1 - a] === source[S - 1 - a]) a++;
   else while (a < n && client[a] === source[a]) a++;
-  if (L === 0) return atEdge && source.length === 0 ? "full" : "open";
-  if (a === L) return L >= CONTEXT_FULL_MIN || (atEdge && source.length === L) ? "full" : "agrees";
-  // The source ran out first: the match sits at its edge and the client shows
-  // more beyond it, which the source cannot contradict.
-  if (a === source.length) return a >= CONTEXT_FULL_MIN ? "full" : "open";
-  return a >= CONTEXT_PARTIAL_MIN ? "partial" : "contradicted";
+  let d: number | null = null;
+  if (a < n) d = a;
+  else if (S < L) d = S;
+  else if (clientAtEdge && !(S === L && sourceAtEdge)) d = L;
+  if (d === null) return clientAtEdge || L >= CONTEXT_FULL_MIN ? "full" : L > 0 ? "agrees" : "open";
+  return d >= CONTEXT_PARTIAL_MIN ? "partial" : "contradicted";
 }
 
 /** The agreement rule: a match is accepted when one side agrees in full and
@@ -525,8 +558,10 @@ export function locatePassage(raw: string, req: LocateRequest): LocateResult {
   const needle = locateKey(req.selection);
   const N = CONTEXT_NEAR_CHARS;
   const F = DISCUSS_CONTEXT_KEY_CHARS;
-  const beforeFar = locateKey(req.before ?? "").slice(-F);
-  const afterFar = locateKey(req.after ?? "").slice(0, F);
+  const beforeKey = locateKey(req.before ?? "");
+  const afterKey = locateKey(req.after ?? "");
+  const beforeFar = beforeKey.slice(-F);
+  const afterFar = afterKey.slice(0, F);
   const before = beforeFar.slice(-N);
   const after = afterFar.slice(0, N);
 
@@ -569,20 +604,16 @@ export function locatePassage(raw: string, req: LocateRequest): LocateResult {
   else if (!spans.length) reason = "no-match";
   else if (spans.length > MAX_SCORED) reason = "ambiguous";
   else {
-    accepted = spans.filter(({ s, e }) =>
-      contextAccepts(
-        sideState(before, text.slice(Math.max(0, s - N), s), "left", req.atStart === true),
-        sideState(after, text.slice(e, e + N), "right", req.atEnd === true),
-      ),
-    );
+    // The client's edge holds for a window only when its whole text fits in it.
+    const left = (client: string, s: number, w: number) =>
+      sideState(client, text.slice(Math.max(0, s - w), s), "left", req.atStart === true && beforeKey.length <= w, s <= w);
+    const right = (client: string, e: number, w: number) =>
+      sideState(client, text.slice(e, e + w), "right", req.atEnd === true && afterKey.length <= w, e + w >= text.length);
+    accepted = spans.filter(({ s, e }) => contextAccepts(left(before, s, N), right(after, e, N)));
     // Copies whose near context is the same: the one whose far context agrees
     // in full on both sides, when it is the only one.
     if (accepted.length > 1) {
-      const far = accepted.filter(
-        ({ s, e }) =>
-          sideState(beforeFar, text.slice(Math.max(0, s - F), s), "left", req.atStart === true) === "full" &&
-          sideState(afterFar, text.slice(e, e + F), "right", req.atEnd === true) === "full",
-      );
+      const far = accepted.filter(({ s, e }) => left(beforeFar, s, F) === "full" && right(afterFar, e, F) === "full");
       if (far.length === 1) accepted = far;
     }
     reason = accepted.length === 0 ? "no-agreement" : "ambiguous";
@@ -598,8 +629,10 @@ export function locatePassage(raw: string, req: LocateRequest): LocateResult {
   const headings = pageHeadings(raw);
   const want = req.heading ? locateKey(req.heading) : "";
   const named = want ? headings.filter((h) => locateKey(h.text) === want) : [];
-  // Among same-named headings, the one whose section holds a match.
-  const section = named.find((h) => candidateLines.some((l) => h.fromLine <= l && l <= h.toLine)) ?? named[0];
+  // A section only when it is known to be the passage's: one heading of that
+  // text, holding a match when there are any. A repeated text names none.
+  const only = named.length === 1 ? named[0]! : null;
+  const section = only && (!candidateLines.length || candidateLines.some((l) => only.fromLine <= l && l <= only.toLine)) ? only : null;
   const miss = { ...base, reason, ambiguous: spans.length > 1, candidates: candidateLines };
   if (section) {
     return {

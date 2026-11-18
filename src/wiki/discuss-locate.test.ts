@@ -17,6 +17,7 @@ import {
   locatePassage,
   pageHeadings,
   sideState,
+  type SideState,
 } from "./discuss-locate.ts";
 
 /** A page whose line N (1-based) is `lines[N-1]`. */
@@ -43,35 +44,86 @@ const PAGE = page(
 );
 
 describe("the agreement rule, one side", () => {
-  test("full: every key character the client sent agrees, at least CONTEXT_FULL_MIN of them", () => {
-    expect(sideState("boatsleaveearly.", "xxboatsleaveearly.", "left", false)).toBe("full");
-    expect(sideState("ferriesrunlate.", "ferriesrunlate.yy", "right", false)).toBe("full");
+  test("the constants", () => {
     expect(CONTEXT_FULL_MIN).toBe(12);
-  });
-  test("agrees: all agree, but fewer than CONTEXT_FULL_MIN and not at the page's edge", () => {
-    expect(sideState("early.", "xxearly.", "left", false)).toBe("agrees");
-  });
-  test("both at the page's edge: full, however short", () => {
-    expect(sideState("", "", "left", true)).toBe("full");
-    expect(sideState("ab", "ab", "right", true)).toBe("full");
-  });
-  test("open: nothing to compare (the client sent nothing, or the source ran out first, short)", () => {
-    expect(sideState("", "something", "left", false)).toBe("open");
-    expect(sideState("", "something", "left", true)).toBe("open");
-    expect(sideState("readerheader:early.", "early.", "left", false)).toBe("open");
-  });
-  test("the source ran out after CONTEXT_FULL_MIN agreeing characters: full", () => {
-    expect(sideState("readerheader:boatsleaveearly.", "boatsleaveearly.", "left", false)).toBe("full");
-  });
-  test("partial: disagrees only past CONTEXT_PARTIAL_MIN characters", () => {
     expect(CONTEXT_PARTIAL_MIN).toBe(8);
-    expect(sideState("chromeXXboatsleave", "sourceYYboatsleave", "left", false)).toBe("partial");
-    expect(sideState("boatsleaveXXchrome", "boatsleaveYYsource", "right", false)).toBe("partial");
   });
-  test("contradicted: disagrees nearer than that", () => {
-    expect(sideState("thesentence.", "otherwords!!", "left", false)).toBe("contradicted");
-    expect(sideState("abcdefgXXXXXX", "abcdefgYYYYYY", "right", false)).toBe("contradicted");
-  });
+
+  // sideState's whole state table. L: key characters the client sent; S: the
+  // source's characters in the window; d: where a character first differs
+  // (within both), or null. The source running out before the client's text,
+  // and the source going on past the client's page edge, are disagreements at
+  // that position too: never `full` or `open` on their own.
+  const ROWS: [L: number, clientEdge: boolean, S: number, sourceEdge: boolean, d: number | null, want: SideState][] = [
+    // L = 0: nothing sent.
+    [0, false, 0, false, null, "open"],
+    [0, false, 0, true, null, "open"],
+    [0, false, 30, false, null, "open"],
+    [0, false, 30, true, null, "open"],
+    [0, true, 0, true, null, "full"], // both at the page's edge
+    [0, true, 0, false, null, "contradicted"], // the client's page ends, the source goes on
+    [0, true, 30, false, null, "contradicted"],
+    [0, true, 30, true, null, "contradicted"],
+    // L = 1–7.
+    [5, false, 5, false, null, "agrees"],
+    [5, false, 30, false, null, "agrees"],
+    [5, false, 5, true, null, "agrees"],
+    [5, false, 3, true, null, "contradicted"], // the source ran out at 3
+    [5, false, 0, true, null, "contradicted"],
+    [5, false, 30, false, 2, "contradicted"],
+    [5, true, 5, true, null, "full"],
+    [5, true, 5, false, null, "contradicted"],
+    [5, true, 30, false, null, "contradicted"],
+    [5, true, 30, true, null, "contradicted"],
+    [5, true, 3, true, null, "contradicted"],
+    // L = 8–11.
+    [10, false, 10, false, null, "agrees"],
+    [10, false, 30, false, null, "agrees"],
+    [10, false, 9, true, null, "partial"], // the source ran out at 9
+    [10, false, 5, true, null, "contradicted"],
+    [10, false, 30, false, 8, "partial"],
+    [10, false, 30, false, 7, "contradicted"],
+    [10, true, 10, true, null, "full"],
+    [10, true, 30, false, null, "partial"], // the source goes on past the client's edge, at 10
+    [10, true, 9, true, null, "partial"],
+    // L = 12–47.
+    [20, false, 20, false, null, "full"],
+    [20, false, 30, false, null, "full"],
+    [20, false, 20, true, null, "full"],
+    [20, false, 15, true, null, "partial"],
+    [20, false, 11, true, null, "partial"],
+    [20, false, 7, true, null, "contradicted"],
+    [20, false, 0, true, null, "contradicted"],
+    [20, false, 30, false, 12, "partial"],
+    [20, false, 30, false, 8, "partial"],
+    [20, false, 30, false, 3, "contradicted"],
+    [20, true, 20, true, null, "full"],
+    [20, true, 30, false, null, "partial"],
+    [20, true, 30, true, null, "partial"],
+    [20, true, 15, true, null, "partial"],
+    [20, true, 15, true, 5, "contradicted"],
+    // L = 48, the whole near window.
+    [48, false, 48, false, null, "full"],
+    [48, false, 48, true, null, "full"],
+    [48, false, 30, true, null, "partial"],
+    [48, false, 5, true, null, "contradicted"],
+    [48, false, 48, false, 40, "partial"],
+    [48, false, 48, false, 0, "contradicted"],
+    [48, true, 48, true, null, "full"],
+    [48, true, 48, false, null, "partial"],
+  ];
+  const ALPHA = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  for (const [L, clientEdge, S, sourceEdge, d, want] of ROWS) {
+    test(`L=${L} client${clientEdge ? "@edge" : ""} S=${S} source${sourceEdge ? "@edge" : ""} d=${d}: ${want}`, () => {
+      // Built for the right side (compared from the start); the left side is the mirror.
+      const client = ALPHA.slice(0, L);
+      let source = ALPHA.slice(0, S);
+      if (d !== null) source = source.slice(0, d) + "#" + source.slice(d + 1);
+      const rev = (s: string) => [...s].reverse().join("");
+      expect(sideState(client, source, "right", clientEdge, sourceEdge)).toBe(want);
+      expect(sideState(rev(client), rev(source), "left", clientEdge, sourceEdge)).toBe(want);
+    });
+  }
   test("accepted: one side full and neither contradicted", () => {
     expect(contextAccepts("full", "full")).toBe(true);
     expect(contextAccepts("full", "partial")).toBe(true);
@@ -102,6 +154,16 @@ describe("one match: taken only when its context agrees", () => {
   });
   test("no context at all: nothing to agree with, so no exact line", () => {
     expect(locatePassage(PAGE, { selection: "Bells ring at noon." }).found).toBe("none");
+  });
+  test("atStart with more text than the near window: the window's slice is not at the edge, so it still agrees in full", () => {
+    const md = page("Kari Nordmann keeps the winter timetable for every boat in the harbour office.", "", "The pier opens at six.", "", "Bells ring at noon on every day.");
+    const before = "Kari Nordmann keeps the winter timetable for every boat in the harbour office.";
+    expect(before.length).toBeGreaterThan(48);
+    const r = locatePassage(md, { selection: "The pier opens at six.", before, atStart: true, after: "Bells" });
+    expect(r).toMatchObject({ found: "exact", fromLine: 3, toLine: 3 });
+    // The mirror at the page's end.
+    const end = page("# T", "", "Bells ring.", "", "The pier opens at six.", "", before);
+    expect(locatePassage(end, { selection: "The pier opens at six.", before: "ring.", after: before, atEnd: true })).toMatchObject({ found: "exact", fromLine: 5, toLine: 5 });
   });
   test("a page of under 3,000 characters still gets the passage's own line", () => {
     const short = page("# Short", "", "One line.", "", "The second line here.", "", "Third.");
@@ -137,6 +199,53 @@ describe("several matches: the context chooses", () => {
     const md = page("# Log", "", ...Array.from({ length: 6 }, () => "- Same line again."));
     const r = locatePassage(md, { selection: "Same line again.", before: "Same line again. Same line again.", after: "Same line again. Same line again.", heading: "Log" });
     expect(r).toMatchObject({ found: "section", reason: "ambiguous", ambiguous: true, candidates: [3, 4, 5, 6, 7, 8] });
+  });
+});
+
+describe("the section fallback names a section only when it is the right one", () => {
+  const PHASES = page(
+    "## Phase 1", //                                              1
+    "",
+    "### Status",
+    "",
+    "Not started, waiting on the harbour office.", //             5
+    "",
+    "## Phase 2",
+    "",
+    "### Status",
+    "", //                                                       10
+    "Not started, waiting on the harbour office.",
+  );
+  test("a heading text that repeats: no section, every match's line listed", () => {
+    const r = locatePassage(PHASES, { selection: "Not started, waiting on the harbour office.", before: "words the page never had", after: "nor these either at all", heading: "Status" });
+    expect(r).toMatchObject({ found: "none", reason: "no-agreement", fromLine: null, toLine: null, section: null, candidates: [5, 11] });
+  });
+  test("a heading text that repeats, with no match: no section", () => {
+    const r = locatePassage(PHASES, { selection: "Nothing like this is on the page.", heading: "Status" });
+    expect(r).toMatchObject({ found: "none", reason: "no-match", section: null, candidates: [] });
+  });
+  test("one heading of that text whose section holds no match: no section", () => {
+    const md = page("## Brief", "", "Intro words.", "", "## Design", "", "The pier opens at six.");
+    const r = locatePassage(md, { selection: "The pier opens at six.", before: "words the page never had", after: "nor these", heading: "Brief" });
+    expect(r).toMatchObject({ found: "none", candidates: [7], section: null });
+  });
+});
+
+describe("a heading inside a Diagram's or an Embed's body is no section boundary", () => {
+  test("pageHeadings leaves it out, and the section above runs past the body", () => {
+    const md = page("## Flow", "", '<Embed src="demo.html">', "", "## Fallback notes", "", "Open the demo in a browser.", "", "</Embed>", "", "The pier opens at six.", "", "## Next", "", "Later.");
+    expect(pageHeadings(md).map((h) => [h.text, h.fromLine, h.toLine])).toEqual([
+      ["Flow", 1, 11],
+      ["Next", 13, 15],
+    ]);
+    const r = locatePassage(md, { selection: "The pier opens at six.", edge: "added", heading: "Flow" });
+    expect(r).toMatchObject({ found: "section", fromLine: 1, toLine: 11 });
+    // The hidden heading cannot be the named section.
+    expect(locatePassage(md, { selection: "Open the demo in a browser.", edge: "added", heading: "Fallback notes" })).toMatchObject({ found: "none", section: null });
+  });
+  test("the same in a Diagram's body", () => {
+    const md = page("## Flow", "", '<Diagram src="flow.diagram.json" caption="c">', "", "### Legend", "", "boats", "", "</Diagram>", "", "The pier opens at six.");
+    expect(pageHeadings(md).map((h) => [h.text, h.fromLine, h.toLine])).toEqual([["Flow", 1, 11]]);
   });
 });
 

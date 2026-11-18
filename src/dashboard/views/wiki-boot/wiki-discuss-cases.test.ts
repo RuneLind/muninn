@@ -416,6 +416,31 @@ describe("review cases: a range stated as found is never another place's", () =>
     const a = readerArticle(md);
     expectExact(locate(md, rangeOf(a, "Add the summer stop", { nth: 1 })), lineOf(md, "Add the summer stop", 1));
   });
+  const ROPES = "Check the ropes. The pier opens at six and closes at ten every day of the week.";
+  test("6: a copy inside an untitled Fold, with the same paragraph first on the page: never the top copy's line", () => {
+    const md = page(ROPES, "", "## Notes", "", '<Fold summary="more">', "", ROPES, "", "</Fold>");
+    const a = readerArticle(md);
+    const r = locate(md, rangeOf(a, "The pier opens at six", { nth: 2 }));
+    expectNotWrong(r, lineOf(md, "The pier opens", 2));
+    // The top copy itself is still found.
+    expectExact(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 })), lineOf(md, "The pier opens", 1));
+  });
+  test("6: a paragraph first on the page and again after a 1) marker: never the top copy's line", () => {
+    const md = page("The pier opens at six and closes at ten every day of the week.", "", "## Steps", "", "1) The pier opens at six and closes at ten every day of the week.");
+    const a = readerArticle(md);
+    expectNotWrong(locate(md, rangeOf(a, "The pier opens at six", { nth: 2 })), lineOf(md, "The pier opens", 2));
+  });
+  const ITEMS = ["Run the database migration on staging and verify that the row counts match", "Ship the release to production after sign-off"];
+  test("6: a Checklist item with a ✓/✗ copy at the page's end: never the copy's line", () => {
+    const md = page("## Plan", "", "<Checklist>", "", `- [x] ${ITEMS[0]}`, `- [ ] ${ITEMS[1]}`, "", "</Checklist>", "", "## Summary", "", `✓ ${ITEMS[0]}`, `✗ ${ITEMS[1]}`);
+    const a = readerArticle(md);
+    expectNotWrong(locate(md, rangeOf(a, ITEMS[1]!, { nth: 1 })), lineOf(md, ITEMS[1]!, 1));
+  });
+  test("6: the mirror, a ✓/✗ copy at the page's start: never the copy's line", () => {
+    const md = page(`✓ ${ITEMS[0]}`, `✗ ${ITEMS[1]}`, "", "## Plan", "", "<Checklist>", "", `- [x] ${ITEMS[0]}`, `- [ ] ${ITEMS[1]}`, "", "</Checklist>");
+    const a = readerArticle(md);
+    expectNotWrong(locate(md, rangeOf(a, ITEMS[0]!, { nth: 2 })), lineOf(md, ITEMS[0]!, 2));
+  });
   test("a fence's label and Copy button inside a selection do not break the match", () => {
     const md = page("## Code", "", "Run this:", "", "```ts", "const stops = 4;", "```", "", "Then stop.");
     const a = readerArticle(md);
