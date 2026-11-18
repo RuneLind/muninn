@@ -16,7 +16,17 @@ import type { BotConfig, ConnectorType, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "./executor.ts";
 import type { StreamProgressCallback } from "./stream-parser.ts";
 import { resolveConnector } from "./connector.ts";
-import { isReadSurface, type ToolSurface } from "./tool-surface.ts";
+import {
+  assertMcpToolsSurface,
+  connectorSupports,
+  connectorsFor,
+  isReadSearchSurface,
+  isReadSurface,
+  mcpToolsSurface,
+  SURFACE_KIND_LABEL,
+  surfaceKind,
+  type ToolSurface,
+} from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
 import { isAbsolute, resolve } from "node:path";
 
@@ -91,29 +101,38 @@ export function applyToolSurface(botConfig: BotConfig, surface: ToolSurface): Bo
   const connector: ConnectorType = botConfig.connector ?? "claude-cli";
   if (surface === "bot") return { ...botConfig, toolSurface: "bot" };
   if (surface === "none") return { ...botConfig, toolSurface: "none", toolsDisabled: true };
-  // Anything but the four declared shapes is refused, never read as { web }.
+  // Anything but the six declared shapes is refused, never read as { web }.
   const shape = surface as unknown;
-  const isRead = typeof shape === "object" && shape !== null && "read" in shape && Array.isArray(shape.read);
-  const isWeb = typeof shape === "object" && shape !== null && "web" in shape && shape.web === true;
-  if (!isRead && !isWeb) {
+  const obj = typeof shape === "object" && shape !== null ? (shape as Record<string, unknown>) : undefined;
+  const keys = obj ? Object.keys(obj) : [];
+  const one = (key: string) => keys.length === 1 && keys[0] === key;
+  const isRead = one("read") && Array.isArray(obj!.read);
+  const isWeb = one("web") && obj!.web === true;
+  const isReadSearch = one("readSearch") && Array.isArray(obj!.readSearch);
+  const isMcpTools = one("mcpTools") && typeof obj!.mcpTools === "object" && obj!.mcpTools !== null;
+  if (!isRead && !isWeb && !isReadSearch && !isMcpTools) {
     throw new Error(
       `executeOneShot: unknown toolSurface ${String(JSON.stringify(shape))} — ` +
-        `expected "none", "bot", { read: [dirs] } or { web: true }.`,
+        `expected "none", "bot", { read: [dirs] }, { web: true }, { readSearch: [dirs] } or { mcpTools: { server: [tools] } }.`,
     );
   }
 
-  const caps = connectorCapabilities(botConfig);
-  if (isReadSurface(surface)) {
-    if (!caps.supportsExtraDirs) {
-      throw new Error(`Connector "${connector}" cannot run a { read } tool surface — only claude-cli and claude-sdk can.`);
-    }
-    if (surface.read.length === 0 || surface.read.some((d) => !isAbsolute(d))) {
-      throw new Error("executeOneShot: a { read } tool surface needs at least one directory, every one absolute.");
-    }
-    return { ...botConfig, toolSurface: { read: surface.read.map((d) => resolve(d)) } };
+  const kind = surfaceKind(surface)!;
+  if (!connectorSupports(connector, kind)) {
+    throw new Error(`Connector "${connector}" cannot run a ${SURFACE_KIND_LABEL[kind]} tool surface — only ${connectorsFor(kind)} can.`);
   }
-  if (!caps.supportsWebTools) {
-    throw new Error(`Connector "${connector}" cannot run a { web } tool surface — only claude-cli and claude-sdk can.`);
+  if (isReadSurface(surface) || isReadSearchSurface(surface)) {
+    const dirs = isReadSurface(surface) ? surface.read : surface.readSearch;
+    if (dirs.length === 0 || dirs.some((d) => typeof d !== "string" || !isAbsolute(d))) {
+      throw new Error(`executeOneShot: a ${SURFACE_KIND_LABEL[kind]} tool surface needs at least one directory, every one absolute.`);
+    }
+    const resolved = dirs.map((d) => resolve(d));
+    return { ...botConfig, toolSurface: isReadSurface(surface) ? { read: resolved } : { readSearch: resolved } };
+  }
+  const named = mcpToolsSurface(surface);
+  if (named) {
+    assertMcpToolsSurface(named);
+    return { ...botConfig, toolSurface: { mcpTools: structuredClone(named.mcpTools) } };
   }
   return { ...botConfig, toolSurface: { web: true } };
 }

@@ -8,25 +8,39 @@
  *   - `"none"`: no tools at all (`toolsDisabled` on every connector).
  *   - `{ read: dirs }`: Read only, confined to `dirs`, no MCP servers.
  *   - `{ web: true }`: WebFetch and WebSearch only, no MCP servers.
+ *   - `{ readSearch: dirs }`: Read, Grep and Glob only, every path confined to
+ *     `dirs` (snapshots from `src/ai/snapshots.ts`), no MCP servers.
+ *   - `{ mcpTools: { server: [tool, …] } }`: only the listed tools of the
+ *     listed servers in the bot's `.mcp.json`, no built-in tool at all.
  *   - `"bot"`: the bot's own surface, stated on purpose.
  *
  * `executeOneShot` applies the surface by cloning the `BotConfig`; the claude-cli
- * (`src/ai/executor.ts`) and claude-sdk connectors map the two fenced shapes, and
- * copilot-sdk and openai-compat refuse them.
+ * (`src/ai/executor.ts`) and claude-sdk connectors map the three fenced shapes
+ * and refuse `{ mcpTools }`; copilot-sdk maps `{ mcpTools }` and refuses the
+ * fenced shapes; openai-compat refuses all four.
  */
 
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, join, sep } from "node:path";
-import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
+import type { CanUseTool, HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import type { ConnectorType } from "../bots/config.ts";
+import { capabilitiesForConnectorType } from "./connector-capabilities.ts";
 
-export type ToolSurface = "none" | "bot" | { read: string[] } | { web: true };
+/** Read, Grep and Glob inside named directories (snapshots, never a checkout). */
+export type ReadSearchSurface = { readSearch: string[] };
+/** The listed tools of the listed `.mcp.json` servers, keyed by server name. */
+export type McpToolsSurface = { mcpTools: Record<string, string[]> };
 
-/** The two surfaces a connector must fence itself (no MCP, a fixed tool list). */
-export type FencedToolSurface = { read: string[] } | { web: true };
+export type ToolSurface = "none" | "bot" | { read: string[] } | { web: true } | ReadSearchSurface | McpToolsSurface;
+
+/** The surfaces claude-cli and claude-sdk fence themselves (no MCP, a fixed built-in tool list). */
+export type FencedToolSurface = { read: string[] } | { web: true } | ReadSearchSurface;
+
+/** The kinds of fenced or named surface, as the capability table and the error messages name them. */
+export type SurfaceKind = "read" | "web" | "readSearch" | "mcpTools";
 
 export function fencedSurface(surface: ToolSurface | undefined): FencedToolSurface | undefined {
-  return typeof surface === "object" ? surface : undefined;
+  return typeof surface === "object" && !("mcpTools" in surface) ? surface : undefined;
 }
 
 export function isReadSurface(surface: ToolSurface | undefined): surface is { read: string[] } {
@@ -37,9 +51,35 @@ export function isWebSurface(surface: ToolSurface | undefined): surface is { web
   return typeof surface === "object" && "web" in surface;
 }
 
+export function isReadSearchSurface(surface: ToolSurface | undefined): surface is ReadSearchSurface {
+  return typeof surface === "object" && "readSearch" in surface;
+}
+
+export function mcpToolsSurface(surface: ToolSurface | undefined): McpToolsSurface | undefined {
+  return typeof surface === "object" && "mcpTools" in surface ? surface : undefined;
+}
+
+/** `undefined` for `"none"`, `"bot"` and an absent surface. */
+export function surfaceKind(surface: ToolSurface | undefined): SurfaceKind | undefined {
+  if (typeof surface !== "object") return undefined;
+  if ("read" in surface) return "read";
+  if ("web" in surface) return "web";
+  if ("readSearch" in surface) return "readSearch";
+  return "mcpTools";
+}
+
 /** The built-in tools a fenced surface keeps. */
 export function fencedTools(surface: FencedToolSurface): string[] {
-  return "read" in surface ? ["Read"] : ["WebFetch", "WebSearch"];
+  if ("read" in surface) return ["Read"];
+  if ("readSearch" in surface) return ["Read", "Grep", "Glob"];
+  return ["WebFetch", "WebSearch"];
+}
+
+/** The directories a fenced surface confines its file tools to, or `undefined` for `{ web }`. */
+export function fencedDirs(surface: FencedToolSurface): string[] | undefined {
+  if ("read" in surface) return surface.read;
+  if ("readSearch" in surface) return surface.readSearch;
+  return undefined;
 }
 
 /** Oldest Claude CLI with `--restricted` (it confines the file tools and drops
@@ -246,6 +286,10 @@ function isPublicIpv6(b: number[]): boolean {
  */
 export function fencedCanUseTool(surface: FencedToolSurface): CanUseTool {
   return async (toolName, input) => {
+    if ("readSearch" in surface) {
+      const denial = readSearchDenial(toolName, input, surface.readSearch);
+      return denial === null ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: denial };
+    }
     if ("read" in surface && toolName === "Read") {
       const filePath = input.file_path;
       if (typeof filePath === "string" && isInsideDirs(filePath, surface.read)) {
@@ -267,16 +311,144 @@ export function fencedCanUseTool(surface: FencedToolSurface): CanUseTool {
   };
 }
 
+/** A glob that is absolute, starts at a home dir or climbs with `..` could list outside its path. */
+function unsafeGlob(glob: string): boolean {
+  return glob.startsWith("/") || glob.startsWith("~") || glob.startsWith("\\") || glob.includes("..");
+}
+
 /**
- * Throw on a fenced surface in a connector that cannot express one. The
- * `executeOneShot` pre-flight already refuses it by capability; this is the
- * connector's own refusal, for a caller that reaches it another way.
+ * Why a `{ readSearch }` run may not make this tool call, or `null` when it
+ * may. Read needs a `file_path` inside `dirs`; Grep and Glob need a `path`
+ * inside `dirs` (a call with no path would search the agent home, so it is
+ * refused with a sentence that tells the model to name one), and neither
+ * Glob's `pattern` nor Grep's `glob` filter may be absolute, start with `~`
+ * or hold `..`. Grep's `pattern` is a regex over file contents, not a path.
+ * Every other tool is refused.
+ */
+export function readSearchDenial(toolName: string, input: Record<string, unknown>, dirs: string[]): string | null {
+  const outside = "is limited to the snapshot directories this run was given.";
+  if (toolName === "Read") {
+    const filePath = input.file_path;
+    return typeof filePath === "string" && isInsideDirs(filePath, dirs) ? null : `Read ${outside}`;
+  }
+  if (toolName === "Grep" || toolName === "Glob") {
+    const path = input.path;
+    if (typeof path !== "string" || path === "") {
+      return `${toolName} needs a path: one of ${dirs.join(", ")}, or a directory inside one.`;
+    }
+    if (!isInsideDirs(path, dirs)) return `${toolName} ${outside}`;
+    const glob = toolName === "Glob" ? input.pattern : input.glob;
+    if (toolName === "Glob" && typeof glob !== "string") return "Glob needs a pattern.";
+    if (typeof glob === "string" && unsafeGlob(glob)) {
+      return `${toolName}: a pattern may not be absolute, start with ~ or hold "..".`;
+    }
+    return null;
+  }
+  return `${toolName} is not available to this run.`;
+}
+
+/**
+ * The claude-sdk PreToolUse hook for a `{ readSearch }` run. In `default` mode
+ * a Read, Grep or Glob inside the working dirs is approved without asking
+ * `canUseTool`, so the handler alone never sees a Glob whose `path` is a
+ * snapshot and whose `pattern` climbs out of it. A hook runs for every call.
+ */
+export function readSearchPreToolUseHook(dirs: string[]): HookCallback {
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    const toolInput = (typeof input.tool_input === "object" && input.tool_input !== null ? input.tool_input : {}) as Record<string, unknown>;
+    const denial = readSearchDenial(input.tool_name, toolInput, dirs);
+    if (denial === null) return {};
+    return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: denial } };
+  };
+}
+
+/** How a surface kind is named in an error message. */
+export const SURFACE_KIND_LABEL: Record<SurfaceKind, string> = {
+  read: "{ read }",
+  web: "{ web }",
+  readSearch: "{ readSearch }",
+  mcpTools: "{ mcpTools }",
+};
+
+/** Which connectors can run a surface kind, read off the capability table, as prose. */
+export function connectorsFor(kind: SurfaceKind): string {
+  const all: ConnectorType[] = ["claude-cli", "claude-sdk", "copilot-sdk", "openai-compat"];
+  return all.filter((c) => connectorSupports(c, kind)).join(" and ");
+}
+
+/** Whether the capability table says `connector` can run a `kind` surface. */
+export function connectorSupports(connector: ConnectorType, kind: SurfaceKind): boolean {
+  const caps = capabilitiesForConnectorType(connector);
+  if (kind === "read") return caps.supportsExtraDirs;
+  if (kind === "web") return caps.supportsWebTools;
+  if (kind === "readSearch") return caps.supportsReadSearch;
+  return caps.supportsNamedMcpTools;
+}
+
+/** The sentence `connector` refuses a `kind` surface with. */
+export function unsupportedSurfaceMessage(connector: string, kind: SurfaceKind): string {
+  return `${connector}: the ${SURFACE_KIND_LABEL[kind]} tool surface is not supported — only ${connectorsFor(kind)} can run it.`;
+}
+
+/**
+ * Throw on a fenced surface (`{ read }`, `{ web }`, `{ readSearch }`) in a
+ * connector that cannot express one. The `executeOneShot` pre-flight already
+ * refuses it by capability; this is the connector's own refusal, for a caller
+ * that reaches it another way.
  */
 export function refuseFencedSurface(connector: string, surface: ToolSurface | undefined): void {
   const fence = fencedSurface(surface);
   if (!fence) return;
-  const kind = "read" in fence ? "{ read }" : "{ web }";
-  throw new Error(`${connector}: the ${kind} tool surface is not supported — only claude-cli and claude-sdk can fence it.`);
+  throw new Error(unsupportedSurfaceMessage(connector, surfaceKind(fence)!));
+}
+
+/**
+ * Throw on a `{ mcpTools }` surface in a connector that cannot hold a session
+ * to a list of tool names. Without it claude-cli and claude-sdk would read the
+ * shape as no fence at all and run the bot's whole surface.
+ */
+export function refuseMcpToolsSurface(connector: string, surface: ToolSurface | undefined): void {
+  if (mcpToolsSurface(surface)) throw new Error(unsupportedSurfaceMessage(connector, "mcpTools"));
+}
+
+/**
+ * Tools that print file contents from a live checkout, so a `{ mcpTools }`
+ * surface may never list them: yggdrasil's `read_source` (reads any indexed
+ * file), `detect_changes` (runs git diff on the working tree) and
+ * `search_pattern` (runs ripgrep over the checkout paths, untracked files
+ * included). Keyed `<server>/<tool>` on the server's name in `.mcp.json`.
+ */
+export const MCP_TOOLS_NEVER_LISTED: readonly string[] = [
+  "yggdrasil/read_source",
+  "yggdrasil/detect_changes",
+  "yggdrasil/search_pattern",
+];
+
+const MCP_NAME = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * Throw unless `surface.mcpTools` is a non-empty map of server names to
+ * non-empty lists of tool names, every name in the safe set, and no tool in
+ * {@link MCP_TOOLS_NEVER_LISTED}.
+ */
+export function assertMcpToolsSurface(surface: McpToolsSurface): void {
+  const map = surface.mcpTools as unknown;
+  if (typeof map !== "object" || map === null || Array.isArray(map) || Object.keys(map).length === 0) {
+    throw new Error("a { mcpTools } tool surface needs at least one server with at least one tool.");
+  }
+  for (const [server, tools] of Object.entries(map as Record<string, unknown>)) {
+    if (!MCP_NAME.test(server)) throw new Error(`a { mcpTools } server name may hold only letters, digits, "_", "." and "-": ${JSON.stringify(server)}`);
+    if (!Array.isArray(tools) || tools.length === 0) throw new Error(`a { mcpTools } server needs at least one tool: ${server}`);
+    for (const tool of tools) {
+      if (typeof tool !== "string" || !MCP_NAME.test(tool)) {
+        throw new Error(`a { mcpTools } tool name may hold only letters, digits, "_", "." and "-": ${JSON.stringify(tool)}`);
+      }
+      if (MCP_TOOLS_NEVER_LISTED.includes(`${server}/${tool}`)) {
+        throw new Error(`a { mcpTools } surface may not list ${server}/${tool}: it prints file contents from a live checkout.`);
+      }
+    }
+  }
 }
 
 /** Compare dotted numeric versions; negative when `a` is older than `b`. */
@@ -369,7 +541,7 @@ export function __setClaudeCliVersionForTest(version: string | null | undefined)
 }
 
 /** Why the installed CLI cannot run a fenced `kind` surface, or null when it can. */
-async function restrictedCliShortfall(kind: "read" | "web"): Promise<string | null> {
+async function restrictedCliShortfall(kind: "read" | "web" | "readSearch"): Promise<string | null> {
   const version = await installedClaudeCliVersion();
   if (version !== null && compareVersions(version, MIN_RESTRICTED_CLI_VERSION) >= 0) return null;
   return (
@@ -380,7 +552,7 @@ async function restrictedCliShortfall(kind: "read" | "web"): Promise<string | nu
 
 /** Throw unless the installed CLI has `--restricted`, which a fenced surface needs. */
 export async function assertRestrictedCliAvailable(surface: FencedToolSurface): Promise<void> {
-  const shortfall = await restrictedCliShortfall("read" in surface ? "read" : "web");
+  const shortfall = await restrictedCliShortfall(surfaceKind(surface) as "read" | "web" | "readSearch");
   if (shortfall !== null) throw new Error(shortfall);
 }
 
@@ -393,8 +565,28 @@ export async function assertRestrictedCliAvailable(surface: FencedToolSurface): 
  */
 export async function restrictedCliBlocker(
   connector: ConnectorType | undefined,
-  kind: "read" | "web",
+  kind: "read" | "web" | "readSearch",
 ): Promise<string | null> {
   if ((connector ?? "claude-cli") !== "claude-cli") return null;
   return restrictedCliShortfall(kind);
+}
+
+/**
+ * A route pre-flight's whole answer for a surface: the sentence the run would
+ * fail with, or null when this connector can run it on this machine. A
+ * connector the capability table does not cover for the surface's kind is
+ * refused here, before any job, snapshot or session exists; on claude-cli
+ * the installed CLI must also have `--restricted`. `"none"` and `"bot"` are
+ * always null.
+ */
+export async function toolSurfaceBlocker(
+  connector: ConnectorType | undefined,
+  surface: ToolSurface,
+): Promise<string | null> {
+  const kind = surfaceKind(surface);
+  if (kind === undefined) return null;
+  const type = connector ?? "claude-cli";
+  if (!connectorSupports(type, kind)) return unsupportedSurfaceMessage(type, kind);
+  if (kind === "mcpTools") return null;
+  return restrictedCliBlocker(type, kind);
 }

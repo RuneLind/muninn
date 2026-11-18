@@ -1,4 +1,12 @@
-import { CopilotClient, approveAll, type SessionEvent, type CustomAgentConfig } from "@github/copilot-sdk";
+import {
+  CopilotClient,
+  approveAll,
+  type CopilotSession,
+  type CustomAgentConfig,
+  type PermissionHandler,
+  type SessionConfig,
+  type SessionEvent,
+} from "@github/copilot-sdk";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
@@ -13,7 +21,8 @@ import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
-import { refuseFencedSurface } from "../tool-surface.ts";
+import { assertMcpToolsSurface, mcpToolsSurface, refuseFencedSurface, type McpToolsSurface } from "../tool-surface.ts";
+import { resolveMcpToolsAgentCwd } from "../agent-cwd.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
@@ -124,7 +133,8 @@ export async function executePrompt(
   const model = await resolveModelForRequest(cl, botConfig.model ?? config.claudeModel, botConfig.name);
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
 
-  const tools = copilotSessionTools(botConfig);
+  const named = mcpToolsSurface(botConfig.toolSurface);
+  const tools = named ? copilotNamedToolsSession(botConfig, named) : copilotSessionTools(botConfig);
 
   // Pre-flight: warn if a *critical* MCP server is down. Non-critical failures
   // are visible in the inspector panel only — they no longer pollute the chat
@@ -134,17 +144,7 @@ export async function executePrompt(
   }
 
   // Create session per request (system prompt is dynamic — memories, goals, history change per message)
-  const session = await cl.createSession({
-    model,
-    streaming: true,
-    workingDirectory: botConfig.dir,
-    systemMessage: systemPrompt
-      ? { mode: "replace", content: systemPrompt }
-      : undefined,
-    onPermissionRequest: approveAll,
-    ...tools,
-  });
-
+  const session = await createCopilotSession(cl, botConfig, model, systemPrompt, tools);
   // Track tool calls for waterfall
   const toolCalls: ToolCall[] = [];
   const pendingTools = new Map<string, { name: string; startMs: number; input?: string }>();
@@ -360,6 +360,141 @@ export function copilotSessionTools(botConfig: BotConfig): {
     ...(customAgents.length > 0 ? { customAgents } : {}),
     ...(botConfig.excludedTools?.length ? { excludedTools: botConfig.excludedTools } : {}),
   };
+}
+
+/**
+ * Create the per-request session. A `{ mcpTools }` surface runs in an empty
+ * agent home (so the runtime discovers no CLAUDE.md, AGENTS.md or .github/
+ * from the bot folder), approves only its listed tools, and is read back with
+ * {@link assertSessionHoldsOnly} before it is returned: a session that holds
+ * any other tool is deleted and refused. Exported for the real-API smoke
+ * (`scripts/smoke-copilot-mcp-tools.ts`), which inspects the same session.
+ */
+export async function createCopilotSession(
+  cl: CopilotClient,
+  botConfig: BotConfig,
+  model: string,
+  systemPrompt: string | undefined,
+  tools: ReturnType<typeof copilotSessionTools> | NamedToolsSessionOptions,
+): Promise<CopilotSession> {
+  const named = mcpToolsSurface(botConfig.toolSurface);
+  const session = await cl.createSession({
+    model,
+    streaming: true,
+    workingDirectory: named ? resolveMcpToolsAgentCwd() : botConfig.dir,
+    systemMessage: systemPrompt
+      ? { mode: "replace", content: systemPrompt }
+      : undefined,
+    onPermissionRequest: named ? namedToolsPermissionHandler(named) : approveAll,
+    ...tools,
+  });
+  if (named) {
+    try {
+      await assertSessionHoldsOnly(session, namedToolWireNames(named));
+    } catch (err) {
+      cl.deleteSession(session.sessionId).catch(() => session.disconnect().catch(() => {}));
+      throw err;
+    }
+  }
+  return session;
+}
+
+/** Copilot's wire name for an MCP tool: `<server>-<tool>`, as `ToolSet.addMcp` documents it. */
+export function namedToolWireNames(surface: McpToolsSurface): string[] {
+  return Object.entries(surface.mcpTools).flatMap(([server, tools]) => tools.map((tool) => `${server}-${tool}`));
+}
+
+/** The session options a `{ mcpTools }` surface sets, beside model, prompt and handler. */
+export type NamedToolsSessionOptions = Pick<
+  SessionConfig,
+  | "mcpServers"
+  | "availableTools"
+  | "excludedTools"
+  | "customAgents"
+  | "skipCustomInstructions"
+  | "enableSkills"
+  | "skillDirectories"
+  | "enableSessionStore"
+  | "memory"
+  | "pluginDirectories"
+  | "instructionDirectories"
+  | "enableConfigDiscovery"
+  | "enableOnDemandInstructionDiscovery"
+  | "enableFileHooks"
+>;
+
+/**
+ * The tool half of `createSession` for a `{ mcpTools }` surface: an ALLOW list.
+ * Only the named servers start, each filtered to its listed tools; the
+ * session's `availableTools` names exactly those tools as `mcp:<server>-<tool>`
+ * (source-qualified, so a built-in of the same name never matches);
+ * `builtin:*` and `custom:*` are excluded as well, and nothing is discovered
+ * from disk: no custom instructions, skills, plugins, file hooks, cross-session
+ * store or memory, and no custom agent. Throws when the bot's `.mcp.json` does
+ * not hold a named server.
+ */
+export function copilotNamedToolsSession(botConfig: BotConfig, surface: McpToolsSurface): NamedToolsSessionOptions {
+  assertMcpToolsSurface(surface);
+  const all = parseMcpConfig(botConfig.dir);
+  const mcpServers: Record<string, ReturnType<typeof parseMcpConfig>[string]> = {};
+  for (const [server, tools] of Object.entries(surface.mcpTools)) {
+    const entry = all[server];
+    if (!entry) {
+      throw new Error(`copilot-sdk: the { mcpTools } surface names server "${server}", which ${botConfig.name}'s .mcp.json does not hold.`);
+    }
+    mcpServers[server] = { ...entry, tools: [...tools] };
+  }
+  return {
+    mcpServers,
+    availableTools: namedToolWireNames(surface).map((name) => `mcp:${name}`),
+    excludedTools: ["builtin:*", "custom:*"],
+    customAgents: [],
+    skipCustomInstructions: true,
+    enableSkills: false,
+    skillDirectories: [],
+    enableSessionStore: false,
+    memory: { enabled: false },
+    pluginDirectories: [],
+    instructionDirectories: [],
+    enableConfigDiscovery: false,
+    enableOnDemandInstructionDiscovery: false,
+    enableFileHooks: false,
+  };
+}
+
+/**
+ * A `{ mcpTools }` session approves only an MCP call to a listed tool; every
+ * other request is rejected. The request names the tool by its wire name
+ * (`toolName: "yggdrasil-list_repos"`, measured on the real runtime) and the
+ * server separately, so both must match a listed pair.
+ */
+export function namedToolsPermissionHandler(surface: McpToolsSurface): PermissionHandler {
+  return (request) => {
+    const tools = request.kind === "mcp" ? surface.mcpTools[request.serverName] : undefined;
+    if (request.kind === "mcp" && tools?.some((tool) => `${request.serverName}-${tool}` === request.toolName)) {
+      return { kind: "approve-once" };
+    }
+    return { kind: "reject", feedback: "This session may call only its listed tools." };
+  };
+}
+
+/**
+ * Throw unless the session's initialized tool list is a subset of `allowed`
+ * (wire names). The allow list is the fence; this reads back what the runtime
+ * actually built, so a runtime that ignored `availableTools` or added a tool
+ * of its own is refused before the prompt is sent. Fails closed: a runtime
+ * that cannot report its tools refuses the run.
+ */
+export async function assertSessionHoldsOnly(session: Pick<CopilotSession, "rpc">, allowed: string[]): Promise<string[]> {
+  await session.rpc.tools.initializeAndValidate();
+  const { tools } = await session.rpc.tools.getCurrentMetadata();
+  if (!tools) throw new Error("copilot-sdk: the { mcpTools } session reported no tool list — refusing to run it.");
+  const names = tools.map((t) => t.name);
+  const extra = names.filter((n) => !allowed.includes(n));
+  if (extra.length > 0) {
+    throw new Error(`copilot-sdk: the { mcpTools } session holds tools it was not given (${extra.join(", ")}) — refusing to run it.`);
+  }
+  return names;
 }
 
 /**

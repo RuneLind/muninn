@@ -15,6 +15,7 @@ import {
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
+import { startSnapshotSweeper } from "./ai/snapshots.ts";
 import { waitForPendingExtractions } from "./ai/extraction-tracker.ts";
 import { logResolvedHaikuBackends } from "./ai/haiku-direct.ts";
 import { disconnectAll as disconnectAllMcp } from "./ai/mcp-tool-caller.ts";
@@ -145,6 +146,10 @@ initDb(config);
 
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
+
+// Sweep the read-and-search snapshots now and every 15 minutes: one unused for
+// an hour, or a build a crash left half-done, is removed (`src/ai/snapshots.ts`).
+startSnapshotSweeper();
 
 // Warm the WORKED-on ledger memo for every registered wiki (fire-and-forget,
 // beside the embeddings warm-up and for the same reason). The index folds in
