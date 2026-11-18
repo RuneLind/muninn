@@ -248,6 +248,16 @@ test.afterAll(() => {
   process.off("SIGTERM", onSigterm);
 });
 
+// The drawer's player is a third-party embed. Unrouted, the runner loads the real page into the iframe,
+// and that page can take focus whenever it finishes loading: CI read `activeElement` as IFRAME where the
+// test expected the player box. An empty document keeps the iframe and its `src` in the DOM and keeps
+// the network out of every focus check.
+test.beforeEach(async ({ page }) => {
+  await page.route("https://www.youtube-nocookie.com/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>embed stub</title>" }),
+  );
+});
+
 async function openDoc(page: Page, source: string, docId: string, text: string): Promise<void> {
   await page.goto(`${BASE}/summaries?source=${source}&doc=${encodeURIComponent(docId)}`);
   await expect(page.locator("#docOverlay")).toHaveClass(/visible/);
