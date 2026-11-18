@@ -513,3 +513,34 @@ describe("the heading the client sends", () => {
     expect(discussHeading(a, r)).toBe("Brief");
   });
 });
+
+describe("reader-made copies placed away from their source", () => {
+  const md = page("## First", "", "The gate opens at dawn.", "", "## Last", "", "The gate shuts at dusk.");
+  /** A peek card as `showPeek` appends it: at the article's end, with a copy of its target. */
+  const withPeek = async () => {
+    const a = await readerArticle(md);
+    a.insertAdjacentHTML("beforeend", '<div class="wiki-ref-peek" role="tooltip"><div class="wiki-ref-peek-head"><span class="wiki-ref-peek-label">First</span></div><div class="wiki-ref-peek-body"><p>The gate opens at dawn.</p></div></div>');
+    return a;
+  };
+  test("a selection inside a peek card has no context: the card is not the page", async () => {
+    const a = await withPeek();
+    expect(discussContext(a, rangeOf(a, "The gate opens at dawn.", { nth: 2 }))).toBeNull();
+  });
+  test("a selection that runs from the page into a peek card has none either", async () => {
+    const a = await withPeek();
+    expect(discussContext(a, rangeOf(a, "shuts at dusk.", { to: "opens at" }))).toBeNull();
+  });
+  test("the same passage on the page keeps its own heading", async () => {
+    const a = await withPeek();
+    expect(discussContext(a, rangeOf(a, "The gate opens at dawn."))?.heading).toBe("First");
+  });
+  test("a decision view is reader-only: a selection inside it has no context, so no heading is sent", async () => {
+    const a = await readerArticle(md);
+    a.querySelectorAll("h1, h2, h3, h4")[0]!.insertAdjacentHTML("afterend", '<section class="dc-view dc-chain" data-reader-only><div class="dc-title">Chain</div><p>The gate shuts at dusk.</p></section>');
+    const t = a.querySelector(".dc-view p")!.firstChild!;
+    const r = document.createRange();
+    r.setStart(t, 0);
+    r.setEnd(t, t.textContent!.length);
+    expect(discussContext(a, r)).toBeNull();
+  });
+});

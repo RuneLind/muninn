@@ -22,6 +22,9 @@
  *     does not hide; Copy is disabled while its request runs; a
  *     non-JSON answer shows its status. The whole-page control shows on an
  *     HTML explainer page too.
+ *  5. **Off the page.** A selection inside a link's peek card offers no
+ *     control; the start view closes the panel and removes the controls,
+ *     and a page shown again brings them back.
  *  3. **The opt-in and the read-only wiki.** A wiki whose `.wiki-reader.json`
  *     does not set `discuss.handoff` shows neither control; a wiki in
  *     `WIKI_READONLY_ROOTS` still offers them, since nothing here calls a model.
@@ -64,7 +67,7 @@ const PAGE = [
   "",
   "The pier opens at six.",
   "", //                                                             10
-  "- **R2, behind.** The page's `status_date` is older than the newest merge.",
+  "- **B4, late.** The ferry's `dock_time` is earlier than the first bell.",
   "- The night route is unchanged.",
   "",
   '<Fold title="Design" summary="routes and stops" open="true">',
@@ -90,6 +93,9 @@ const PAGE = [
   "",
 ].join("\n");
 const EXPLAINER = "notes/board.html";
+/** A page whose middle links to its first section: a hover on the link shows a peek card. */
+const PEEK_REL = "plans/peek.mdx";
+const PEEK_PAGE = ["---", "title: Gate", "---", "", "# Gate", "", "## First", "", "The gate opens at dawn for the carts.", "", "## Middle", "", "See [the first part](#first) for it.", "", "## Last", "", "The gate shuts at dusk.", ""].join("\n");
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -104,6 +110,7 @@ test.beforeAll(async () => {
     await mkdir(path.join(r, "plans"), { recursive: true });
     await writeFile(path.join(r, REL), PAGE, "utf8");
   }
+  await writeFile(path.join(root, PEEK_REL), PEEK_PAGE, "utf8");
   await mkdir(path.join(root, "notes"), { recursive: true });
   await writeFile(path.join(root, EXPLAINER), "<!doctype html><html><head><title>Board</title></head><body><h1>Board</h1><p>Departures.</p></body></html>", "utf8");
   const on = JSON.stringify({ discuss: { handoff: true } });
@@ -230,11 +237,11 @@ test.describe("Wiki reader: Ask Claude Code", () => {
   test("a bullet that opens in bold and holds inline code", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
-    await select(page, "R2, behind", 1, "newest merge.");
+    await select(page, "B4, late", 1, "first bell.");
     await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
-    const clip = await askAndCopy(page, "Which date does R2 read?");
+    const clip = await askAndCopy(page, "Which time does B4 read?");
     expect(clip).toContain("Passage (line 11, Harbour timetable › Brief):");
-    expect(clip).toContain("> R2, behind. The page's status_date is older than the newest merge.");
+    expect(clip).toContain("> B4, late. The ferry's dock_time is earlier than the first bell.");
     expect(clip).toContain(`${root}/${REL}`);
   });
 
@@ -403,6 +410,47 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     const clip = await askAndCopy(page, "What does the board show?");
     expect(clip).toContain(`Page: ${root}/${EXPLAINER}`);
     expect(clip).toContain("Question about the whole page: What does the board show?");
+  });
+
+  test("a selection inside a link's peek card offers no control: the card is not the page", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PEEK_REL)}`);
+    await expect(page.locator(".wiki-article")).toContainText("The gate shuts at dusk.");
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await select(page, "The gate opens at dawn", 1, "for the carts.");
+    await expect(btn).toBeVisible();
+    await page.locator(".wiki-article a", { hasText: "the first part" }).hover();
+    const peek = page.locator(".wiki-article .wiki-ref-peek");
+    await expect(peek).toContainText("The gate opens at dawn");
+    await peek.evaluate((card) => {
+      const w = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
+      for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
+        const i = t.data.indexOf("The gate opens");
+        if (i === -1) continue;
+        getSelection()!.setBaseAndExtent(t, i, t, t.data.length);
+        return;
+      }
+      throw new Error("no text in the peek card");
+    });
+    await page.waitForTimeout(200);
+    await expect(peek).toBeVisible();
+    await expect(btn).toBeHidden();
+  });
+
+  test("leaving the page for the start view closes the panel and hides the controls; a page brings them back", async ({ page }) => {
+    await openPage(page, WIKI);
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`).click();
+    await expect(panel).toBeVisible();
+    await page.locator(".wiki-bc-wiki").click();
+    await expect(page).not.toHaveURL(/relPath=/);
+    await expect(panel).toBeHidden();
+    await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toHaveCount(0);
+    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+    await page.goBack();
+    await expect(page.locator(".wiki-article")).toContainText("The night route is unchanged.");
+    await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toBeVisible();
+    await select(page, "The night route is unchanged.", 1);
+    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toBeVisible();
   });
 
   test("a wiki without discuss.handoff shows neither control", async ({ page }) => {

@@ -1004,6 +1004,7 @@ function hideBreadcrumb(): void {
   // would still be handed a page the reader is no longer on.
   currentArticle = null;
   clearOutgoingTitles();
+  setDiscussHandoffEnabled(false); // start, issue graph, Ask answer, effort page: panel closed
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -1668,6 +1669,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
         // The breadcrumb is the previous page's; its lens chip goes with that article.
         removeLensChip(document.getElementById("wikiBreadcrumb"));
+        setDiscussHandoffEnabled(false); // and «Ask Claude Code», which would ask about it
         // Its stale report goes with it: the tab says the page did not load (A12).
         staleForFailedPage();
         // The PREVIOUS page's `currentName` deliberately survives a failed load, so
@@ -1843,6 +1845,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
       removeLensChip(document.getElementById("wikiBreadcrumb"));
+      setDiscussHandoffEnabled(false);
       staleForFailedPage();
       renderList();
     });

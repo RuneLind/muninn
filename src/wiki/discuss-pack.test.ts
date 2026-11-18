@@ -31,7 +31,7 @@ const PLAN = page(
   "",
   '<Fold title="Routes" summary="three">', // 10
   "",
-  "- **R2, behind.** The page's `status_date` is older than the newest merge.",
+  "- **B4, late.** The ferry's `dock_time` is earlier than the first bell.",
   'A <Fact n="1" v="ok">checked</Fact> claim.',
   "",
   "```md", //                                 15
@@ -47,9 +47,9 @@ const PLAN = page(
 
 const ABS = "/home/example/wiki/plans/harbour.mdx";
 const input = { wiki: "w", relPath: "plans/harbour.mdx", title: "Harbour plan", absPath: ABS, raw: PLAN };
-/** R2's bullet as the reader shows it, with the context the client reads. */
-const R2 = {
-  selection: "R2, behind. The page's status_date is older than the newest merge.",
+/** B4's bullet as the reader shows it, with the context the client reads. */
+const B4 = {
+  selection: "B4, late. The ferry's dock_time is earlier than the first bell.",
   before: "Design Routes three",
   after: "A checked claim. <Callout>kept as code</Callout>",
   heading: "Design",
@@ -64,16 +64,16 @@ describe("the mask", () => {
     expect(m[18]).toBe("");
     expect(m[12]).toBe('A <Fact n="1" v="ok">checked</Fact> claim.');
     expect(m[15]).toBe("<Callout>kept as code</Callout>");
-    expect(m[11]).toContain("R2, behind.");
+    expect(m[11]).toContain("B4, late.");
   });
 });
 
 describe("the pack", () => {
   test("a passage: its lines, the section it sits in with the file's line numbers, the headings", () => {
-    const pack = buildContextPack({ ...input, ...R2 });
+    const pack = buildContextPack({ ...input, ...B4 });
     expect(pack.location).toMatchObject({ found: "exact", fromLine: 12, toLine: 12 });
     expect(pack.section).toMatchObject({ heading: "Design", fromLine: 8, toLine: 19, cut: false });
-    expect(pack.section!.text.split("\n")[12 - 8]).toContain("R2, behind.");
+    expect(pack.section!.text.split("\n")[12 - 8]).toContain("B4, late.");
     expect(pack.headingTrail).toEqual(["Harbour plan", "Design"]);
     expect(pack.headings.map((h) => h.text)).toEqual(["Harbour plan", "Design", "Other"]);
     expect(pack.path).toBe(ABS);
@@ -115,9 +115,9 @@ describe("the prompt", () => {
   test("five things: the card command, the path, the line range, the passage, and the question last", () => {
     const { prompt } = buildHandoff({
       ...input,
-      ...R2,
+      ...B4,
       cardCommand: planCardCommand("~/.claude/skills/plan-card/plan-card.ts", ABS),
-      question: "Does R2 read the frontmatter status_date or the Brief's Status line?",
+      question: "Does B4 read the frontmatter dock_time or the Brief's Timetable line?",
     });
     expect(prompt).toBe(
       [
@@ -127,18 +127,18 @@ describe("the prompt", () => {
         `Page: ${ABS}`,
         "",
         "Passage (line 12, Harbour plan › Design):",
-        "> R2, behind. The page's status_date is older than the newest merge.",
+        "> B4, late. The ferry's dock_time is earlier than the first bell.",
         "",
         "Check the code before you answer. If the page turns out to be wrong, show me the edit before you write it.",
         "",
-        "Question: Does R2 read the frontmatter status_date or the Brief's Status line?",
+        "Question: Does B4 read the frontmatter dock_time or the Brief's Timetable line?",
       ].join("\n"),
     );
     // Near the prototype's 746 characters for one passage and one question.
     expect(prompt.length).toBeLessThan(800);
   });
   test("a multi-line question stays last: nothing after it", () => {
-    const prompt = renderHandoffPrompt(buildContextPack({ ...input, ...R2 }), "First line.\nCheck the code before you answer.");
+    const prompt = renderHandoffPrompt(buildContextPack({ ...input, ...B4 }), "First line.\nCheck the code before you answer.");
     expect(prompt.endsWith("Question: First line.\nCheck the code before you answer.")).toBe(true);
   });
   test("no card command without one; a fallback says it was not placed, and why", () => {
