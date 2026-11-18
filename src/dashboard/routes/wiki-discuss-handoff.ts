@@ -65,7 +65,8 @@ export interface HandoffBody {
 }
 
 /** The body, or the 400 message. The bounds are `discuss-bounds.ts`'s, which
- *  the client and the pack use too. */
+ *  the client and the pack use too; the heading alone is refused at four times
+ *  its bound, and the pack cuts it to the bound. */
 export function parseHandoffBody(raw: unknown): HandoffBody | string {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "body must be a JSON object";
   const b = raw as Record<string, unknown>;
@@ -155,7 +156,7 @@ export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps:
       }
       const markdown = await readWikiPage(page.index, page.meta);
       if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
-      // Resolved: a root from `WIKI_DIR` or the registry may be relative, and the prompt promises an absolute path.
+      // Resolved: `resolveWikiRoot` returns a `WIKI_DIR` root as written, which may be relative, and the prompt promises an absolute path.
       const wikiDir = path.resolve(resolveWikiRoot(page.entry?.root));
       const target = planCardTargetFor({
         env: deps.env ?? process.env,

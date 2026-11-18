@@ -13,7 +13,7 @@
  * locator never answers with the head of the page: a passage it cannot place
  * gets the heading's section (reported as such) or no range at all.
  *
- * Pure: no filesystem, no index. `src/dashboard/views/components/wiki-discuss-parity.test.ts`
+ * Pure: no filesystem, no index. `src/dashboard/views/wiki-boot/wiki-discuss-parity.test.ts`
  * holds the collapse to the reader's own render.
  */
 

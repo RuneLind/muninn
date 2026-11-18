@@ -3,7 +3,7 @@
  * about a page carries, built on the server from a page reference and a
  * selection, never from text the client claims about the file.
  *
- * Pure: the route resolves the page (`resolvePageRef`), reads its raw text and
+ * Pure: the route resolves the page (`resolveScopedPage`, by `relPath`), reads its raw text and
  * computes the card command, then calls {@link buildContextPack}. P1's prompt
  * (`discuss-prompt.ts`) reads only the path, the line range, the passage and
  * the card command; the section text and the heading list are here for the
