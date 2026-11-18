@@ -21,8 +21,8 @@
  * {@link SETTLE_MS}) only decides whether the control shows, with a cheap check
  * that reads no context and adds no class to the root: on a long page the full
  * read is a style recalculation and a walk of every text node. Closing the
- * panel puts the passage's range back only when no newer selection would be
- * replaced.
+ * panel puts the passage's range back unless the live selection is itself a
+ * passage on the page (a newer selection outside the article is replaced).
  * The ids stay out of the read-only egress and blocked selectors
  * (no model call, no write, like Copy path) and are in
  * `WIKI_READ_SLICE_HIDDEN_SELECTOR`: the pod drops the route.

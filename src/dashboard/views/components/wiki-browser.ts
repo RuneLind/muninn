@@ -3345,8 +3345,8 @@ export function boot(): { dispose(): void } {
   document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
     setTimeout(maybeShowExplainPill, 0);
   });
-  // Dismiss on: selection collapse, article scroll, Escape, any mousedown outside
-  // the pill (the pill's own mousedown stops propagation, so it self-excludes).
+  // Dismiss on: selection collapse, article scroll, Escape, and a mousedown
+  // outside the buttons the handler below names (its `closest()` checks).
   document.addEventListener("selectionchange", () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) hideExplainPill();
@@ -3356,7 +3356,7 @@ export function boot(): { dispose(): void } {
   });
   // A mousedown on the Explain button activates it (preventDefault keeps the
   // selection alive so `activateExplain` reads its captured passage); a mousedown
-  // anywhere else dismisses the button. One handler so the two never race.
+  // on any button not named below dismisses it. One handler so the two never race.
   document.addEventListener("mousedown", (e) => {
     const t = e.target as HTMLElement;
     if (t.closest && t.closest("#wikiExplainBtn")) {

@@ -192,6 +192,9 @@ describe("several matches: the context chooses", () => {
     // Both near contexts agree on the right; only the first agrees in full far out on both sides.
     expect(r).toMatchObject({ found: "exact", fromLine: 3, toLine: 3 });
   });
+  // The context below is written by hand (no edge flags, a short `after`): it
+  // pins the accept rule's (full, partial) cell, not a request the reader's
+  // client is known to send for this page.
   test("V1: the true copy refused (the reader shows a Fold's «Details» label), a copy agreeing in full on one side only is not taken", () => {
     const md = page(
       "Kari keeps the timetable.", //                             1
