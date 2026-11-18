@@ -231,7 +231,7 @@ describe("the log", () => {
   test("one line per handoff with the wiki, the page and how it was found, never the question, the passage or its context", async () => {
     const spy: Spy = { logs: [], resolves: 0 };
     const question = "Which stops does the zzquestionzz route add?";
-    const res = await post(appWith(undefined, {}, spy), { ...PAGE, question, ...PASSAGE, before: "zzbeforezz " + PASSAGE.before });
+    const res = await post(appWith(undefined, {}, spy), { ...PAGE, question, ...PASSAGE, before: "Kari Nordmann keeps the winter " + PASSAGE.before });
     expect(res.status).toBe(200);
     expect(spy.logs.length).toBe(1);
     const [msg, props] = spy.logs[0] as [string, Record<string, unknown>];
@@ -240,7 +240,7 @@ describe("the log", () => {
     const logged = JSON.stringify(spy.logs);
     expect(logged).not.toContain("zzquestionzz");
     expect(logged).not.toContain("Example Island");
-    expect(logged).not.toContain("zzbeforezz");
+    expect(logged).not.toContain("Kari Nordmann");
     expect(logged).not.toContain("night route");
   });
 });

@@ -401,8 +401,10 @@ describe("review cases: a range stated as found is never another place's", () =>
     const a = await readerArticle(md);
     const r = locate(md, rangeOf(a, "The pier opens at six", { nth: 2 }));
     expectNotWrong(r, lineOf(md, "The pier opens", 2));
-    // The top copy itself is still found.
-    expectExact(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 })), lineOf(md, "The pier opens", 1));
+    // The top copy agrees in full on its left only: on its right the reader
+    // shows the Fold's «Details» label before «more», which the collapse does
+    // not hold. A match needs both sides in full, so it falls back too.
+    expect(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 }))).toMatchObject({ found: "none", reason: "no-agreement", candidates: [lineOf(md, "The pier opens", 1), lineOf(md, "The pier opens", 2)] });
   });
   test("6: a paragraph first on the page and again after a 1) marker: never the top copy's line", async () => {
     const md = page("The pier opens at six and closes at ten every day of the week.", "", "## Steps", "", "1) The pier opens at six and closes at ten every day of the week.");
@@ -419,6 +421,20 @@ describe("review cases: a range stated as found is never another place's", () =>
     const md = page(`✓ ${ITEMS[0]}`, `✗ ${ITEMS[1]}`, "", "## Plan", "", "<Checklist>", "", `- [x] ${ITEMS[0]}`, `- [ ] ${ITEMS[1]}`, "", "</Checklist>");
     const a = await readerArticle(md);
     expectNotWrong(locate(md, rangeOf(a, ITEMS[0]!, { nth: 2 })), lineOf(md, ITEMS[0]!, 2));
+  });
+  // Round 2: the true copy is refused (the reader shows a Fold's «Details» or a
+  // callout's «Note» the collapse does not hold), and a copy with one side
+  // agreeing in full and the other only partly was the one taken.
+  const MIGRATE = "Run the database migration on staging and verify that the row counts match";
+  test("V1: an untitled Fold's copy, with a Checklist copy and a ✓ copy below: never the Checklist's line", async () => {
+    const md = ["<Fold>", "", MIGRATE, "", "</Fold>", "", "<Checklist>", "", `- [x] ${MIGRATE}`, "", "</Checklist>", "", `✓ ${MIGRATE}`].join("\n");
+    const a = await readerArticle(md);
+    expectNotWrong(locate(md, rangeOf(a, MIGRATE.slice(10, 40), { nth: 1 })), 3);
+  });
+  test("V3: a plain copy between a ✓ copy and a callout's copy: never the callout's line", async () => {
+    const md = [`✓ ${MIGRATE}`, "", MIGRATE, "", "> [!note]", `> ${MIGRATE}`, "", '<Fold summary="Notes">', "", MIGRATE, "", "</Fold>"].join("\n");
+    const a = await readerArticle(md);
+    expectNotWrong(locate(md, rangeOf(a, MIGRATE.slice(0, -6), { nth: 2 })), 3);
   });
   test("a fence's label and Copy button inside a selection do not break the match", async () => {
     const md = page("## Code", "", "Run this:", "", "```ts", "const stops = 4;", "```", "", "Then stop.");
@@ -543,4 +559,90 @@ describe("reader-made copies placed away from their source", () => {
     r.setEnd(t, t.textContent!.length);
     expect(discussContext(a, r)).toBeNull();
   });
+});
+
+describe("seeded guard: a range stated as found is the selection's own line", () => {
+  // Synthetic pages, each holding one sentence two or more times in blocks the
+  // reader shows differently from the source (a Fold's label, a callout's frame,
+  // a checklist mark, a table row, a `1)` line). Every copy is selected whole
+  // and in three slices; an `exact` answer must name that copy's line.
+  const SENTS = [
+    "The pier opens at six and closes at ten every day of the week.",
+    "Run the database migration on staging and verify that the row counts match",
+  ];
+  const FILL = ["Boats leave early.", "Kari keeps the winter timetable.", "Bells ring at noon.", "more", "Notes", "Plan"];
+  /** A page per step of a fixed linear congruential sequence from `seed`. */
+  function* seededPages(seed: number, count: number): Generator<{ md: string; s: string }> {
+    let x = seed;
+    const rnd = () => {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      return x / 2147483648;
+    };
+    const pick = <T,>(a: readonly T[]) => a[Math.floor(rnd() * a.length)]!;
+    const block = (s: string): string[] => {
+      const f = pick(FILL);
+      return pick<() => string[]>([
+        () => [s],
+        () => [`1) ${s}`],
+        () => [`- ${s}`],
+        () => [`✓ ${s}`],
+        () => [`${f} ${s}`],
+        () => [`${s} ${f}`],
+        () => ["<Fold>", "", s, "", "</Fold>"],
+        () => [`<Fold summary="${f}">`, "", s, "", "</Fold>"],
+        () => [`<Fold title="${f}">`, "", s, "", "</Fold>"],
+        () => ["<Checklist>", "", `- [x] ${s}`, "", "</Checklist>"],
+        () => [`> ${s}`],
+        () => ["> [!note]", `> ${s}`],
+        () => [`| ${s} | ${f} |`, "|---|---|", "| a | b |"],
+        () => [`## ${f}`],
+        () => [`### ${pick(FILL)}`],
+        () => [f],
+        () => [`**${s}**`],
+      ])();
+    };
+    for (let p = 0; p < count; p++) {
+      const s = pick(SENTS);
+      const blocks: string[][] = [];
+      const nb = 2 + Math.floor(rnd() * 6);
+      let has = 0;
+      for (let b = 0; b < nb; b++) {
+        const useS = rnd() < 0.5;
+        if (useS) has++;
+        blocks.push(block(useS ? s : pick(FILL)));
+      }
+      if (has < 2) blocks.push(block(s));
+      yield { md: blocks.map((b) => b.join("\n")).join("\n\n"), s };
+    }
+  }
+  /** Every exact answer on the seed's pages that names another line. */
+  async function wrongExacts(seed: number, count: number): Promise<string[]> {
+    const wrong: string[] = [];
+    for (const { md, s } of seededPages(seed, count)) {
+      const a = await readerArticle(md);
+      const lines = md.split("\n").flatMap((l, i) => (l.includes(s) ? [i + 1] : []));
+      const f = flat(a);
+      // Only pages where the reader shows each copy once, in source order.
+      if (f.text.split(s).length - 1 !== lines.length) continue;
+      for (let n = 1; n <= lines.length; n++) {
+        for (const sel of [s, s.slice(4), s.slice(0, -6), s.slice(10, 40)]) {
+          let at = -1;
+          for (let k = 0; k < n; k++) at = f.text.indexOf(s, at + 1);
+          const off = s.indexOf(sel);
+          const r = document.createRange();
+          r.setStart(...f.pos(at + off));
+          r.setEnd(...f.pos(at + off + sel.length, true));
+          const res = locate(md, r);
+          if (res.found === "exact" && res.fromLine !== lines[n - 1]) wrong.push(`seed ${seed}: copy ${n} «${sel.slice(0, 20)}…» at line ${res.fromLine}, not ${lines[n - 1]}\n${md}`);
+        }
+      }
+    }
+    return wrong;
+  }
+  // Seeds whose pages held a wrong exact answer under the one-side-full rule.
+  for (const seed of [3, 10, 16]) {
+    test(`seed ${seed}: no exact answer names another copy's line`, async () => {
+      expect(await wrongExacts(seed, 150)).toEqual([]);
+    }, 8000);
+  }
 });

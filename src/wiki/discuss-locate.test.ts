@@ -49,7 +49,8 @@ describe("the agreement rule, one side", () => {
     expect(CONTEXT_PARTIAL_MIN).toBe(8);
   });
 
-  // sideState's whole state table. L: key characters the client sent; S: the
+  // sideState's state table, by example: 51 rows covering 44 of the 140 classes
+  // of (L band, client edge, S against L, source edge, where d falls). L: key characters the client sent; S: the
   // source's characters in the window; d: where a character first differs
   // (within both), or null. The source running out before the client's text,
   // and the source going on past the client's page edge, are disagreements at
@@ -124,13 +125,9 @@ describe("the agreement rule, one side", () => {
       expect(sideState(rev(client), rev(source), "left", clientEdge, sourceEdge)).toBe(want);
     });
   }
-  test("accepted: one side full and neither contradicted", () => {
-    expect(contextAccepts("full", "full")).toBe(true);
-    expect(contextAccepts("full", "partial")).toBe(true);
-    expect(contextAccepts("open", "full")).toBe(true);
-    expect(contextAccepts("full", "contradicted")).toBe(false);
-    expect(contextAccepts("partial", "partial")).toBe(false);
-    expect(contextAccepts("agrees", "open")).toBe(false);
+  test("accepted: both sides full, and only then", () => {
+    const STATES: SideState[] = ["full", "agrees", "open", "partial", "contradicted"];
+    for (const l of STATES) for (const r of STATES) expect([l, r, contextAccepts(l, r)]).toEqual([l, r, l === "full" && r === "full"]);
   });
 });
 
@@ -159,11 +156,11 @@ describe("one match: taken only when its context agrees", () => {
     const md = page("Kari Nordmann keeps the winter timetable for every boat in the harbour office.", "", "The pier opens at six.", "", "Bells ring at noon on every day.");
     const before = "Kari Nordmann keeps the winter timetable for every boat in the harbour office.";
     expect(before.length).toBeGreaterThan(48);
-    const r = locatePassage(md, { selection: "The pier opens at six.", before, atStart: true, after: "Bells" });
+    const r = locatePassage(md, { selection: "The pier opens at six.", before, atStart: true, after: "Bells ring at noon on every day." });
     expect(r).toMatchObject({ found: "exact", fromLine: 3, toLine: 3 });
     // The mirror at the page's end.
     const end = page("# T", "", "Bells ring.", "", "The pier opens at six.", "", before);
-    expect(locatePassage(end, { selection: "The pier opens at six.", before: "ring.", after: before, atEnd: true })).toMatchObject({ found: "exact", fromLine: 5, toLine: 5 });
+    expect(locatePassage(end, { selection: "The pier opens at six.", before: "T Bells ring.", atStart: true, after: before, atEnd: true })).toMatchObject({ found: "exact", fromLine: 5, toLine: 5 });
   });
   test("a page of under 3,000 characters still gets the passage's own line", () => {
     const short = page("# Short", "", "One line.", "", "The second line here.", "", "Third.");
@@ -194,6 +191,30 @@ describe("several matches: the context chooses", () => {
     const r = locatePassage(md, { selection: "check the ropes,", before: "Log Alpha wrote: ", after: `${tail} Beta wrote: check the ropes, ${tail} End.`, atEnd: true });
     // Both near contexts agree on the right; only the first agrees in full far out on both sides.
     expect(r).toMatchObject({ found: "exact", fromLine: 3, toLine: 3 });
+  });
+  test("V1: the true copy refused (the reader shows a Fold's «Details» label), a copy agreeing in full on one side only is not taken", () => {
+    const md = page(
+      "Kari keeps the timetable.", //                             1
+      "",
+      "<Fold>",
+      "",
+      "Check the ropes before the evening ferry.", //             5
+      "",
+      "Bells ring at noon.",
+      "",
+      "</Fold>",
+      "", //                                                     10
+      "Kari keeps the timetable. Details",
+      "",
+      "Check the ropes before the evening ferry.",
+      "",
+      "Bells ring late.", //                                     15
+    );
+    // As the client reads the Fold's copy: its «Details» label before it.
+    const r = locatePassage(md, { selection: "Check the ropes before the evening ferry.", before: "Kari keeps the timetable. Details ", after: "Bells ring at noon. Kari keeps" });
+    // Copy 5: left contradicted (the collapse has no «Details»). Copy 13: left
+    // full, right partial («bellsring» then «late» against «atnoon»).
+    expect(r.found === "exact" ? r.fromLine : null).not.toBe(13);
   });
   test("copies alike as far as the context reads: ambiguous", () => {
     const md = page("# Log", "", ...Array.from({ length: 6 }, () => "- Same line again."));
@@ -243,6 +264,30 @@ describe("a heading inside a Diagram's or an Embed's body is no section boundary
     // The hidden heading cannot be the named section.
     expect(locatePassage(md, { selection: "Open the demo in a browser.", edge: "added", heading: "Fallback notes" })).toMatchObject({ found: "none", section: null });
   });
+  test("a <Fact> tag alone on a line above the body: the hidden lines stay the file's (the strip removes that line)", () => {
+    const md = page(
+      "## Flow", //                                               1
+      "",
+      '<Fact n="1">',
+      "Boats leave early.",
+      "</Fact>", //                                               5
+      "",
+      "## Real section",
+      '<Embed src="demo.html">',
+      "",
+      "Fallback words.", //                                      10
+      "## Hidden notes",
+      "</Embed>",
+      "",
+      "The pier opens at six.",
+    );
+    expect(pageHeadings(md).map((h) => [h.text, h.fromLine, h.toLine])).toEqual([
+      ["Flow", 1, 5],
+      ["Real section", 7, 14],
+    ]);
+    expect(locatePassage(md, { selection: "The pier opens at six.", edge: "added", heading: "Hidden notes" })).toMatchObject({ found: "none", section: null });
+    expect(locatePassage(md, { selection: "The pier opens at six.", edge: "added", heading: "Real section" })).toMatchObject({ found: "section", fromLine: 7, toLine: 14 });
+  });
   test("the same in a Diagram's body", () => {
     const md = page("## Flow", "", '<Diagram src="flow.diagram.json" caption="c">', "", "### Legend", "", "boats", "", "</Diagram>", "", "The pier opens at six.");
     expect(pageHeadings(md).map((h) => [h.text, h.fromLine, h.toLine])).toEqual([["Flow", 1, 11]]);
@@ -275,7 +320,7 @@ describe("the edges tier: the first and last LOCATE_EDGE_CHARS", () => {
   });
   test("two starts: each is a candidate, and the context chooses (never simply the first)", () => {
     const two = page("# Two", "", "Alpha:", "", LONG, "", "Beta:", "", LONG, "", "End.");
-    const r = locatePassage(two, { selection: withChip, before: "Beta:", after: "End.", atEnd: true });
+    const r = locatePassage(two, { selection: withChip, before: `Two Alpha: ${LONG} Beta:`, after: "End.", atEnd: true });
     // Three candidates: each start with the end after it, and the first start
     // with the second copy's end (inside the bound); the context takes one.
     expect(r).toMatchObject({ found: "exact", tier: "edges", matches: 3, fromLine: 9, toLine: 9 });

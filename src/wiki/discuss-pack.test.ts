@@ -102,7 +102,7 @@ describe("the pack", () => {
     const long = page("# L", "", "Intro.", "", ...lines, "", "Outro.");
     const selection = lines.join("\n");
     expect(selection.length).toBeGreaterThan(1500);
-    const pack = buildContextPack({ ...input, raw: long, selection, before: "L Intro.", after: "Outro.", atEnd: true });
+    const pack = buildContextPack({ ...input, raw: long, selection, before: "L Intro.", atStart: true, after: "Outro.", atEnd: true });
     expect(pack.passage).toBe(selection);
     expect(pack.location).toMatchObject({ found: "exact", fromLine: 5, toLine: 64 });
   });
@@ -153,7 +153,7 @@ describe("the prompt", () => {
     const lines = Array.from({ length: 200 }, (_, k) => `Line ${k} says something different about pier number ${k}.`);
     const long = page("# L", "", "Intro.", "", ...lines, "", "Outro.");
     const selection = lines.join("\n");
-    const { prompt } = buildHandoff({ ...input, raw: long, selection, before: "L Intro.", after: "Outro.", atEnd: true, question: "Q?".repeat(1000) });
+    const { prompt } = buildHandoff({ ...input, raw: long, selection, before: "L Intro.", atStart: true, after: "Outro.", atEnd: true, question: "Q?".repeat(1000) });
     expect(prompt.length).toBeLessThanOrEqual(HANDOFF_PROMPT_MAX);
     expect(prompt).toContain("Passage (lines 5–204, L):");
     expect(prompt).toMatch(/\[… [\d,]+ more characters cut here; the lines above cover the whole passage\]/);

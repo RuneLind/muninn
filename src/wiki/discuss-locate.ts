@@ -185,7 +185,7 @@ function hiddenBodyLines(
  *    directly in a NextMoves, and the lists nested under their rows;
  *  - `dated`: a Timeline's top-level item, whose separator after the date
  *    the reader does not show.
- * Line numbers are the file's (0-based).
+ * Line numbers are those of `lines` (0-based): the fact-stripped text's ({@link readerLines}).
  */
 function readerListLines(lines: readonly string[], keep: readonly number[]) {
   const marker = new Set<number>();
@@ -226,9 +226,12 @@ function readerListLines(lines: readonly string[], keep: readonly number[]) {
   return { marker, task, dated };
 }
 
-/** The page's lines as the collapse reads them: fact wrappers stripped (tags
- *  only, so line numbers stay the file's), frontmatter, sentinel and fence
- *  marker lines in `skip`, fence bodies in `code`, hidden bodies in `hidden`. */
+/** The page's lines as the collapse reads them: fact wrappers stripped,
+ *  frontmatter, sentinel and fence marker lines in `skip`, fence bodies in
+ *  `code`, hidden bodies in `hidden`. The strip removes a line that holds only
+ *  a `<Fact …>` or `</Fact>` tag, so every line number here is the STRIPPED
+ *  text's: a caller reaches the file through `rawOf` (offsets), never by
+ *  using a line number as the file's. */
 function readerLines(raw: string) {
   const { text, map: rawOf } = stripFactWrappersWithMap(raw.replace(/\0/g, " "));
   const lines = text.split("\n");
@@ -452,7 +455,12 @@ export function pageHeadings(raw: string): PageHeading[] {
   const bodyFrom = frontmatterBodyLine(raw);
   const fenced = new Set<number>();
   for (const f of readerFences(raw)) for (let k = f.opener; k <= f.closer; k++) fenced.add(k);
-  const { hidden } = readerLines(raw);
+  // `readerLines` numbers the fact-stripped text, which lacks each line that
+  // held only a `<Fact>` tag: translate through its offset map to the file's.
+  const r = readerLines(raw);
+  const rawLine = lineIndex(raw);
+  const hidden = new Set<number>();
+  for (const k of r.hidden) hidden.add(rawLine(r.rawOf[r.lineStart[k]!] ?? raw.length) - 1);
   const found: { level: number; text: string; line: number }[] = [];
   for (let k = bodyFrom; k < lines.length; k++) {
     if (fenced.has(k) || hidden.has(k)) continue;
@@ -588,14 +596,15 @@ const MAX_SCORED = 400;
  *  - `open`: the client sent nothing and is not at the page's edge;
  *  - `partial`: the first disagreement is at {@link CONTEXT_PARTIAL_MIN} or later;
  *  - `contradicted`: it is nearer.
- * Only `full` counts toward acceptance; only `contradicted` blocks it.
+ * A match is accepted only when both of its sides are `full`
+ * ({@link contextAccepts}); every other state refuses it.
  */
 export type SideState = "full" | "agrees" | "open" | "partial" | "contradicted";
 
 /** Compare the client's side with the source's, outward from the match: the
  *  left side from its end, the right side from its start. `clientAtEdge`: the
  *  client's text stops at the article's edge; `sourceAtEdge`: the source's
- *  window reaches the collapsed page's edge. The test file holds the table. */
+ *  window reaches the collapsed page's edge. The test file pins the states by example. */
 export function sideState(client: string, source: string, side: "left" | "right", clientAtEdge: boolean, sourceAtEdge: boolean): SideState {
   const L = client.length;
   const S = source.length;
@@ -611,10 +620,12 @@ export function sideState(client: string, source: string, side: "left" | "right"
   return d >= CONTEXT_PARTIAL_MIN ? "partial" : "contradicted";
 }
 
-/** The agreement rule: a match is accepted when one side agrees in full and
- *  neither side is contradicted near the match. */
+/** The agreement rule: a match is accepted only when both sides agree in full.
+ *  One side in full and the other only partly took a wrong copy when the
+ *  reader showed a label beside the true one (a Fold's «Details», a callout's
+ *  «Note») that the collapse does not hold. */
 export function contextAccepts(left: SideState, right: SideState): boolean {
-  return (left === "full" || right === "full") && left !== "contradicted" && right !== "contradicted";
+  return left === "full" && right === "full";
 }
 
 /**
