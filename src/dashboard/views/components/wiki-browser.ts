@@ -385,6 +385,16 @@ import {
   type SeriesPort,
 } from "./wiki-series-controller.ts";
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
+import {
+  captureDiscussSelection,
+  discussHandoffPageBtnHtml,
+  discussHandoffSelBtnHtml,
+  DISCUSS_HANDOFF_SEL_BTN_ID,
+  initDiscussHandoff,
+  openDiscussHandoff,
+  setDiscussHandoffEnabled,
+  showDiscussSelBtn,
+} from "./wiki-discuss-handoff.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -865,6 +875,8 @@ const NO_SESSION_TITLE =
 function renderBreadcrumb(m: WikiListing): void {
   // A page render starts over: the previous page's provenance load is not wanted.
   abortProvLoad();
+  // Off until this page's payload says its wiki offers it (Discuss P1).
+  setDiscussHandoffEnabled(false);
   const el = document.getElementById("wikiBreadcrumb");
   // Navigating to a DIFFERENT page invalidates an open article popover: it still
   // targets the page the reader just left, and its anchor button has been
@@ -976,9 +988,14 @@ function renderBreadcrumb(m: WikiListing): void {
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
+    // «Ask Claude Code» on the selection (Discuss P1): copies a prompt, calls no
+    // model, so it is in neither read-only selector list, like Copy path.
+    discussHandoffSelBtnHtml() +
     // Always-visible whole-article fact check (markdown pages + explainers).
     '<button class="wiki-bc-factcheck wiki-bc-factcheck-article" id="wikiFactcheckArticleBtn" ' +
     'title="Fact-check this whole page against the web">🔎 Fact check</button>' +
+    // …and «Ask Claude Code» for the whole page, shown where the wiki opts in.
+    discussHandoffPageBtnHtml() +
     // …and its sibling article-level action: take this page into a real chat
     // thread. Same row deliberately — see `discussArticleBtnHtml`.
     discussArticleBtnHtml() +
@@ -1722,6 +1739,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // queries, cases) and the `line refs` toggle, all counted off the
       // rendered article. No-op on a page with none of them.
       const reader = data.reader;
+      // Discuss P1: «Ask Claude Code» where the wiki opts in, for an admin.
+      setDiscussHandoffEnabled(reader?.discussHandoff === true);
       const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
@@ -2172,6 +2191,7 @@ function hideExplainPill(): void {
   // The selection-gated Fact check button rides the same selection state.
   const fc = document.getElementById("wikiFactcheckBtn");
   if (fc) (fc as HTMLElement).style.display = "none";
+  showDiscussSelBtn(false);
 }
 function showExplainPill(): void {
   const btn = document.getElementById("wikiExplainBtn");
@@ -2209,6 +2229,9 @@ function maybeShowExplainPill(): void {
   const range = sel.getRangeAt(0);
   pillSel = text;
   pillHeading = nearestHeading(range);
+  // Discuss P1 reads its own copy now, before a click collapses the selection.
+  captureDiscussSelection(sel);
+  showDiscussSelBtn(true);
   showExplainPill();
 }
 
@@ -2828,6 +2851,7 @@ export function boot(): { dispose(): void } {
   });
   initWikiVisuals();
   initRailResize();
+  initDiscussHandoff({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath });
   initPaneToggles();
   // The one-time cleanup that ships with the removal of `Recently opened`: the
   // `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
@@ -3375,6 +3399,13 @@ export function boot(): { dispose(): void } {
     if (t.closest && t.closest("#wikiExplainBtn")) {
       e.preventDefault();
       activateExplain();
+      return;
+    }
+    // «Ask Claude Code» on the selection: its passage was captured at selection time.
+    if (t.closest && t.closest("#" + DISCUSS_HANDOFF_SEL_BTN_ID)) {
+      e.preventDefault();
+      hideExplainPill();
+      openDiscussHandoff(true);
       return;
     }
     // Selection-gated Fact check — preventDefault keeps the selection alive so the

@@ -414,6 +414,8 @@ describe("GET /api/wiki/html", () => {
       agentLens: false,
       // Auth off with no owner: no viewer role; auth off is admin, so «Se som rolle».
       roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
+      // The wiki's `.wiki-reader.json` sets no `discuss` block.
+      discussHandoff: false,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });

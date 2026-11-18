@@ -60,6 +60,11 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   // The issue board (`/wiki/issues`) and the gardener (`/wiki/gardener`).
   "#wikiBoardLink",
   ".wiki-gardener-icon",
+  // Discuss P1's «Ask Claude Code» (both controls) and its panel:
+  // `POST /api/wiki/discuss/handoff` is in the dropped `wiki` group.
+  "#wikiDiscussHandoffBtn",
+  "#wikiDiscussHandoffPageBtn",
+  "#wikiDiscussHandoffPanel",
   // Stamp on a provenance ghost row: `POST /api/wiki/provenance/stamp`.
   "[data-prov-stamp]",
   // The start view's Your work, What's new (digest) and Index (index-coverage, reindex)

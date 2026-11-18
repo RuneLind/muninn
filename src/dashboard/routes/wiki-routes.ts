@@ -56,6 +56,7 @@ import {
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
 import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
 import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
+import { registerWikiDiscussHandoffRoute } from "./wiki-discuss-handoff.ts";
 import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
 import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
 import { workMapListingField } from "../../wiki/work-map/listing.ts";
@@ -2155,6 +2156,9 @@ export function registerWikiToolRoutes(
   // The Agent lens: runs plan-card on a plan page. Off unless PLAN_CARD_BIN is
   // set; dropped on nais with the group.
   registerWikiPlanCardRoute(app, config);
+  // Discuss's handoff (P1): the prompt «Ask Claude Code» copies. It returns an
+  // absolute path, so it is admin-only and dropped on nais with the group.
+  registerWikiDiscussHandoffRoute(app, config);
   // The series editor's one write, in the same group for the same reason.
   registerWikiSeriesRoutes(app);
   // The issue board's page, in the same group: it reads one wiki's index.
