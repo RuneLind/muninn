@@ -173,7 +173,7 @@ describe("copilot-sdk { mcpTools }: an allow list of tool names", () => {
     expect(sent).toEqual([]);
   });
 
-  test("a listed tool the bot's config.json excludes is refused before a session exists, in every pattern form", () => {
+  test("a listed tool the bot's config.json excludes is refused before a session exists, in each Copilot form and the plain Claude Code ones", () => {
     for (const pattern of ["yggdrasil-search", "mcp:yggdrasil-search", "mcp__yggdrasil__search", "mcp__yggdrasil", "yggdrasil-*", "mcp:*"]) {
       expect(() =>
         copilotNamedToolsSession({ ...copilotBot(), excludedTools: [pattern] }, { mcpTools: { yggdrasil: ["search"] } }),
@@ -182,12 +182,49 @@ describe("copilot-sdk { mcpTools }: an allow list of tool names", () => {
     expect(sessions).toHaveLength(0);
   });
 
-  test("the bot's other exclusions ride into the session's excludedTools", () => {
+  test.each(["mcp__yggdrasil__*", "mcp__yggdrasil__sea*", "mcp__ygg*"])(
+    "a listed tool the Claude Code glob %s excludes is refused before a session exists",
+    (pattern) => {
+      expect(() =>
+        copilotNamedToolsSession({ ...copilotBot(), excludedTools: [pattern] }, { mcpTools: { yggdrasil: ["search"] } }),
+      ).toThrow(/lists yggdrasil\/search, which .* config\.json excludes/);
+      expect(sessions).toHaveLength(0);
+    },
+  );
+
+  test("Claude Code patterns for other servers or tools leave a listed tool alone", () => {
+    expect(() =>
+      copilotNamedToolsSession(
+        { ...copilotBot(), excludedTools: ["mcp__yggdrasil__impact", "mcp__yggdrasil__sea", "mcp__hivemind__*", "mcp__yggdrasilx"] },
+        { mcpTools: { yggdrasil: ["search"] } },
+      ),
+    ).not.toThrow();
+  });
+
+  test.each(["mcp__foo_bar__t", "mcp__foo_bar", "mcp__foo_bar__*"])(
+    'a server "foo.bar" is matched by its Claude Code name in %s (non-name characters become "_")',
+    (pattern) => {
+      // Measured on CLI 2.1.327: a server "foo.bar baz@q" with a tool "t.x" is offered as mcp__foo_bar_baz_q__t_x.
+      const dotted = testTempDirSync(join(tmpdir(), "copilot-dotted-"));
+      try {
+        writeFileSync(join(dotted, ".mcp.json"), JSON.stringify({ mcpServers: { "foo.bar": { type: "http", url: "http://127.0.0.1:3/mcp" } } }));
+        const bot = driveBot(dotted, { connector: "copilot-sdk", model: "claude-sonnet-4.5" });
+        expect(() => copilotNamedToolsSession({ ...bot, excludedTools: [pattern] }, { mcpTools: { "foo.bar": ["t"] } })).toThrow(
+          /lists foo\.bar\/t, which .* config\.json excludes/,
+        );
+        expect(() => copilotNamedToolsSession({ ...bot, excludedTools: ["mcp__foo_baz__t"] }, { mcpTools: { "foo.bar": ["t"] } })).not.toThrow();
+      } finally {
+        rmSync(dotted, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("the bot's other exclusions are not carried into the session: the allow list already leaves those tools out", () => {
     const o = copilotNamedToolsSession(
       { ...copilotBot(), excludedTools: ["yggdrasil-impact", "hivemind-*"] },
       { mcpTools: { yggdrasil: ["search"] } },
     );
-    expect(o.excludedTools).toEqual(["yggdrasil-impact", "hivemind-*", "builtin:*", "custom:*"]);
+    expect(o.excludedTools).toEqual(["builtin:*", "custom:*"]);
   });
 
   test("a runtime that reports no tool list is refused (fails closed)", async () => {

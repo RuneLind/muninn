@@ -16,7 +16,8 @@
  *    gets a new copy and a copy another turn reads is never replaced in place.
  *
  * A code snapshot drops the symlinks that leave it; a wiki snapshot copies
- * only regular files reached through no symlink at all ({@link wikiSourceFile}). Snapshots live in their own bucket of the agent home ({@link snapshotRootDir}), a sibling of the fenced
+ * only regular files reached through no symlink at all ({@link wikiSourceFile}).
+ * Snapshots live in their own bucket of the agent home ({@link snapshotRootDir}), a sibling of the fenced
  * working directory, so a run can read one only when it names it. A snapshot
  * is removed by {@link sweepSnapshots} once no turn has used it for
  * {@link SNAPSHOT_IDLE_MS}; {@link startSnapshotSweeper} runs that at boot and
@@ -273,22 +274,37 @@ export async function wikiSnapshotFiles(wikiDir: string, git: GitRun = realGit):
 
 /**
  * The size of `rel` under `base` (a real path) when it is a regular file that
- * no symlink leads to: its folder's real path must be exactly its folder under
- * `base`, so a link in any folder part (`keys` -> `~/.ssh` under a tracked
- * `keys/x`) disqualifies it, and the file itself must not be a link. Anything
- * else (gone, a link, a directory) is null and is not copied. The folder, not
- * the file, is resolved: Bun's realpath opens its argument, so an unreadable
- * file would otherwise drop out silently instead of failing its copy.
+ * no symlink leads to: each part of `rel`, from `base` down, is `lstat`ed and
+ * must not be a link (so a tracked `keys/x` whose `keys` became a link to
+ * `~/.ssh` is not copied), every folder part a folder and the last part a
+ * file. No name is compared, so a folder whose on-disk spelling differs from
+ * git's (case, Unicode normalisation) still matches, and `lstat` needs only
+ * search permission on the parent, so an execute-only folder's files are
+ * reached. A part that is gone or no longer a folder is null (not copied);
+ * any other error (EACCES on a folder that cannot be searched) is thrown.
  */
 function wikiSourceFile(base: string, rel: string): number | null {
-  const path = join(base, rel);
-  try {
-    if (realpathSync(dirname(path)) !== dirname(path)) return null;
-    const st = lstatSync(path);
-    return st.isFile() ? st.size : null;
-  } catch {
-    return null;
+  const parts = rel.split("/");
+  let path = base;
+  if (parts.some((part) => part === "" || part === "." || part === "..")) return null;
+  for (let i = 0; i < parts.length; i++) {
+    path = join(path, parts[i]!);
+    let st;
+    try {
+      st = lstatSync(path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
+      throw err;
+    }
+    if (st.isSymbolicLink()) return null;
+    if (i < parts.length - 1) {
+      if (!st.isDirectory()) return null;
+    } else {
+      return st.isFile() ? st.size : null;
+    }
   }
+  return null;
 }
 
 /** The files of `files` that {@link wikiSourceFile} accepts, and their summed size; nothing is read. */

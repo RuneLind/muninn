@@ -428,8 +428,8 @@ export type NamedToolsSessionOptions = Pick<
  * Only the named servers start, each filtered to its listed tools; the
  * session's `availableTools` names exactly those tools as `mcp:<server>-<tool>`
  * (source-qualified, so a built-in of the same name never matches);
- * `builtin:*`, `custom:*` and the bot's own `excludedTools` are excluded as
- * well (a listed tool the bot excludes is refused here), and nothing is discovered
+ * `builtin:*` and `custom:*` are excluded as well, a listed tool the bot's
+ * own `excludedTools` deny is refused here, and nothing is discovered
  * from disk: no custom instructions, skills, plugins, file hooks, cross-session
  * store or memory, and no custom agent. Throws when the bot's `.mcp.json` does
  * not hold a named server.
@@ -455,9 +455,9 @@ export function copilotNamedToolsSession(botConfig: BotConfig, surface: McpTools
   return {
     mcpServers,
     availableTools: namedToolWireNames(surface).map((name) => `mcp:${name}`),
-    // The bot's own exclusions ride along (the SDK sends toolFilterPrecedence
-    // "excluded", so deny wins) for a pattern form the check above does not read.
-    excludedTools: [...(botConfig.excludedTools ?? []), "builtin:*", "custom:*"],
+    // The bot's own exclusions are not carried: the runtime honours only the
+    // exact, `mcp:` and `mcp:*` forms, which the check above already refuses.
+    excludedTools: ["builtin:*", "custom:*"],
     customAgents: [],
     skipCustomInstructions: true,
     enableSkills: false,
@@ -518,14 +518,26 @@ export async function assertSessionHoldsOnly(session: Pick<CopilotSession, "rpc"
 
 /**
  * Whether one of the bot's `excludedTools` patterns denies the MCP tool
- * `<server>-<tool>`: Copilot's forms (`server-tool`, `mcp:server-tool`, a
- * trailing `*` on either, `mcp:*`) and Claude Code's (`mcp__server__tool`,
- * `mcp__server`).
+ * `<server>-<tool>`. Copilot's forms: `server-tool`, `mcp:server-tool`,
+ * `mcp:*`, and (over-matching, fails closed) a trailing `*` on the first two,
+ * which the runtime itself ignores (measured, SDK 1.0.13). Claude Code's:
+ * `mcp__<s>` and any `mcp__…` pattern whose `*` globs match
+ * `mcp__<s>__<t>` (its deny rules take a wildcard anywhere), where `<s>` and
+ * `<t>` are the names with every character outside `[a-zA-Z0-9_-]` replaced
+ * by `_` (measured on CLI 2.1.327: server `foo.bar baz@q`, tool `t.x` →
+ * `mcp__foo_bar_baz_q__t_x`).
  */
 export function botExcludesMcpTool(excluded: string[] | undefined, server: string, tool: string): boolean {
   const wire = `${server}-${tool}`;
+  const ccName = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const ccServer = `mcp__${ccName(server)}`;
+  const ccTool = `${ccServer}__${ccName(tool)}`;
   return (excluded ?? []).some((pattern) => {
-    if (pattern === `mcp__${server}__${tool}` || pattern === `mcp__${server}`) return true;
+    if (pattern.startsWith("mcp__")) {
+      if (pattern === ccServer) return true;
+      const literal = pattern.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      return new RegExp(`^${literal.join(".*")}$`).test(ccTool);
+    }
     const p = pattern.startsWith("mcp:") ? pattern.slice(4) : pattern;
     return p.endsWith("*") ? wire.startsWith(p.slice(0, -1)) : p === wire;
   });

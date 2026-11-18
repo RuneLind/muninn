@@ -5,7 +5,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { testTempDirSync } from "../test/temp-dir.ts";
@@ -13,6 +13,18 @@ import { codeSnapshot, leaseSnapshot, sweepSnapshots, wikiSnapshot, wikiSnapshot
 
 let base: string;
 let root: string;
+
+// What this filesystem does with names, probed once: the cases below need a
+// case-insensitive one that keeps a decomposed (NFD) name as written (APFS).
+const probe = testTempDirSync(join(tmpdir(), "snapshots-probe-"));
+writeFileSync(join(probe, "CaseProbe"), "");
+const caseInsensitive = existsSync(join(probe, "caseprobe"));
+const COMPOSED = "\u00e9t\u00e9";
+const DECOMPOSED = COMPOSED.normalize("NFD");
+mkdirSync(join(probe, DECOMPOSED));
+const keepsDecomposed = readdirSync(probe).includes(DECOMPOSED);
+rmSync(probe, { recursive: true, force: true });
+const runsAsRoot = process.getuid?.() === 0;
 
 function git(cwd: string, ...args: string[]): string {
   const p = Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "init.defaultBranch=main", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
@@ -183,6 +195,96 @@ describe("wikiSnapshot: what it refuses to read", () => {
     expect(files(snap.dir)).toEqual(["index.md"]);
     for (const f of files(snap.dir)) expect(readFileSync(join(snap.dir, f), "utf8")).not.toContain("outside-secret-7g8h");
   });
+
+  test("a tracked file under a link in a grandparent folder is not copied", async () => {
+    const outside = join(base, "outside-grand");
+    mkdirSync(join(outside, "b"), { recursive: true });
+    writeFileSync(join(outside, "b", "x"), "outside-secret-9k1m\n");
+    const wiki = newWiki("wiki-linked-grandparent");
+    writeFileSync(join(wiki, "index.md"), "# index\n");
+    mkdirSync(join(wiki, "a", "b"), { recursive: true });
+    writeFileSync(join(wiki, "a", "b", "x"), "tracked text\n");
+    git(wiki, "add", "-A");
+    git(wiki, "commit", "-m", "one");
+    rmSync(join(wiki, "a"), { recursive: true });
+    symlinkSync(outside, join(wiki, "a"));
+    expect(await wikiSnapshotFiles(wiki)).toContain("a/b/x");
+    const snap = await wikiSnapshot(wiki, { root });
+    expect(files(snap.dir)).toEqual(["index.md"]);
+  });
+
+  test.skipIf(!caseInsensitive)(
+    `a tracked Docs/x.md whose folder was renamed to docs is copied${caseInsensitive ? "" : " (skipped: case-sensitive filesystem)"}`,
+    async () => {
+      const wiki = newWiki("wiki-renamed-case");
+      mkdirSync(join(wiki, "Docs"));
+      writeFileSync(join(wiki, "Docs", "x.md"), "case text\n");
+      git(wiki, "add", "-A");
+      git(wiki, "commit", "-m", "one");
+      renameSync(join(wiki, "Docs"), join(wiki, "tmp-name"));
+      renameSync(join(wiki, "tmp-name"), join(wiki, "docs"));
+      expect(readdirSync(wiki)).toContain("docs");
+      expect(await wikiSnapshotFiles(wiki)).toEqual(["Docs/x.md"]);
+      const snap = await wikiSnapshot(wiki, { root });
+      expect(files(snap.dir)).toEqual(["Docs/x.md"]);
+      expect(readFileSync(join(snap.dir, "Docs", "x.md"), "utf8")).toBe("case text\n");
+    },
+  );
+
+  test.skipIf(!keepsDecomposed)(
+    `a folder stored decomposed (NFD) that git lists composed is copied${keepsDecomposed ? "" : " (skipped: the filesystem normalises names)"}`,
+    async () => {
+      const wiki = newWiki("wiki-nfd-folder");
+      mkdirSync(join(wiki, DECOMPOSED));
+      writeFileSync(join(wiki, DECOMPOSED, "x.md"), "accent text\n");
+      expect(readdirSync(wiki)).toContain(DECOMPOSED);
+      git(wiki, "add", "-A");
+      git(wiki, "commit", "-m", "one");
+      const listed = await wikiSnapshotFiles(wiki);
+      expect(listed).toHaveLength(1);
+      const snap = await wikiSnapshot(wiki, { root });
+      expect(files(snap.dir).map((f) => f.normalize("NFC"))).toEqual([`${COMPOSED}/x.md`]);
+      expect(readFileSync(join(snap.dir, listed[0]!), "utf8")).toBe("accent text\n");
+    },
+  );
+
+  test.skipIf(runsAsRoot)(
+    `a readable file inside an execute-only folder (0311) is copied, never silently absent${runsAsRoot ? " (skipped: root ignores modes)" : ""}`,
+    async () => {
+      const wiki = newWiki("wiki-exec-only");
+      writeFileSync(join(wiki, "index.md"), "# index\n");
+      mkdirSync(join(wiki, "d"));
+      writeFileSync(join(wiki, "d", "g.md"), "exec-only text\n");
+      git(wiki, "add", "-A");
+      git(wiki, "commit", "-m", "one");
+      chmodSync(join(wiki, "d"), 0o311);
+      try {
+        const snap = await wikiSnapshot(wiki, { root });
+        expect(files(snap.dir)).toEqual(["d/g.md", "index.md"]);
+        expect(readFileSync(join(snap.dir, "d", "g.md"), "utf8")).toBe("exec-only text\n");
+      } finally {
+        chmodSync(join(wiki, "d"), 0o755);
+      }
+    },
+  );
+
+  test.skipIf(runsAsRoot)(
+    `a tracked file in a folder that cannot be searched (0600) fails the snapshot loudly${runsAsRoot ? " (skipped: root ignores modes)" : ""}`,
+    async () => {
+      const wiki = newWiki("wiki-no-search");
+      writeFileSync(join(wiki, "index.md"), "# index\n");
+      mkdirSync(join(wiki, "d"));
+      writeFileSync(join(wiki, "d", "g.md"), "hidden text\n");
+      git(wiki, "add", "-A");
+      git(wiki, "commit", "-m", "one");
+      chmodSync(join(wiki, "d"), 0o600);
+      try {
+        await expect(wikiSnapshot(wiki, { root })).rejects.toThrow(/EACCES|permission denied/i);
+      } finally {
+        chmodSync(join(wiki, "d"), 0o755);
+      }
+    },
+  );
 
   test("the byte limit refuses on the sizes alone, before any file is read", async () => {
     const wiki = newWiki("wiki-over-limit");
