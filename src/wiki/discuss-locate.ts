@@ -17,15 +17,15 @@
  * holds the collapse to the reader's own render.
  */
 
-import { COMPONENT_NAMES, INLINE_COMPONENT_NAMES } from "../format/component-spec.ts";
+import { COMPONENT_NAMES, INLINE_COMPONENT_NAMES, SELF_CLOSING_ALLOWED } from "../format/component-spec.ts";
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { frontmatterBodyLine } from "../format/frontmatter-fence.ts";
-import { readerFences, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
+import { COMPONENT_OPEN_RE, readerFences, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
+import { DISCUSS_CONTEXT_KEY_CHARS } from "./discuss-bounds.ts";
 import { keyChar, locateKey, matchStarts } from "./locate-key.ts";
-import { wikiLinkText } from "./decision-text.ts";
 
-/** How many key characters the prefix and suffix tiers compare. */
+/** How many key characters the edges tier compares at each end. */
 export const LOCATE_EDGE_CHARS = 80;
 
 const COMPONENTS = new Set<string>(COMPONENT_NAMES);
@@ -48,6 +48,55 @@ const SHOWN_SELF_CLOSING_ATTRS: Readonly<Record<string, readonly string[]>> = {
   ...SHOWN_ATTRS,
   FileRef: ["path"],
 };
+
+/**
+ * The lines whose block component tag the reader parses as markup, by its own
+ * rule (`tryParseComponent`, `markdown-ast.ts`): the trimmed line matches
+ * `COMPONENT_OPEN_RE` (double-quoted attributes only, the whole tag on one
+ * line) with a known name, and it is a self-closing tag that may self-close
+ * and owns its line, or an opener closed on its own line, or an opener alone
+ * on its line with a matching `</Name>` line after it (same-name nesting
+ * counted), which is then a tag line too. Any other tag shows as text: a bare
+ * attribute (`open`), a single-quoted value, a tag over several lines, an
+ * unclosed opener.
+ */
+function readerTagLines(lines: readonly string[], skip: ReadonlySet<number>, code: ReadonlySet<number>): Set<number> {
+  const out = new Set<number>();
+  for (let k = 0; k < lines.length; k++) {
+    if (skip.has(k) || code.has(k)) continue;
+    const m = COMPONENT_OPEN_RE.exec(lines[k]!.trim());
+    if (!m || !COMPONENTS.has(m[1]!)) continue;
+    const name = m[1]!;
+    const rest = m[4]!;
+    if (m[3] === "/") {
+      if (SELF_CLOSING_ALLOWED.has(name as never) && rest.trim() === "") out.add(k);
+      continue;
+    }
+    const close = `</${name}>`;
+    const inline = rest.indexOf(close);
+    if (inline !== -1) {
+      if (rest.slice(inline + close.length).trim() === "") out.add(k);
+      continue;
+    }
+    if (rest.trim() !== "") continue;
+    let nesting = 1;
+    for (let j = k + 1; j < lines.length; j++) {
+      if (code.has(j)) continue;
+      const t = lines[j]!.trim();
+      if (t === close) {
+        if (--nesting === 0) {
+          out.add(k);
+          out.add(j);
+          break;
+        }
+        continue;
+      }
+      const o = COMPONENT_OPEN_RE.exec(t);
+      if (o && o[1] === name && o[3] !== "/" && !o[4]!.includes(close)) nesting++;
+    }
+  }
+  return out;
+}
 
 /** The collapsed text of a page and, per collapsed character, its offset in the
  *  RAW file (fact wrappers included). */
@@ -82,6 +131,9 @@ function tagEnd(text: string, i: number): number {
   return -1;
 }
 
+/** A block component whose body the reader does not show, opened alone at a line's start. */
+const HIDDEN_BODY_OPEN_RE = /^\s*<(Diagram|Embed)\b/;
+
 const TABLE_RULE_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
 const COMPONENT_TAG_RE = /<\/?([A-Z][A-Za-z0-9]*)/y;
 const WIKILINK_AT_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/y;
@@ -97,8 +149,9 @@ const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
  *  - a list marker (`-`, `+`, `1.`) at the start of a line is dropped, and a
  *    table's rule row and a thematic break are dropped whole; quote and
  *    heading markers and table pipes the key drops anyway;
- *  - a component tag is dropped, except the attribute values the reader shows
- *    ({@link SHOWN_ATTRS});
+ *  - a component tag the reader parses ({@link readerTagLines}) is dropped, except the attribute values the reader shows
+ *    ({@link SHOWN_ATTRS}); a `<Diagram>` or `<Embed>` body is dropped whole
+ *    (the reader draws or frames it, and shows none of its words);
  *  - a `[[wikilink]]` reads as the reader shows it, `wikiLinkText`: its label,
  *    else its target; a `[label](url)` as its label; inline code as its text.
  * HTML entities and backslash escapes are NOT decoded, because the reader
@@ -132,17 +185,32 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
       else code.add(k);
     }
   }
+  // A block whose body the reader never shows as text: it draws a Diagram
+  // from its `src` and frames an Embed, so the body's words are not on screen.
+  for (let k = bodyFrom; k < lines.length; k++) {
+    if (skip.has(k) || code.has(k)) continue;
+    const m = HIDDEN_BODY_OPEN_RE.exec(lines[k]!);
+    if (!m) continue;
+    const end = tagEnd(text, lineStart[k]! + m[0].length - m[1]!.length - 1);
+    if (end === -1 || /\/\s*>$/.test(text.slice(lineStart[k]!, end))) continue;
+    let close = k;
+    while (close < lines.length && !lines[close]!.includes(`</${m[1]}>`)) close++;
+    if (close === lines.length) continue;
+    for (let j = k; j <= close; j++) skip.add(j);
+    k = close;
+  }
   if (opts.stripTitle) {
     const want = opts.stripTitle.trim().toLowerCase();
     for (let k = bodyFrom; k < lines.length; k++) {
       if (skip.has(k)) continue;
       if (lines[k]!.trim() === "") continue;
-      const m = /^\s*#\s+(.+)$/.exec(lines[k]!);
+      const m = /^\s*#\s+(.+?)\s*$/.exec(lines[k]!);
       if (m && m[1]!.trim().toLowerCase() === want) skip.add(k);
       break;
     }
   }
 
+  const tagLines = readerTagLines(lines, skip, code);
   const out: string[] = [];
   const map: number[] = [];
   const emit = (ch: string, at: number) => {
@@ -195,7 +263,6 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
     /** Block components opened on this line, whose closer on it is a tag too. */
     const openedHere = new Set<string>();
     const spans = lineCodeSpanRanges(line);
-    let next = li + 1;
     while (i < line.length) {
       const span = spans.find((s) => s.start === i);
       if (span) {
@@ -208,13 +275,12 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
         WIKILINK_AT_RE.lastIndex = i;
         const w = WIKILINK_AT_RE.exec(line);
         if (w) {
-          const shown = wikiLinkText(w[1]!, w[2]);
+          // The reader shows `wikiLinkText`: the label, else the target, trimmed.
+          // The key drops the white space it trims, so the raw span maps 1:1.
           const labelUsed = w[2] !== undefined && w[2].trim() !== "";
           const from = base + i + 2 + (labelUsed ? w[1]!.length + 1 : 0);
           const src = labelUsed ? w[2]! : w[1]!;
-          // `wikiLinkText` trims; the key drops the white space it trims.
-          if (locateKey(shown) === locateKey(src)) emitRange(from, from + src.length);
-          else for (const c of shown) emit(c, from);
+          emitRange(from, from + src.length);
           i += w[0].length;
           continue;
         }
@@ -232,48 +298,33 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
         const closing = line[i + 1] === "/";
         const name = t?.[1] ?? "";
         const end = t && COMPONENTS.has(name) ? tagEnd(text, base + i) : -1;
-        // A block component's tag is markup when its line holds nothing else, or
-        // its opener and closer share the line (`<Meter …>label</Meter>`); any
-        // other block tag the reader shows as text. An inline one is markup anywhere.
-        const restOfLine = end === -1 ? "" : text.slice(end, base + line.length);
+        // A block component's tag is markup only where the reader parses it
+        // ({@link readerTagLines}), and a closer on its opener's line
+        // (`<Meter …>label</Meter>`); any other block tag the reader shows as
+        // text. An inline one is markup anywhere.
         const isTag =
           end !== -1 &&
-          (INLINE_COMPONENTS.has(name) ||
-            (closing && (openedHere.has(name) || (i === contentStart && restOfLine.trim() === ""))) ||
-            (!closing && i === contentStart && (restOfLine.trim() === "" || end > base + line.length || restOfLine.trimEnd().endsWith(`</${name}>`))));
+          end <= base + line.length &&
+          (INLINE_COMPONENTS.has(name) || (closing && openedHere.has(name)) || (i === contentStart && tagLines.has(li)));
         if (isTag) {
-          {
-            const tag = text.slice(base + i, end);
-            if (!closing) {
-              openedHere.add(name);
-              const attrs = tagAttrs(tag, base + i);
-              const shown = /\/\s*>$/.test(tag) ? SHOWN_SELF_CLOSING_ATTRS[name] : SHOWN_ATTRS[name];
-              for (const name of shown ?? []) {
-                const a = attrs.get(name);
-                if (a) emitRange(a.at, a.at + a.value.length);
-              }
+          const tag = text.slice(base + i, end);
+          if (!closing) {
+            openedHere.add(name);
+            const attrs = tagAttrs(tag, base + i);
+            const shown = /\/\s*>$/.test(tag) ? SHOWN_SELF_CLOSING_ATTRS[name] : SHOWN_ATTRS[name];
+            for (const name of shown ?? []) {
+              const a = attrs.get(name);
+              if (a) emitRange(a.at, a.at + a.value.length);
             }
-            // A tag may run over several lines: carry on after it.
-            if (end > base + line.length) {
-              while (next < lines.length && lineStart[next]! + lines[next]!.length < end) next++;
-              const rest = end - lineStart[next]!;
-              const tail = lines[next]!.slice(rest);
-              // Scan the tail of the line the tag ends on as prose.
-              const tailBase = end;
-              for (let k = 0; k < tail.length; k++) emit(tail[k]!, tailBase + k);
-              next++;
-              i = line.length;
-              break;
-            }
-            i = end - base;
-            continue;
           }
+          i = end - base;
+          continue;
         }
       }
       emit(ch, base + i);
       i++;
     }
-    li = next;
+    li++;
   }
   return { text: out.join(""), map };
 }
@@ -287,6 +338,10 @@ export interface PageHeading {
   toLine: number;
 }
 
+/** An ATX heading line: a closing run of `#` counts only after white space
+ *  (`## C#` is «C#»), and a CRLF line's `\r` is white space. */
+const HEADING_LINE_RE = /^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t\r]*$/;
+
 /** The page's markdown headings outside fences and frontmatter, with their
  *  sections' line ranges. */
 export function pageHeadings(raw: string): PageHeading[] {
@@ -297,7 +352,7 @@ export function pageHeadings(raw: string): PageHeading[] {
   const found: { level: number; text: string; line: number }[] = [];
   for (let k = bodyFrom; k < lines.length; k++) {
     if (fenced.has(k)) continue;
-    const m = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(lines[k]!);
+    const m = HEADING_LINE_RE.exec(lines[k]!);
     if (m) found.push({ level: m[1]!.length, text: m[2]!.trim(), line: k });
   }
   let last = lines.length - 1;
@@ -326,10 +381,19 @@ export function sectionHolding(headings: readonly PageHeading[], line: number): 
 export interface LocateRequest {
   /** The selection as the reader read it (rendered text). */
   selection: string;
-  /** How many matches of the selection start before it in the article. */
-  occurrence?: number;
-  /** How many matches the article holds in all. */
-  total?: number;
+  /** The article's text just before the selection, as the client read it
+   *  (reader additions left out): its last key characters are compared. */
+  before?: string;
+  /** The same just after the selection: its first key characters. */
+  after?: string;
+  /** `before` stops at the article's start (it is short because nothing precedes). */
+  atStart?: boolean;
+  /** `after` stops at the article's end. */
+  atEnd?: boolean;
+  /** The client saw the selection start or end in text the reader added
+   *  (`added`), or span lanes the reader reordered (`reordered`): it cannot be
+   *  placed exactly, so it goes to the heading's section. */
+  edge?: "added" | "reordered";
   /** The nearest heading above the selection, as the reader shows it. */
   heading?: string;
   /** The page title, when the reader drops a leading H1 that repeats it. */
@@ -338,27 +402,48 @@ export interface LocateRequest {
 
 /**
  * How the passage was found:
- *  - `one`: the selection matched one place;
- *  - `occurrence`: it matched several, and the client's occurrence number chose one;
- *  - `section`: no single place, so the section of the heading the client sent
- *    (`ambiguous` when there were several matches the count could not choose among);
- *  - `none`: no match and no heading section. The range is then empty.
+ *  - `exact`: one match whose neighbours in the source agree with the
+ *    client's context ({@link contextAccepts});
+ *  - `section`: no such single match, so the section of the heading the
+ *    client sent, with `reason` saying why;
+ *  - `none`: neither a single match nor a heading section. No range then.
  */
-export type LocateFound = "one" | "occurrence" | "section" | "none";
+export type LocateFound = "exact" | "section" | "none";
+
+/** Why a passage was not placed exactly. */
+export type LocateMiss =
+  /** The source does not hold the selection (nor its first and last {@link LOCATE_EDGE_CHARS}). */
+  | "no-match"
+  /** Matches exist, but none has neighbours that agree with the client's context. */
+  | "no-agreement"
+  /** More than one match agrees. */
+  | "ambiguous"
+  /** The client saw the selection start or end in reader-added text. */
+  | "added"
+  /** The selection spans lanes the reader reordered. */
+  | "reordered";
 
 export interface LocateResult {
   found: LocateFound;
-  /** The tier that matched: the whole selection, or its first {@link LOCATE_EDGE_CHARS}. */
-  tier: "whole" | "prefix" | null;
+  /** Set when `found` is not `exact`. */
+  reason: LocateMiss | null;
+  /** The tier that matched: the whole selection, or its first and last {@link LOCATE_EDGE_CHARS}. */
+  tier: "whole" | "edges" | null;
   /** How many places the matching tier found. */
   matches: number;
-  /** 1-based, inclusive. `toLine` is null when only the start was found. */
+  /** 1-based, inclusive: the passage's own lines when `exact`, the section's
+   *  when `section`, null when `none`. */
   fromLine: number | null;
   toLine: number | null;
-  /** Several matches the count could not choose among. */
+  /** Raw-file offsets of an `exact` passage, end exclusive; null otherwise. */
+  rawFrom: number | null;
+  rawTo: number | null;
+  /** Several matches the context could not choose among (or did not test). */
   ambiguous: boolean;
-  /** Start lines of every match, when there were several. */
+  /** Start lines of every match, when it was not placed exactly. */
   candidates: number[];
+  /** The heading section a `section` result names. */
+  section: { heading: string; fromLine: number; toLine: number } | null;
 }
 
 function lineIndex(raw: string): (offset: number) => number {
@@ -376,81 +461,154 @@ function lineIndex(raw: string): (offset: number) => number {
   };
 }
 
+/** The key characters on each side the agreement rule compares. */
+export const CONTEXT_NEAR_CHARS = 48;
+/** A side of context agrees in full from this many key characters on. */
+export const CONTEXT_FULL_MIN = 12;
+/** A side that disagrees only past this many key characters is not
+ *  contradicted: the reader shows something the source does not (or the
+ *  reverse) further out. Nearer than this, it is. */
+export const CONTEXT_PARTIAL_MIN = 8;
+/** Matches scored at most; past it the selection goes to the section. */
+const MAX_SCORED = 400;
+
 /**
- * Locate a reader selection in the raw page file. Tiers, in order:
- *  1. the whole selection: one match is taken; several are chosen among by the
- *     client's occurrence number when its total agrees with this count;
- *  2. the selection's first {@link LOCATE_EDGE_CHARS} key characters, when the
- *     whole did not match: one match is taken, and the range runs to where the
- *     selection's last {@link LOCATE_EDGE_CHARS} end after it, or has a start
- *     only when they are not found;
- *  3. the section of the heading the client sent;
+ * One side of a match, compared outward from the match:
+ *  - `full`: the client's side agrees for all its key characters, at least
+ *    {@link CONTEXT_FULL_MIN} of them (or both reach the page's edge there);
+ *  - `agrees`: agrees, but too few characters to count as full;
+ *  - `open`: nothing to compare (the client's side is empty, or the source's
+ *    runs out first);
+ *  - `partial`: disagrees, but only past {@link CONTEXT_PARTIAL_MIN} characters;
+ *  - `contradicted`: disagrees nearer than that.
+ */
+export type SideState = "full" | "agrees" | "open" | "partial" | "contradicted";
+
+/** Compare the client's side with the source's, outward from the match: the
+ *  left side from its end, the right side from its start. */
+export function sideState(client: string, source: string, side: "left" | "right", atEdge: boolean): SideState {
+  const L = client.length;
+  const n = Math.min(L, source.length);
+  let a = 0;
+  if (side === "left") while (a < n && client[L - 1 - a] === source[source.length - 1 - a]) a++;
+  else while (a < n && client[a] === source[a]) a++;
+  if (L === 0) return atEdge && source.length === 0 ? "full" : "open";
+  if (a === L) return L >= CONTEXT_FULL_MIN || (atEdge && source.length === L) ? "full" : "agrees";
+  // The source ran out first: the match sits at its edge and the client shows
+  // more beyond it, which the source cannot contradict.
+  if (a === source.length) return a >= CONTEXT_FULL_MIN ? "full" : "open";
+  return a >= CONTEXT_PARTIAL_MIN ? "partial" : "contradicted";
+}
+
+/** The agreement rule: a match is accepted when one side agrees in full and
+ *  neither side is contradicted near the match. */
+export function contextAccepts(left: SideState, right: SideState): boolean {
+  return (left === "full" || right === "full") && left !== "contradicted" && right !== "contradicted";
+}
+
+/**
+ * Locate a reader selection in the raw page file. A match is taken only when
+ * its neighbours in the collapsed source agree with the context the client
+ * read around the selection ({@link contextAccepts}), whether the source holds
+ * one match or several. Tiers, in order:
+ *  1. the whole selection;
+ *  2. when the whole is not found and is longer than {@link LOCATE_EDGE_CHARS}:
+ *     its first {@link LOCATE_EDGE_CHARS} key characters with its last ones
+ *     after them (a start without an end counts as a miss);
+ *  3. the section of the heading the client sent, with why;
  *  4. nothing. Never the head of the page.
  */
 export function locatePassage(raw: string, req: LocateRequest): LocateResult {
   const collapsed = collapseForLocate(raw, { stripTitle: req.stripTitle });
+  const text = collapsed.text;
   const line = lineIndex(raw);
   const needle = locateKey(req.selection);
-  const startLine = (s: number) => line(collapsed.map[s]!);
-  const endLine = (s: number, len: number) => line(collapsed.map[s + len - 1]!);
-  const result = (r: Partial<LocateResult> & Pick<LocateResult, "found">): LocateResult => ({
-    tier: null,
-    matches: 0,
-    fromLine: null,
-    toLine: null,
-    ambiguous: false,
-    candidates: [],
-    ...r,
-  });
+  const N = CONTEXT_NEAR_CHARS;
+  const F = DISCUSS_CONTEXT_KEY_CHARS;
+  const beforeFar = locateKey(req.before ?? "").slice(-F);
+  const afterFar = locateKey(req.after ?? "").slice(0, F);
+  const before = beforeFar.slice(-N);
+  const after = afterFar.slice(0, N);
 
-  let candidates: number[] = [];
+  /** Candidate spans in the collapsed text, `[s, e)`. */
+  let spans: { s: number; e: number }[] = [];
   let tier: LocateResult["tier"] = null;
   if (needle) {
-    const whole = matchStarts(collapsed.text, needle);
-    if (whole.length === 1) {
-      return result({ found: "one", tier: "whole", matches: 1, fromLine: startLine(whole[0]!), toLine: endLine(whole[0]!, needle.length) });
-    }
-    if (whole.length > 1) {
-      const { occurrence, total } = req;
-      if (total === whole.length && occurrence !== undefined && Number.isInteger(occurrence) && occurrence >= 0 && occurrence < whole.length) {
-        const s = whole[occurrence]!;
-        return result({ found: "occurrence", tier: "whole", matches: whole.length, fromLine: startLine(s), toLine: endLine(s, needle.length) });
-      }
-      candidates = whole;
+    const whole = matchStarts(text, needle);
+    if (whole.length) {
       tier = "whole";
+      spans = whole.map((s) => ({ s, e: s + needle.length }));
     } else if (needle.length > LOCATE_EDGE_CHARS) {
       const prefix = needle.slice(0, LOCATE_EDGE_CHARS);
-      const hits = matchStarts(collapsed.text, prefix);
-      if (hits.length === 1) {
-        const s = hits[0]!;
-        const suffix = needle.slice(-LOCATE_EDGE_CHARS);
-        const at = collapsed.text.indexOf(suffix, s);
-        const ok = at !== -1 && at + suffix.length <= s + needle.length * 2 + 200;
-        return result({ found: "one", tier: "prefix", matches: 1, fromLine: startLine(s), toLine: ok ? endLine(at, suffix.length) : null });
+      const suffix = needle.slice(-LOCATE_EDGE_CHARS);
+      for (const s of matchStarts(text, prefix)) {
+        // The end may sit further than the needle's length (text the source
+        // holds and the reader does not show), never before the prefix starts.
+        const limit = s + needle.length * 2 + 200;
+        for (let at = text.indexOf(suffix, s); at !== -1 && at + suffix.length <= limit; at = text.indexOf(suffix, at + 1)) {
+          spans.push({ s, e: at + suffix.length });
+        }
       }
-      if (hits.length > 1) {
-        candidates = hits;
-        tier = "prefix";
-      }
+      if (spans.length) tier = "edges";
     }
   }
 
-  const candidateLines = [...new Set(candidates.map(startLine))];
+  const base = {
+    tier,
+    matches: spans.length,
+    rawFrom: null,
+    rawTo: null,
+    ambiguous: false,
+    candidates: [] as number[],
+    section: null,
+  };
+
+  let reason: LocateMiss;
+  let accepted: { s: number; e: number }[] = [];
+  if (req.edge === "added" || req.edge === "reordered") reason = req.edge;
+  else if (!spans.length) reason = "no-match";
+  else if (spans.length > MAX_SCORED) reason = "ambiguous";
+  else {
+    accepted = spans.filter(({ s, e }) =>
+      contextAccepts(
+        sideState(before, text.slice(Math.max(0, s - N), s), "left", req.atStart === true),
+        sideState(after, text.slice(e, e + N), "right", req.atEnd === true),
+      ),
+    );
+    // Copies whose near context is the same: the one whose far context agrees
+    // in full on both sides, when it is the only one.
+    if (accepted.length > 1) {
+      const far = accepted.filter(
+        ({ s, e }) =>
+          sideState(beforeFar, text.slice(Math.max(0, s - F), s), "left", req.atStart === true) === "full" &&
+          sideState(afterFar, text.slice(e, e + F), "right", req.atEnd === true) === "full",
+      );
+      if (far.length === 1) accepted = far;
+    }
+    reason = accepted.length === 0 ? "no-agreement" : "ambiguous";
+  }
+  if (accepted.length === 1) {
+    const { s, e } = accepted[0]!;
+    const rawFrom = collapsed.map[s]!;
+    const rawTo = collapsed.map[e - 1]! + 1;
+    return { ...base, found: "exact", reason: null, fromLine: line(rawFrom), toLine: line(rawTo - 1), rawFrom, rawTo };
+  }
+
+  const candidateLines = [...new Set(spans.map((sp) => line(collapsed.map[sp.s]!)))];
   const headings = pageHeadings(raw);
   const want = req.heading ? locateKey(req.heading) : "";
   const named = want ? headings.filter((h) => locateKey(h.text) === want) : [];
   // Among same-named headings, the one whose section holds a match.
   const section = named.find((h) => candidateLines.some((l) => h.fromLine <= l && l <= h.toLine)) ?? named[0];
+  const miss = { ...base, reason, ambiguous: spans.length > 1, candidates: candidateLines };
   if (section) {
-    return result({
+    return {
+      ...miss,
       found: "section",
-      tier,
-      matches: candidates.length,
       fromLine: section.fromLine,
       toLine: section.toLine,
-      ambiguous: candidates.length > 1,
-      candidates: candidateLines,
-    });
+      section: { heading: section.text, fromLine: section.fromLine, toLine: section.toLine },
+    };
   }
-  return result({ found: "none", tier, matches: candidates.length, ambiguous: candidates.length > 1, candidates: candidateLines });
+  return { ...miss, found: "none", fromLine: null, toLine: null };
 }

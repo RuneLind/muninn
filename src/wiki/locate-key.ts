@@ -1,8 +1,8 @@
 /**
  * The match key the Discuss locator compares on, shared by the server
  * (`discuss-locate.ts`, over the page source) and the reader's client (over the
- * rendered article, to count a selection's occurrence). Dependency-free: the
- * reader bundle imports it.
+ * rendered article, for the context it reads around a selection).
+ * Dependency-free: the reader bundle imports it.
  *
  * The key drops every whitespace character and the markup characters
  * {@link isDroppedChar} names, and lowercases the rest, one character for one.
@@ -45,18 +45,4 @@ export function matchStarts(hay: string, needle: string): number[] {
   if (!needle) return out;
   for (let i = hay.indexOf(needle); i !== -1; i = hay.indexOf(needle, i + 1)) out.push(i);
   return out;
-}
-
-/**
- * The occurrence number the client sends: how many matches of the selection's
- * key start before the selection, and how many there are in all. `before` is
- * the article's text up to the selection's start, `whole` the article's whole
- * text, both read the same way, so `locateKey(before)` is a prefix of
- * `locateKey(whole)`.
- */
-export function occurrenceIn(before: string, whole: string, selection: string): { occurrence: number; total: number } {
-  const needle = locateKey(selection);
-  const starts = matchStarts(locateKey(whole), needle);
-  const cut = locateKey(before).length;
-  return { occurrence: starts.filter((s) => s < cut).length, total: starts.length };
 }
