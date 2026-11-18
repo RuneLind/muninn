@@ -19,7 +19,9 @@
  *     extended with Shift+ArrowRight is the one offered and quoted; Tab to the
  *     selection's control and press Enter; Escape closes the panel wherever
  *     focus is and returns focus to the control, which a late `selectionchange`
- *     does not hide; Copy is disabled while its request runs; a
+ *     does not hide; a passage selected with the mouse while the panel is
+ *     open is the one a second activation asks about, and closing the panel
+ *     keeps it; Copy is disabled while its request runs; a
  *     non-JSON answer shows its status. The whole-page control shows on an
  *     HTML explainer page too.
  *  5. **Off the page.** A selection inside a link's peek card offers no
@@ -207,6 +209,32 @@ async function select(page: Page, text: string, n: number, upTo?: string, mouseu
   );
 }
 
+/** Select the first `text` in the article with a real mouse drag, from its
+ *  first character's left edge to its last character's right edge. */
+async function dragSelect(page: Page, text: string): Promise<void> {
+  const at = await page.evaluate((text) => {
+    const article = document.querySelector(".wiki-article")!;
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      const i = t.data.indexOf(text);
+      if (i === -1) continue;
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.setEnd(t, i + text.length);
+      const rects = r.getClientRects();
+      const a = rects[0]!;
+      const b = rects[rects.length - 1]!;
+      return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 1, y1: b.top + b.height / 2 };
+    }
+    throw new Error(`no text ${text}`);
+  }, text);
+  await page.mouse.move(at.x0, at.y0);
+  await page.mouse.down();
+  await page.mouse.move(at.x1, at.y1, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(text);
+}
+
 async function askAndCopy(page: Page, question: string): Promise<string> {
   const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
   await expect(panel).toBeVisible();
@@ -379,6 +407,40 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await page.waitForTimeout(200);
     await expect(btn).toBeVisible();
     await expect(btn).toBeFocused();
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
+  });
+
+  test("a passage selected with the mouse while the panel is open: activating the control asks about it", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI);
+    // No mouseup: Explain stays hidden, so the drag's press hides nothing and the article does not move under it.
+    await select(page, "The pier opens at six.", 1, undefined, false);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator(".wiki-handoff-quote")).toHaveText("The pier opens at six.");
+    await dragSelect(page, "The night route is unchanged.");
+    await expect(panel).toBeVisible();
+    await btn.click();
+    await expect(panel.locator(".wiki-handoff-quote")).toHaveText("The night route is unchanged.");
+    const clip = await askAndCopy(page, "Since when?");
+    expect(clip).toContain("Passage (line 12, Harbour timetable › Brief):");
+    expect(clip).toContain("> The night route is unchanged.");
+  });
+
+  test("closing the panel keeps a selection made while it was open", async ({ page }) => {
+    await openPage(page, WIKI);
+    await select(page, "The pier opens at six.", 1, undefined, false); // no mouseup: see the test above
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel).toBeVisible();
+    await dragSelect(page, "The night route is unchanged.");
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
+    await page.waitForTimeout(150);
+    await expect(btn).toBeVisible();
     expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
   });
 

@@ -15,10 +15,14 @@
  *
  * This module owns its controls and listeners: the shell only says per page
  * whether the wiki offers it ({@link setDiscussHandoffEnabled}) and calls
- * {@link initDiscussHandoff} once. While the panel is closed the capture
- * follows the live selection, from any device: `selectionchange`, settled for
- * {@link SETTLE_MS}, and flushed when the panel opens. While it is open the
- * capture is the snapshot taken at opening; closing it restores that range.
+ * {@link initDiscussHandoff} once. The selection is read when the control is
+ * activated, always the live one, from any device; activating it again with
+ * the panel open reads the new selection. A settled `selectionchange` (after
+ * {@link SETTLE_MS}) only decides whether the control shows, with a cheap check
+ * that reads no context and adds no class to the root: on a long page the full
+ * read is a style recalculation and a walk of every text node. Closing the
+ * panel puts the passage's range back only when no newer selection would be
+ * replaced.
  * The ids stay out of the read-only egress and blocked selectors
  * (no model call, no write, like Copy path) and are in
  * `WIKI_READ_SLICE_HIDDEN_SELECTOR`: the pod drops the route.
@@ -26,7 +30,7 @@
 
 import { copyText } from "./copy-path.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
-import { DISCUSS_TEXT_HIDDEN, discussContext, type DiscussContext } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, discussContext, touchesPeek, type DiscussContext } from "./wiki-discuss-text.ts";
 import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX, HANDOFF_SELECTION_MIN } from "../../../wiki/discuss-bounds.ts";
 
 export const DISCUSS_HANDOFF_SEL_BTN_ID = "wikiDiscussHandoffBtn";
@@ -37,7 +41,7 @@ const HANDOFF_PATH = "/api/wiki/discuss/handoff";
 const READING_CLASS = "discuss-reading";
 /** The quote the panel shows is cut here; the request carries the whole selection. */
 const PANEL_QUOTE_MAX = 400;
-/** A drag or a held Shift+arrow fires `selectionchange` many times: capture once it rests. */
+/** A drag or a held Shift+arrow fires `selectionchange` many times: check once it rests. */
 const SETTLE_MS = 50;
 
 export interface DiscussHandoffDeps {
@@ -55,7 +59,6 @@ interface Captured extends DiscussContext {
 
 let deps: DiscussHandoffDeps | null = null;
 let enabled = false;
-let captured: Captured | null = null;
 /** What the open panel asks about: a passage, or the whole page (null). */
 let asking: { relPath: string; passage: Captured | null; opener: HTMLElement | null } | null = null;
 let inFlight = false;
@@ -93,53 +96,74 @@ function mountControls(): void {
 }
 
 /** Per page render: whether the page's wiki offers the handoff. Closes a panel
- *  left open on the previous page and drops a captured selection. */
+ *  left open on the previous page. */
 export function setDiscussHandoffEnabled(on: boolean): void {
   enabled = on;
-  captured = null;
   closePanel(false);
-  if (on) mountControls();
-  else {
+  if (on) {
+    mountControls();
+    showSelBtn();
+  } else {
     document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)?.remove();
     document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)?.remove();
   }
 }
 
-/** Read the selection while it exists: its text without the reader's own
- *  additions, fact chips or fence bars, and the context around it. */
-export function captureDiscussSelection(sel: Selection | null): void {
-  captured = null;
-  if (!enabled || !sel || sel.isCollapsed || sel.rangeCount === 0) return;
+/** The selection's range and its article when it starts and ends in one
+ *  `.wiki-article` and touches no peek card. */
+function inArticle(sel: Selection | null): { range: Range; article: Element } | null {
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
   const range = sel.getRangeAt(0);
   const start = range.startContainer;
   const article = (start.nodeType === 1 ? (start as Element) : start.parentElement)?.closest(".wiki-article");
-  if (!article || !article.contains(range.endContainer)) return;
+  if (!article || !article.contains(range.endContainer) || touchesPeek(article, range)) return null;
+  return { range, article };
+}
+
+/** The cheap check: could the selection be a passage? Its raw text, which can
+ *  hold what the reader added, stands in for the reading; no class on the root,
+ *  no context, no walk of the article. */
+function mayBePassage(sel: Selection | null): boolean {
+  if (!inArticle(sel)) return false;
+  const n = sel!.toString().trim().length;
+  return n >= HANDOFF_SELECTION_MIN && n <= HANDOFF_SELECTION_MAX;
+}
+
+/** The full read of the live selection: its text without the reader's own
+ *  additions, fact chips or fence bars, and the context around it. Null when
+ *  it is no passage. */
+function readDiscussSelection(sel: Selection | null): Captured | null {
+  if (!enabled) return null;
+  const at = inArticle(sel);
+  if (!at) return null;
+  const { range, article } = at;
   const root = document.documentElement;
   root.classList.add(READING_CLASS);
   let selection: string;
   try {
-    selection = readerSelectionText(sel).trim();
+    selection = readerSelectionText(sel!).trim();
   } finally {
     root.classList.remove(READING_CLASS);
   }
-  if (selection.length < HANDOFF_SELECTION_MIN || selection.length > HANDOFF_SELECTION_MAX) return;
+  if (selection.length < HANDOFF_SELECTION_MIN || selection.length > HANDOFF_SELECTION_MAX) return null;
   const context = discussContext(article, range);
-  if (!context) return;
-  captured = { selection, ...context, range: range.cloneRange() };
+  if (!context) return null;
+  return { selection, ...context, range: range.cloneRange() };
 }
 
-/** Capture the live selection now, unless the panel holds its snapshot. */
+/** The selection has rested: show or hide the control. */
 function settleSelection(): void {
   if (settleTimer !== null) clearTimeout(settleTimer);
   settleTimer = null;
-  if (panelOpen()) return;
-  captureDiscussSelection(window.getSelection());
   showSelBtn();
 }
 
+/** The control shows while the selection may be a passage, and while the panel
+ *  is open on a passage (the control opened it; focus in the question box
+ *  collapses the page's selection). */
 function showSelBtn(): void {
   const btn = document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID);
-  if (btn) btn.style.display = enabled && captured ? "" : "none";
+  if (btn) btn.style.display = enabled && (!!asking?.passage || mayBePassage(window.getSelection())) ? "" : "none";
 }
 
 function panel(): HTMLElement {
@@ -169,33 +193,39 @@ function panelOpen(): boolean {
 }
 
 /** Close the panel; `restore` puts focus back on the control that opened it
- *  and the passage's selection back on the page, which focus in the question
- *  box collapsed. The capture then still matches the selection, so no late
- *  `selectionchange` hides the control that has focus. */
+ *  and, when the page holds no selection that may be a passage (focus in the
+ *  question box collapsed it), the passage's range back on the page, so no
+ *  late `selectionchange` hides the control that has focus. A selection the
+ *  reader made while the panel was open stays. */
 function closePanel(restore: boolean): void {
   const opener = asking?.opener ?? null;
   const range = asking?.passage?.range ?? null;
   asking = null;
   const el = document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
   if (el) el.hidden = true;
-  if (!restore) return;
-  if (opener?.isConnected) opener.focus();
-  const sel = window.getSelection();
-  if (sel && range && range.startContainer.isConnected && range.endContainer.isConnected) {
-    sel.removeAllRanges();
-    sel.addRange(range);
+  if (restore) {
+    if (opener?.isConnected) opener.focus();
+    const sel = window.getSelection();
+    if (sel && range && !mayBePassage(sel) && range.startContainer.isConnected && range.endContainer.isConnected) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
   }
-  settleSelection();
+  showSelBtn();
 }
 
-/** Open the panel on the captured passage (`passage: true`) or the whole page. */
+/** Open the panel on the live selection (`passage: true`) or the whole page.
+ *  With the panel open, a passage is read again and the panel shows it; a
+ *  selection that reads as no passage opens nothing and leaves an open panel. */
 export function openDiscussHandoff(passage: boolean, opener: HTMLElement | null = null): void {
   const relPath = deps?.relPath();
   if (!enabled || !relPath) return;
-  // A selection changed in the last few ms is not captured yet.
-  if (passage && settleTimer !== null) settleSelection();
-  if (passage && !captured) return;
-  asking = { relPath, passage: passage ? captured : null, opener };
+  const read = passage ? readDiscussSelection(window.getSelection()) : null;
+  if (passage && !read) {
+    showSelBtn();
+    return;
+  }
+  asking = { relPath, passage: read, opener };
   const el = panel();
   const sel = asking.passage?.selection ?? "";
   const quote = asking.passage
@@ -211,6 +241,7 @@ export function openDiscussHandoff(passage: boolean, opener: HTMLElement | null 
   inFlight = false;
   el.hidden = false;
   el.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")?.focus();
+  showSelBtn();
 }
 
 function onPanelClick(e: Event): void {
@@ -280,10 +311,8 @@ async function copyPrompt(): Promise<void> {
 /** Wire the controls once, at boot. */
 export function initDiscussHandoff(d: DiscussHandoffDeps): void {
   deps = d;
-  // Mouse, keyboard or touch: every selection change ends here. While the panel
-  // is open (focus in its question box moves the selection) the capture stays.
+  // Mouse, keyboard or touch: every selection change ends here, the panel open or not.
   document.addEventListener("selectionchange", () => {
-    if (panelOpen()) return;
     if (settleTimer !== null) clearTimeout(settleTimer);
     settleTimer = setTimeout(settleSelection, SETTLE_MS);
   });

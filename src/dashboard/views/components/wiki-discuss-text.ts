@@ -242,6 +242,14 @@ function selectedPart(range: Range, t: Text): string {
   return a < b ? t.data.slice(a, b) : "";
 }
 
+/** Whether `range` touches a peek card in `article`. A peek card previews
+ *  another place, appended at the article's end: a selection touching it is not
+ *  on the page, and its heading would be the last. A selector query, no walk:
+ *  the handoff's control runs it on every settled selection change. */
+export function touchesPeek(article: Element, range: Range): boolean {
+  return Array.from(article.querySelectorAll(`.${PEEK_CLASS}`)).some((p) => range.intersectsNode(p));
+}
+
 /**
  * The context of `range` inside `article`, or null when the range selects no
  * text the reading shows or touches a peek card. The selection's own text is the caller's
@@ -254,9 +262,7 @@ export function discussContext(article: Element, range: Range): DiscussContext |
     if (u.node) indexOf.set(u.node, i);
   });
   const texts = domTexts(article);
-  // A peek card previews another place, appended at the article's end: a
-  // selection touching it is not on the page, and its heading would be the last.
-  if (Array.from(article.querySelectorAll(`.${PEEK_CLASS}`)).some((p) => range.intersectsNode(p))) return null;
+  if (touchesPeek(article, range)) return null;
   const isHidden = (t: Text) => units[indexOf.get(t)!]!.hidden;
 
   // The first and last characters the selection's reading holds: the first

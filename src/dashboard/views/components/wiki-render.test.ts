@@ -181,7 +181,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // shared locate-key.ts and discuss-bounds.ts): 887,956 bytes (302,393 by Bun.gzipSync), so the pin moves to 888,200.
 // Its fix round 1 batch 4 (no context in a peek card, off when the page is left): 888,272 (302,447 gzipped),
 // so the pin moves to 888,400.
-const WIKI_CLIENT_MAX_BYTES = 888_400;
+// Its fix round 2 batch 2 (the selection read on activation, a cheap check on each settle): 888,519
+// (302,574 gzipped), so the pin moves to 888,600.
+const WIKI_CLIENT_MAX_BYTES = 888_600;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
