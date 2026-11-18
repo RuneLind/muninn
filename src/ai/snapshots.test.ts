@@ -5,11 +5,11 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { testTempDirSync } from "../test/temp-dir.ts";
-import { codeSnapshot, leaseSnapshot, sweepSnapshots, wikiSnapshot, SNAPSHOT_IDLE_MS } from "./snapshots.ts";
+import { codeSnapshot, leaseSnapshot, sweepSnapshots, wikiSnapshot, wikiSnapshotFiles, SNAPSHOT_IDLE_MS } from "./snapshots.ts";
 
 let base: string;
 let root: string;
@@ -154,6 +154,84 @@ describe("wikiSnapshot", () => {
     expect(second.dir).not.toBe(first.dir);
     expect(readFileSync(join(second.dir, "concepts", "a.md"), "utf8")).toBe("second edit\n");
     expect(readFileSync(join(first.dir, "concepts", "a.md"), "utf8")).toBe("uncommitted edit\n");
+  });
+});
+
+describe("wikiSnapshot: what it refuses to read", () => {
+  function newWiki(name: string): string {
+    const dir = join(base, name);
+    mkdirSync(dir, { recursive: true });
+    git(dir, "init");
+    return dir;
+  }
+
+  test("a tracked file under a folder replaced by a symlink to an outside directory is not copied", async () => {
+    const outside = join(base, "outside-secrets");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "x"), "outside-secret-7g8h\n");
+    const wiki = newWiki("wiki-linked-folder");
+    writeFileSync(join(wiki, "index.md"), "# index\n");
+    mkdirSync(join(wiki, "keys"));
+    writeFileSync(join(wiki, "keys", "x"), "tracked text\n");
+    git(wiki, "add", "-A");
+    git(wiki, "commit", "-m", "one");
+    rmSync(join(wiki, "keys"), { recursive: true });
+    symlinkSync(outside, join(wiki, "keys"));
+    // git still lists the tracked path from its index.
+    expect(await wikiSnapshotFiles(wiki)).toContain("keys/x");
+    const snap = await wikiSnapshot(wiki, { root });
+    expect(files(snap.dir)).toEqual(["index.md"]);
+    for (const f of files(snap.dir)) expect(readFileSync(join(snap.dir, f), "utf8")).not.toContain("outside-secret-7g8h");
+  });
+
+  test("the byte limit refuses on the sizes alone, before any file is read", async () => {
+    const wiki = newWiki("wiki-over-limit");
+    writeFileSync(join(wiki, "a.md"), "x".repeat(2000));
+    // Sorted after a.md, so a run that reads before checking reaches it and fails on EACCES.
+    writeFileSync(join(wiki, "z.md"), "unreadable\n");
+    chmodSync(join(wiki, "z.md"), 0o000);
+    try {
+      await expect(wikiSnapshot(wiki, { root, maxBytes: 100 })).rejects.toThrow(/bytes, over 100\./);
+    } finally {
+      chmodSync(join(wiki, "z.md"), 0o644);
+    }
+  });
+
+  test("a rule only in the global excludes file under a custom XDG_CONFIG_HOME keeps the file out of the listing", async () => {
+    const xdg = join(base, "xdg-config");
+    mkdirSync(join(xdg, "git"), { recursive: true });
+    writeFileSync(join(xdg, "git", "ignore"), "xdg-only-notes.md\n");
+    const wiki = newWiki("wiki-xdg-ignore");
+    writeFileSync(join(wiki, "index.md"), "# index\n");
+    writeFileSync(join(wiki, "xdg-only-notes.md"), "private notes\n");
+    const saved = { xdg: process.env.XDG_CONFIG_HOME, global: process.env.GIT_CONFIG_GLOBAL };
+    process.env.XDG_CONFIG_HOME = xdg;
+    delete process.env.GIT_CONFIG_GLOBAL;
+    try {
+      expect(await wikiSnapshotFiles(wiki)).toEqual(["index.md"]);
+    } finally {
+      if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = saved.xdg;
+      if (saved.global !== undefined) process.env.GIT_CONFIG_GLOBAL = saved.global;
+    }
+  });
+
+  test("a rule only in the excludes file a GIT_CONFIG_GLOBAL config names keeps the file out of the listing", async () => {
+    const cfgDir = join(base, "global-config");
+    mkdirSync(cfgDir);
+    writeFileSync(join(cfgDir, "excludes"), ".env.local\n");
+    writeFileSync(join(cfgDir, "gitconfig"), `[core]\n\texcludesFile = ${join(cfgDir, "excludes")}\n`);
+    const wiki = newWiki("wiki-global-config-ignore");
+    writeFileSync(join(wiki, "index.md"), "# index\n");
+    writeFileSync(join(wiki, ".env.local"), "SECRET=1\n");
+    const saved = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = join(cfgDir, "gitconfig");
+    try {
+      expect(await wikiSnapshotFiles(wiki)).toEqual(["index.md"]);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = saved;
+    }
   });
 });
 

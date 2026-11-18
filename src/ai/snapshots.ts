@@ -15,8 +15,8 @@
  *    minus the wiki's own write artifacts, keyed by content, so a changed tree
  *    gets a new copy and a copy another turn reads is never replaced in place.
  *
- * A code snapshot drops the symlinks that leave it; a wiki snapshot holds
- * none. Snapshots live in their own bucket of the agent home ({@link snapshotRootDir}), a sibling of the fenced
+ * A code snapshot drops the symlinks that leave it; a wiki snapshot copies
+ * only regular files reached through no symlink at all ({@link wikiSourceFile}). Snapshots live in their own bucket of the agent home ({@link snapshotRootDir}), a sibling of the fenced
  * working directory, so a run can read one only when it names it. A snapshot
  * is removed by {@link sweepSnapshots} once no turn has used it for
  * {@link SNAPSHOT_IDLE_MS}; {@link startSnapshotSweeper} runs that at boot and
@@ -77,6 +77,9 @@ export interface SnapshotOptions {
   root?: string;
   /** The git runner; defaults to the decision triage's allowlisted one. */
   git?: GitRun;
+  /** Wiki snapshots: the byte and file-count limits; default {@link WIKI_SNAPSHOT_MAX_BYTES} and {@link WIKI_SNAPSHOT_MAX_FILES}. */
+  maxBytes?: number;
+  maxFiles?: number;
 }
 
 /** In-process leases: a leased snapshot is never swept, whatever its age. */
@@ -249,7 +252,13 @@ export async function codeSnapshot(repoDir: string, opts: SnapshotOptions = {}):
 /** The files a wiki snapshot holds, relative to the wiki directory, sorted. */
 export async function wikiSnapshotFiles(wikiDir: string, git: GitRun = realGit): Promise<string[]> {
   // -z: names verbatim. An untracked nested repository is listed as `dir/`, which is skipped.
-  const res = await git(wikiDir, ["ls-files", "-co", "--exclude-standard", "-z"]);
+  // The global ignore rules can live under XDG_CONFIG_HOME or GIT_CONFIG_GLOBAL, which the runner's allowlist drops.
+  const env: Record<string, string> = {};
+  for (const name of ["XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"] as const) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  const res = await git(wikiDir, ["ls-files", "-co", "--exclude-standard", "-z"], { env });
   if (!res.ok || res.capped || res.timedOut) {
     throw new Error(`snapshot: cannot list the files of ${wikiDir}${res.capped ? " (the listing was cut short)" : ""}.`);
   }
@@ -263,30 +272,49 @@ export async function wikiSnapshotFiles(wikiDir: string, git: GitRun = realGit):
 }
 
 /**
- * A content hash over the regular files of `files` under `base`: each one's
- * path and bytes. A listed file that is gone (a tracked file deleted in the
- * working tree), a symlink or anything else is skipped, so a wiki snapshot
- * never holds a link.
+ * The size of `rel` under `base` (a real path) when it is a regular file that
+ * no symlink leads to: its folder's real path must be exactly its folder under
+ * `base`, so a link in any folder part (`keys` -> `~/.ssh` under a tracked
+ * `keys/x`) disqualifies it, and the file itself must not be a link. Anything
+ * else (gone, a link, a directory) is null and is not copied. The folder, not
+ * the file, is resolved: Bun's realpath opens its argument, so an unreadable
+ * file would otherwise drop out silently instead of failing its copy.
  */
-function contentKey(base: string, files: string[]): { hash: string; present: string[]; bytes: number } {
-  const h = createHash("sha256");
+function wikiSourceFile(base: string, rel: string): number | null {
+  const path = join(base, rel);
+  try {
+    if (realpathSync(dirname(path)) !== dirname(path)) return null;
+    const st = lstatSync(path);
+    return st.isFile() ? st.size : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The files of `files` that {@link wikiSourceFile} accepts, and their summed size; nothing is read. */
+function wikiSourceFiles(base: string, files: string[]): { present: string[]; bytes: number } {
+  const real = realpathSync(base);
   const present: string[] = [];
   let bytes = 0;
   for (const rel of files) {
-    const path = join(base, rel);
-    let st;
-    try {
-      st = lstatSync(path);
-    } catch {
-      continue;
-    }
-    if (!st.isFile()) continue;
-    const data = readFileSync(path);
-    bytes += data.length;
-    h.update(`${rel}\0${data.length}\0`).update(data).update("\n");
+    const size = wikiSourceFile(real, rel);
+    if (size === null) continue;
     present.push(rel);
+    bytes += size;
   }
-  return { hash: h.digest("hex"), present, bytes };
+  return { present, bytes };
+}
+
+/** A content hash over each of `files` under `base` that {@link wikiSourceFile} accepts: its path and bytes. */
+function contentKey(base: string, files: string[]): string {
+  const real = realpathSync(base);
+  const h = createHash("sha256");
+  for (const rel of files) {
+    if (wikiSourceFile(real, rel) === null) continue;
+    const data = readFileSync(join(real, rel));
+    h.update(`${rel}\0${data.length}\0`).update(data).update("\n");
+  }
+  return h.digest("hex");
 }
 
 /**
@@ -300,13 +328,16 @@ function contentKey(base: string, files: string[]): { hash: string; present: str
 export async function wikiSnapshot(wikiDir: string, opts: SnapshotOptions = {}): Promise<Snapshot> {
   const git = opts.git ?? realGit;
   const source = realpathSync(wikiDir);
+  const maxFiles = opts.maxFiles ?? WIKI_SNAPSHOT_MAX_FILES;
+  const maxBytes = opts.maxBytes ?? WIKI_SNAPSHOT_MAX_BYTES;
   const files = await wikiSnapshotFiles(source, git);
-  if (files.length > WIKI_SNAPSHOT_MAX_FILES) throw new Error(`snapshot: ${source} holds ${files.length} files, over ${WIKI_SNAPSHOT_MAX_FILES}.`);
+  if (files.length > maxFiles) throw new Error(`snapshot: ${source} holds ${files.length} files, over ${maxFiles}.`);
+  // The limits are checked on the sizes alone, before any file is read.
+  const live = wikiSourceFiles(source, files);
+  if (live.bytes > maxBytes) throw new Error(`snapshot: ${source} holds ${live.bytes} bytes, over ${maxBytes}.`);
   const root = rootOf(opts);
   const prefix = `wiki-${safeName(basename(source))}-${shortHash(source)}-`;
-  const live = contentKey(source, files);
-  if (live.bytes > WIKI_SNAPSHOT_MAX_BYTES) throw new Error(`snapshot: ${source} holds ${live.bytes} bytes, over ${WIKI_SNAPSHOT_MAX_BYTES}.`);
-  const liveKey = prefix + live.hash.slice(0, 32);
+  const liveKey = prefix + contentKey(source, live.present).slice(0, 32);
   const liveDir = join(root, liveKey);
   if (existsSync(liveDir)) {
     touchSnapshot(liveDir);
@@ -317,19 +348,13 @@ export async function wikiSnapshot(wikiDir: string, opts: SnapshotOptions = {}):
     mkdirSync(tmp, { mode: 0o700 });
     try {
       for (const rel of live.present) {
-        const from = join(source, rel);
+        // Checked again: a part may have become a link since it was hashed; the copy's own hash decides the key.
+        if (wikiSourceFile(source, rel) === null) continue;
         const to = join(tmp, rel);
         mkdirSync(dirname(to), { recursive: true });
-        let st;
-        try {
-          st = lstatSync(from);
-        } catch {
-          continue; // removed since it was hashed: the copy's own hash decides the key
-        }
-        if (st.isFile()) copyFileSync(from, to);
+        copyFileSync(join(source, rel), to);
       }
-      const copied = contentKey(tmp, live.present);
-      const key = prefix + copied.hash.slice(0, 32);
+      const key = prefix + contentKey(tmp, live.present).slice(0, 32);
       const dir = join(root, key);
       publish(tmp, dir);
       touchSnapshot(dir);
