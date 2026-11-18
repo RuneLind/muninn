@@ -196,8 +196,9 @@ export interface BotConfig {
   /**
    * The one-shot's declared tool surface. Set per-call by `executeOneShot`
    * from its required `toolSurface` option, never in config.json. The
-   * claude-cli and claude-sdk connectors fence `{ read }` and `{ web }`; the
-   * other connectors refuse them. See `src/ai/tool-surface.ts`.
+   * claude-cli and claude-sdk connectors fence `{ read }`, `{ web }` and
+   * `{ readSearch }`, copilot-sdk runs `{ mcpTools }`, and each connector
+   * refuses the shapes it cannot run. See `src/ai/tool-surface.ts`.
    */
   toolSurface?: ToolSurface;
   /** Hivemind peer-to-peer integration config — parsed from `hivemind` block in config.json */

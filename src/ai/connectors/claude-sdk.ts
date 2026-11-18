@@ -25,10 +25,13 @@ import { currentActiveTurn } from "../../hivemind/active-turn.ts";
 import { resolveFencedAgentCwd } from "../agent-cwd.ts";
 import {
   fencedCanUseTool,
+  fencedDirs,
   fencedSdkSettings,
   fencedSurface,
   fencedTools,
-  isReadSurface,
+  isReadSearchSurface,
+  readSearchPreToolUseHook,
+  refuseMcpToolsSurface,
   type FencedToolSurface,
 } from "../tool-surface.ts";
 
@@ -62,9 +65,13 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
  * allows Read only under the dirs and the web tools only on `{ web }` (no allow rule, so WebFetch reaches the handler). The cwd
  * is an empty agent home: in `default` mode a Read inside the working dir skips
  * `canUseTool`, so the bot folder as cwd would leave its config readable.
+ * `{ readSearch }` adds a PreToolUse hook running the same check as the
+ * handler, because a Grep or Glob whose `path` is a working dir skips the
+ * handler too, and its pattern could still climb out.
  */
 export function fencedSdkOptions(fence: FencedToolSurface): Partial<Options> {
   const settings = fencedSdkSettings();
+  const dirs = fencedDirs(fence);
   return {
     cwd: resolveFencedAgentCwd(),
     permissionMode: "default",
@@ -72,8 +79,9 @@ export function fencedSdkOptions(fence: FencedToolSurface): Partial<Options> {
     mcpServers: {},
     strictMcpConfig: true,
     settingSources: [],
-    ...(isReadSurface(fence) ? { additionalDirectories: fence.read } : {}),
+    ...(dirs ? { additionalDirectories: dirs } : {}),
     canUseTool: fencedCanUseTool(fence),
+    ...(isReadSearchSurface(fence) ? { hooks: { PreToolUse: [{ hooks: [readSearchPreToolUseHook(fence.readSearch)] }] } } : {}),
     ...(settings ? { settings } : {}),
   };
 }
@@ -125,6 +133,7 @@ export async function executePrompt(
   // a read from inside a tool-result handler is not, on any connector with a
   // shared long-lived transport (see `research/thread-citations.ts`).
   const activeTurn = currentActiveTurn();
+  refuseMcpToolsSurface("claude-sdk", botConfig.toolSurface);
   assertHaveAuth();
   const wallStart = performance.now();
 
