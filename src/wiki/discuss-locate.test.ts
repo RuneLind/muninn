@@ -1,17 +1,26 @@
 /**
- * The Discuss locator's cases: selections as the reader shows them, located
- * as line ranges in the raw file. The collapse's parity with the reader's
- * render is `src/dashboard/views/components/wiki-discuss-parity.test.ts`.
+ * The Discuss locator on the server side: selections and the context the
+ * client read around them (as the reader shows text: no markup), located as
+ * line ranges in the raw file. End-to-end cases through the reader's render
+ * and the client's own reading are in
+ * `src/dashboard/views/components/wiki-discuss-cases.test.ts`; the collapse's
+ * parity with the render is `wiki-discuss-parity.test.ts` beside it.
  */
 import { describe, expect, test } from "bun:test";
 import { stripFactWrappers, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
-import { collapseForLocate, locatePassage, pageHeadings } from "./discuss-locate.ts";
+import {
+  collapseForLocate,
+  CONTEXT_FULL_MIN,
+  CONTEXT_PARTIAL_MIN,
+  contextAccepts,
+  LOCATE_EDGE_CHARS,
+  locatePassage,
+  pageHeadings,
+  sideState,
+} from "./discuss-locate.ts";
 
 /** A page whose line N (1-based) is `lines[N-1]`. */
 const page = (...lines: string[]) => lines.join("\n") + "\n";
-
-/** Lines of filler prose, so a page is past Explain's 3,000-character whole-page cut. */
-const filler = (n: number) => Array.from({ length: n }, (_, k) => `Filler sentence ${k} about the harbour and its many quiet piers.`);
 
 const PAGE = page(
   "---", //                                                     1
@@ -22,149 +31,191 @@ const PAGE = page(
   "",
   "## Brief",
   "",
-  "Kari Nordmann keeps the **winter** timetable in `harbour.yaml`, see [the docs](https://example.com/d), [[ferry-plan]] and [[ferry-plan|the ferry plan]].",
+  "Kari Nordmann keeps the **winter** timetable in `harbour.yaml`.",
   "", //                                                        10
-  "- **R2, behind.** The page's `status_date` is older than the newest merge.",
-  "- The night route is unchanged.",
-  "",
-  "The pier opens at six.",
-  "", //                                                        15
-  '<Fold title="Design" summary="three routes, one new stop">',
+  "Boats leave early. The pier opens at six.",
   "",
   "## Design",
   "",
-  '<Callout tone="warn" title="Watch the tide">', //            20
-  "",
-  "Low water closes the north pier.",
-  "",
-  "</Callout>",
-  "", //                                                        25
-  "| Route | Stops |",
-  "|---|---|",
-  "| Summer | `4` |",
-  "",
-  "The pier opens at six.", //                                  30
-  "",
-  "</Fold>",
-  "",
-  "## Section with a repeat",
-  "", //                                                        35
-  "Bells ring at noon.",
+  "Ferries run late. The pier opens at six.", //                15
   "",
   "Bells ring at noon.",
-  "",
-  ...filler(50), //                                             40–89
 );
 
-describe("one match: the passage's own lines", () => {
-  test("a selection over bold, inline code, a link, a bare and a labelled wikilink, as the reader shows them", () => {
-    const sel = "Kari Nordmann keeps the winter timetable in harbour.yaml, see the docs, ferry-plan and the ferry plan.";
-    expect(locatePassage(PAGE, { selection: sel })).toMatchObject({ found: "one", tier: "whole", matches: 1, fromLine: 9, toLine: 9 });
+describe("the agreement rule, one side", () => {
+  test("full: every key character the client sent agrees, at least CONTEXT_FULL_MIN of them", () => {
+    expect(sideState("boatsleaveearly.", "xxboatsleaveearly.", "left", false)).toBe("full");
+    expect(sideState("ferriesrunlate.", "ferriesrunlate.yy", "right", false)).toBe("full");
+    expect(CONTEXT_FULL_MIN).toBe(12);
   });
-  test("a bullet that opens in bold and holds inline code", () => {
-    const sel = "R2, behind. The page's status_date is older than the newest merge.";
-    expect(locatePassage(PAGE, { selection: sel })).toMatchObject({ found: "one", fromLine: 11, toLine: 11 });
+  test("agrees: all agree, but fewer than CONTEXT_FULL_MIN and not at the page's edge", () => {
+    expect(sideState("early.", "xxearly.", "left", false)).toBe("agrees");
   });
-  test("across two list items, with the newlines a selection carries", () => {
-    const sel = "older than the newest merge.\nThe night route";
-    expect(locatePassage(PAGE, { selection: sel })).toMatchObject({ found: "one", fromLine: 11, toLine: 12 });
+  test("both at the page's edge: full, however short", () => {
+    expect(sideState("", "", "left", true)).toBe("full");
+    expect(sideState("ab", "ab", "right", true)).toBe("full");
   });
-  test("inside a Fold and a component", () => {
-    expect(locatePassage(PAGE, { selection: "Low water closes the north pier." })).toMatchObject({ found: "one", fromLine: 22, toLine: 22 });
+  test("open: nothing to compare (the client sent nothing, or the source ran out first, short)", () => {
+    expect(sideState("", "something", "left", false)).toBe("open");
+    expect(sideState("", "something", "left", true)).toBe("open");
+    expect(sideState("readerheader:early.", "early.", "left", false)).toBe("open");
   });
-  test("a Fold's summary maps to the Fold's tag line", () => {
-    expect(locatePassage(PAGE, { selection: "three routes, one new stop" })).toMatchObject({ found: "one", fromLine: 16, toLine: 16 });
+  test("the source ran out after CONTEXT_FULL_MIN agreeing characters: full", () => {
+    expect(sideState("readerheader:boatsleaveearly.", "boatsleaveearly.", "left", false)).toBe("full");
   });
-  test("a table row", () => {
-    expect(locatePassage(PAGE, { selection: "Summer\t4" })).toMatchObject({ found: "one", fromLine: 28, toLine: 28 });
+  test("partial: disagrees only past CONTEXT_PARTIAL_MIN characters", () => {
+    expect(CONTEXT_PARTIAL_MIN).toBe(8);
+    expect(sideState("chromeXXboatsleave", "sourceYYboatsleave", "left", false)).toBe("partial");
+    expect(sideState("boatsleaveXXchrome", "boatsleaveYYsource", "right", false)).toBe("partial");
   });
-  test("a page of under 3,000 characters still gets the passage's line, not the page", () => {
+  test("contradicted: disagrees nearer than that", () => {
+    expect(sideState("thesentence.", "otherwords!!", "left", false)).toBe("contradicted");
+    expect(sideState("abcdefgXXXXXX", "abcdefgYYYYYY", "right", false)).toBe("contradicted");
+  });
+  test("accepted: one side full and neither contradicted", () => {
+    expect(contextAccepts("full", "full")).toBe(true);
+    expect(contextAccepts("full", "partial")).toBe(true);
+    expect(contextAccepts("open", "full")).toBe(true);
+    expect(contextAccepts("full", "contradicted")).toBe(false);
+    expect(contextAccepts("partial", "partial")).toBe(false);
+    expect(contextAccepts("agrees", "open")).toBe(false);
+  });
+});
+
+describe("one match: taken only when its context agrees", () => {
+  test("a selection over markup, with the reader's context", () => {
+    const r = locatePassage(PAGE, {
+      selection: "keeps the winter timetable in harbour.yaml.",
+      before: "Brief\nKari Nordmann ",
+      after: "Boats leave early. The pier opens at six.",
+      heading: "Brief",
+      stripTitle: "Harbour plan",
+    });
+    expect(r).toMatchObject({ found: "exact", reason: null, tier: "whole", matches: 1, fromLine: 9, toLine: 9 });
+    expect(PAGE.slice(r.rawFrom!, r.rawTo!)).toBe("keeps the **winter** timetable in `harbour.yaml`.");
+  });
+  test("finding 1: the source's only match, whose neighbours disagree with the client's, is not taken", () => {
+    // The client selected these words somewhere the source does not hold them (chrome).
+    const r = locatePassage(PAGE, { selection: "Bells ring at noon.", before: "Lane head: owner", after: "Waiting on the harbour", heading: "Design" });
+    expect(r).toMatchObject({ found: "section", reason: "no-agreement", matches: 1, fromLine: 13, toLine: 17, candidates: [17] });
+    expect(r.section).toEqual({ heading: "Design", fromLine: 13, toLine: 17 });
+  });
+  test("no context at all: nothing to agree with, so no exact line", () => {
+    expect(locatePassage(PAGE, { selection: "Bells ring at noon." }).found).toBe("none");
+  });
+  test("a page of under 3,000 characters still gets the passage's own line", () => {
     const short = page("# Short", "", "One line.", "", "The second line here.", "", "Third.");
     expect(short.length).toBeLessThan(3000);
-    expect(locatePassage(short, { selection: "The second line here." })).toMatchObject({ found: "one", fromLine: 5, toLine: 5 });
+    const r = locatePassage(short, { selection: "The second line here.", before: "Short One line.", after: "Third.", atEnd: true });
+    expect(r).toMatchObject({ found: "exact", fromLine: 5, toLine: 5 });
   });
 });
 
-describe("fact wrappers: line numbers stay the file's", () => {
-  const FACTS = page(
-    "# Facts",
-    "",
-    'Before <Fact n="1" v="ok">a checked claim</Fact> after.',
-    "",
-    '<Fact n="2" v="warn">',
-    "A whole checked paragraph.",
-    "</Fact>",
-    "",
-    "The last line.",
-  );
-  test("an inline wrapper", () => {
-    expect(locatePassage(FACTS, { selection: "Before a checked claim after." })).toMatchObject({ fromLine: 3, toLine: 3 });
+describe("several matches: the context chooses", () => {
+  test("a sentence twice: each copy by its neighbours", () => {
+    const first = locatePassage(PAGE, { selection: "The pier opens at six.", before: "harbour.yaml. Boats leave early. ", after: "Design Ferries run late." });
+    expect(first).toMatchObject({ found: "exact", matches: 2, fromLine: 11, toLine: 11 });
+    const second = locatePassage(PAGE, { selection: "The pier opens at six.", before: "Design Ferries run late. ", after: "Bells ring at noon.", atEnd: true });
+    expect(second).toMatchObject({ found: "exact", matches: 2, fromLine: 15, toLine: 15 });
   });
-  test("a block wrapper's tag lines are skipped, the lines after them keep their numbers", () => {
-    expect(locatePassage(FACTS, { selection: "A whole checked paragraph." })).toMatchObject({ fromLine: 6, toLine: 6 });
-    expect(locatePassage(FACTS, { selection: "The last line." })).toMatchObject({ fromLine: 9, toLine: 9 });
-  });
-  test("the strip with a map strips what the strip strips", () => {
-    expect(stripFactWrappersWithMap(FACTS).text).toBe(stripFactWrappers(FACTS));
-    const { text, map } = stripFactWrappersWithMap(FACTS);
-    for (let i = 0; i < text.length; i++) expect(FACTS[map[i]!]).toBe(text[i]!);
-  });
-});
-
-describe("a live-fact chip in the selection", () => {
-  const CHIP = page("# Chips", "", ...filler(3), "", "The new timetable for the winter season was drafted by Kari Nordmann in October, and the fix in PR #12 landed on Tuesday, after which the harbour master signed it off before the evening ferry left the north pier for the island.", "", ...filler(3));
-  test("without the chip's text (the reader leaves it out): the whole selection", () => {
-    const sel = "The new timetable for the winter season was drafted by Kari Nordmann in October, and the fix in PR #12 landed on Tuesday, after which the harbour master signed it off before the evening ferry left the north pier for the island.";
-    expect(locatePassage(CHIP, { selection: sel })).toMatchObject({ found: "one", tier: "whole", fromLine: 7, toLine: 7 });
-  });
-  test("with it, a long selection still finds its start and end by its first and last 80 characters", () => {
-    const sel = "The new timetable for the winter season was drafted by Kari Nordmann in October, and the fix in PR #12 merged ✓ landed on Tuesday, after which the harbour master signed it off before the evening ferry left the north pier for the island.";
-    expect(locatePassage(CHIP, { selection: sel })).toMatchObject({ found: "one", tier: "prefix", fromLine: 7, toLine: 7 });
-  });
-  test("with it, a short selection falls back to its heading's section, never the head of the page", () => {
-    const r = locatePassage(CHIP, { selection: "PR #12 merged ✓ landed", heading: "Chips" });
-    expect(r).toMatchObject({ found: "section", fromLine: 1 });
-    expect(locatePassage(CHIP, { selection: "PR #12 merged ✓ landed" })).toMatchObject({ found: "none", fromLine: null, toLine: null });
-  });
-});
-
-describe("several matches", () => {
-  test("a sentence twice on the page: the client's occurrence number picks one when its total agrees", () => {
-    expect(locatePassage(PAGE, { selection: "The pier opens at six.", occurrence: 1, total: 2 })).toMatchObject({ found: "occurrence", matches: 2, fromLine: 30, toLine: 30 });
-    expect(locatePassage(PAGE, { selection: "The pier opens at six.", occurrence: 0, total: 2 })).toMatchObject({ found: "occurrence", fromLine: 14, toLine: 14 });
-  });
-  test("when the counts disagree: the heading's section, ambiguous, with every match's line", () => {
-    const r = locatePassage(PAGE, { selection: "The pier opens at six.", occurrence: 1, total: 3, heading: "Design" });
-    expect(r).toMatchObject({ found: "section", ambiguous: true, matches: 2, fromLine: 18, candidates: [14, 30] });
-    expect(locatePassage(PAGE, { selection: "The pier opens at six.", occurrence: 5, total: 2, heading: "Design" }).found).toBe("section");
-    expect(locatePassage(PAGE, { selection: "The pier opens at six.", total: 2, heading: "Design" }).found).toBe("section");
-  });
-  test("twice in one section: the occurrence picks, a disagreement gives that section", () => {
-    expect(locatePassage(PAGE, { selection: "Bells ring at noon.", occurrence: 1, total: 2 })).toMatchObject({ fromLine: 38, toLine: 38 });
-    expect(locatePassage(PAGE, { selection: "Bells ring at noon.", heading: "Section with a repeat" })).toMatchObject({ found: "section", ambiguous: true, fromLine: 34, toLine: 89 });
+  test("when no copy's neighbours agree: the heading's section, with every match's line", () => {
+    const r = locatePassage(PAGE, { selection: "The pier opens at six.", before: "something else entirely", after: "and more of it here too", heading: "Design" });
+    expect(r).toMatchObject({ found: "section", reason: "no-agreement", ambiguous: true, matches: 2, fromLine: 13, toLine: 17, candidates: [11, 15] });
   });
   test("no heading to fall back on: no range, never the head of the page", () => {
-    expect(locatePassage(PAGE, { selection: "The pier opens at six." })).toMatchObject({ found: "none", fromLine: null, toLine: null, candidates: [14, 30] });
+    const r = locatePassage(PAGE, { selection: "The pier opens at six.", before: "something else entirely", after: "and more of it here too" });
+    expect(r).toMatchObject({ found: "none", fromLine: null, toLine: null, section: null, candidates: [11, 15] });
+  });
+  test("copies alike in the near context: the far context chooses the one that agrees in full", () => {
+    const tail = "and the harbour office keeps the book.";
+    const md = page("# Log", "", `Alpha wrote: check the ropes, ${tail}`, "", `Beta wrote: check the ropes, ${tail}`, "", "End.");
+    const r = locatePassage(md, { selection: "check the ropes,", before: "Log Alpha wrote: ", after: `${tail} Beta wrote: check the ropes, ${tail} End.`, atEnd: true });
+    // Both near contexts agree on the right; only the first agrees in full far out on both sides.
+    expect(r).toMatchObject({ found: "exact", fromLine: 3, toLine: 3 });
+  });
+  test("copies alike as far as the context reads: ambiguous", () => {
+    const md = page("# Log", "", ...Array.from({ length: 6 }, () => "- Same line again."));
+    const r = locatePassage(md, { selection: "Same line again.", before: "Same line again. Same line again.", after: "Same line again. Same line again.", heading: "Log" });
+    expect(r).toMatchObject({ found: "section", reason: "ambiguous", ambiguous: true, candidates: [3, 4, 5, 6, 7, 8] });
   });
 });
 
-describe("not in the source", () => {
-  test("a selection the file does not hold: the heading's section, or nothing", () => {
-    expect(locatePassage(PAGE, { selection: "Nothing like this sentence is on the page.", heading: "Brief" })).toMatchObject({ found: "section", ambiguous: false, matches: 0, fromLine: 7, toLine: 16 });
-    const none = locatePassage(PAGE, { selection: "Nothing like this sentence is on the page." });
-    expect(none).toMatchObject({ found: "none", fromLine: null, toLine: null });
+describe("the edges tier: the first and last LOCATE_EDGE_CHARS", () => {
+  const LONG = "The new timetable for the winter season was drafted by Kari Nordmann in October, and the fix in PR #12 landed on Tuesday, after which the harbour master signed it off before the evening ferry left the north pier for the island.";
+  const md = page("# Chips", "", "Opening line of the page.", "", LONG, "", "Closing line of the page.");
+  const withChip = LONG.replace("PR #12", "PR #12 merged ✓");
+  test("a selection holding text the source does not (a chip): found by its two ends, the range covers it all", () => {
+    expect(withChip.length).toBeGreaterThan(LOCATE_EDGE_CHARS * 2);
+    const r = locatePassage(md, { selection: withChip, before: "Chips Opening line of the page.", after: "Closing line of the page.", atEnd: true });
+    expect(r).toMatchObject({ found: "exact", tier: "edges", fromLine: 5, toLine: 5 });
+    expect(md.slice(r.rawFrom!, r.rawTo!)).toBe(LONG);
+  });
+  test("a start without an end is a miss, not a start-only range", () => {
+    const r = locatePassage(md, { selection: withChip.slice(0, -40) + " and then words the file never had at all, none of them.", before: "Opening line of the page.", after: "Closing line of the page.", heading: "Chips" });
+    expect(r).toMatchObject({ found: "section", reason: "no-match", tier: null });
+  });
+  test("the end must follow the start within the bound", () => {
+    const far = page("# Far", "", LONG.slice(0, 120), "", ...Array.from({ length: 30 }, (_, k) => `Filler line ${k} about the quiet harbour piers.`), "", LONG.slice(120));
+    const r = locatePassage(far, { selection: withChip, before: "Far", after: "", atEnd: true, heading: "Far" });
+    expect(r.found).not.toBe("exact");
+  });
+  test("an end that sits before the start is not taken", () => {
+    const back = page("# Back", "", LONG.slice(-100), "", LONG.slice(0, 120), "", "Closing.");
+    const r = locatePassage(back, { selection: withChip, before: "Back", after: "Closing.", atEnd: true, heading: "Back" });
+    expect(r.found).not.toBe("exact");
+  });
+  test("two starts: each is a candidate, and the context chooses (never simply the first)", () => {
+    const two = page("# Two", "", "Alpha:", "", LONG, "", "Beta:", "", LONG, "", "End.");
+    const r = locatePassage(two, { selection: withChip, before: "Beta:", after: "End.", atEnd: true });
+    // Three candidates: each start with the end after it, and the first start
+    // with the second copy's end (inside the bound); the context takes one.
+    expect(r).toMatchObject({ found: "exact", tier: "edges", matches: 3, fromLine: 9, toLine: 9 });
+  });
+});
+
+describe("what the client marks", () => {
+  test("a selection that starts or ends in reader-added text goes to the section, even with one agreeing match", () => {
+    const r = locatePassage(PAGE, { selection: "Bells ring at noon.", before: "Ferries run late. The pier opens at six.", atEnd: true, edge: "added", heading: "Design" });
+    expect(r).toMatchObject({ found: "section", reason: "added", fromLine: 13 });
+  });
+  test("a selection over reordered lanes goes to the section", () => {
+    expect(locatePassage(PAGE, { selection: "Bells ring at noon.", edge: "reordered", heading: "Design" })).toMatchObject({ found: "section", reason: "reordered" });
+  });
+  test("text the source does not hold: the section, or nothing, with no candidates", () => {
+    expect(locatePassage(PAGE, { selection: "Nothing like this sentence is on the page.", heading: "Brief" })).toMatchObject({ found: "section", reason: "no-match", matches: 0, fromLine: 7, toLine: 11 });
+    expect(locatePassage(PAGE, { selection: "Nothing like this sentence is on the page." })).toMatchObject({ found: "none", fromLine: null, section: null });
   });
 });
 
 describe("the collapse and the headings", () => {
   test("frontmatter, the repeated title and markup are not in the collapse", () => {
-    const c = collapseForLocate(page("---", "title: T", "---", "", "# T", "", "Body **bold** text."), { stripTitle: "T" });
-    expect(c.text).toBe("bodyboldtext.");
+    expect(collapseForLocate(page("---", "title: T", "---", "", "# T", "", "Body **bold** text."), { stripTitle: "T" }).text).toBe("bodyboldtext.");
   });
-  test("a multi-line component tag is markup, and the text after it maps to its own line", () => {
-    const md = page("# M", "", "<Callout", '  tone="warn"', '  title="Long tag">', "", "Inside.", "", "</Callout>");
-    expect(locatePassage(md, { selection: "Inside." })).toMatchObject({ fromLine: 7, toLine: 7 });
-    expect(locatePassage(md, { selection: "Long tag" })).toMatchObject({ fromLine: 5, toLine: 5 });
+  test("finding 7: on a CRLF page the repeated title is still dropped and the headings are found", () => {
+    const crlf = page("---", "title: T", "---", "", "# T", "", "## One", "", "Body.", "", "## C#", "", "Sharp.").replace(/\n/g, "\r\n");
+    expect(collapseForLocate(crlf, { stripTitle: "T" }).text).toBe("onebody.csharp.");
+    expect(pageHeadings(crlf).map((h) => [h.level, h.text, h.fromLine, h.toLine])).toEqual([
+      [1, "T", 5, 13],
+      [2, "One", 7, 9],
+      [2, "C#", 11, 13],
+    ]);
+  });
+  test("a closing run of # needs white space before it", () => {
+    expect(pageHeadings(page("## C#", "", "## Done ##", "", "#### F# notes")).map((h) => h.text)).toEqual(["C#", "Done", "F# notes"]);
+  });
+  test("a tag the reader does not parse is text, as the reader shows it: over several lines, a bare attribute, single quotes, unclosed", () => {
+    expect(collapseForLocate(page("<Callout", '  title="Long tag">', "", "Inside.", "", "</Callout>")).text).toBe('<callouttitle="longtag">inside.</callout>'.replace(/[<>]/g, ""));
+    expect(collapseForLocate(page('<Fold title="D" open>', "", "Body.", "", "</Fold>")).text).toBe('foldtitle="d"openbody./fold');
+    expect(collapseForLocate(page("<Fold title='D'>", "", "Body.", "", "</Fold>")).text).toBe("foldtitle='d'body./fold");
+    expect(collapseForLocate(page('<Callout title="x">', "", "Never closed.")).text).toBe('callouttitle="x"neverclosed.');
+    // Parsed: an indented opener and its closer, and a nested same-name pair.
+    expect(collapseForLocate(page('  <Callout title="x">', "", "In.", "", "  </Callout>")).text).toBe("xin.");
+    expect(collapseForLocate(page('<Callout title="a">', '<Callout title="b">', "In.", "</Callout>", "</Callout>")).text).toBe("abin.");
+  });
+  test("a Diagram's and an Embed's body are not in the collapse (the reader shows none of their words)", () => {
+    const md = page("Before.", "", '<Diagram src="a.diagram.json" caption="c">', "", "boats to the pier", "", "</Diagram>", "", '<Embed src="x.html">', "fallback", "</Embed>", "", "After.");
+    expect(collapseForLocate(md).text).toBe("before.after.");
+    expect(collapseForLocate(page('<Diagram src="a.diagram.json" />', "", "Shown.")).text).toBe("shown.");
   });
   test("headings with their sections' line ranges, fenced lines skipped", () => {
     const md = page("# A", "", "text", "", "```", "# not a heading", "```", "", "## B", "", "b text", "", "# C", "c");
@@ -173,5 +224,12 @@ describe("the collapse and the headings", () => {
       { level: 2, text: "B", fromLine: 9, toLine: 11 },
       { level: 1, text: "C", fromLine: 13, toLine: 14 },
     ]);
+  });
+  test("fact wrappers: the strip with a map strips what the strip strips, and lines stay the file's", () => {
+    const FACTS = page("# Facts", "", 'Before <Fact n="1" v="ok">a checked claim</Fact> after.', "", '<Fact n="2" v="warn">', "A whole checked paragraph.", "</Fact>", "", "The last line.");
+    expect(stripFactWrappersWithMap(FACTS).text).toBe(stripFactWrappers(FACTS));
+    const { text, map } = stripFactWrappersWithMap(FACTS);
+    for (let i = 0; i < text.length; i++) expect(FACTS[map[i]!]).toBe(text[i]!);
+    expect(locatePassage(FACTS, { selection: "A whole checked paragraph.", before: "Before a checked claim after.", after: "The last line.", atEnd: true })).toMatchObject({ found: "exact", fromLine: 6, toLine: 6 });
   });
 });

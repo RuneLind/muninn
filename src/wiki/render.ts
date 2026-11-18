@@ -368,8 +368,9 @@ export interface ReaderPayload {
    *  `MELOSYS-8308` before a wikilink is never a cross-page id. Absent on a
    *  wiki with no trackers. */
   trackerProjects?: string[];
-  /** Discuss's «Ask Claude Code» (P1): the wiki sets `discuss.handoff` and
-   *  the viewer is admin, since its route answers an absolute path. */
+  /** Discuss's «Ask Claude Code» (P1): its route is registered (the tool
+   *  half), the wiki sets `discuss.handoff` and the viewer is admin, since the
+   *  route answers an absolute path. */
   discussHandoff: boolean;
 }
 
@@ -387,6 +388,9 @@ export function readerPayload(
   /** D7, computed by the caller (`agentLensFor`): `PLAN_CARD_BIN` set, the
    *  page carries `plan_status`, its root is a plan-card root, viewer admin. */
   agentLens = false,
+  /** Whether the handoff route is registered here (the tool half: not under
+   *  the read slice, which drops the `wiki` group). */
+  handoffRoute = false,
 ): ReaderPayload {
   const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
   return {
@@ -396,7 +400,7 @@ export function readerPayload(
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
     agentLens,
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
-    discussHandoff: readerConfig?.discuss?.handoff === true && viewer.admin,
+    discussHandoff: handoffRoute && readerConfig?.discuss?.handoff === true && viewer.admin,
   };
 }
 

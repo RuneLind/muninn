@@ -385,16 +385,8 @@ import {
   type SeriesPort,
 } from "./wiki-series-controller.ts";
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
-import {
-  captureDiscussSelection,
-  discussHandoffPageBtnHtml,
-  discussHandoffSelBtnHtml,
-  DISCUSS_HANDOFF_SEL_BTN_ID,
-  initDiscussHandoff,
-  openDiscussHandoff,
-  setDiscussHandoffEnabled,
-  showDiscussSelBtn,
-} from "./wiki-discuss-handoff.ts";
+import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
+import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -988,14 +980,9 @@ function renderBreadcrumb(m: WikiListing): void {
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
-    // «Ask Claude Code» on the selection (Discuss P1): copies a prompt, calls no
-    // model, so it is in neither read-only selector list, like Copy path.
-    discussHandoffSelBtnHtml() +
     // Always-visible whole-article fact check (markdown pages + explainers).
     '<button class="wiki-bc-factcheck wiki-bc-factcheck-article" id="wikiFactcheckArticleBtn" ' +
     'title="Fact-check this whole page against the web">🔎 Fact check</button>' +
-    // …and «Ask Claude Code» for the whole page, shown where the wiki opts in.
-    discussHandoffPageBtnHtml() +
     // …and its sibling article-level action: take this page into a real chat
     // thread. Same row deliberately — see `discussArticleBtnHtml`.
     discussArticleBtnHtml() +
@@ -1535,6 +1522,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       if (currentPageHash === null && typeof data.hash === "string") currentPageHash = data.hash;
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
+      // «Ask Claude Code» for the whole page; an explainer's selection is in its iframe.
+      setDiscussHandoffEnabled(data.reader?.discussHandoff === true);
       // The same gate as a markdown page: an explainer with inferred keys has
       // provenance too. Its head rendered before this payload, so the strip is
       // inserted when the block lands (`placeProvStrip`), with no placeholder.
@@ -2156,31 +2145,6 @@ const EXPLAIN_MAX_CHARS = 1500;
 let pillSel = "";
 let pillHeading = "";
 
-/** Nearest preceding h1–h4 above the selection, within `.wiki-article`. Walks up
- *  the ancestor chain from the selection's start, scanning previous siblings (and
- *  their inner headings) at each level. Trimmed text, may be empty. */
-function nearestHeading(range: Range): string {
-  const startEl =
-    range.startContainer.nodeType === 1
-      ? (range.startContainer as Element)
-      : range.startContainer.parentElement;
-  const article = startEl?.closest(".wiki-article");
-  if (!article || !startEl) return "";
-  const HEAD = /^H[1-4]$/;
-  let node: Element | null = startEl;
-  while (node && node !== article) {
-    let sib: Element | null = node.previousElementSibling;
-    while (sib) {
-      if (HEAD.test(sib.tagName)) return (sib.textContent || "").trim();
-      const inner = sib.querySelectorAll ? sib.querySelectorAll("h1,h2,h3,h4") : null;
-      if (inner && inner.length) return (inner[inner.length - 1]!.textContent || "").trim();
-      sib = sib.previousElementSibling;
-    }
-    node = node.parentElement;
-  }
-  return "";
-}
-
 /** Reveal / hide the breadcrumb's Explain button. The button is (re)rendered
  *  hidden by `renderBreadcrumb` on every page load, so a lookup-by-id is enough;
  *  on the start view / Ask answers there is no breadcrumb and both are no-ops.
@@ -2191,7 +2155,6 @@ function hideExplainPill(): void {
   // The selection-gated Fact check button rides the same selection state.
   const fc = document.getElementById("wikiFactcheckBtn");
   if (fc) (fc as HTMLElement).style.display = "none";
-  showDiscussSelBtn(false);
 }
 function showExplainPill(): void {
   const btn = document.getElementById("wikiExplainBtn");
@@ -2229,9 +2192,6 @@ function maybeShowExplainPill(): void {
   const range = sel.getRangeAt(0);
   pillSel = text;
   pillHeading = nearestHeading(range);
-  // Discuss P1 reads its own copy now, before a click collapses the selection.
-  captureDiscussSelection(sel);
-  showDiscussSelBtn(true);
   showExplainPill();
 }
 
@@ -3401,13 +3361,6 @@ export function boot(): { dispose(): void } {
       activateExplain();
       return;
     }
-    // «Ask Claude Code» on the selection: its passage was captured at selection time.
-    if (t.closest && t.closest("#" + DISCUSS_HANDOFF_SEL_BTN_ID)) {
-      e.preventDefault();
-      hideExplainPill();
-      openDiscussHandoff(true);
-      return;
-    }
     // Selection-gated Fact check — preventDefault keeps the selection alive so the
     // captured passage is read (same pattern as Explain).
     if (t.closest && t.closest("#wikiFactcheckBtn")) {
@@ -3420,6 +3373,9 @@ export function boot(): { dispose(): void } {
       activateFactcheckArticle();
       return;
     }
+    // «Ask Claude Code» (its own module acts on the click): hiding the pill
+    // here would move that button out from under the pointer before mouseup.
+    if (t.closest && t.closest("#wikiDiscussHandoffBtn")) return;
     hideExplainPill();
   });
   // ── Explainer-iframe bridge ───────────────────────────────────────────

@@ -14,14 +14,11 @@
 import { COMPONENT_NAMES } from "../format/component-spec.ts";
 import { frontmatterBodyLine } from "../format/frontmatter-fence.ts";
 import { readerFences } from "../format/markdown-ast.ts";
-import { locatePassage, pageHeadings, sectionHolding, type LocateResult, type PageHeading } from "./discuss-locate.ts";
+import { HANDOFF_CONTEXT_MAX, HANDOFF_HEADING_MAX, HANDOFF_SELECTION_MAX } from "./discuss-bounds.ts";
+import { locatePassage, pageHeadings, sectionHolding, type LocateRequest, type LocateResult, type PageHeading } from "./discuss-locate.ts";
 
 /** The section text's bound, in characters. */
 export const PACK_SECTION_MAX = 12_000;
-/** The passage's bound, as Explain's selection cap. */
-export const PACK_PASSAGE_MAX = 1500;
-/** The heading hint's bound. */
-export const PACK_HEADING_MAX = 200;
 
 /** Block components whose tag lines the mask blanks; `Fact` wrappers stay. */
 const MASKED_COMPONENTS = new Set<string>(COMPONENT_NAMES.filter((n) => n !== "Fact"));
@@ -77,13 +74,16 @@ export interface ContextPack {
   title: string;
   /** The page's absolute path on the machine serving the reader. */
   path: string;
-  /** The selection, trimmed and bounded; null for a question about the whole page. */
+  /** The whole selection, trimmed; null for a question about the whole page.
+   *  Never cut here: the locator places all of it, and the prompt marks its own cut. */
   passage: string | null;
   /** Where the passage sits; null for the whole page. */
   location: LocateResult | null;
   /** The headings holding the passage's first line, outermost first. */
   headingTrail: string[];
-  section: PackSection;
+  /** The section the passage sits in (the page for a whole-page question);
+   *  null when the passage was not placed. */
+  section: PackSection | null;
   headings: PageHeading[];
   /** The plan-card command, for a page with `plan_status` in a plan-card root. */
   cardCommand: string | null;
@@ -96,8 +96,11 @@ export interface PackInput {
   absPath: string;
   raw: string;
   selection?: string;
-  occurrence?: number;
-  total?: number;
+  before?: string;
+  after?: string;
+  atStart?: boolean;
+  atEnd?: boolean;
+  edge?: LocateRequest["edge"];
   heading?: string;
   cardCommand?: string | null;
 }
@@ -121,7 +124,10 @@ export function buildContextPack(input: PackInput): ContextPack {
   const headings = pageHeadings(raw);
   const masked = packMask(raw);
   const lastLine = Math.max(1, raw.split("\n").length);
-  const passage = input.selection?.trim().slice(0, PACK_PASSAGE_MAX) || null;
+  const passage = input.selection?.trim() || null;
+  if (passage !== null && passage.length > HANDOFF_SELECTION_MAX) {
+    throw new RangeError(`selection over ${HANDOFF_SELECTION_MAX} characters`);
+  }
   const base = {
     wiki: input.wiki,
     relPath: input.relPath,
@@ -136,20 +142,23 @@ export function buildContextPack(input: PackInput): ContextPack {
   }
   const location = locatePassage(raw, {
     selection: passage,
-    occurrence: input.occurrence,
-    total: input.total,
-    heading: input.heading?.slice(0, PACK_HEADING_MAX),
+    before: input.before?.slice(-HANDOFF_CONTEXT_MAX),
+    after: input.after?.slice(0, HANDOFF_CONTEXT_MAX),
+    atStart: input.atStart,
+    atEnd: input.atEnd,
+    edge: input.edge,
+    heading: input.heading?.slice(0, HANDOFF_HEADING_MAX),
     stripTitle: input.title,
   });
-  const anchor = location.fromLine;
-  const holding = anchor === null ? null : sectionHolding(headings, anchor);
-  const headingTrail = anchor === null
-    ? []
-    : headings.filter((h) => h.fromLine <= anchor && anchor <= h.toLine).sort((a, b) => a.level - b.level).map((h) => h.text);
+  // Not placed: no section, so nothing reads as where the passage is.
+  if (location.found === "none") return { ...base, passage, location, headingTrail: [], section: null };
+  const anchor = location.fromLine!;
+  const holding = sectionHolding(headings, anchor);
+  const headingTrail = headings.filter((h) => h.fromLine <= anchor && anchor <= h.toLine).sort((a, b) => a.level - b.level).map((h) => h.text);
   let section: PackSection;
   if (holding) section = boundedSection(masked, holding.text, holding.fromLine, holding.toLine);
   else {
-    // Above the first heading (or not placed): the page from the top to it.
+    // An exact passage above the first heading: the page from the top to it.
     const end = headings[0] ? Math.max(top, headings[0].fromLine - 1) : lastLine;
     section = boundedSection(masked, null, top, end);
   }

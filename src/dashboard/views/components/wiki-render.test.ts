@@ -177,7 +177,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves to 878,000.
 // Its fix round 1 batch 2 (a reason-only change sets the row's title in place): 878,104 (298,801 gzipped),
 // so the pin moves to 878,300.
-const WIKI_CLIENT_MAX_BYTES = 878_300;
+// 2026-11-18, Discuss P1's «Ask Claude Code» (wiki-discuss-handoff.ts, wiki-discuss-text.ts and the
+// shared locate-key.ts and discuss-bounds.ts): 887,956 bytes (302,393 by Bun.gzipSync), so the pin moves to 888,200.
+const WIKI_CLIENT_MAX_BYTES = 888_200;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

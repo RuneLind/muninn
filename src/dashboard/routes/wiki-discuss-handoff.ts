@@ -1,14 +1,18 @@
 /**
  * `POST /api/wiki/discuss/handoff` — Discuss's handoff (mimir plan
  * muninn-wiki-discuss, P1). Body `{wiki, relPath, question, selection?,
- * occurrence?, total?, heading?}`; answers `{prompt, chars, location}`: the
- * prompt the reader copies for Claude Code, built from the context pack
- * (`src/wiki/discuss-pack.ts`). No `selection` asks about the whole page.
+ * before?, after?, atStart?, atEnd?, edge?, heading?}`; answers `{prompt,
+ * chars, location}`: the prompt the reader copies for Claude Code, built from
+ * the context pack (`src/wiki/discuss-pack.ts`). No `selection` key asks about
+ * the whole page; a `selection` that is blank is a 400, never a silent
+ * whole-page prompt.
  *
  * Refusals, in order: 403 role not admin (the prompt carries the page's
- * absolute path, as the Agent lens route's card does) · 415 not JSON · 400 a
- * malformed body · 400/404/503 the page ladder `/api/wiki/page` answers · 404
- * a wiki without `"discuss": {"handoff": true}` in its `.wiki-reader.json`.
+ * absolute path, as the Agent lens route's card does) · 415 not JSON · 413 a
+ * body over `HANDOFF_BODY_MAX` · 400 a malformed body or a field past its
+ * bound (`discuss-bounds.ts`, the client's bounds too) · 400/404/503 the page
+ * ladder `/api/wiki/page` answers · 404 a wiki without
+ * `"discuss": {"handoff": true}` in its `.wiki-reader.json`.
  *
  * It calls no model and starts no process, so it carries no egress prologue
  * and a read-only wiki answers it. Each handoff it builds is logged with the
@@ -16,19 +20,24 @@
  * something to count. In the `wiki` route group, which `MUNINN_PROFILE=nais` drops.
  */
 import path from "node:path";
-import type { Hono } from "hono";
+import type { Context, Hono, Next } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import type { Config } from "../../config.ts";
 import { resolveServingProfile } from "../../config.ts";
 import { getLog } from "../../logging.ts";
-import { buildHandoff, HANDOFF_QUESTION_MAX, planCardCommand } from "../../wiki/discuss-prompt.ts";
-import { PACK_HEADING_MAX, PACK_PASSAGE_MAX } from "../../wiki/discuss-pack.ts";
+import {
+  HANDOFF_BODY_MAX,
+  HANDOFF_CONTEXT_MAX,
+  HANDOFF_HEADING_MAX,
+  HANDOFF_QUESTION_MAX,
+  HANDOFF_SELECTION_MAX,
+} from "../../wiki/discuss-bounds.ts";
+import { buildHandoff, planCardCommand } from "../../wiki/discuss-prompt.ts";
 import { planCardRoots, planCardTargetFor } from "../../wiki/plan-card.ts";
 import { parseFrontmatter, readWikiPage, resolveWikiRoot } from "../../wiki/store.ts";
 import { servesWikiReadSliceOnly } from "../route-groups.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { resolveScopedPage } from "./wiki-read-scope.ts";
-
-const log = getLog("wiki", "discuss");
 
 export const WIKI_DISCUSS_HANDOFF_PATH = "/api/wiki/discuss/handoff";
 
@@ -36,52 +45,97 @@ export interface DiscussHandoffDeps {
   /** plan-card's roots; default `planCardRoots()` from this process's env. */
   roots?: () => string[];
   env?: Record<string, string | undefined>;
+  /** The page resolver; default `resolveScopedPage`. A seam for the refusal-order tests. */
+  resolvePage?: typeof resolveScopedPage;
+  /** The logger; default `["muninn","wiki","discuss"]`. A seam for the no-question-in-the-log test. */
+  log?: { info(msg: string, props: Record<string, unknown>): void; error(msg: string, props: Record<string, unknown>): void };
 }
 
-interface HandoffBody {
+export interface HandoffBody {
   wiki?: string;
   relPath: string;
   question: string;
   selection?: string;
-  occurrence?: number;
-  total?: number;
+  before?: string;
+  after?: string;
+  atStart?: boolean;
+  atEnd?: boolean;
+  edge?: "added" | "reordered";
   heading?: string;
 }
 
-/** The body, or the 400 message. Bounds are generous: the pack clamps again. */
+/** The body, or the 400 message. The bounds are `discuss-bounds.ts`'s, which
+ *  the client and the pack use too. */
 export function parseHandoffBody(raw: unknown): HandoffBody | string {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "body must be a JSON object";
   const b = raw as Record<string, unknown>;
-  const str = (k: string, max: number, required = false): string | undefined | null => {
-    const v = b[k];
-    if (v === undefined || v === null) return required ? null : undefined;
-    if (typeof v !== "string" || v.length > max) return null;
-    return v;
-  };
-  const count = (k: string): number | undefined | null => {
+  const str = (k: string): string | undefined | null => {
     const v = b[k];
     if (v === undefined || v === null) return undefined;
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 100_000 ? v : null;
+    return typeof v === "string" ? v : null;
   };
-  const relPath = str("relPath", 1024, true);
-  if (!relPath || !relPath.trim()) return "relPath is required";
-  const question = str("question", HANDOFF_QUESTION_MAX * 2, true);
-  if (question === null || question === undefined || !question.trim()) return "question is required";
-  const wiki = str("wiki", 200);
-  const selection = str("selection", PACK_PASSAGE_MAX * 4);
-  const heading = str("heading", PACK_HEADING_MAX * 4);
-  const occurrence = count("occurrence");
-  const total = count("total");
-  if (wiki === null || selection === null || heading === null) return "wiki, selection and heading must be strings within their bounds";
-  if (occurrence === null || total === null) return "occurrence and total must be whole numbers";
-  return { wiki, relPath, question, selection, occurrence, total, heading };
+  const flag = (k: string): boolean | undefined | null => {
+    const v = b[k];
+    if (v === undefined || v === null) return undefined;
+    return typeof v === "boolean" ? v : null;
+  };
+  const relPath = str("relPath");
+  if (relPath === null || !relPath?.trim()) return "relPath is required";
+  if (relPath.length > 1024) return "relPath is too long";
+  const question = str("question");
+  if (question === null || !question?.trim()) return "question is required";
+  if (question.length > HANDOFF_QUESTION_MAX) return `question is too long (at most ${HANDOFF_QUESTION_MAX} characters)`;
+  const selection = str("selection");
+  if (selection === null) return "selection must be a string";
+  if (selection !== undefined && !selection.trim()) return "selection is empty (leave it out to ask about the whole page)";
+  if (selection !== undefined && selection.trim().length > HANDOFF_SELECTION_MAX) {
+    return `selection is too long (at most ${HANDOFF_SELECTION_MAX} characters)`;
+  }
+  const wiki = str("wiki");
+  const heading = str("heading");
+  const before = str("before");
+  const after = str("after");
+  if (wiki === null || heading === null || before === null || after === null) return "wiki, heading, before and after must be strings";
+  if ((wiki?.length ?? 0) > 200) return "wiki is too long";
+  if ((heading?.length ?? 0) > HANDOFF_HEADING_MAX * 4) return "heading is too long";
+  if ((before?.length ?? 0) > HANDOFF_CONTEXT_MAX || (after?.length ?? 0) > HANDOFF_CONTEXT_MAX) {
+    return `before and after are at most ${HANDOFF_CONTEXT_MAX} characters`;
+  }
+  const atStart = flag("atStart");
+  const atEnd = flag("atEnd");
+  if (atStart === null || atEnd === null) return "atStart and atEnd must be true or false";
+  const edge = b.edge;
+  if (edge !== undefined && edge !== null && edge !== "added" && edge !== "reordered") return 'edge must be "added" or "reordered"';
+  return {
+    wiki,
+    relPath,
+    question,
+    selection,
+    before,
+    after,
+    atStart,
+    atEnd,
+    ...(edge === "added" || edge === "reordered" ? { edge } : {}),
+    heading,
+  };
 }
 
 export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps: DiscussHandoffDeps = {}): void {
-  app.post(WIKI_DISCUSS_HANDOFF_PATH, async (c) => {
+  const log = deps.log ?? getLog("wiki", "discuss");
+  const resolvePage = deps.resolvePage ?? resolveScopedPage;
+  // The cheap refusals run before the body is read: role, then content type,
+  // then the body's size, streamed (`bodyLimit` stops reading past the bound).
+  const gate = async (c: Context, next: Next) => {
     if ((c.get("role") ?? "admin") !== "admin") return c.json({ error: "Ask Claude Code is for admins" }, 403);
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
+    await next();
+  };
+  const limit = bodyLimit({
+    maxSize: HANDOFF_BODY_MAX,
+    onError: (c) => c.json({ error: `request body is larger than ${HANDOFF_BODY_MAX} bytes`, code: "too_large" }, 413),
+  });
+  app.post(WIKI_DISCUSS_HANDOFF_PATH, gate, limit, async (c) => {
     let raw: unknown;
     try {
       raw = await c.req.json();
@@ -92,7 +146,7 @@ export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps:
     if (typeof body === "string") return c.json({ error: body }, 400);
     try {
       const profile = config.profile ?? resolveServingProfile();
-      const page = await resolveScopedPage(servesWikiReadSliceOnly(profile), { wiki: body.wiki, bot: undefined, relPath: body.relPath, name: undefined });
+      const page = await resolvePage(servesWikiReadSliceOnly(profile), { wiki: body.wiki, bot: undefined, relPath: body.relPath, name: undefined });
       if (!page.ok) return c.json({ error: page.error }, page.status);
       if (page.index.readerConfig?.discuss?.handoff !== true) {
         return c.json({ error: "this wiki does not offer Ask Claude Code", reason: "off" }, 404);
@@ -114,17 +168,22 @@ export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps:
         absPath: target?.abs ?? path.join(wikiDir, page.meta.relPath),
         raw: markdown,
         selection: body.selection,
-        occurrence: body.occurrence,
-        total: body.total,
+        before: body.before,
+        after: body.after,
+        atStart: body.atStart,
+        atEnd: body.atEnd,
+        edge: body.edge,
         heading: body.heading,
         cardCommand: target ? planCardCommand(target.bin, target.abs) : null,
         question: body.question,
       });
       const loc = pack.location;
+      // Never the question, the passage or its context.
       log.info("discuss handoff on {wiki} {relPath}: {found}", {
         wiki: page.entry?.name ?? "",
         relPath: page.meta.relPath,
         found: loc ? loc.found : "page",
+        reason: loc?.reason ?? null,
         tier: loc?.tier ?? null,
         matches: loc?.matches ?? null,
         fromLine: loc?.fromLine ?? null,
@@ -136,7 +195,7 @@ export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps:
         prompt,
         chars: prompt.length,
         location: loc
-          ? { found: loc.found, tier: loc.tier, matches: loc.matches, fromLine: loc.fromLine, toLine: loc.toLine, ambiguous: loc.ambiguous }
+          ? { found: loc.found, reason: loc.reason, tier: loc.tier, matches: loc.matches, fromLine: loc.fromLine, toLine: loc.toLine, ambiguous: loc.ambiguous }
           : null,
       });
     } catch (err) {

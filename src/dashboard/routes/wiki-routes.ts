@@ -1904,6 +1904,8 @@ export function registerWikiReadRoutes(
             hasPlanStatus: parseFrontmatter(markdown).plan_status !== undefined,
             admin: (c.get("role") ?? "admin") === "admin",
           }),
+        // Discuss P1: only where its route is registered, as D7 above.
+        tools,
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

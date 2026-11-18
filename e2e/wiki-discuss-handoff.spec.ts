@@ -9,9 +9,15 @@
  *     to the route and copied through `copyText`. A green locator test says
  *     nothing about any link of that.
  *  2. **The right lines for the hard shapes.** A sentence that appears twice on
- *     the page (the second is selected: the occurrence number decides), and a
- *     bullet that opens in bold and holds inline code (the rendered text has
- *     neither marker).
+ *     the page (the second is selected: the context the client reads around it
+ *     decides), a bullet that opens in bold and holds inline code (the rendered
+ *     text has neither marker), and a selection past Explain's 1,500
+ *     characters (offered, located whole).
+ *  4. **The controls as a keyboard user meets them.** Tab to the selection's
+ *     control and press Enter; Escape closes the panel wherever focus is and
+ *     returns focus to the control; Copy is disabled while its request runs; a
+ *     non-JSON answer shows its status. The whole-page control shows on an
+ *     HTML explainer page too.
  *  3. **The opt-in and the read-only wiki.** A wiki whose `.wiki-reader.json`
  *     does not set `discuss.handoff` shows neither control; a wiki in
  *     `WIKI_READONLY_ROOTS` still offers them, since nothing here calls a model.
@@ -57,7 +63,7 @@ const PAGE = [
   "- **R2, behind.** The page's `status_date` is older than the newest merge.",
   "- The night route is unchanged.",
   "",
-  '<Fold title="Design" summary="routes and stops" open>',
+  '<Fold title="Design" summary="routes and stops" open="true">',
   "", //                                                             15
   "## Design",
   "",
@@ -65,7 +71,12 @@ const PAGE = [
   "",
   "</Fold>", //                                                      20
   "",
+  "## Long", //                                                      22
+  "",
+  ...Array.from({ length: 30 }, (_, k) => `Line ${k} of the long section says something different about berth number ${k}.`), // 24-53
+  "",
 ].join("\n");
+const EXPLAINER = "notes/board.html";
 
 let server: ChildProcess | undefined;
 let root = "";
@@ -80,6 +91,8 @@ test.beforeAll(async () => {
     await mkdir(path.join(r, "plans"), { recursive: true });
     await writeFile(path.join(r, REL), PAGE, "utf8");
   }
+  await mkdir(path.join(root, "notes"), { recursive: true });
+  await writeFile(path.join(root, EXPLAINER), "<!doctype html><html><head><title>Board</title></head><body><h1>Board</h1><p>Departures.</p></body></html>", "utf8");
   const on = JSON.stringify({ discuss: { handoff: true } });
   await writeFile(path.join(root, ".wiki-reader.json"), on, "utf8");
   await writeFile(path.join(roRoot, ".wiki-reader.json"), on, "utf8");
@@ -235,12 +248,75 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     expect(clip).toContain("Passage (line 12,");
   });
 
+  test("a selection past Explain's 1,500 characters: offered, and its range runs to its end", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI);
+    await select(page, "Line 0 of the long section", 1, "berth number 29.");
+    expect(await page.evaluate(() => getSelection()!.toString().length)).toBeGreaterThan(1500);
+    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toBeVisible();
+    await expect(page.locator("#wikiExplainBtn")).toBeHidden();
+    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    const clip = await askAndCopy(page, "Which berths?");
+    expect(clip).toContain("Passage (lines 24–53, Harbour timetable › Long):");
+  });
+
+  test("keyboard: Tab to the control, Enter opens; Escape with focus on the page closes and returns focus", async ({ page }) => {
+    await openPage(page, WIKI);
+    await select(page, "The night route is unchanged.", 1);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await expect(btn).toBeVisible();
+    // Reach the control from the one before it, as Tab does.
+    await page.locator("#wikiFactcheckBtn").focus();
+    await page.keyboard.press("Tab");
+    await expect(btn).toBeFocused();
+    await page.keyboard.press("Enter");
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel).toBeVisible();
+    await expect(panel).toHaveAttribute("role", "group");
+    await expect(panel.locator("textarea.wiki-handoff-q")).toHaveAttribute("maxlength", "2000");
+    // Focus off the panel (as the fallback copy leaves it), then Escape.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(btn).toBeFocused();
+  });
+
+  test("Copy is disabled while its request runs, and a non-JSON answer shows its status", async ({ page }) => {
+    await openPage(page, WIKI);
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/discuss/handoff", async (route) => {
+      await held;
+      await route.fulfill({ status: 502, contentType: "text/html", body: "<html>Bad gateway</html>" });
+    });
+    await page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`).click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await panel.locator("textarea.wiki-handoff-q").fill("Anything?");
+    await panel.locator("[data-handoff=copy]").click();
+    await expect(panel.locator("[data-handoff=copy]")).toBeDisabled();
+    release();
+    await expect(panel.locator(".wiki-handoff-status")).toHaveText("The prompt could not be built (502).");
+    await expect(panel.locator("[data-handoff=copy]")).toBeEnabled();
+  });
+
+  test("an HTML explainer page offers the whole-page control", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(EXPLAINER)}`);
+    await expect(page.locator("iframe.wiki-explainer-frame")).toBeVisible();
+    const pageBtn = page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`);
+    await expect(pageBtn).toBeVisible();
+    await pageBtn.click();
+    const clip = await askAndCopy(page, "What does the board show?");
+    expect(clip).toContain(`Page: ${root}/${EXPLAINER}`);
+    expect(clip).toContain("Question about the whole page: What does the board show?");
+  });
+
   test("a wiki without discuss.handoff shows neither control", async ({ page }) => {
     await openPage(page, OFF_WIKI);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toBeHidden();
+    await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toHaveCount(0);
     await select(page, "The night route is unchanged.", 1);
     // Explain shows for the same selection: the selection was read.
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toBeHidden();
+    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
   });
 });
