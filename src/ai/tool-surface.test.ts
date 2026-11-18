@@ -14,6 +14,7 @@ import {
   readSearchDenial,
   refuseFencedSurface,
   refuseMcpToolsSurface,
+  surfaceKind,
   toolSurfaceBlocker,
   toolSurfaceTestSeam,
   type ToolSurface,
@@ -97,6 +98,27 @@ describe("applyToolSurface", () => {
     expect(() => refuseFencedSurface("copilot-sdk", undefined)).not.toThrow();
     // { mcpTools } is not a fenced shape: Copilot runs it, so this lets it through.
     expect(() => refuseFencedSurface("copilot-sdk", { mcpTools: { s: ["t"] } })).not.toThrow();
+  });
+
+  test("an object of no known shape has no kind, and every refusal names it as unrecognised, never as a kind", async () => {
+    const odd = { foo: 1 } as unknown as ToolSurface;
+    expect(surfaceKind(odd)).toBeUndefined();
+    for (const connector of ["copilot-sdk", "openai-compat"]) {
+      let message = "";
+      try {
+        refuseFencedSurface(connector, odd);
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toBe(`${connector}: an unrecognised tool surface {"foo":1} — refusing to run it.`);
+    }
+    // claude-cli's version gate refuses it too, whatever the installed CLI, instead of naming a kind.
+    __setClaudeCliVersionForTest("9.9.9");
+    try {
+      await expect(assertRestrictedCliAvailable(odd as never)).rejects.toThrow(/^claude-cli: an unrecognised tool surface \{"foo":1\}/);
+    } finally {
+      __setClaudeCliVersionForTest(undefined);
+    }
   });
 
   test("refuseMcpToolsSurface refuses { mcpTools } and nothing else", () => {

@@ -60,13 +60,19 @@ export function mcpToolsSurface(surface: ToolSurface | undefined): McpToolsSurfa
   return typeof surface === "object" && "mcpTools" in surface ? surface : undefined;
 }
 
-/** `undefined` for `"none"`, `"bot"` and an absent surface. */
+/** `undefined` for `"none"`, `"bot"`, an absent surface and an object of no known shape. */
 export function surfaceKind(surface: ToolSurface | undefined): SurfaceKind | undefined {
-  if (typeof surface !== "object") return undefined;
+  if (typeof surface !== "object" || surface === null) return undefined;
   if ("read" in surface) return "read";
   if ("web" in surface) return "web";
   if ("readSearch" in surface) return "readSearch";
-  return "mcpTools";
+  if ("mcpTools" in surface) return "mcpTools";
+  return undefined;
+}
+
+/** The sentence a connector refuses an object of no known surface shape with. */
+export function unknownSurfaceMessage(connector: string, surface: unknown): string {
+  return `${connector}: an unrecognised tool surface ${String(JSON.stringify(surface))} — refusing to run it.`;
 }
 
 /** The built-in tools a fenced surface keeps. */
@@ -401,7 +407,8 @@ export function unsupportedSurfaceMessage(connector: string, kind: SurfaceKind):
 export function refuseFencedSurface(connector: string, surface: ToolSurface | undefined): void {
   const fence = fencedSurface(surface);
   if (!fence) return;
-  throw new Error(unsupportedSurfaceMessage(connector, surfaceKind(fence)!));
+  const kind = surfaceKind(fence);
+  throw new Error(kind ? unsupportedSurfaceMessage(connector, kind) : unknownSurfaceMessage(connector, fence));
 }
 
 /**
@@ -500,7 +507,8 @@ export function validateToolSurface(connector: ConnectorType, surface: unknown):
     );
   }
   const shaped = surface as ToolSurface;
-  const kind = surfaceKind(shaped)!;
+  const kind = surfaceKind(shaped);
+  if (kind === undefined) throw new Error(unknownSurfaceMessage("executeOneShot", surface));
   if (!connectorSupports(connector, kind)) {
     throw new Error(`Connector "${connector}" cannot run a ${SURFACE_KIND_LABEL[kind]} tool surface — only ${connectorsFor(kind)} can.`);
   }
@@ -625,7 +633,10 @@ async function restrictedCliShortfall(kind: "read" | "web" | "readSearch"): Prom
 
 /** Throw unless the installed CLI has `--restricted`, which a fenced surface needs. */
 export async function assertRestrictedCliAvailable(surface: FencedToolSurface): Promise<void> {
-  const shortfall = await restrictedCliShortfall(surfaceKind(surface) as "read" | "web" | "readSearch");
+  const kind = surfaceKind(surface);
+  if (kind === undefined) throw new Error(unknownSurfaceMessage("claude-cli", surface));
+  if (kind === "mcpTools") throw new Error(unsupportedSurfaceMessage("claude-cli", kind));
+  const shortfall = await restrictedCliShortfall(kind);
   if (shortfall !== null) throw new Error(shortfall);
 }
 

@@ -49,7 +49,7 @@ mock.module("@github/copilot-sdk", () => ({
 }));
 
 const { driveBot, driveCapture, driveConfig } = await import("../../test/one-shot-drive.ts");
-const { executePrompt } = await import("./copilot-sdk.ts");
+const { copilotNamedToolsSession, executePrompt } = await import("./copilot-sdk.ts");
 
 let botDir: string;
 let agentRoot: string;
@@ -155,6 +155,39 @@ describe("copilot-sdk { mcpTools }: an allow list of tool names", () => {
     await expect(driveCapture(copilotBot(), surface)).rejects.toThrow(/holds tools it was not given \(bash\)/);
     expect(deleted).toEqual(["s1"]);
     expect(sent).toEqual([]);
+  });
+
+  test("a session holding no tools is deleted and refused, naming every missing tool", async () => {
+    reportTools = () => [];
+    await expect(driveCapture(copilotBot(), surface)).rejects.toThrow(
+      /missing listed tools \(yggdrasil-search, yggdrasil-list_files\)/,
+    );
+    expect(deleted).toEqual(["s1"]);
+    expect(sent).toEqual([]);
+  });
+
+  test("a session holding only some of the listed tools is deleted and refused, naming the missing one", async () => {
+    reportTools = () => [{ name: "yggdrasil-search" }];
+    await expect(driveCapture(copilotBot(), surface)).rejects.toThrow(/missing listed tools \(yggdrasil-list_files\)/);
+    expect(deleted).toEqual(["s1"]);
+    expect(sent).toEqual([]);
+  });
+
+  test("a listed tool the bot's config.json excludes is refused before a session exists, in every pattern form", () => {
+    for (const pattern of ["yggdrasil-search", "mcp:yggdrasil-search", "mcp__yggdrasil__search", "mcp__yggdrasil", "yggdrasil-*", "mcp:*"]) {
+      expect(() =>
+        copilotNamedToolsSession({ ...copilotBot(), excludedTools: [pattern] }, { mcpTools: { yggdrasil: ["search"] } }),
+      ).toThrow(/lists yggdrasil\/search, which .* config\.json excludes/);
+    }
+    expect(sessions).toHaveLength(0);
+  });
+
+  test("the bot's other exclusions ride into the session's excludedTools", () => {
+    const o = copilotNamedToolsSession(
+      { ...copilotBot(), excludedTools: ["yggdrasil-impact", "hivemind-*"] },
+      { mcpTools: { yggdrasil: ["search"] } },
+    );
+    expect(o.excludedTools).toEqual(["yggdrasil-impact", "hivemind-*", "builtin:*", "custom:*"]);
   });
 
   test("a runtime that reports no tool list is refused (fails closed)", async () => {

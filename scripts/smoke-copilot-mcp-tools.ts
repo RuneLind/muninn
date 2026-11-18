@@ -8,7 +8,9 @@
  *
  * Three parts, each through the shipped connector code:
  *  1. The session the connector builds (`createCopilotSession`), read back
- *     with the runtime's own tool list (`session.rpc.tools.getCurrentMetadata`).
+ *     with the runtime's own tool list (`session.rpc.tools.getCurrentMetadata`),
+ *     and two sessions it must refuse because a listed tool is missing (a name
+ *     the server lacks, a server that is down).
  *  2. Every listed tool executed directly in that session with arguments aimed
  *     at the ignored file (its path, its name, distinctive lines of it), plus
  *     calls to tools that must not exist there (shell, file write, hivemind,
@@ -21,7 +23,8 @@
  * HTTP server, the knowledge API) and a Copilot login (`gh auth login`).
  */
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import type { BotConfig } from "../src/bots/config.ts";
@@ -107,6 +110,31 @@ const names = (meta.tools ?? []).map((t) => t.name).sort();
 const expected = Object.entries(SURFACE.mcpTools).flatMap(([s, ts]) => ts.map((t) => `${s}-${t}`)).sort();
 console.log(`session tools (as the runtime reports them): ${JSON.stringify(names)}`);
 check("the session holds exactly the listed tools", JSON.stringify(names) === JSON.stringify(expected));
+
+// A session missing a listed tool is refused, never run tool-less: a tool name the
+// server does not have, and a listed server that is unreachable (a scratch
+// .mcp.json pointing the server's name at a closed port).
+async function refusedMissing(label: string, b: BotConfig, surface: McpToolsSurface) {
+  const eff = applyToolSurface(b, surface);
+  try {
+    const s = await createCopilotSession(cl, eff, model, "You are a test assistant.", copilotNamedToolsSession(eff, surface));
+    await cl.deleteSession(s.sessionId).catch(() => {});
+    check(`${label}: refused`, false, "the session was created");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    check(`${label}: refused`, /missing listed tools/.test(msg), msg);
+  }
+}
+await refusedMissing("a listed tool the server does not have", bot, { mcpTools: { yggdrasil: ["search", "no_such_tool"] } });
+{
+  const scratch = mkdtempSync(join(tmpdir(), "smoke-mcp-down-"));
+  writeFileSync(join(scratch, ".mcp.json"), JSON.stringify({ mcpServers: { yggdrasil: { type: "http", url: "http://127.0.0.1:1/mcp" } } }));
+  try {
+    await refusedMissing("a listed server that is unreachable", { ...bot, name: "scratch", dir: scratch }, { mcpTools: { yggdrasil: ["search"] } });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 // The control: the same bot's ordinary session, so the allow list is what removed the rest.
 {

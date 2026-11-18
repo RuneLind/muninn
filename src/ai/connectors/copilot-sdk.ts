@@ -428,7 +428,8 @@ export type NamedToolsSessionOptions = Pick<
  * Only the named servers start, each filtered to its listed tools; the
  * session's `availableTools` names exactly those tools as `mcp:<server>-<tool>`
  * (source-qualified, so a built-in of the same name never matches);
- * `builtin:*` and `custom:*` are excluded as well, and nothing is discovered
+ * `builtin:*`, `custom:*` and the bot's own `excludedTools` are excluded as
+ * well (a listed tool the bot excludes is refused here), and nothing is discovered
  * from disk: no custom instructions, skills, plugins, file hooks, cross-session
  * store or memory, and no custom agent. Throws when the bot's `.mcp.json` does
  * not hold a named server.
@@ -442,12 +443,21 @@ export function copilotNamedToolsSession(botConfig: BotConfig, surface: McpTools
     if (!entry) {
       throw new Error(`copilot-sdk: the { mcpTools } surface names server "${server}", which ${botConfig.name}'s .mcp.json does not hold.`);
     }
+    const denied = tools.filter((tool) => botExcludesMcpTool(botConfig.excludedTools, server, tool));
+    if (denied.length > 0) {
+      throw new Error(
+        `copilot-sdk: the { mcpTools } surface lists ${denied.map((t) => `${server}/${t}`).join(", ")}, ` +
+          `which ${botConfig.name}'s config.json excludes.`,
+      );
+    }
     mcpServers[server] = { ...entry, tools: [...tools] };
   }
   return {
     mcpServers,
     availableTools: namedToolWireNames(surface).map((name) => `mcp:${name}`),
-    excludedTools: ["builtin:*", "custom:*"],
+    // The bot's own exclusions ride along (the SDK sends toolFilterPrecedence
+    // "excluded", so deny wins) for a pattern form the check above does not read.
+    excludedTools: [...(botConfig.excludedTools ?? []), "builtin:*", "custom:*"],
     customAgents: [],
     skipCustomInstructions: true,
     enableSkills: false,
@@ -479,11 +489,13 @@ export function namedToolsPermissionHandler(surface: McpToolsSurface): Permissio
 }
 
 /**
- * Throw unless the session's initialized tool list is a subset of `allowed`
- * (wire names). The allow list is the fence; this reads back what the runtime
+ * Throw unless the session's initialized tool list EQUALS `allowed` (wire
+ * names). The allow list is the fence; this reads back what the runtime
  * actually built, so a runtime that ignored `availableTools` or added a tool
- * of its own is refused before the prompt is sent. Fails closed: a runtime
- * that cannot report its tools refuses the run.
+ * of its own is refused before the prompt is sent, and so is a session missing
+ * a listed tool (a server that is down, a tool name it does not have: measured,
+ * the runtime then builds the session without it and reports no error).
+ * Fails closed: a runtime that cannot report its tools refuses the run.
  */
 export async function assertSessionHoldsOnly(session: Pick<CopilotSession, "rpc">, allowed: string[]): Promise<string[]> {
   await session.rpc.tools.initializeAndValidate();
@@ -494,7 +506,29 @@ export async function assertSessionHoldsOnly(session: Pick<CopilotSession, "rpc"
   if (extra.length > 0) {
     throw new Error(`copilot-sdk: the { mcpTools } session holds tools it was not given (${extra.join(", ")}) — refusing to run it.`);
   }
+  const missing = allowed.filter((n) => !names.includes(n));
+  if (missing.length > 0) {
+    throw new Error(
+      `copilot-sdk: the { mcpTools } session is missing listed tools (${missing.join(", ")}) — ` +
+        "a server is down or does not have them; refusing to run it.",
+    );
+  }
   return names;
+}
+
+/**
+ * Whether one of the bot's `excludedTools` patterns denies the MCP tool
+ * `<server>-<tool>`: Copilot's forms (`server-tool`, `mcp:server-tool`, a
+ * trailing `*` on either, `mcp:*`) and Claude Code's (`mcp__server__tool`,
+ * `mcp__server`).
+ */
+export function botExcludesMcpTool(excluded: string[] | undefined, server: string, tool: string): boolean {
+  const wire = `${server}-${tool}`;
+  return (excluded ?? []).some((pattern) => {
+    if (pattern === `mcp__${server}__${tool}` || pattern === `mcp__${server}`) return true;
+    const p = pattern.startsWith("mcp:") ? pattern.slice(4) : pattern;
+    return p.endsWith("*") ? wire.startsWith(p.slice(0, -1)) : p === wire;
+  });
 }
 
 /**
