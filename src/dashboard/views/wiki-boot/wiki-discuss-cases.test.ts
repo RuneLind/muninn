@@ -1,6 +1,6 @@
 /**
  * The Discuss locator's cases, end to end on synthetic pages: the reader's
- * render after the client's enhancers, a selection made on it, its text read
+ * render after every step the reader runs on it (`discuss-reader-article.ts`), a selection made on it, its text read
  * by `readerSelectionText` and its context by `discussContext`, then
  * `locatePassage` on the page source. The one outcome every case guards: a
  * line range stated as found (`exact`) is the passage's own; anything else is
@@ -12,12 +12,10 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { questionRenderOptionsFor, renderWikiHtml } from "../../../wiki/render.ts";
 import { locatePassage, type LocateResult } from "../../../wiki/discuss-locate.ts";
 import { DISCUSS_TEXT_HIDDEN, discussContext, discussHeading } from "../components/wiki-discuss-text.ts";
-import { enhanceCodeBlocks } from "../components/code-block-chrome.ts";
-import { applyLaneRoles } from "../components/wiki-report-blocks.ts";
-import { enhanceLens, readerSelectionText } from "../components/wiki-lens.ts";
+import { readerSelectionText } from "../components/wiki-lens.ts";
+import { readerArticle } from "./discuss-reader-article.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -50,28 +48,6 @@ afterAll(() => {
   }
   saved.clear();
 });
-
-const pages = new Map([["ferry-plan", { name: "ferry-plan", relPath: "plans/ferry-plan.mdx", title: "Ferry plan" }]]);
-const resolve = (t: string) => pages.get(t.trim().toLowerCase()) as never;
-
-/** The reader's article for `md`, enhanced as `fetchAndRenderPage` does. */
-function readerArticle(md: string, opts: { title?: string; roles?: string[] } = {}): HTMLElement {
-  document.body.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.id = "articleWrap";
-  wrap.innerHTML = `<div class="wiki-article">${renderWikiHtml(md, resolve, {
-    stripTitle: opts.title,
-    readerShapes: true,
-    views: true,
-    question: questionRenderOptionsFor(md, null, false, null),
-  })}</div>`;
-  document.body.appendChild(wrap);
-  const article = wrap.querySelector<HTMLElement>(".wiki-article")!;
-  enhanceCodeBlocks(article);
-  applyLaneRoles(article, opts.roles ?? []);
-  enhanceLens(wrap, { language: "en", agentAvailable: false, inPlace: false, chipHost: null, initial: "all" } as never);
-  return article;
-}
 
 /** Text nodes of `root` outside the hidden parts, with a flat string. */
 function flat(root: Element) {
@@ -153,24 +129,24 @@ describe("inline markup and links", () => {
     "- **R1, summer.** Adds a stop at `Example Island` for MELOSYS-999.",
     "- The night route is unchanged.",
   );
-  test("a selection over bold, inline code, a link and both kinds of wikilink", () => {
-    const a = readerArticle(md);
+  test("a selection over bold, inline code, a link and both kinds of wikilink", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "winter timetable", { to: "the ferry plan" })), lineOf(md, "winter"));
   });
-  test("a bullet that opens in bold and holds inline code", () => {
-    const a = readerArticle(md);
+  test("a bullet that opens in bold and holds inline code", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "R1, summer.", { to: "MELOSYS-999." })), lineOf(md, "R1, summer"));
   });
-  test("across two list items", () => {
-    const a = readerArticle(md);
+  test("across two list items", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "Example Island", { to: "is unchanged." })), lineOf(md, "R1, summer"), lineOf(md, "night route"));
   });
 });
 
 describe("chips the reader adds", () => {
-  test("a selection over a live-fact chip (filled by the client) and a fact-check chip", () => {
+  test("a selection over a live-fact chip (filled by the client) and a fact-check chip", async () => {
     const md = page("Merged MELOSYS-999 today, and the pier is <Fact n=\"1\" v=\"ok\">open at six</Fact> every day of the week.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     // The client fills a live chip after the mention, reader-only.
     const f = flat(a);
     const [node, off] = f.pos(f.text.indexOf("MELOSYS-999") + "MELOSYS-999".length);
@@ -183,40 +159,40 @@ describe("chips the reader adds", () => {
     expect(a.querySelector(".fc-chip")).not.toBeNull();
     expectExact(locate(md, rangeOf(a, "Merged", { to: "of the week." })), lineOf(md, "Merged"));
   });
-  test("a page with fact wrappers, block and inline", () => {
+  test("a page with fact wrappers, block and inline", async () => {
     const md = page('<Fact n="2" v="warn">', "A whole checked paragraph about the pier.", "</Fact>", "", 'Before <Fact n="3" v="ok">a claim</Fact> after it.');
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "checked paragraph")), lineOf(md, "checked paragraph"));
     expectExact(locate(md, rangeOf(a, "a claim after")), lineOf(md, "a claim"));
   });
 });
 
 describe("duplicates", () => {
-  test("a sentence twice on the page: each copy gets its own line", () => {
+  test("a sentence twice on the page: each copy gets its own line", async () => {
     const md = page("## One", "", "Boats leave early. The pier opens at six.", "", "## Two", "", "Ferries run late. The pier opens at six.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "The pier opens at six.", { nth: 1 })), lineOf(md, "The pier opens", 1));
     expectExact(locate(md, rangeOf(a, "The pier opens at six.", { nth: 2 })), lineOf(md, "The pier opens", 2));
   });
-  test("twice in one section", () => {
+  test("twice in one section", async () => {
     const md = page("## One", "", "Boats leave early. The pier opens at six.", "", "Ferries run late. The pier opens at six.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "The pier opens at six.", { nth: 2 })), lineOf(md, "The pier opens", 2));
   });
-  test("two identical bullets whose neighbours are the same further than the context reads fall back, both lines listed", () => {
+  test("two identical bullets whose neighbours are the same further than the context reads fall back, both lines listed", async () => {
     // Neighbours longer than the context the client reads (160 key characters), so no side tells the copies apart.
     const long = "Check the pier, the ramp, the bollards, the lights and the ropes before the first boat leaves the harbour in the morning, and write each finding in the log book by the door, with the time, the name of the person who checked and what was done about it.";
     const md = page("## Steps", "", `- ${long}`, "- Print the boards.", `- ${long}`, "", "## More", "", `- ${long}`, "- Print the boards.", `- ${long}`);
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const r = locate(md, rangeOf(a, "Print the boards.", { nth: 1 }));
     expect(r.found).toBe("section");
     expect(r.reason).toBe("ambiguous");
     expect(r.candidates).toEqual([lineOf(md, "Print the boards", 1), lineOf(md, "Print the boards", 2)]);
     expect(r.section?.heading).toBe("Steps");
   });
-  test("two identical bullets told apart only past the near context: the far context chooses", () => {
+  test("two identical bullets told apart only past the near context: the far context chooses", async () => {
     const md = page("## Steps", "", "- Check the pier.", "- Print the boards.", "- Check the pier.", "- Print the boards.", "- Check the pier.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "Print the boards.", { nth: 1 })), lineOf(md, "Print the boards", 1));
     expectExact(locate(md, rangeOf(a, "Print the boards.", { nth: 2 })), lineOf(md, "Print the boards", 2));
   });
@@ -243,42 +219,42 @@ describe("inside components", () => {
     "| Summer | `4` stops a day |",
     "| Winter | `2` stops a day |",
   );
-  test("inside a Fold", () => {
-    const a = readerArticle(md);
+  test("inside a Fold", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "summer route adds")), lineOf(md, "summer route adds"));
   });
-  test("inside a component inside a Fold", () => {
-    const a = readerArticle(md);
+  test("inside a component inside a Fold", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "Low water closes the north pier.")), lineOf(md, "Low water"));
   });
-  test("in a table row", () => {
-    const a = readerArticle(md);
+  test("in a table row", async () => {
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "2 stops a day")), lineOf(md, "| Winter"));
   });
 });
 
 describe("text the source does not hold, and short pages", () => {
-  test("text the reader shows that is not in the file: no range stated as found", () => {
+  test("text the reader shows that is not in the file: no range stated as found", async () => {
     const md = page("## Brief", "", "The pier opens at six.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     a.insertAdjacentHTML("beforeend", "<p>Nothing like this is in the file.</p>");
     const r = locate(md, rangeOf(a, "Nothing like this"));
     expect(r.found).not.toBe("exact");
     expect(r.reason).toBe("no-match");
   });
-  test("a page under 3,000 characters", () => {
+  test("a page under 3,000 characters", async () => {
     const md = page("A short note: the pier opens at six.");
     expect(md.length).toBeLessThan(3000);
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const r = locate(md, rangeOf(a, "the pier opens at six."));
     expectExact(r, lineOf(md, "short note"));
   });
 });
 
 describe("review cases: a range stated as found is never another place's", () => {
-  test("1: a word in a lane's head goes to the section, though the source holds it elsewhere", () => {
+  test("1: a word in a lane's head goes to the section, though the source holds it elsewhere", async () => {
     const md = page("## Next", "", "<NextMoves>", "", '<Lane kind="you" who="harbourmaster">', "", "- Print the boards.", "", "</Lane>", "", "</NextMoves>", "", "The harbourmaster_config key sets it.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const head = a.querySelector(".nm-head .nm-who")!;
     const r2 = document.createRange();
     r2.selectNodeContents(head);
@@ -286,24 +262,24 @@ describe("review cases: a range stated as found is never another place's", () =>
     expect(r.found).not.toBe("exact");
     expect(r.reason).toBe("added");
   });
-  test("1: text in a Query card's SQL (a sibling file's content) goes to the section", () => {
+  test("1: text in a Query card's SQL (a sibling file's content) goes to the section", async () => {
     const md = page("## Data", "", "Count the boats per day.", "", "select count(*) from boats");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     a.insertAdjacentHTML("afterbegin", '<details class="query-sql"><summary>SQL</summary><pre>select count(*) from boats</pre></details>');
     const r = locate(md, rangeOf(a, "select count(*) from boats", { nth: 1 }));
     expect(r.found).not.toBe("exact");
   });
-  test("1: unknown chrome holding a word the source has elsewhere: the context disagrees", () => {
+  test("1: unknown chrome holding a word the source has elsewhere: the context disagrees", async () => {
     const md = page("## Brief", "", "Boats leave early.", "", "The harbour_pier key is in config.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     // A reader addition this reading does not know of.
     a.insertAdjacentHTML("afterbegin", '<div class="some-new-chrome">harbour</div>');
     const r = locate(md, rangeOf(a, "harbour", { nth: 1 }));
     expect(r.found).not.toBe("exact");
   });
-  test("2: a Figure caption that repeats a prose sentence", () => {
+  test("2: a Figure caption that repeats a prose sentence", async () => {
     const md = page("## Map", "", "The pier opens at six.", "", '<Figure caption="The pier opens at six.">', "", "![map](map.png)", "", "</Figure>", "", "More text after.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const cap = a.querySelector("figcaption")!;
     const r2 = document.createRange();
     r2.selectNodeContents(cap);
@@ -311,7 +287,7 @@ describe("review cases: a range stated as found is never another place's", () =>
     expect(r.found).not.toBe("exact");
     expect(r.reason).toBe("added");
   });
-  test("2: attribute-born text (a Tab label, a FactCheck date, a DeltaTable/Steps/Diagram src line, a Lane's who) is never placed at a prose copy", () => {
+  test("2: attribute-born text (a Tab label, a FactCheck date, a DeltaTable/Steps/Diagram src line, a Lane's who) is never placed at a prose copy", async () => {
     const S = "zz copy here";
     const cases = [
       `<Tab label="${S}">\n\nBody.\n\n</Tab>`,
@@ -323,31 +299,34 @@ describe("review cases: a range stated as found is never another place's", () =>
     ];
     for (const c of cases) {
       const md = page("## A", "", `Prose: ${S}.`, "", c, "", "After.");
-      const a = readerArticle(md);
+      const a = await readerArticle(md);
+      // Every copy the reader shows outside the prose line (a FactCheck date
+      // shows twice: in its strip and in the page's fact-check toolbar).
       const f = flat(a);
-      const first = f.text.indexOf(S);
-      const second = f.text.indexOf(S, first + 1);
-      if (second === -1) continue; // the component does not show it
-      const r = locate(md, rangeOf(a, S, { nth: 2 }));
-      expect({ c, found: r.found }).not.toEqual({ c, found: "exact" });
+      for (let nth = 1, at = f.text.indexOf(S); at !== -1; nth++, at = f.text.indexOf(S, at + 1)) {
+        const range = rangeOf(a, S, { nth });
+        if ((range.startContainer.textContent ?? "").includes("Prose:")) continue;
+        const r = locate(md, range);
+        expect({ c, nth, found: r.found }).not.toEqual({ c, nth, found: "exact" });
+      }
     }
   });
-  test("3: a Diagram body (source only) and its caption (reader only) with the same words", () => {
+  test("3: a Diagram body (source only) and its caption (reader only) with the same words", async () => {
     const md = page("## Flow", "", '<Diagram src="flow.diagram.json" caption="boats to the pier">', "", "boats to the pier", "", "</Diagram>", "", "After the diagram.");
     // As the reader shows a loaded diagram: the picture and its caption.
-    const shown = (captionTag: string) => {
-      const a = readerArticle(md);
+    const shown = async (captionTag: string) => {
+      const a = await readerArticle(md);
       a.querySelector(".dgm-unavailable")!.outerHTML = `<figure class="dgm"><svg></svg><${captionTag}>boats to the pier</${captionTag.split(" ")[0]}></figure>`;
       return a;
     };
-    expect(locate(md, rangeOf(shown("figcaption"), "boats to the pier")).reason).toBe("added");
+    expect(locate(md, rangeOf(await shown("figcaption"), "boats to the pier")).reason).toBe("added");
     // A caption element this reading does not know of: the body is no text the
     // reader shows, so the source holds no match.
-    const r = locate(md, rangeOf(shown('div class="some-caption"'), "boats to the pier"));
+    const r = locate(md, rangeOf(await shown('div class="some-caption"'), "boats to the pier"));
     expect(r.found).not.toBe("exact");
     expect(r.reason).toBe("no-match");
   });
-  test("4: an identical bullet in two lanes the role reorders gets its own lane's line, or falls back", () => {
+  test("4: an identical bullet in two lanes the role reorders gets its own lane's line, or falls back", async () => {
     const md = page(
       "<NextMoves>",
       "",
@@ -367,30 +346,30 @@ describe("review cases: a range stated as found is never another place's", () =>
       "",
       "</NextMoves>",
     );
-    const a = readerArticle(md, { roles: ["utvikler"] });
+    const a = await readerArticle(md, { roles: ["utvikler"] });
     expect(Array.from(a.querySelectorAll(".nm-lanes > .nm-lane")).map((l) => l.getAttribute("data-nm-order"))).toEqual(["1", "0"]);
     // Shown first: the utvikler lane's copy, authored second.
     expectExact(locate(md, rangeOf(a, "Print the new boards.", { nth: 1 })), lineOf(md, "Print the new boards", 2));
     expectExact(locate(md, rangeOf(a, "Print the new boards.", { nth: 2 })), lineOf(md, "Print the new boards", 1));
   });
-  test("4: two single-bullet lanes with the same bullet, swapped by the role: never the other lane's line", () => {
+  test("4: two single-bullet lanes with the same bullet, swapped by the role: never the other lane's line", async () => {
     const md = page("<NextMoves>", "", '<Lane kind="you" role="fag">', "", "- Print the new boards.", "", "</Lane>", "", '<Lane kind="you" role="utvikler">', "", "- Print the new boards.", "", "</Lane>", "", "</NextMoves>");
-    const a = readerArticle(md, { roles: ["utvikler"] });
+    const a = await readerArticle(md, { roles: ["utvikler"] });
     expectNotWrong(locate(md, rangeOf(a, "Print the new boards.", { nth: 1 })), lineOf(md, "Print the new boards", 2));
     expectNotWrong(locate(md, rangeOf(a, "Print the new boards.", { nth: 2 })), lineOf(md, "Print the new boards", 1));
   });
-  test("4: a selection across two reordered lanes goes to the section", () => {
+  test("4: a selection across two reordered lanes goes to the section", async () => {
     const md = page("## Next", "", "<NextMoves>", "", '<Lane kind="you" role="fag">', "", "- Confirm the stops.", "", "</Lane>", "", '<Lane kind="you" role="utvikler">', "", "- Ship the parser.", "", "</Lane>", "", "</NextMoves>");
-    const a = readerArticle(md, { roles: ["utvikler"] });
+    const a = await readerArticle(md, { roles: ["utvikler"] });
     const range = rangeOf(a, "the parser.", { to: "Confirm the" });
     expect(discussContext(a, range)?.edge).toBe("reordered");
     const r = locate(md, range);
     expect(r).toMatchObject({ found: "section", reason: "reordered" });
     // Lanes in their authored order: one stretch of the source, no mark.
-    const plain = readerArticle(md);
+    const plain = await readerArticle(md);
     expect(discussContext(plain, rangeOf(plain, "the stops.", { to: "Ship the" }))?.edge).toBeNull();
   });
-  test("5: a selection across DecisionLog items shown newest first, with a verbatim copy elsewhere", () => {
+  test("5: a selection across DecisionLog items shown newest first, with a verbatim copy elsewhere", async () => {
     const md = page(
       "## Log",
       "",
@@ -406,71 +385,127 @@ describe("review cases: a range stated as found is never another place's", () =>
       "- **D1** — Keep the night route. Kari Nordmann, 01.11.2026.",
       "- **D2** — Add the summer stop. Kari Nordmann, 02.11.2026.",
     );
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     // Shown newest first: D2 then D1; select from D2's text into D1's.
     const r = locate(md, rangeOf(a, "Add the summer stop", { to: "Keep the night" }));
     expectNotWrong(r, lineOf(md, "D1", 1), lineOf(md, "D2", 1));
   });
-  test("5: one DecisionLog item with a verbatim copy elsewhere: its own line", () => {
+  test("5: one DecisionLog item with a verbatim copy elsewhere: its own line", async () => {
     const md = page("## Log", "", "<DecisionLog>", "", "- **D1** — Keep the night route. Kari Nordmann, 01.11.2026.", "- **D2** — Add the summer stop. Kari Nordmann, 02.11.2026.", "", "</DecisionLog>", "", "## Notes", "", "Add the summer stop. Kari Nordmann, 02.11.2026.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectExact(locate(md, rangeOf(a, "Add the summer stop", { nth: 1 })), lineOf(md, "Add the summer stop", 1));
   });
   const ROPES = "Check the ropes. The pier opens at six and closes at ten every day of the week.";
-  test("6: a copy inside an untitled Fold, with the same paragraph first on the page: never the top copy's line", () => {
+  test("6: a copy inside an untitled Fold, with the same paragraph first on the page: never the top copy's line", async () => {
     const md = page(ROPES, "", "## Notes", "", '<Fold summary="more">', "", ROPES, "", "</Fold>");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const r = locate(md, rangeOf(a, "The pier opens at six", { nth: 2 }));
     expectNotWrong(r, lineOf(md, "The pier opens", 2));
     // The top copy itself is still found.
     expectExact(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 })), lineOf(md, "The pier opens", 1));
   });
-  test("6: a paragraph first on the page and again after a 1) marker: never the top copy's line", () => {
+  test("6: a paragraph first on the page and again after a 1) marker: never the top copy's line", async () => {
     const md = page("The pier opens at six and closes at ten every day of the week.", "", "## Steps", "", "1) The pier opens at six and closes at ten every day of the week.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectNotWrong(locate(md, rangeOf(a, "The pier opens at six", { nth: 2 })), lineOf(md, "The pier opens", 2));
   });
   const ITEMS = ["Run the database migration on staging and verify that the row counts match", "Ship the release to production after sign-off"];
-  test("6: a Checklist item with a ✓/✗ copy at the page's end: never the copy's line", () => {
+  test("6: a Checklist item with a ✓/✗ copy at the page's end: never the copy's line", async () => {
     const md = page("## Plan", "", "<Checklist>", "", `- [x] ${ITEMS[0]}`, `- [ ] ${ITEMS[1]}`, "", "</Checklist>", "", "## Summary", "", `✓ ${ITEMS[0]}`, `✗ ${ITEMS[1]}`);
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectNotWrong(locate(md, rangeOf(a, ITEMS[1]!, { nth: 1 })), lineOf(md, ITEMS[1]!, 1));
   });
-  test("6: the mirror, a ✓/✗ copy at the page's start: never the copy's line", () => {
+  test("6: the mirror, a ✓/✗ copy at the page's start: never the copy's line", async () => {
     const md = page(`✓ ${ITEMS[0]}`, `✗ ${ITEMS[1]}`, "", "## Plan", "", "<Checklist>", "", `- [x] ${ITEMS[0]}`, `- [ ] ${ITEMS[1]}`, "", "</Checklist>");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expectNotWrong(locate(md, rangeOf(a, ITEMS[0]!, { nth: 2 })), lineOf(md, ITEMS[0]!, 2));
   });
-  test("a fence's label and Copy button inside a selection do not break the match", () => {
+  test("a fence's label and Copy button inside a selection do not break the match", async () => {
     const md = page("## Code", "", "Run this:", "", "```ts", "const stops = 4;", "```", "", "Then stop.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expect(a.querySelector(".fence-lang")?.textContent).toBe("ts");
     expectExact(locate(md, rangeOf(a, "Run this:", { to: "Then stop." })), lineOf(md, "Run this"), lineOf(md, "Then stop"));
   });
 });
 
+describe("text the reader shows otherwise than the source spells it", () => {
+  /** A range over all of `el`'s content: what a triple-click on a list item selects. */
+  const over = (el: Element) => {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    return r;
+  };
+  const CHECKS = page(
+    "## Boards",
+    "",
+    "<Checklist>",
+    "",
+    "- [x] Order the new boards from the yard",
+    "- [ ] Hang the new boards at the pier",
+    "- [ ] Paint the frames before the winter",
+    "",
+    "</Checklist>",
+    "",
+    "<RunChecklist>",
+    "",
+    "1. [x] Load the timetable into the board",
+    "2. [ ] Publish the timetable to the ferry app",
+    "",
+    "</RunChecklist>",
+  );
+  test("a checklist item, its ✓/✗ mark included, is placed on its own line", async () => {
+    const a = await readerArticle(CHECKS);
+    const items = Array.from(a.querySelectorAll("li.check-item"));
+    expectExact(locate(CHECKS, over(items[1]!)), lineOf(CHECKS, "Hang the new boards"));
+    expectExact(locate(CHECKS, over(items[3]!)), lineOf(CHECKS, "Load the timetable"));
+  });
+  test("a selection across two checklist items spans both lines", async () => {
+    const a = await readerArticle(CHECKS);
+    expectExact(locate(CHECKS, rangeOf(a, "Hang the new", { to: "before the winter" })), lineOf(CHECKS, "Hang the new"), lineOf(CHECKS, "Paint the frames"));
+  });
+  test("a Timeline item is placed on its own line, past the separator the reader drops", async () => {
+    const md = page("## Log", "", "<Timeline>", "", "- **2026-09-28** — Pier survey done by the harbour office.", "- 2026-09-29 – Boards ordered from the yard.", "", "</Timeline>");
+    const a = await readerArticle(md);
+    const items = Array.from(a.querySelectorAll("li.gtl-item"));
+    expectExact(locate(md, over(items[0]!)), lineOf(md, "Pier survey"));
+    expectExact(locate(md, over(items[1]!)), lineOf(md, "Boards ordered"));
+  });
+  test("a selection that starts in the Query explorer's count starts in reader-added text", async () => {
+    const md = page("## Queries", "", '<Query id="Q-1" question="How many stops?" answer="Four.">', "", "Counted from the summer route.", "", "</Query>", "", '<Query id="Q-2" question="How many boards?" answer="Six.">', "", "Counted at the pier.", "", "</Query>");
+    const a = await readerArticle(md);
+    const range = rangeOf(a, "2 queries", { to: "summer route." });
+    expect(discussContext(a, range)?.edge).toBe("added");
+    expect(locate(md, range)).toMatchObject({ found: "section", reason: "added" });
+  });
+  test("a `1)` line is prose, placed on its own line", async () => {
+    const md = page("## Steps", "", "1) Walk to the pier at six in the morning.", "2) Count the boats that are moored there.");
+    const a = await readerArticle(md);
+    expectExact(locate(md, rangeOf(a, "Count the boats")), lineOf(md, "Count the boats"));
+  });
+});
+
 describe("the heading the client sends", () => {
-  test("the heading itself when the selection starts in it, without the reader's 🧭", () => {
+  test("the heading itself when the selection starts in it, without the reader's 🧭", async () => {
     const md = page("## One", "", "Text one.", "", "## Two", "", "Text two.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const h = a.querySelectorAll("h1, h2, h3, h4")[1]!;
     h.insertAdjacentHTML("beforeend", "<button>🧭</button>");
     expect(discussHeading(a, rangeOf(a, "Two"))).toBe("Two");
   });
-  test("a heading inside an earlier sibling (a Fold's own heading) counts", () => {
+  test("a heading inside an earlier sibling (a Fold's own heading) counts", async () => {
     const md = page("## Top", "", '<Fold title="Routes">', "", "### Inner", "", "Inside.", "", "</Fold>", "", "After the fold.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expect(discussHeading(a, rangeOf(a, "After the fold."))).toBe("Inner");
     expect(discussHeading(a, rangeOf(a, "Inside."))).toBe("Inner");
   });
-  test("top-level prose under a heading (the selection's parent is the article)", () => {
+  test("top-level prose under a heading (the selection's parent is the article)", async () => {
     const md = page("## Brief", "", "Bare prose at the top level.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     expect(discussHeading(a, rangeOf(a, "Bare prose"))).toBe("Brief");
   });
-  test("a range that starts at the article element itself", () => {
+  test("a range that starts at the article element itself", async () => {
     const md = page("## Brief", "", "Bare prose at the top level.");
-    const a = readerArticle(md);
+    const a = await readerArticle(md);
     const r = document.createRange();
     r.setStart(a, 0);
     r.setEnd(a, a.childNodes.length);

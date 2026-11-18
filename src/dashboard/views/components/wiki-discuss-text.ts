@@ -22,8 +22,10 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /**
  * Elements whose text the source does not hold where the article shows it,
- * measured on real mimir and melosys-kode-wiki renders and on every component's
- * attributes. A selection that starts or ends in one goes to the section. A
+ * found by diffing real mimir and melosys-kode-wiki renders, after the reader's
+ * whole enhancer chain, against the collapse; the parity test's fixture holds
+ * each component that adds one. A selection that starts or ends in one goes
+ * to the section. A
  * Lane outside an «Oppfølging» block shows its `who` and `since` in a plain
  * paragraph with no class: there the context check is what falls back.
  *  - the reader's own additions: every button and a standalone code tab's
@@ -32,7 +34,8 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
  *    the Historic stamp, a chart's head and plot, a DeltaTable's change
  *    column, a Query card's head and SQL, a FactCheck strip's date, a
  *    Figure's caption, and the line a DeltaTable, Diagram or Steps shows for
- *    its `src` when it cannot draw it;
+ *    its `src` when it cannot draw it, the Query explorer's bar (its search
+ *    box, `uses` chips and «N of M queries» count);
  *  - text from a page's sibling files: a CaseBoard, a Query result;
  *  - copies of text that sits elsewhere in the source: the decision views
  *    (`dc-view`: the chain, the PR strip, the question grid);
@@ -65,6 +68,7 @@ export const DISCUSS_TEXT_SKIP = [
   ".query-sql",
   ".query-result",
   ".query-table-wrap",
+  ".qx-bar",
   ".rc-head",
   ".stp-unavailable",
   ".dgm-unavailable",
@@ -78,11 +82,21 @@ export const DISCUSS_TEXT_SKIP = [
 
 /**
  * Text the selection's own reading leaves out (`readerSelectionText` under the
- * `discuss-reading` class): the reader-only additions, fact chips and a code
- * fence's bar (its language label and Copy button, added by `enhanceCodeBlocks`).
+ * `discuss-reading` class): the reader-only additions, fact chips, a code
+ * fence's bar (its language label and Copy button, added by `enhanceCodeBlocks`),
+ * and a checklist row's ✓/✗ mark and a RunChecklist step's number, which stand
+ * where the source has `[x]`/`[ ]` and `1.` (the collapse drops those).
  * A selection may run through these; the context skips them too.
  */
-export const DISCUSS_TEXT_HIDDEN = [`[${READER_ONLY_ATTR}]`, FACT_CHIP_SELECTOR, ".fc-chip", ".fact-chip", ".fence-bar"].join(", ");
+export const DISCUSS_TEXT_HIDDEN = [
+  `[${READER_ONLY_ATTR}]`,
+  FACT_CHIP_SELECTOR,
+  ".fc-chip",
+  ".fact-chip",
+  ".fence-bar",
+  ".check-mark",
+  ".rc-num",
+].join(", ");
 
 const TEXT_NODE = 3;
 const ELEMENT_NODE = 1;

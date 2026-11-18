@@ -20,7 +20,17 @@
 import { COMPONENT_NAMES, INLINE_COMPONENT_NAMES, SELF_CLOSING_ALLOWED } from "../format/component-spec.ts";
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { frontmatterBodyLine } from "../format/frontmatter-fence.ts";
-import { COMPONENT_OPEN_RE, readerFences, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
+import {
+  COMPONENT_OPEN_RE,
+  isTaskList,
+  listItemLines,
+  parseBlocks,
+  readerFences,
+  stripFactWrappersWithMap,
+  type Block,
+  type ListBlock,
+} from "../format/markdown-ast.ts";
+import { parseTimelineItem } from "../format/genre-lists.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { DISCUSS_CONTEXT_KEY_CHARS } from "./discuss-bounds.ts";
 import { keyChar, locateKey, matchStarts } from "./locate-key.ts";
@@ -164,6 +174,58 @@ function hiddenBodyLines(
   return out;
 }
 
+/**
+ * The lines where the reader's own parser (`parseBlocks`, run on the body as
+ * `readerBody` hands it over: no frontmatter, no sentinel lines) starts a list
+ * item, so the collapse drops exactly the markers the reader drops (`1)` is
+ * text, so is an indented `3.` under prose, and only one marker per line):
+ *  - `marker`: an item's first line;
+ *  - `task`: an item whose `[x]`/`[ ]` the reader draws as ✓/✗: in a
+ *    Checklist's list, a RunChecklist's step lists, the task list of a Lane
+ *    directly in a NextMoves, and the lists nested under their rows;
+ *  - `dated`: a Timeline's top-level item, whose separator after the date
+ *    the reader does not show.
+ * Line numbers are the file's (0-based).
+ */
+function readerListLines(lines: readonly string[], keep: readonly number[]) {
+  const marker = new Set<number>();
+  const task = new Set<number>();
+  const dated = new Set<number>();
+  const firstLines = (list: ListBlock) => (listItemLines(list) ?? []).flatMap((ls) => (ls.length ? [keep[ls[0]!]!] : []));
+  const visitList = (list: ListBlock, checklist: boolean): void => {
+    for (const k of firstLines(list)) {
+      marker.add(k);
+      if (checklist) task.add(k);
+    }
+    for (const kids of list.nested ?? []) for (const c of kids ?? []) if (c.type === "ul" || c.type === "ol") visitList(c, checklist);
+  };
+  const visit = (blocks: readonly Block[], parent: string | null): void => {
+    for (const b of blocks) {
+      if (b.type === "ul" || b.type === "ol") visitList(b, false);
+      else if (b.type === "component") {
+        const lists = b.children.filter((c): c is ListBlock => c.type === "ul" || c.type === "ol");
+        const checklist =
+          b.name === "Checklist"
+            ? lists.filter((c) => c.type === "ul").slice(0, 1)
+            : b.name === "RunChecklist"
+              ? lists
+              : b.name === "Lane" && parent === "NextMoves"
+                ? lists.filter(isTaskList)
+                : [];
+        for (const c of b.children) {
+          if (c.type !== "ul" && c.type !== "ol") visit([c], b.name);
+          else {
+            visitList(c, checklist.includes(c));
+            if (b.name === "Timeline") for (const k of firstLines(c)) dated.add(k);
+          }
+        }
+      }
+    }
+  };
+  visit(parseBlocks(keep.map((k) => lines[k]!).join("\n")), null);
+  return { marker, task, dated };
+}
+
 /** The page's lines as the collapse reads them: fact wrappers stripped (tags
  *  only, so line numbers stay the file's), frontmatter, sentinel and fence
  *  marker lines in `skip`, fence bodies in `code`, hidden bodies in `hidden`. */
@@ -181,10 +243,12 @@ function readerLines(raw: string) {
   const bodyFrom = frontmatterBodyLine(text);
   const skip = new Set<number>();
   for (let k = 0; k < bodyFrom; k++) skip.add(k);
+  const sentinels = new Set<number>();
   for (const s of findLiveSentinelBlocks(text)) {
-    skip.add(s.startLine);
-    skip.add(s.endLine);
+    sentinels.add(s.startLine);
+    sentinels.add(s.endLine);
   }
+  for (const k of sentinels) skip.add(k);
   const code = new Set<number>();
   for (const f of readerFences(text)) {
     skip.add(f.opener);
@@ -195,7 +259,7 @@ function readerLines(raw: string) {
     }
   }
   const hidden = hiddenBodyLines(text, lines, lineStart, bodyFrom, skip, code);
-  return { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden };
+  return { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden, sentinels };
 }
 
 const TABLE_RULE_RE =/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
@@ -210,8 +274,10 @@ const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
  *    `stripTitle` are dropped (the reader drops them, `readerBody`);
  *  - a fence's opener and closer lines are dropped and its body kept as it
  *    stands; a `mermaid` fence's body is dropped too (the reader draws it);
- *  - a list marker (`-`, `+`, `1.`) at the start of a line is dropped, and a
- *    table's rule row and a thematic break are dropped whole; quote and
+ *  - a list marker (`-`, `+`, `*`, `1.`) is dropped on the lines where the
+ *    reader's parser starts an item ({@link readerListLines}), with a
+ *    checklist row's `[x]`/`[ ]` and a Timeline date's `—`/`–` separator;
+ *    a table's rule row and a thematic break are dropped whole; quote and
  *    heading markers and table pipes the key drops anyway;
  *  - a component tag the reader parses ({@link readerTagLines}) is dropped, except the attribute values the reader shows
  *    ({@link SHOWN_ATTRS}); a `<Diagram>` or `<Embed>` body is dropped whole
@@ -222,7 +288,10 @@ const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
  * shows them as written.
  */
 export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {}): LocateCollapse {
-  const { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden } = readerLines(raw);
+  const { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden, sentinels } = readerLines(raw);
+  const keep: number[] = [];
+  for (let k = bodyFrom; k < lines.length; k++) if (!sentinels.has(k)) keep.push(k);
+  const items = readerListLines(lines, keep);
   for (const k of hidden) skip.add(k);
   if (opts.stripTitle) {
     const want = opts.stripTitle.trim().toLowerCase();
@@ -267,15 +336,24 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
       continue;
     }
     // Line-start markers. The key drops `>`, `#`, `-`, `+` and `*`, so only a
-    // numbered marker needs taking off, and only outside a quote: the reader
-    // parses no list inside a blockquote and shows its `1.` as text.
+    // numbered marker needs taking off, on an item line of the reader's parser.
     const quoted = /^[ \t]*>/.test(line);
     let i = /^[ \t]*(?:>[ \t]?)*/.exec(line)![0].length;
-    if (!quoted) {
-      for (;;) {
-        const lm = /^[ \t]*(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)/.exec(line.slice(i));
-        if (!lm) break;
-        i += lm[0].length;
+    /** Offsets in `text` the reader does not show: a Timeline separator's dashes. */
+    let dropDash: { from: number; to: number } | null = null;
+    if (!quoted && items.marker.has(li)) {
+      const lm = /^[ \t]*(?:[-+*]|\d{1,9}\.)[ \t]+/.exec(line);
+      if (lm) {
+        i = lm[0].length;
+        if (items.task.has(li)) {
+          const tm = /^\[[ xX]\][ \t]*/.exec(line.slice(i));
+          if (tm) i += tm[0].length;
+        }
+        if (items.dated.has(li)) {
+          const item = line.slice(i);
+          const t = parseTimelineItem(item);
+          if (t.date !== null) dropDash = { from: base + i, to: base + i + item.length - t.text.length };
+        }
       }
     }
     // An Obsidian callout's `[!type]` becomes the callout's frame, not text.
@@ -346,7 +424,7 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
           continue;
         }
       }
-      emit(ch, base + i);
+      if (!(dropDash && base + i >= dropDash.from && base + i < dropDash.to && (ch === "—" || ch === "–"))) emit(ch, base + i);
       i++;
     }
     li++;

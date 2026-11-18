@@ -24,7 +24,7 @@
 
 import { copyText } from "./copy-path.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
-import { discussContext, type DiscussContext } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, discussContext, type DiscussContext } from "./wiki-discuss-text.ts";
 import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX, HANDOFF_SELECTION_MIN } from "../../../wiki/discuss-bounds.ts";
 
 export const DISCUSS_HANDOFF_SEL_BTN_ID = "wikiDiscussHandoffBtn";
@@ -303,7 +303,7 @@ export function discussHandoffStyles(): string {
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
     .wiki-bc-handoff:hover { background: var(--tint-neutral); color: var(--text-primary); }
-    .${READING_CLASS} .fc-chip, .${READING_CLASS} .fact-chip, .${READING_CLASS} .fence-bar { display: none !important; }
+    ${DISCUSS_TEXT_HIDDEN.split(", ").map((sel) => `.${READING_CLASS} ${sel}`).join(", ")} { display: none !important; }
     .wiki-handoff-panel {
       position: fixed; right: 24px; top: 112px; z-index: 40;
       width: min(440px, calc(100vw - 32px)); box-sizing: border-box;

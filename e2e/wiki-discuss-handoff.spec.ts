@@ -11,8 +11,10 @@
  *  2. **The right lines for the hard shapes.** A sentence that appears twice on
  *     the page (the second is selected: the context the client reads around it
  *     decides), a bullet that opens in bold and holds inline code (the rendered
- *     text has neither marker), and a selection past Explain's 1,500
- *     characters (offered, located whole).
+ *     text has neither marker), a selection past Explain's 1,500
+ *     characters (offered, located whole), and a checklist row selected from
+ *     its ✗ (the mark is hidden from the reading by CSS, the `[ ]` dropped by
+ *     the collapse).
  *  4. **The controls as a keyboard user meets them.** Tab to the selection's
  *     control and press Enter; Escape closes the panel wherever focus is and
  *     returns focus to the control; Copy is disabled while its request runs; a
@@ -74,6 +76,15 @@ const PAGE = [
   "## Long", //                                                      22
   "",
   ...Array.from({ length: 30 }, (_, k) => `Line ${k} of the long section says something different about berth number ${k}.`), // 24-53
+  "",
+  "## Boards", //                                                    55
+  "",
+  "<Checklist>",
+  "",
+  "- [x] Order the new boards from the yard",
+  "- [ ] Hang the new boards at the pier", //                       60
+  "",
+  "</Checklist>",
   "",
 ].join("\n");
 const EXPLAINER = "notes/board.html";
@@ -258,6 +269,17 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
     const clip = await askAndCopy(page, "Which berths?");
     expect(clip).toContain("Passage (lines 24–53, Harbour timetable › Long):");
+  });
+
+  test("a checklist row selected from its ✗ mark: its own line, the mark not quoted", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI);
+    await select(page, "✗", 1, "at the pier");
+    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    const clip = await askAndCopy(page, "Who hangs them?");
+    expect(clip).toContain("Passage (line 60, Harbour timetable › Boards):");
+    expect(clip).toContain("> Hang the new boards at the pier");
+    expect(clip).not.toContain("✗");
   });
 
   test("keyboard: Tab to the control, Enter opens; Escape with focus on the page closes and returns focus", async ({ page }) => {

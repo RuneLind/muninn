@@ -1,12 +1,11 @@
 /**
  * Parity: the Discuss locator's collapse of a page source (`collapseForLocate`,
  * `src/wiki/discuss-locate.ts`) against the reader's own render of it, read
- * the way the client reads a selection and its context, AFTER the client's
- * enhancers have run: `enhanceCodeBlocks` (a `span.fence-lang` label and a
- * Copy button on every fence), `applyLaneRoles` (a role's lanes first, the
- * authored order in `data-nm-order`) and the lens (a DecisionLog newest first).
- * A selection is made on that article, so a parity test that reads only the
- * server render misses all three (the first build's did).
+ * the way the client reads a selection and its context, AFTER every step the
+ * reader runs on the article (`readerArticle`, `discuss-reader-article.ts`,
+ * which lists them). A selection is made on that article, so a parity test
+ * that reads only the server render, or a few of the enhancers, misses what
+ * the rest add (the first build's did, and so did the second's).
  *
  * Written before the locator's cases: a locator that guesses the reader's
  * reading of markdown from source rules drifts from it (muninn #872).
@@ -16,13 +15,11 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { questionRenderOptionsFor, renderWikiHtml } from "../../../wiki/render.ts";
 import { collapseForLocate } from "../../../wiki/discuss-locate.ts";
 import { locateKey } from "../../../wiki/locate-key.ts";
-import { DISCUSS_TEXT_HIDDEN, discussText } from "../components/wiki-discuss-text.ts";
-import { enhanceCodeBlocks } from "../components/code-block-chrome.ts";
-import { applyLaneRoles } from "../components/wiki-report-blocks.ts";
-import { enhanceLens, readerSelectionText } from "../components/wiki-lens.ts";
+import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussText } from "../components/wiki-discuss-text.ts";
+import { readerSelectionText } from "../components/wiki-lens.ts";
+import { readerArticle as renderReader } from "./discuss-reader-article.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -60,28 +57,8 @@ afterAll(() => {
   saved.clear();
 });
 
-const pages = new Map([["ferry-plan", { name: "ferry-plan", relPath: "plans/ferry-plan.mdx", title: "Ferry plan" }]]);
-const resolve = (t: string) => pages.get(t.trim().toLowerCase()) as never;
-
-/** The article as the reader shows it: `GET /api/wiki/page`'s render, then
- *  the client's enhancers, in the order `fetchAndRenderPage` runs them. */
-function readerArticle(md: string, title?: string, roles: string[] = ["utvikler"]): HTMLElement {
-  document.body.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.id = "articleWrap";
-  wrap.innerHTML = `<div class="wiki-article">${renderWikiHtml(md, resolve, {
-    stripTitle: title,
-    readerShapes: true,
-    views: true,
-    question: questionRenderOptionsFor(md, null, false, null),
-  })}</div>`;
-  document.body.appendChild(wrap);
-  const article = wrap.querySelector<HTMLElement>(".wiki-article")!;
-  enhanceCodeBlocks(article);
-  applyLaneRoles(article, roles);
-  enhanceLens(wrap, { language: "en", agentAvailable: false, inPlace: false, chipHost: null, initial: "all" } as never);
-  return article;
-}
+/** The article as the reader shows it, roles `utvikler` unless named. */
+const readerArticle = (md: string, title?: string, roles: string[] = ["utvikler"]) => renderReader(md, { title, roles });
 
 const serverKey = (md: string, title?: string) => collapseForLocate(md, { stripTitle: title }).text;
 
@@ -96,7 +73,9 @@ function selectionTextOver(el: Element): string {
 }
 
 /** The fixture: components, escapes, both kinds of wikilink, fact wrappers,
- *  a fence, two role lanes and a DecisionLog. */
+ *  a fence, two role lanes, a DecisionLog, and every component an enhancer of
+ *  the chain changes the text of (a Checklist and a RunChecklist, a Timeline,
+ *  a Query run, a FactCheck block, a bare id the ref links wrap). */
 const FIXTURE = [
   "---",
   "title: Harbour timetable",
@@ -189,36 +168,90 @@ const FIXTURE = [
   "",
   "</DecisionLog>",
   "",
+  "As D2 says, the summer stop comes first.",
+  "",
+  "<Checklist>",
+  "",
+  "- [x] Order the new boards",
+  "- [ ] Hang the new boards",
+  "  - [X] Measure the frames",
+  "  - plain note under a step",
+  "",
+  "</Checklist>",
+  "",
+  "<RunChecklist>",
+  "",
+  "1. [x] Load the timetable",
+  "   - Command: `bun run load`",
+  "   - Expected: four stops",
+  "2. [ ] Publish the timetable",
+  "",
+  "</RunChecklist>",
+  "",
+  "<Timeline>",
+  "",
+  "- **2026-09-28** — Pier survey done.",
+  "- 2026-09-29 – Boards ordered.",
+  "- 29.09: Night route checked.",
+  "- Undated step — keeps its dash.",
+  "",
+  "</Timeline>",
+  "",
+  '<Query id="Q-1" question="How many stops?" answer="Four.">',
+  "",
+  "Counted from the summer route.",
+  "",
+  "</Query>",
+  "",
+  '<Query id="Q-2" question="How many boards?" answer="Six.">',
+  "",
+  "Counted at the pier.",
+  "",
+  "</Query>",
+  "",
+  '<FactCheck date="2026-11-01">',
+  "",
+  "The pier claim was checked.",
+  "",
+  "</FactCheck>",
+  "",
 ].join("\n");
 
 const TITLE = "Harbour timetable";
 const BLOCKS = "li, td, th, h1, h2, h3, h4, summary, blockquote, .callout-body, .tldr-body, pre, .fence, section.decision-log, .nm-lanes, .nm-lane";
 
 describe("the fixture page, after the client's enhancers", () => {
-  test("the enhancers ran: a fence label, lanes reordered for the role, the DecisionLog newest first", () => {
-    const a = readerArticle(FIXTURE, TITLE);
+  test("the enhancers ran: a fence label, lanes reordered for the role, the DecisionLog newest first", async () => {
+    const a = await readerArticle(FIXTURE, TITLE);
     expect(a.querySelector(".fence .fence-lang")?.textContent).toBe("ts");
     const lanes = Array.from(a.querySelectorAll(".nm-lanes > .nm-lane"));
     expect(lanes.map((l) => l.getAttribute("data-nm-order"))).toEqual(["1", "0"]);
     const items = Array.from(a.querySelectorAll("section.decision-log .dl-list > li"));
     expect(items.map((li) => li.getAttribute("data-dl-order"))).toEqual(["2", "1", "0"]);
+    // The rest of the chain: the Query explorer's bar, the fact-check toolbar,
+    // a ref link on the bare id, the checklist marks.
+    expect(a.querySelector(".qx-bar .qx-count")?.textContent).toBe("2 of 2 queries");
+    expect(a.querySelector(".fc-toolbar")).not.toBeNull();
+    expect(Array.from(a.querySelectorAll(".check-mark")).map((m) => m.textContent)).toEqual(["✓", "✗", "✓", "✓", "✗"]);
   });
 
-  test("every text block, as the context reads it, is found in the collapse", () => {
-    const a = readerArticle(FIXTURE, TITLE);
+  test("every text block, as the context reads it, is found in the collapse", async () => {
+    const a = await readerArticle(FIXTURE, TITLE);
     const server = serverKey(FIXTURE, TITLE);
-    const blocks = Array.from(a.querySelectorAll(BLOCKS));
+    // A block inside reader-added text (the dates view a Timeline brings) is
+    // the reader's own: a selection there goes to the section by design.
+    const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.closest(DISCUSS_TEXT_SKIP));
     expect(blocks.length).toBeGreaterThan(16);
     const missing = blocks.map((b) => locateKey(discussText(b))).filter((k) => k && !server.includes(k));
     expect(missing).toEqual([]);
   });
 
-  test("every text block, as a selection over it reads (`readerSelectionText`), is found in the collapse", () => {
-    const a = readerArticle(FIXTURE, TITLE);
+  test("every text block, as a selection over it reads (`readerSelectionText`), is found in the collapse", async () => {
+    const a = await readerArticle(FIXTURE, TITLE);
     const server = serverKey(FIXTURE, TITLE);
     // Lanes are left out here: a selection over the lane list in its shown
     // order is not one stretch of the source (the client marks it `reordered`).
-    const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.matches(".nm-lanes") && !b.closest(".nm-head"));
+    const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.matches(".nm-lanes") && !b.closest(".nm-head") && !b.closest(DISCUSS_TEXT_SKIP));
     // A block whose text is all reader-added (a mermaid fence, drawn as an
     // SVG) is left out too: a selection there goes to the section by design.
     const missing = blocks
@@ -228,8 +261,8 @@ describe("the fixture page, after the client's enhancers", () => {
     expect(missing).toEqual([]);
   });
 
-  test("the whole article, as the context reads it, equals the collapse", () => {
-    expect(locateKey(discussText(readerArticle(FIXTURE, TITLE)))).toBe(serverKey(FIXTURE, TITLE));
+  test("the whole article, as the context reads it, equals the collapse", async () => {
+    expect(locateKey(discussText(await readerArticle(FIXTURE, TITLE)))).toBe(serverKey(FIXTURE, TITLE));
   });
 });
 
@@ -273,36 +306,58 @@ const FORMS: [string, string][] = [
   ["an unclosed opener is text", '<Callout title="x">\n\nNever closed.\n'],
   ["nested same-name components", '<Callout title="a">\n\n<Callout title="b">\n\nIn.\n\n</Callout>\n\n</Callout>\n'],
   ["a code tab's label is a button", '<CodeTabs>\n<Tab label="TypeScript">\n\n```ts\nconst a = 1;\n```\n\n</Tab>\n</CodeTabs>\n'],
+  // Checklist marks: ✓/✗ are the reader's, `[x]`/`[ ]` the source's.
+  ["a Checklist's marks", "<Checklist>\n\n- [x] Done item\n- [ ] Open item\n  - [X] Nested done\n  - plain nested\n\n</Checklist>\n"],
+  ["a RunChecklist's marks, step numbers and labels", "<RunChecklist>\n\n1. [x] Step one\n   - Command: `ls`\n   - Expected: a list\n2. [ ] Step two\n\n</RunChecklist>\n"],
+  ["a task list in a lane", '<NextMoves>\n\n<Lane kind="you">\n\n- [x] Done step\n- [ ] Open step\n\n</Lane>\n\n</NextMoves>\n'],
+  ["a task marker outside a checklist is text", "- [x] Done item\n- [ ] Open item\n"],
+  ["a Lane outside NextMoves keeps its task markers as text", '<Lane kind="you">\n\n- [x] Done step\n- [ ] Open step\n\n</Lane>\n'],
+  // A Timeline shows a dated item's date and text, not the separator between.
+  ["a Timeline's date separators", "<Timeline>\n\n- **2026-09-28** — Pier opened.\n- 2026-09-29 – Boards printed.\n- 29.09: Short one.\n- Undated — keeps its dash.\n\n</Timeline>\n"],
+  ["a Query run: the explorer's search bar and count", '<Query id="Q-1" question="How many?" answer="Four.">\n\nBody one.\n\n</Query>\n\n<Query id="Q-2" question="Which?" answer="Two.">\n\nBody two.\n\n</Query>\n'],
+  // List markers, as the reader's parser (`parseBlocks`) reads them.
+  ["`1)` is no list marker", "1) first\n2) second\n"],
+  ["a wrapped line that starts `1979)` is prose", "A paragraph that wraps\n1979) a year line.\n"],
+  ["a column-0 number under prose opens a list", "A paragraph that wraps\n2022. a year line.\n"],
+  ["`1.` interrupts a paragraph", "Text before\n1. one\n2. two\n"],
+  ["`2.` at column 0 interrupts a paragraph", "Text before\n2. two\n3. three\n"],
+  ["an indented number under prose is text", "Para\n  1. indented\n"],
+  ["`3.` under an item's text is continuation text", "- item\n  3. wraps\n"],
+  ["`1.` under an item's text opens a child list", "- item\n  1. wraps\n"],
+  ["a number after a blank line under an item opens a child list", "- item\n\n  2. after blank\n"],
+  ["one marker per line", "- 1. deep\n- 2) paren\n"],
+  ["a number with no text after it is text", "Para.\n\n2.\n\nAnd 7.\n"],
+  ["numbers after a blank line", "Para.\n\n3. three\n4. four\n"],
 ];
 
 describe("forms: the enhanced render and the collapse agree", () => {
   for (const [name, md] of FORMS) {
-    test(name, () => {
+    test(name, async () => {
       const title = name.startsWith("the leading H1") ? "Same title" : undefined;
-      expect(locateKey(discussText(readerArticle(md, title)))).toBe(serverKey(md, title));
+      expect(locateKey(discussText(await readerArticle(md, title)))).toBe(serverKey(md, title));
     });
   }
 });
 
 describe("where the two differ on purpose", () => {
-  test("a mermaid fence: the client drops it (an SVG once drawn), and so does the collapse", () => {
+  test("a mermaid fence: the client drops it (an SVG once drawn), and so does the collapse", async () => {
     const md = "Before.\n\n```mermaid\ngraph LR\n  A --> B\n```\n\nAfter.\n";
-    expect(locateKey(discussText(readerArticle(md)))).toBe("before.after.");
+    expect(locateKey(discussText(await readerArticle(md)))).toBe("before.after.");
     expect(serverKey(md)).toBe("before.after.");
   });
-  test("a Figure's caption is reader-added: the client skips it and the collapse leaves it out", () => {
+  test("a Figure's caption is reader-added: the client skips it and the collapse leaves it out", async () => {
     const fig = '<Figure caption="A caption">\n\nBody.\n\n</Figure>\n';
-    expect(readerArticle(fig).querySelector("figcaption")?.textContent).toContain("A caption");
-    expect(locateKey(discussText(readerArticle(fig)))).not.toContain("acaption");
+    expect((await readerArticle(fig)).querySelector("figcaption")?.textContent).toContain("A caption");
+    expect(locateKey(discussText(await readerArticle(fig)))).not.toContain("acaption");
     expect(serverKey(fig)).not.toContain("acaption");
   });
-  test("a Query's head: reader chrome to the client, an attribute to the collapse", () => {
+  test("a Query's head: reader chrome to the client, an attribute to the collapse", async () => {
     const q = '<Query id="Q-1" question="How many?" answer="Four.">\n\nBody.\n\n</Query>\n';
-    expect(locateKey(discussText(readerArticle(q)))).not.toContain("howmany");
+    expect(locateKey(discussText(await readerArticle(q)))).not.toContain("howmany");
     expect(serverKey(q)).not.toContain("howmany");
   });
-  test("the decision views (`dc-view`) copy text from elsewhere on the page; the client skips them", () => {
-    const a = readerArticle("The pier opens at six.\n");
+  test("the decision views (`dc-view`) copy text from elsewhere on the page; the client skips them", async () => {
+    const a = await readerArticle("The pier opens at six.\n");
     const view = document.createElement("section");
     view.className = "dc-view qg";
     view.textContent = "The pier opens at six.";
