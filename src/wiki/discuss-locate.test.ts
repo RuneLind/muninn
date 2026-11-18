@@ -49,7 +49,7 @@ describe("the agreement rule, one side", () => {
     expect(CONTEXT_PARTIAL_MIN).toBe(8);
   });
 
-  // sideState's state table, by example: 51 rows covering 44 of the 140 classes
+  // sideState's state table, by example: 51 rows, a sample (not all) of the classes
   // of (L band, client edge, S against L, source edge, where d falls). L: key characters the client sent; S: the
   // source's characters in the window; d: where a character first differs
   // (within both), or null. The source running out before the client's text,

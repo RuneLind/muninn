@@ -569,8 +569,9 @@ describe("reader-made copies placed away from their source", () => {
 });
 
 describe("seeded guard: a range stated as found is the selection's own line", () => {
-  // Synthetic pages, each holding one sentence two or more times in blocks the
-  // reader shows differently from the source (a Fold's label, a callout's frame,
+  // Synthetic pages built to hold one sentence two or more times (some blocks
+  // leave it out), in blocks the reader shows differently from the source (a
+  // Fold's label, a callout's frame,
   // a checklist mark, a table row, a `1)` line). Every copy is selected whole
   // and in three slices; an `exact` answer must name that copy's line.
   const SENTS = [
@@ -578,7 +579,9 @@ describe("seeded guard: a range stated as found is the selection's own line", ()
     "Run the database migration on staging and verify that the row counts match",
   ];
   const FILL = ["Boats leave early.", "Kari keeps the winter timetable.", "Bells ring at noon.", "more", "Notes", "Plan"];
-  /** A page per step of a fixed linear congruential sequence from `seed`. */
+  /** A page per step of a fixed linear congruential sequence from `seed`. The
+   *  multiplier overflows a double, so seeds share pages: the three below hold
+   *  326 distinct pages of 450. */
   function* seededPages(seed: number, count: number): Generator<{ md: string; s: string }> {
     let x = seed;
     const rnd = () => {
