@@ -453,7 +453,7 @@ describe("fix round 2: an id inside a link's URL", () => {
 
 describe("D39: moved-card stubs", () => {
   const fag = (ids: string[]) => nm([lane('kind="waiting" role="fag"', ids.map((id) => `- **${id}** — hva nå?`))]);
-  const stubs = (html: string) => [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+  const stubs = (html: string) => [...html.matchAll(/<p class="q-moved" data-reader-only data-q-moved-ids="[^"]+"><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
   const cards = (ids: string[]) => ids.flatMap((id) => [...question(id), ""]);
 
   test("four cards right after the block leave no stub, and the page keeps one card per id", () => {
@@ -522,7 +522,7 @@ describe("D36–D38: the compact lane head", () => {
 
 describe("fix round 1 (#671): moved-card stubs", () => {
   const stubs = (html: string) =>
-    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+    [...html.matchAll(/<p class="q-moved" data-reader-only data-q-moved-ids="[^"]+"><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
   const fag = (ids: string[]) => nm([lane('kind="waiting" role="fag"', ids.map((id) => `- **${id}** — hva nå?`))]);
 
   test("a run of cards taken by two blocks splits into one line per block, each with its own arrow", () => {
@@ -618,7 +618,7 @@ describe("fix round 1 (#671): the compact head", () => {
 
 describe("fix round 2 (#671): a stub inside the taking block points by render order", () => {
   const stubs = (html: string) =>
-    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+    [...html.matchAll(/<p class="q-moved" data-reader-only data-q-moved-ids="[^"]+"><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
 
   test("a card in a lane rendered below the taking lane points up", () => {
     const md = nm([
@@ -712,7 +712,7 @@ describe("the «Avklart» lane: decided and closed cards (D1, D3–D7, D9, D10)"
     }));
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   const stubs = (html: string) =>
-    [...html.matchAll(/<p class="q-moved" data-reader-only><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
+    [...html.matchAll(/<p class="q-moved" data-reader-only data-q-moved-ids="[^"]+"><a class="q-moved-link" href="#([^"]+)">([^<]*)<\/a><\/p>/g)].map((m) => `${m[1]}|${m[2]}`);
   const sumOf = (html: string) => /<span class="nm-sum">([^<]*)<\/span>/.exec(html)?.[1];
 
   const PAGE_S = [

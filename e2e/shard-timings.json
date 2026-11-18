@@ -46,6 +46,7 @@
     "wiki-compact-lists.spec.ts": 13.5,
     "wiki-copy-path.spec.ts": 9.4,
     "wiki-cross-refs.spec.ts": 8,
+    "wiki-discuss-handoff.spec.ts": 8,
     "wiki-live-facts.spec.ts": 4,
     "wiki-decision-inbox.spec.ts": 6.9,
     "wiki-decision-run-now.spec.ts": 0.7,

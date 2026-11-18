@@ -368,6 +368,9 @@ export interface ReaderPayload {
    *  `MELOSYS-8308` before a wikilink is never a cross-page id. Absent on a
    *  wiki with no trackers. */
   trackerProjects?: string[];
+  /** Discuss's «Ask Claude Code» (P1): the wiki sets `discuss.handoff` and
+   *  the viewer is admin, since its route answers an absolute path. */
+  discussHandoff: boolean;
 }
 
 export interface ViewerRoles {
@@ -393,6 +396,7 @@ export function readerPayload(
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
     agentLens,
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
+    discussHandoff: readerConfig?.discuss?.handoff === true && viewer.admin,
   };
 }
 

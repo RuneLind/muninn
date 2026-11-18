@@ -421,6 +421,8 @@ export const E2E_PORTS = {
   "wiki-cross-refs": 3250,
   // Living facts PR 3b: live chips over three synthetic wikis.
   "wiki-live-facts": 3251,
+  // Discuss P1: «Ask Claude Code» copies a prompt; a read-only wiki and an opted-out one beside it.
+  "wiki-discuss-handoff": 3252,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

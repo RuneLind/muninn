@@ -11,6 +11,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { walkthroughStyles } from "./components/wiki-walkthrough-view.ts";
 import { stepDoneStyles } from "./components/wiki-step-done.ts";
+import { discussHandoffStyles } from "./components/wiki-discuss-handoff.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import { mirrorStatusSlotHtml, mirrorStatusStyles } from "./components/wiki-mirror-status.ts";
@@ -3841,6 +3842,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${shareDialogStyles()}
     ${walkthroughStyles()}
     ${stepDoneStyles()}
+    ${discussHandoffStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${mirrorStatusStyles()}

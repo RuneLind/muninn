@@ -2626,7 +2626,9 @@ const webRenderer: BlockRenderer = {
           // `planMovedStubs` visits every component, so a miss renders nothing.
           const stub = currentLaneCards.stubs.get(attrs) ?? null;
           if (stub === null) return "";
-          return `<p class="q-moved" ${READER_ONLY_ATTR}><a class="q-moved-link" href="#${stub.anchor}">${escapeHtml(laneWords(currentLanguage).movedLink(stub.ids, stub.arrow))}</a></p>`;
+          // `data-q-moved-ids`: the cards this line stands for, in source order,
+          // so Discuss reads them here (`wiki-discuss-text.ts`).
+          return `<p class="q-moved" ${READER_ONLY_ATTR} data-q-moved-ids="${escapeHtml(stub.ids.join(" "))}"><a class="q-moved-link" href="#${stub.anchor}">${escapeHtml(laneWords(currentLanguage).movedLink(stub.ids, stub.arrow))}</a></p>`;
         }
         return questionCardHtml(attrs, children);
       }

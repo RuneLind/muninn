@@ -102,6 +102,33 @@ export function agentLensFor(opts: {
   return !!config.bin && planCardRootFor(opts.wikiDir, config.roots) !== null;
 }
 
+/** The script Discuss's handoff names when `PLAN_CARD_BIN` is unset: where the
+ *  plan-card skill lives in a Claude Code home. The prompt carries it for the
+ *  viewer's shell, which expands the `~`. */
+export const PLAN_CARD_SKILL_SCRIPT = "~/.claude/skills/plan-card/plan-card.ts";
+
+/**
+ * The script and page path for Discuss's handoff to run plan-card on, or null
+ * when the card does not apply: the page carries no `plan_status`, or its wiki
+ * root is none of plan-card's roots (plan-card refuses any other page). The
+ * prompt runs it in the viewer's Claude Code, not here, so neither the serving
+ * profile nor the Agent lens's admin rule enters; the script is
+ * `PLAN_CARD_BIN` when set, else {@link PLAN_CARD_SKILL_SCRIPT}.
+ */
+export function planCardTargetFor(opts: {
+  env: Record<string, string | undefined>;
+  roots: readonly string[];
+  wikiDir: string;
+  relPath: string;
+  hasPlanStatus: boolean;
+}): { bin: string; abs: string } | null {
+  if (!opts.hasPlanStatus) return null;
+  const root = planCardRootFor(opts.wikiDir, opts.roots);
+  if (!root) return null;
+  const raw = (opts.env[PLAN_CARD_BIN_ENV] ?? "").trim();
+  return { bin: raw && path.isAbsolute(raw) ? raw : PLAN_CARD_SKILL_SCRIPT, abs: path.join(root, opts.relPath) };
+}
+
 /** The child's argv after the interpreter. */
 export function planCardArgs(bin: string, abs: string, opts: { since?: string; id?: string }): string[] {
   return [bin, abs, ...(opts.since ? ["--since", opts.since] : []), ...(opts.id ? ["--id", opts.id] : []), "--json"];
