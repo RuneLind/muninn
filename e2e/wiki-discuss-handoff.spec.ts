@@ -15,9 +15,11 @@
  *     characters (offered, located whole), and a checklist row selected from
  *     its ✗ (the mark is hidden from the reading by CSS, the `[ ]` dropped by
  *     the collapse).
- *  4. **The controls as a keyboard user meets them.** Tab to the selection's
- *     control and press Enter; Escape closes the panel wherever focus is and
- *     returns focus to the control; Copy is disabled while its request runs; a
+ *  4. **The controls as a keyboard user meets them.** A selection made or
+ *     extended with Shift+ArrowRight is the one offered and quoted; Tab to the
+ *     selection's control and press Enter; Escape closes the panel wherever
+ *     focus is and returns focus to the control, which a late `selectionchange`
+ *     does not hide; Copy is disabled while its request runs; a
  *     non-JSON answer shows its status. The whole-page control shows on an
  *     HTML explainer page too.
  *  3. **The opt-in and the read-only wiki.** A wiki whose `.wiki-reader.json`
@@ -156,10 +158,11 @@ async function openPage(page: Page, wiki: string): Promise<void> {
 
 /** Select the `n`-th (1-based) text node match of `text` in the article, from
  *  its start to the end of `upTo` (or of `text`), and release the mouse there
- *  as a reader would: the reader reads the selection on `mouseup`. */
-async function select(page: Page, text: string, n: number, upTo?: string): Promise<void> {
+ *  as a reader would (Explain and Fact check show on that `mouseup`; the
+ *  handoff follows `selectionchange`). `mouseup: false` dispatches none. */
+async function select(page: Page, text: string, n: number, upTo?: string, mouseup = true): Promise<void> {
   await page.evaluate(
-    ({ text, n, upTo }) => {
+    ({ text, n, upTo, mouseup }) => {
       const article = document.querySelector(".wiki-article")!;
       const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
       let k = 0;
@@ -191,9 +194,9 @@ async function select(page: Page, text: string, n: number, upTo?: string): Promi
       const sel = getSelection()!;
       sel.removeAllRanges();
       sel.addRange(r);
-      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      if (mouseup) document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     },
-    { text, n, upTo },
+    { text, n, upTo, mouseup },
   );
 }
 
@@ -284,11 +287,17 @@ test.describe("Wiki reader: Ask Claude Code", () => {
 
   test("keyboard: Tab to the control, Enter opens; Escape with focus on the page closes and returns focus", async ({ page }) => {
     await openPage(page, WIKI);
-    await select(page, "The night route is unchanged.", 1);
+    // No mouseup: Explain and Fact check stay hidden, the handoff shows.
+    await select(page, "The night route is unchanged.", 1, undefined, false);
     const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
     await expect(btn).toBeVisible();
-    // Reach the control from the one before it, as Tab does.
-    await page.locator("#wikiFactcheckBtn").focus();
+    // Reach the control from the nearest shown control before it, as Tab does.
+    await btn.evaluate((b) => {
+      let el = b.previousElementSibling as HTMLElement | null;
+      while (el && (el.tagName !== "BUTTON" || el.offsetParent === null)) el = el.previousElementSibling as HTMLElement | null;
+      if (!el) throw new Error("no shown control before the handoff");
+      el.focus();
+    });
     await page.keyboard.press("Tab");
     await expect(btn).toBeFocused();
     await page.keyboard.press("Enter");
@@ -301,6 +310,69 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await page.keyboard.press("Escape");
     await expect(panel).toBeHidden();
     await expect(btn).toBeFocused();
+  });
+
+  test("a selection made with the keyboard only shows the control, and the prompt quotes it", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI);
+    // Chromium moves a caret in plain text only under caret browsing, which a
+    // test cannot switch on: the start is a one-character selection, too short
+    // to offer, set by script. Shift+ArrowRight makes the rest; no mouse event.
+    await page.evaluate(() => {
+      const article = document.querySelector(".wiki-article")!;
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf("The night route");
+        if (i !== -1) return void getSelection()!.setBaseAndExtent(t, i, t, i + 1);
+      }
+      throw new Error("no start text");
+    });
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await page.waitForTimeout(150);
+    await expect(btn).toBeHidden();
+    const passage = "The night route is unchanged.";
+    for (let i = 1; i < passage.length; i++) await page.keyboard.press("Shift+ArrowRight");
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe(passage);
+    await expect(btn).toBeVisible();
+    await btn.click();
+    await expect(page.locator(`#${DISCUSS_HANDOFF_PANEL_ID} .wiki-handoff-quote`)).toHaveText(passage);
+    const clip = await askAndCopy(page, "Since when?");
+    expect(clip).toContain("Passage (line 12, Harbour timetable › Brief):");
+    expect(clip).toContain(`> ${passage}`);
+  });
+
+  test("a mouse selection extended with Shift+ArrowRight: the panel and the prompt hold the extended selection", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI);
+    await select(page, "The night route", 1);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await expect(btn).toBeVisible();
+    for (let i = 0; i < " is unchanged.".length; i++) await page.keyboard.press("Shift+ArrowRight");
+    const live = await page.evaluate(() => getSelection()!.toString());
+    expect(live).toBe("The night route is unchanged.");
+    // At once, before the selection has settled: opening reads it as it is now.
+    await btn.click();
+    await expect(page.locator(`#${DISCUSS_HANDOFF_PANEL_ID} .wiki-handoff-quote`)).toHaveText(live);
+    const clip = await askAndCopy(page, "Since when?");
+    expect(clip).toContain(`> ${live}`);
+  });
+
+  test("a selectionchange that arrives after the panel closed keeps the control, its focus and the selection", async ({ page }) => {
+    await openPage(page, WIKI);
+    await select(page, "The night route is unchanged.", 1);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(btn).toBeFocused();
+    // The event focus in the question box queued, delivered late (the order a real browser sometimes takes).
+    await page.evaluate(() => document.dispatchEvent(new Event("selectionchange")));
+    await page.waitForTimeout(200);
+    await expect(btn).toBeVisible();
+    await expect(btn).toBeFocused();
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
   });
 
   test("Copy is disabled while its request runs, and a non-JSON answer shows its status", async ({ page }) => {

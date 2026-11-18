@@ -15,9 +15,11 @@
  *
  * This module owns its controls and listeners: the shell only says per page
  * whether the wiki offers it ({@link setDiscussHandoffEnabled}) and calls
- * {@link initDiscussHandoff} once. The selection's text and the context
- * around it are captured on `mouseup`, before a click can collapse the
- * selection. The ids stay out of the read-only egress and blocked selectors
+ * {@link initDiscussHandoff} once. While the panel is closed the capture
+ * follows the live selection, from any device: `selectionchange`, settled for
+ * {@link SETTLE_MS}, and flushed when the panel opens. While it is open the
+ * capture is the snapshot taken at opening; closing it restores that range.
+ * The ids stay out of the read-only egress and blocked selectors
  * (no model call, no write, like Copy path) and are in
  * `WIKI_READ_SLICE_HIDDEN_SELECTOR`: the pod drops the route.
  */
@@ -35,6 +37,8 @@ const HANDOFF_PATH = "/api/wiki/discuss/handoff";
 const READING_CLASS = "discuss-reading";
 /** The quote the panel shows is cut here; the request carries the whole selection. */
 const PANEL_QUOTE_MAX = 400;
+/** A drag or a held Shift+arrow fires `selectionchange` many times: capture once it rests. */
+const SETTLE_MS = 50;
 
 export interface DiscussHandoffDeps {
   /** The served wiki's registry name (`FIND_SELF_WIKI || WIKI`). */
@@ -45,6 +49,8 @@ export interface DiscussHandoffDeps {
 
 interface Captured extends DiscussContext {
   selection: string;
+  /** The selection's range, put back when the panel closes. */
+  range: Range;
 }
 
 let deps: DiscussHandoffDeps | null = null;
@@ -53,6 +59,7 @@ let captured: Captured | null = null;
 /** What the open panel asks about: a passage, or the whole page (null). */
 let asking: { relPath: string; passage: Captured | null; opener: HTMLElement | null } | null = null;
 let inFlight = false;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -118,7 +125,16 @@ export function captureDiscussSelection(sel: Selection | null): void {
   if (selection.length < HANDOFF_SELECTION_MIN || selection.length > HANDOFF_SELECTION_MAX) return;
   const context = discussContext(article, range);
   if (!context) return;
-  captured = { selection, ...context };
+  captured = { selection, ...context, range: range.cloneRange() };
+}
+
+/** Capture the live selection now, unless the panel holds its snapshot. */
+function settleSelection(): void {
+  if (settleTimer !== null) clearTimeout(settleTimer);
+  settleTimer = null;
+  if (panelOpen()) return;
+  captureDiscussSelection(window.getSelection());
+  showSelBtn();
 }
 
 function showSelBtn(): void {
@@ -152,19 +168,32 @@ function panelOpen(): boolean {
   return !!el && !el.hidden;
 }
 
-/** Close the panel; `restore` puts focus back on the control that opened it. */
+/** Close the panel; `restore` puts focus back on the control that opened it
+ *  and the passage's selection back on the page, which focus in the question
+ *  box collapsed. The capture then still matches the selection, so no late
+ *  `selectionchange` hides the control that has focus. */
 function closePanel(restore: boolean): void {
   const opener = asking?.opener ?? null;
+  const range = asking?.passage?.range ?? null;
   asking = null;
   const el = document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
   if (el) el.hidden = true;
-  if (restore && opener?.isConnected) opener.focus();
+  if (!restore) return;
+  if (opener?.isConnected) opener.focus();
+  const sel = window.getSelection();
+  if (sel && range && range.startContainer.isConnected && range.endContainer.isConnected) {
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  settleSelection();
 }
 
 /** Open the panel on the captured passage (`passage: true`) or the whole page. */
 export function openDiscussHandoff(passage: boolean, opener: HTMLElement | null = null): void {
   const relPath = deps?.relPath();
   if (!enabled || !relPath) return;
+  // A selection changed in the last few ms is not captured yet.
+  if (passage && settleTimer !== null) settleSelection();
   if (passage && !captured) return;
   asking = { relPath, passage: passage ? captured : null, opener };
   const el = panel();
@@ -251,24 +280,12 @@ async function copyPrompt(): Promise<void> {
 /** Wire the controls once, at boot. */
 export function initDiscussHandoff(d: DiscussHandoffDeps): void {
   deps = d;
-  document.addEventListener("mouseup", (e) => {
-    // A press on one of the panel's or the controls' own buttons is no new selection.
-    const t = e.target as HTMLElement | null;
-    if (t?.closest?.(`#${DISCUSS_HANDOFF_PANEL_ID}, #${DISCUSS_HANDOFF_SEL_BTN_ID}`)) return;
-    setTimeout(() => {
-      captureDiscussSelection(window.getSelection());
-      showSelBtn();
-    }, 0);
-  });
+  // Mouse, keyboard or touch: every selection change ends here. While the panel
+  // is open (focus in its question box moves the selection) the capture stays.
   document.addEventListener("selectionchange", () => {
-    // Focus in the panel's question box moves the selection: while the panel
-    // is open the control it was opened from stays, so focus can return to it.
     if (panelOpen()) return;
-    const sel = window.getSelection();
-    if (captured && (!sel || sel.isCollapsed)) {
-      captured = null;
-      showSelBtn();
-    }
+    if (settleTimer !== null) clearTimeout(settleTimer);
+    settleTimer = setTimeout(settleSelection, SETTLE_MS);
   });
   // A mouse press would collapse the selection the button acts on; keep it.
   document.addEventListener("mousedown", (e) => {

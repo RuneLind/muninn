@@ -380,8 +380,8 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
       "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
       "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy",
-      // Discuss P1 (`initDiscussHandoff`): capture on mouseup, hide on a collapsed selection, keep the selection on a press, act on click, Escape.
-      "document mouseup 33t3i", "document selectionchange 1cbbl", "document mousedown 124c0", "document click 3pvli", "document keydown 27uoi",
+      // Discuss P1 (`initDiscussHandoff`): capture on a settled selectionchange, keep the selection on a press, act on click, Escape.
+      "document selectionchange ri7zr", "document mousedown 124c0", "document click 3pvli", "document keydown 27uoi",
       // Issue #623: the rail panel closes on Back/Forward and on leaving the narrow width.
       "window popstate 3fyct", "[object eventtarget] change 1g0ma", "document click 1wxv0",
       "document keydown 1wnp1", "#staleBody toggle capture 2a2m2", "document keydown 3nsjp",
