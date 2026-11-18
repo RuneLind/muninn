@@ -162,7 +162,8 @@ const UNNAMED_FILE = "unnamed-secret-file.txt";
 const NAMED_MARKER = "NAMED-SNAPSHOT-OK-41b9";
 
 function readSearchFixture() {
-  const snapshots = join(f.root, "snapshots");
+  // Under the snapshot root of the agent home set above: a { readSearch } dir must be its direct child.
+  const snapshots = join(f.root, "agent-home", ".snapshots");
   const named = join(snapshots, "named");
   const unnamed = join(snapshots, "unnamed");
   mkdirSync(named, { recursive: true });

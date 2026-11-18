@@ -21,9 +21,10 @@
  */
 
 import { lstatSync, realpathSync } from "node:fs";
-import { isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { CanUseTool, HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import type { ConnectorType } from "../bots/config.ts";
+import { snapshotRootDir } from "./agent-cwd.ts";
 import { capabilitiesForConnectorType } from "./connector-capabilities.ts";
 
 /** Read, Grep and Glob inside named directories (snapshots, never a checkout). */
@@ -413,17 +414,21 @@ export function refuseMcpToolsSurface(connector: string, surface: ToolSurface | 
 }
 
 /**
- * Tools that print file contents from a live checkout, so a `{ mcpTools }`
- * surface may never list them: yggdrasil's `read_source` (reads any indexed
- * file), `detect_changes` (runs git diff on the working tree) and
- * `search_pattern` (runs ripgrep over the checkout paths, untracked files
- * included). Keyed `<server>/<tool>` on the server's name in `.mcp.json`.
+ * Tools a `{ mcpTools }` surface may never list, under whatever server name:
+ * yggdrasil's `read_source` (reads any indexed file), `detect_changes` (runs
+ * git diff on the working tree) and `search_pattern` (runs ripgrep over the
+ * checkout paths, untracked files included), and the Serena proxy's
+ * `call_tool` (`src/serena/tool-proxy.ts`), which dispatches to any Serena
+ * tool, `read_file`, `search_for_pattern` and the shell and edit tools
+ * included, over live checkouts. The proxy's other tool, `search_tools`, only
+ * lists the catalog. Compared by {@link normalizedMcpToolName}.
  */
-export const MCP_TOOLS_NEVER_LISTED: readonly string[] = [
-  "yggdrasil/read_source",
-  "yggdrasil/detect_changes",
-  "yggdrasil/search_pattern",
-];
+export const MCP_TOOLS_NEVER_LISTED: readonly string[] = ["read_source", "detect_changes", "search_pattern", "call_tool"];
+
+/** A tool name as the never-list compares it: lowercase, with `-` and `.` read as `_`. */
+export function normalizedMcpToolName(tool: string): string {
+  return tool.toLowerCase().replace(/[-.]/g, "_");
+}
 
 const MCP_NAME = /^[A-Za-z0-9_.-]+$/;
 
@@ -444,11 +449,79 @@ export function assertMcpToolsSurface(surface: McpToolsSurface): void {
       if (typeof tool !== "string" || !MCP_NAME.test(tool)) {
         throw new Error(`a { mcpTools } tool name may hold only letters, digits, "_", "." and "-": ${JSON.stringify(tool)}`);
       }
-      if (MCP_TOOLS_NEVER_LISTED.includes(`${server}/${tool}`)) {
-        throw new Error(`a { mcpTools } surface may not list ${server}/${tool}: it prints file contents from a live checkout.`);
+      if (MCP_TOOLS_NEVER_LISTED.includes(normalizedMcpToolName(tool))) {
+        throw new Error(`a { mcpTools } surface may not list ${server}/${tool}: it reads files from a live checkout, or dispatches to tools that do.`);
       }
     }
   }
+}
+
+/**
+ * Why `dir` may not be a `{ readSearch }` directory, or null when it may: it
+ * must be a direct child of the snapshot root ({@link snapshotRootDir}), both
+ * after `path.resolve` and with symlinks resolved, so neither a checkout, the
+ * root itself, a `..` climb, a sibling whose name only shares the root's
+ * prefix, nor a link planted in the root passes.
+ */
+export function readSearchDirRefusal(dir: string, root: string = snapshotRootDir()): string | null {
+  const lexRoot = resolve(root);
+  const lex = resolve(dir);
+  const name = basename(lex);
+  let ok = lex !== lexRoot && dirname(lex) === lexRoot && name !== "";
+  if (ok) {
+    const realRoot = canonicalPath(lexRoot);
+    ok = realRoot !== null && canonicalPath(lex) === join(realRoot, name);
+  }
+  return ok ? null : `a { readSearch } directory must be a snapshot directly under ${lexRoot}: ${dir}`;
+}
+
+/**
+ * The one validator of a declared surface, shared by {@link toolSurfaceBlocker}
+ * and `applyToolSurface`: throws the sentence the run would fail with, or
+ * returns the surface to carry (dirs resolved, the `{ mcpTools }` map copied).
+ * Order: the shape (exactly one of the six), the capability table, then the
+ * contents (absolute dirs, `{ readSearch }` dirs under the snapshot root, MCP
+ * names and the never-list).
+ */
+export function validateToolSurface(connector: ConnectorType, surface: unknown): ToolSurface {
+  if (surface === "bot" || surface === "none") return surface;
+  // Anything but the six declared shapes is refused, never read as { web }.
+  const obj = typeof surface === "object" && surface !== null ? (surface as Record<string, unknown>) : undefined;
+  const keys = obj ? Object.keys(obj) : [];
+  const one = (key: string) => keys.length === 1 && keys[0] === key;
+  const isRead = one("read") && Array.isArray(obj!.read);
+  const isWeb = one("web") && obj!.web === true;
+  const isReadSearch = one("readSearch") && Array.isArray(obj!.readSearch);
+  const isMcpTools = one("mcpTools") && typeof obj!.mcpTools === "object" && obj!.mcpTools !== null;
+  if (!isRead && !isWeb && !isReadSearch && !isMcpTools) {
+    throw new Error(
+      `executeOneShot: unknown toolSurface ${String(JSON.stringify(surface))} — ` +
+        `expected "none", "bot", { read: [dirs] }, { web: true }, { readSearch: [dirs] } or { mcpTools: { server: [tools] } }.`,
+    );
+  }
+  const shaped = surface as ToolSurface;
+  const kind = surfaceKind(shaped)!;
+  if (!connectorSupports(connector, kind)) {
+    throw new Error(`Connector "${connector}" cannot run a ${SURFACE_KIND_LABEL[kind]} tool surface — only ${connectorsFor(kind)} can.`);
+  }
+  if (isRead || isReadSearch) {
+    const dirs = (isRead ? obj!.read : obj!.readSearch) as unknown[];
+    if (dirs.length === 0 || dirs.some((d) => typeof d !== "string" || !isAbsolute(d))) {
+      throw new Error(`executeOneShot: a ${SURFACE_KIND_LABEL[kind]} tool surface needs at least one directory, every one absolute.`);
+    }
+    const resolved = (dirs as string[]).map((d) => resolve(d));
+    if (isRead) return { read: resolved };
+    for (const dir of dirs as string[]) {
+      const refusal = readSearchDirRefusal(dir);
+      if (refusal !== null) throw new Error(`executeOneShot: ${refusal}`);
+    }
+    return { readSearch: resolved };
+  }
+  if (isMcpTools) {
+    assertMcpToolsSurface(shaped as McpToolsSurface);
+    return { mcpTools: structuredClone((shaped as McpToolsSurface).mcpTools) };
+  }
+  return { web: true };
 }
 
 /** Compare dotted numeric versions; negative when `a` is older than `b`. */
@@ -573,20 +646,24 @@ export async function restrictedCliBlocker(
 
 /**
  * A route pre-flight's whole answer for a surface: the sentence the run would
- * fail with, or null when this connector can run it on this machine. A
- * connector the capability table does not cover for the surface's kind is
- * refused here, before any job, snapshot or session exists; on claude-cli
- * the installed CLI must also have `--restricted`. `"none"` and `"bot"` are
- * always null.
+ * fail with, or null when this connector can run it on this machine, before
+ * any job, snapshot or session exists. It runs {@link validateToolSurface},
+ * the check `applyToolSurface` runs (shape, capability table, dirs, MCP names
+ * and the never-list); on claude-cli the installed CLI must also have
+ * `--restricted` for a fenced surface. `"none"` and `"bot"` are always null.
  */
 export async function toolSurfaceBlocker(
   connector: ConnectorType | undefined,
   surface: ToolSurface,
 ): Promise<string | null> {
-  const kind = surfaceKind(surface);
-  if (kind === undefined) return null;
   const type = connector ?? "claude-cli";
-  if (!connectorSupports(type, kind)) return unsupportedSurfaceMessage(type, kind);
-  if (kind === "mcpTools") return null;
+  let valid: ToolSurface;
+  try {
+    valid = validateToolSurface(type, surface);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  const kind = surfaceKind(valid);
+  if (kind === undefined || kind === "mcpTools") return null;
   return restrictedCliBlocker(type, kind);
 }

@@ -134,18 +134,21 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
   });
 
   test("{ readSearch }: Read, Grep and Glob, the snapshots added, the handler and a PreToolUse hook running one check", async () => {
-    await driveCapture(sdkBot(), { readSearch: [framesDir] });
+    // A { readSearch } dir must sit directly under the snapshot root.
+    const snap = join(agentRoot, ".snapshots", "code-x");
+    mkdirSync(snap, { recursive: true });
+    await driveCapture(sdkBot(), { readSearch: [snap] });
     const o = queryCalls[0]!.options;
     expect(o.tools).toEqual(["Read", "Grep", "Glob"]);
     expect(o.mcpServers).toEqual({});
     expect(o.strictMcpConfig).toBe(true);
     expect(o.settingSources).toEqual([]);
     expect(o.cwd).toBe(join(agentRoot, ".fenced"));
-    expect(o.additionalDirectories).toEqual([framesDir]);
+    expect(o.additionalDirectories).toEqual([snap]);
     expect(o.permissionMode).toBe("default");
     expect(o.settings).toEqual({ autoMemoryEnabled: false });
-    expect((await ask(o, "Grep", { pattern: "x", path: framesDir })).behavior).toBe("allow");
-    expect((await ask(o, "Glob", { pattern: "../*", path: framesDir })).behavior).toBe("deny");
+    expect((await ask(o, "Grep", { pattern: "x", path: snap })).behavior).toBe("allow");
+    expect((await ask(o, "Glob", { pattern: "../*", path: snap })).behavior).toBe("deny");
     expect((await ask(o, "Read", { file_path: join(botDir, "config.json") })).behavior).toBe("deny");
     // The hook sees the calls default mode approves without asking the handler.
     const matchers = (o.hooks as { PreToolUse: Array<{ matcher?: string; hooks: Array<(i: unknown, id: string, opts: unknown) => Promise<Record<string, unknown>>> }> }).PreToolUse;
@@ -153,8 +156,8 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect(matchers[0]!.matcher).toBeUndefined(); // every tool, not a name pattern
     const hook = (tool: string, input: Record<string, unknown>) =>
       matchers[0]!.hooks[0]!({ hook_event_name: "PreToolUse", tool_name: tool, tool_input: input, tool_use_id: "t" }, "t", { signal: new AbortController().signal });
-    expect(await hook("Glob", { pattern: "*.jpg", path: framesDir })).toEqual({});
-    expect(await hook("Glob", { pattern: "../*", path: framesDir })).toMatchObject({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" } });
+    expect(await hook("Glob", { pattern: "*.jpg", path: snap })).toEqual({});
+    expect(await hook("Glob", { pattern: "../*", path: snap })).toMatchObject({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" } });
     expect(await hook("Grep", { pattern: "x" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
     expect(await hook("Bash", { command: "ls" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
   });

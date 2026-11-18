@@ -12,23 +12,12 @@
  */
 
 import type { Config } from "../config.ts";
-import type { BotConfig, ConnectorType, EffortLevel } from "../bots/config.ts";
+import type { BotConfig, EffortLevel } from "../bots/config.ts";
 import type { ClaudeExecResult } from "./executor.ts";
 import type { StreamProgressCallback } from "./stream-parser.ts";
 import { resolveConnector } from "./connector.ts";
-import {
-  assertMcpToolsSurface,
-  connectorSupports,
-  connectorsFor,
-  isReadSearchSurface,
-  isReadSurface,
-  mcpToolsSurface,
-  SURFACE_KIND_LABEL,
-  surfaceKind,
-  type ToolSurface,
-} from "./tool-surface.ts";
+import { type ToolSurface, validateToolSurface } from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
-import { isAbsolute, resolve } from "node:path";
 
 const log = getLog("ai", "one-shot");
 
@@ -94,47 +83,14 @@ export interface OneShotOptions {
 /**
  * Apply a declared tool surface to a per-call `BotConfig` clone. The single
  * place a surface turns into connector fields: `"none"` sets `toolsDisabled`,
- * the fenced shapes ride on `toolSurface` for the connector to map, and a
- * connector that cannot express a fenced shape is refused before it runs.
+ * the fenced shapes ride on `toolSurface` for the connector to map. Every
+ * refusal is {@link validateToolSurface}'s, the check the route pre-flight
+ * (`toolSurfaceBlocker`) runs too.
  */
 export function applyToolSurface(botConfig: BotConfig, surface: ToolSurface): BotConfig {
-  const connector: ConnectorType = botConfig.connector ?? "claude-cli";
-  if (surface === "bot") return { ...botConfig, toolSurface: "bot" };
-  if (surface === "none") return { ...botConfig, toolSurface: "none", toolsDisabled: true };
-  // Anything but the six declared shapes is refused, never read as { web }.
-  const shape = surface as unknown;
-  const obj = typeof shape === "object" && shape !== null ? (shape as Record<string, unknown>) : undefined;
-  const keys = obj ? Object.keys(obj) : [];
-  const one = (key: string) => keys.length === 1 && keys[0] === key;
-  const isRead = one("read") && Array.isArray(obj!.read);
-  const isWeb = one("web") && obj!.web === true;
-  const isReadSearch = one("readSearch") && Array.isArray(obj!.readSearch);
-  const isMcpTools = one("mcpTools") && typeof obj!.mcpTools === "object" && obj!.mcpTools !== null;
-  if (!isRead && !isWeb && !isReadSearch && !isMcpTools) {
-    throw new Error(
-      `executeOneShot: unknown toolSurface ${String(JSON.stringify(shape))} — ` +
-        `expected "none", "bot", { read: [dirs] }, { web: true }, { readSearch: [dirs] } or { mcpTools: { server: [tools] } }.`,
-    );
-  }
-
-  const kind = surfaceKind(surface)!;
-  if (!connectorSupports(connector, kind)) {
-    throw new Error(`Connector "${connector}" cannot run a ${SURFACE_KIND_LABEL[kind]} tool surface — only ${connectorsFor(kind)} can.`);
-  }
-  if (isReadSurface(surface) || isReadSearchSurface(surface)) {
-    const dirs = isReadSurface(surface) ? surface.read : surface.readSearch;
-    if (dirs.length === 0 || dirs.some((d) => typeof d !== "string" || !isAbsolute(d))) {
-      throw new Error(`executeOneShot: a ${SURFACE_KIND_LABEL[kind]} tool surface needs at least one directory, every one absolute.`);
-    }
-    const resolved = dirs.map((d) => resolve(d));
-    return { ...botConfig, toolSurface: isReadSurface(surface) ? { read: resolved } : { readSearch: resolved } };
-  }
-  const named = mcpToolsSurface(surface);
-  if (named) {
-    assertMcpToolsSurface(named);
-    return { ...botConfig, toolSurface: { mcpTools: structuredClone(named.mcpTools) } };
-  }
-  return { ...botConfig, toolSurface: { web: true } };
+  const valid = validateToolSurface(botConfig.connector ?? "claude-cli", surface);
+  if (valid === "none") return { ...botConfig, toolSurface: "none", toolsDisabled: true };
+  return { ...botConfig, toolSurface: valid };
 }
 
 /**

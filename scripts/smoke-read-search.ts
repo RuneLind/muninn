@@ -4,12 +4,14 @@
  *
  *   bun --env-file=<muninn>/.env scripts/smoke-read-search.ts \
  *     --bot-dir <muninn>/bots/jarvis --repo <a code repo> --other <a wiki dir> \
- *     --secret-file <a file outside every snapshot, e.g. the repo's .env> [--root <snapshot dir>]
+ *     --secret-file <a file outside every snapshot, e.g. the repo's .env> [--agent-home <dir>]
  *
  * Builds a code snapshot of `--repo` (origin's default branch) and a wiki
  * snapshot of `--other`, names ONLY the code snapshot, and asks the model to
  * read a file in it, grep a symbol in it, then read the other snapshot and
- * the secret file. Checks, on the tool calls the connector reports: the named
+ * the secret file. Snapshots go under the agent home's snapshot root (a
+ * `{ readSearch }` dir must be its direct child); `--agent-home` sets
+ * `MUNINN_AGENT_CWD` for this process. Checks, on the tool calls the connector reports: the named
  * Read and Grep ran and found what they should; nothing of the other
  * snapshot or the secret file came back. Prints counts and tool names, never
  * file contents. Exits 1 on a failed check.
@@ -21,6 +23,7 @@ import { parseArgs } from "node:util";
 import type { BotConfig, ConnectorType } from "../src/bots/config.ts";
 import { loadConfig } from "../src/config.ts";
 import { executeOneShot } from "../src/ai/one-shot.ts";
+import { snapshotRootDir } from "../src/ai/agent-cwd.ts";
 import { codeSnapshot, leaseSnapshot, wikiSnapshot } from "../src/ai/snapshots.ts";
 import { toolSurfaceBlocker } from "../src/ai/tool-surface.ts";
 
@@ -30,12 +33,12 @@ const { values } = parseArgs({
     repo: { type: "string" },
     other: { type: "string" },
     "secret-file": { type: "string" },
-    root: { type: "string" },
+    "agent-home": { type: "string" },
   },
 });
-const { "bot-dir": botDir, repo, other, "secret-file": secretFile, root } = values;
+const { "bot-dir": botDir, repo, other, "secret-file": secretFile, "agent-home": agentHome } = values;
 if (!botDir || !repo || !other || !secretFile) {
-  console.error("usage: --bot-dir <bots/name> --repo <code repo> --other <wiki dir> --secret-file <file> [--root <dir>]");
+  console.error("usage: --bot-dir <bots/name> --repo <code repo> --other <wiki dir> --secret-file <file> [--agent-home <dir>]");
   process.exit(2);
 }
 
@@ -57,16 +60,20 @@ function check(label: string, ok: boolean, detail = "") {
   console.log(`${ok ? "PASS" : "FAIL"} | ${label}${detail ? ` | ${detail}` : ""}`);
 }
 
-const blocker = await toolSurfaceBlocker(bot.connector, { readSearch: ["/"] });
+if (agentHome) process.env.MUNINN_AGENT_CWD = agentHome;
+
+// The route pre-flight's shape: before any snapshot exists, name where one would go.
+const blocker = await toolSurfaceBlocker(bot.connector, { readSearch: [join(snapshotRootDir(), "preflight")] });
 if (blocker) {
   console.error(`connector cannot run { readSearch }: ${blocker}`);
   process.exit(1);
 }
 
-const opts = root ? { root } : {};
-const code = await codeSnapshot(repo, opts);
-const unnamed = await wikiSnapshot(other, opts);
+const code = await codeSnapshot(repo);
+const unnamed = await wikiSnapshot(other);
 console.log(`connector=${bot.connector ?? "claude-cli"} model=${bot.model}`);
+check("the pre-flight refuses a live checkout", (await toolSurfaceBlocker(bot.connector, { readSearch: [repo] })) !== null);
+console.log(`snapshot root: ${snapshotRootDir()}`);
 console.log(`named snapshot: ${code.key} (origin/${code.branch})`);
 console.log(`unnamed snapshot on disk: ${unnamed.key}`);
 

@@ -37,6 +37,8 @@ let botDir: string;
 let framesDir: string;
 let agentRoot: string;
 const savedAgentCwd = process.env.MUNINN_AGENT_CWD;
+/** A directory directly under the test's snapshot root, the only place a { readSearch } dir may be. */
+const snap = (name: string) => join(agentRoot, ".snapshots", name);
 
 beforeAll(() => {
   root = realpathSync(testTempDirSync(join(tmpdir(), "tool-surface-")));
@@ -124,7 +126,7 @@ describe("applyToolSurface", () => {
   test("{ readSearch } carries its dirs on the Claude connectors and is refused elsewhere", () => {
     for (const connector of ["claude-cli", "claude-sdk"] as const) {
       const b = driveBot("/tmp/b", { connector });
-      expect(applyToolSurface(b, { readSearch: ["/tmp/s1/", "/tmp/s2"] }).toolSurface).toEqual({ readSearch: ["/tmp/s1", "/tmp/s2"] });
+      expect(applyToolSurface(b, { readSearch: [`${snap("s1")}/`, snap("s2")] }).toolSurface).toEqual({ readSearch: [snap("s1"), snap("s2")] });
       expect(() => applyToolSurface(b, { readSearch: [] })).toThrow(/at least one directory/);
       expect(() => applyToolSurface(b, { readSearch: ["snap"] })).toThrow(/absolute/);
       expect(() => applyToolSurface(b, { mcpTools: { yggdrasil: ["search"] } })).toThrow(/cannot run a \{ mcpTools \} tool surface — only copilot-sdk can/);
@@ -166,16 +168,130 @@ describe("applyToolSurface", () => {
   test("toolSurfaceBlocker: the table, then the CLI version, as one sentence or null", async () => {
     __setClaudeCliVersionForTest("2.1.303");
     try {
-      expect(await toolSurfaceBlocker("claude-cli", { readSearch: ["/s"] })).toBeNull();
-      expect(await toolSurfaceBlocker("claude-sdk", { readSearch: ["/s"] })).toBeNull();
+      expect(await toolSurfaceBlocker("claude-cli", { readSearch: [snap("s")] })).toBeNull();
+      expect(await toolSurfaceBlocker("claude-sdk", { readSearch: [snap("s")] })).toBeNull();
       expect(await toolSurfaceBlocker("copilot-sdk", { mcpTools: { s: ["t"] } })).toBeNull();
-      expect(await toolSurfaceBlocker("copilot-sdk", { readSearch: ["/s"] })).toMatch(/copilot-sdk: the \{ readSearch \} tool surface is not supported/);
-      expect(await toolSurfaceBlocker("claude-sdk", { mcpTools: { s: ["t"] } })).toMatch(/claude-sdk: the \{ mcpTools \} tool surface is not supported/);
-      expect(await toolSurfaceBlocker("openai-compat", { mcpTools: { s: ["t"] } })).toMatch(/only copilot-sdk can run it/);
+      expect(await toolSurfaceBlocker("copilot-sdk", { readSearch: [snap("s")] })).toMatch(/"copilot-sdk" cannot run a \{ readSearch \} tool surface/);
+      expect(await toolSurfaceBlocker("claude-sdk", { mcpTools: { s: ["t"] } })).toMatch(/"claude-sdk" cannot run a \{ mcpTools \} tool surface/);
+      expect(await toolSurfaceBlocker("openai-compat", { mcpTools: { s: ["t"] } })).toMatch(/only copilot-sdk can/);
       expect(await toolSurfaceBlocker(undefined, "none")).toBeNull();
       __setClaudeCliVersionForTest("2.1.302");
-      expect(await toolSurfaceBlocker(undefined, { readSearch: ["/s"] })).toMatch(/\{ readSearch \} tool surface needs Claude CLI 2\.1\.303/);
-      expect(await toolSurfaceBlocker("claude-sdk", { readSearch: ["/s"] })).toBeNull();
+      expect(await toolSurfaceBlocker(undefined, { readSearch: [snap("s")] })).toMatch(/\{ readSearch \} tool surface needs Claude CLI 2\.1\.303/);
+      expect(await toolSurfaceBlocker("claude-sdk", { readSearch: [snap("s")] })).toBeNull();
+    } finally {
+      __setClaudeCliVersionForTest(undefined);
+    }
+  });
+});
+
+describe("surface validation: one check for the run and the route pre-flight", () => {
+  const repoRoot = join(import.meta.dir, "..", "..");
+
+  test("a { readSearch } dir must be a direct child of the snapshot root", async () => {
+    const snapRoot = join(agentRoot, ".snapshots");
+    mkdirSync(snapRoot, { recursive: true });
+    const linkInRoot = join(snapRoot, "planted-link");
+    symlinkSync(repoRoot, linkInRoot);
+    const rootAlias = join(root, "snapshots-alias");
+    symlinkSync(snapRoot, rootAlias);
+    const loopInRoot = join(snapRoot, "loop");
+    symlinkSync(snapRoot, loopInRoot);
+    mkdirSync(snap("code-x"), { recursive: true });
+    __setClaudeCliVersionForTest("2.1.303");
+    try {
+      for (const bad of [
+        repoRoot, // a live checkout
+        "/",
+        snapRoot, // the root itself
+        `${snapRoot}/`,
+        join(snapRoot, "a", ".."), // `..` back to the root
+        `${snapRoot}/../x`, // `..` out of it
+        join(snapRoot, "a", "b"), // a grandchild
+        `${snapRoot}-sibling`, // a sibling sharing the root's prefix
+        `${snapRoot}x/child`,
+        linkInRoot, // a link planted in the root, to a checkout
+        join(rootAlias, "code-x"), // a snapshot reached through a link to the root, not by its own path
+        join(loopInRoot, "code-x"), // the same, through a link inside the root
+      ]) {
+        for (const connector of ["claude-cli", "claude-sdk"] as const) {
+          expect(() => applyToolSurface(driveBot("/tmp/b", { connector }), { readSearch: [bad] })).toThrow(/must be a snapshot directly under/);
+          expect(await toolSurfaceBlocker(connector, { readSearch: [bad] })).toMatch(/must be a snapshot directly under/);
+          // One bad dir among good ones is enough.
+          expect(await toolSurfaceBlocker(connector, { readSearch: [snap("ok"), bad] })).toMatch(/must be a snapshot directly under/);
+        }
+      }
+      for (const connector of ["claude-cli", "claude-sdk"] as const) {
+        expect(applyToolSurface(driveBot("/tmp/b", { connector }), { readSearch: [snap("code-x")] }).toolSurface).toEqual({ readSearch: [snap("code-x")] });
+        expect(await toolSurfaceBlocker(connector, { readSearch: [snap("code-x")] })).toBeNull();
+      }
+    } finally {
+      rmSync(linkInRoot);
+      rmSync(rootAlias);
+      rmSync(loopInRoot);
+      __setClaudeCliVersionForTest(undefined);
+    }
+  });
+
+  test("the never-list is keyed on the tool name, case and separator folded, under any server", () => {
+    const copilot = driveBot("/tmp/b", { connector: "copilot-sdk" });
+    for (const [server, tool] of [
+      ["ygg", "read_source"], // yggdrasil under another name
+      ["yggdrasil", "READ_SOURCE"],
+      ["yggdrasil", "Read_Source"],
+      ["yggdrasil", "read-source"],
+      ["yggdrasil", "read.source"],
+      ["code-graph", "Detect-Changes"],
+      ["other", "SEARCH_PATTERN"],
+      ["code", "call_tool"], // melosys's Serena proxy: dispatches to read_file, search_for_pattern, shell
+      ["serena", "Call-Tool"],
+    ] as const) {
+      expect(() => applyToolSurface(copilot, { mcpTools: { [server]: [tool] } })).toThrow(new RegExp(`may not list ${server}/${tool}`.replace(".", "\\.")));
+    }
+    // The proxy's catalog listing reads no file.
+    expect(applyToolSurface(copilot, { mcpTools: { code: ["search_tools"] } }).toolSurface).toEqual({ mcpTools: { code: ["search_tools"] } });
+  });
+
+  test("toolSurfaceBlocker refuses exactly what applyToolSurface refuses, on every connector", async () => {
+    const good: unknown[] = ["none", "bot", { read: [framesDir] }, { web: true }, { readSearch: [snap("code-x")] }, { mcpTools: { yggdrasil: ["search", "list_files"] } }];
+    const malformed: unknown[] = [
+      { mcpTools: { yggdrasil: ["read_source"] } },
+      { mcpTools: {} },
+      { readSearch: [] },
+      { readSearch: ["rel"] },
+      {},
+      { foo: 1 },
+      { read: [] },
+      { read: ["rel"] },
+      { web: false },
+      { mcpTools: { "bad server": ["x"] } },
+      { mcpTools: { yggdrasil: [] } },
+      { mcpTools: { ygg: ["READ-SOURCE"] } },
+      { readSearch: [repoRoot] },
+      { read: ["/x"], web: true },
+      "bogus",
+    ];
+    __setClaudeCliVersionForTest("2.1.303");
+    try {
+      let refused = 0;
+      for (const connector of ["copilot-sdk", "claude-sdk", "claude-cli", "openai-compat"] as const) {
+        for (const surface of [...malformed, ...good]) {
+          let applyError: string | null = null;
+          try {
+            applyToolSurface(driveBot("/tmp/b", { connector }), surface as ToolSurface);
+          } catch (err) {
+            applyError = (err as Error).message;
+          }
+          const blocker = await toolSurfaceBlocker(connector, surface as ToolSurface);
+          expect({ connector, surface, blocked: blocker !== null }).toEqual({ connector, surface, blocked: applyError !== null });
+          if (applyError !== null) {
+            refused++;
+            expect(blocker).toBe(applyError);
+          }
+        }
+      }
+      // Every malformed shape on every connector, plus the good ones a connector cannot run:
+      // { mcpTools } on each Claude connector, the three fenced shapes on copilot-sdk, all four on openai-compat.
+      expect(refused).toBe(malformed.length * 4 + 1 + 1 + 3 + 4);
     } finally {
       __setClaudeCliVersionForTest(undefined);
     }
@@ -605,14 +721,15 @@ describe("claude-cli argv, driven from runCaptureOneShot", () => {
   });
 
   test("{ readSearch }: --restricted, Read Grep and Glob only, every snapshot added, an empty agent home as cwd", async () => {
-    const second = join(root, "snap-2");
-    await executeOneShot("p", driveConfig, driveBot(botDir, { connector: "claude-cli" }), { toolSurface: { readSearch: [framesDir, second] } });
+    const first = snap("snap-1");
+    const second = snap("snap-2");
+    await executeOneShot("p", driveConfig, driveBot(botDir, { connector: "claude-cli" }), { toolSurface: { readSearch: [first, second] } });
     const { args, cwd } = spawned[0]!;
     expect(cwd).toBe(join(agentRoot, ".fenced"));
     expect(args).toContain("--restricted");
     expect(flagValues(args, "--tools")).toEqual(["Read,Grep,Glob"]);
     expect(args).toContain("--strict-mcp-config");
-    expect(flagValues(args, "--add-dir")).toEqual([framesDir, second]);
+    expect(flagValues(args, "--add-dir")).toEqual([first, second]);
     expect(args).not.toContain("--mcp-config");
     expect(args).not.toContain("--settings");
   });
