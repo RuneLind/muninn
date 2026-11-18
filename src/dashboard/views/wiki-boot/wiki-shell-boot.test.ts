@@ -399,7 +399,7 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
       "document click 1ha77", "document change 1typa", "document input smycp", "document keydown 2bnv5",
       "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s", "#articleWrap mouseup 2roml",
-      "document selectionchange 33rjq", "document keydown crscu", "document mousedown 1jrs7", "window message 30vgu",
+      "document selectionchange 33rjq", "document keydown crscu", "document mousedown 25hct", "window message 30vgu",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",
     ];

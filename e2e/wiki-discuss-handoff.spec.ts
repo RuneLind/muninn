@@ -283,6 +283,16 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     expect(clip).not.toMatch(/\blines? \d/);
   });
 
+  test("the whole-page control under a mouse selection: one click opens it while Explain shows beside it", async ({ page }) => {
+    await openPage(page, WIKI);
+    await dragSelect(page, "The night route is unchanged.");
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`).click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel).toBeVisible();
+    await expect(panel.locator(".wiki-handoff-whole")).toHaveText("About the whole page");
+  });
+
   test("a read-only wiki still offers it", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, RO_WIKI);

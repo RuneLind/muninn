@@ -3377,8 +3377,8 @@ export function boot(): { dispose(): void } {
       return;
     }
     // «Ask Claude Code» (its own module acts on the click): hiding the pill
-    // here would move that button out from under the pointer before mouseup.
-    if (t.closest && t.closest("#wikiDiscussHandoffBtn")) return;
+    // here would move either button out from under the pointer before mouseup.
+    if (t.closest && t.closest("#wikiDiscussHandoffBtn, #wikiDiscussHandoffPageBtn")) return;
     hideExplainPill();
   });
   // ── Explainer-iframe bridge ───────────────────────────────────────────
