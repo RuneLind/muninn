@@ -80,10 +80,12 @@ export function parseHandoffBody(raw: unknown): HandoffBody | string {
     return typeof v === "boolean" ? v : null;
   };
   const relPath = str("relPath");
-  if (relPath === null || !relPath?.trim()) return "relPath is required";
+  if (relPath === null) return "relPath must be a string";
+  if (!relPath?.trim()) return "relPath is required";
   if (relPath.length > 1024) return "relPath is too long";
   const question = str("question");
-  if (question === null || !question?.trim()) return "question is required";
+  if (question === null) return "question must be a string";
+  if (!question?.trim()) return "question is required";
   if (question.length > HANDOFF_QUESTION_MAX) return `question is too long (at most ${HANDOFF_QUESTION_MAX} characters)`;
   const selection = str("selection");
   if (selection === null) return "selection must be a string";
@@ -153,7 +155,8 @@ export function registerWikiDiscussHandoffRoute(app: Hono, config: Config, deps:
       }
       const markdown = await readWikiPage(page.index, page.meta);
       if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
-      const wikiDir = resolveWikiRoot(page.entry?.root);
+      // Resolved: a root from `WIKI_DIR` or the registry may be relative, and the prompt promises an absolute path.
+      const wikiDir = path.resolve(resolveWikiRoot(page.entry?.root));
       const target = planCardTargetFor({
         env: deps.env ?? process.env,
         roots: (deps.roots ?? (() => planCardRoots()))(),

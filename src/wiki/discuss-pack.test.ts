@@ -160,6 +160,19 @@ describe("the prompt", () => {
     expect(prompt).toContain(`Page: ${ABS}`);
     expect(prompt.endsWith("Question: " + "Q?".repeat(1000))).toBe(true);
   });
+  test("a cut quote claims the lines cover the passage only when a range of its own was stated", () => {
+    const lines = Array.from({ length: 200 }, (_, k) => `Line ${k} says something different about pier number ${k}.`);
+    const long = page("# L", "", "## Part", "", "Intro.", "", ...lines, "", "Outro.");
+    const selection = lines.join("\n") + " and words the file does not hold";
+    const none = buildHandoff({ ...input, raw: long, selection, question: "Q?".repeat(1000) }).prompt;
+    expect(none).toContain("Passage (not placed: ");
+    expect(none).toMatch(/\[… [\d,]+ more characters cut here\]/);
+    expect(none).not.toContain("cover the whole passage");
+    const section = buildHandoff({ ...input, raw: long, selection, heading: "Part", question: "Q?".repeat(1000) }).prompt;
+    expect(section).toContain("Passage (not placed exactly: ");
+    expect(section).toMatch(/\[… [\d,]+ more characters cut here\]/);
+    expect(section).not.toContain("cover the whole passage");
+  });
   test("the quote is cut to the room left, never below 80 characters, and not cut when it fits", () => {
     expect(quoteFor("short passage", 100)).toBe("short passage");
     const cut = quoteFor("word ".repeat(400), 300);

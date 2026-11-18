@@ -130,6 +130,16 @@ describe("refusals, in order", () => {
     expect((await post(app, "{not json")).status).toBe(400);
     expect(spy.resolves).toBe(0);
   });
+  test("a question or relPath of the wrong type says it must be a string, not that it is missing", async () => {
+    const q = await post(appWith(), { ...PAGE, question: 5 });
+    expect(q.status).toBe(400);
+    expect(((await q.json()) as { error: string }).error).toBe("question must be a string");
+    const r = await post(appWith(), { wiki: "on", relPath: 5, question: "q" });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as { error: string }).error).toBe("relPath must be a string");
+    const missing = await post(appWith(), { wiki: "on", question: "q" });
+    expect(((await missing.json()) as { error: string }).error).toBe("relPath is required");
+  });
   test("finding 9: a question past the bound says it is too long, not that it is missing", async () => {
     const res = await post(appWith(), { ...PAGE, question: "q".repeat(HANDOFF_QUESTION_MAX + 1) });
     expect(res.status).toBe(400);
@@ -180,6 +190,31 @@ describe("the prompt", () => {
     expect(((await withBin.json()) as { prompt: string }).prompt).toContain("bun --no-env-file /opt/plan-card/plan-card.ts ");
     const noRoot = await post(appWith(undefined, { roots: () => [] }), { ...PAGE, question: "q" });
     expect(((await noRoot.json()) as { prompt: string }).prompt).not.toContain("plan-card");
+  });
+  test("a wiki registered with a relative root still gets an absolute path in the prompt", async () => {
+    __setWikiRegistryForTest([
+      { name: "on", root: on, source: "extra" },
+      { name: "off", root: off, source: "extra" },
+      { name: "rel", root: path.relative(process.cwd(), on), source: "extra" },
+    ]);
+    __resetWikiCacheForTest();
+    try {
+      const pageLine = async (relPath: string) => {
+        const res = await post(appWith(undefined, { roots: () => [] }), { wiki: "rel", relPath, question: "q" });
+        expect(res.status).toBe(200);
+        const line = ((await res.json()) as { prompt: string }).prompt.split("\n").find((l) => l.startsWith("Page: "));
+        return line!.slice("Page: ".length);
+      };
+      const plain = await pageLine("notes/plain.md");
+      expect(path.isAbsolute(plain)).toBe(true);
+      expect(plain).toBe(path.resolve(on, "notes/plain.md"));
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "on", root: on, source: "extra" },
+        { name: "off", root: off, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
   });
   test("the whole page: the path, no line range, and no card command on a page without plan_status", async () => {
     const res = await post(appWith(), { wiki: "on", relPath: "notes/plain.md", question: "What is this note for?" });

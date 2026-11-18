@@ -69,11 +69,13 @@ export function passageWhere(pack: ContextPack): string {
 }
 
 /** The quote as the prompt carries it: whole when it fits `room`, else cut
- *  with a visible mark that says the range covers all of it. */
-export function quoteFor(passage: string, room: number): string {
+ *  with a visible mark. The mark says the lines cover all of it only when
+ *  `ranged`: the prompt states the passage's own range. */
+export function quoteFor(passage: string, room: number, ranged = false): string {
   const flat = clampLine(passage, passage.length);
   if (flat.length <= room) return flat;
-  const mark = (rest: number) => ` [… ${rest.toLocaleString("en-US")} more characters cut here; the lines above cover the whole passage]`;
+  const covers = ranged ? "; the lines above cover the whole passage" : "";
+  const mark = (rest: number) => ` [… ${rest.toLocaleString("en-US")} more characters cut here${covers}]`;
   const keep = Math.max(QUOTE_MIN, room - mark(flat.length).length);
   const head = flat.slice(0, keep).trimEnd();
   return head + mark(flat.length - head.length);
@@ -105,7 +107,7 @@ export function renderHandoffPrompt(pack: ContextPack, question: string): string
       quote !== null ? `Question: ${q}` : `Question about the whole page: ${q}`,
     ].join("\n");
   if (pack.passage === null) return build(null);
-  return build(quoteFor(pack.passage, HANDOFF_PROMPT_MAX - build("").length));
+  return build(quoteFor(pack.passage, HANDOFF_PROMPT_MAX - build("").length, pack.location?.found === "exact"));
 }
 
 /** The pack and the prompt for one handoff: what the route answers. */
