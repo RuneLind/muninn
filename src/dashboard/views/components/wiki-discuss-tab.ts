@@ -87,6 +87,12 @@ let paintQueued = false;
 /** A press is held in the tab: the pane does not follow the stream meanwhile,
  *  or the control under the pointer would move before the release. */
 let pressing = false;
+/** Where the pane stood when the press began: at its bottom, and its scrollTop. */
+let pressFromBottom = false;
+let pressTop = 0;
+/** The press began at the bottom and the pane was not scrolled meanwhile: the
+ *  next paint scrolls to the bottom though the stream grew past the margin. */
+let followAfterPress = false;
 
 const keyOf = (wiki: string, relPath: string) => `${wiki}\n${relPath}`;
 
@@ -181,9 +187,10 @@ function paint(): void {
   const d = here();
   if (list) {
     // Follow the stream while the reader is at the bottom of the pane.
-    const atBottom = !pressing && body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    const atBottom = !pressing && (followAfterPress || body.scrollHeight - body.scrollTop - body.clientHeight < 40);
     patchDiscussTurns(list, d);
     if (atBottom) body.scrollTop = body.scrollHeight;
+    if (!pressing) followAfterPress = false;
   }
   const live = !!d && discussionLive(d);
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
@@ -344,6 +351,17 @@ function askFromBox(): void {
   startTurn(q.slice(0, HANDOFF_QUESTION_MAX), null, null, { text: input.value, page: draftPage });
 }
 
+/** The press is over: a press that began at the bottom, with the pane not
+ *  scrolled since, follows the stream again (it grew meanwhile, past the
+ *  40 px margin); the paint is scheduled for a stream that ended meanwhile. */
+function endPress(): void {
+  if (!pressing) return;
+  pressing = false;
+  const body = document.getElementById(DISCUSS_BODY_ID);
+  followAfterPress = pressFromBottom && !!body && Math.abs(body.scrollTop - pressTop) < 2;
+  if (followAfterPress) schedulePaint();
+}
+
 /** Wire the tab once, at boot. */
 export function initDiscussTab(d: DiscussTabDeps): void {
   deps = d;
@@ -363,9 +381,16 @@ export function initDiscussTab(d: DiscussTabDeps): void {
     if (cont) void continueInClaudeCode(cont.dataset.discussContinue ?? "");
   });
   document.addEventListener("pointerdown", (e) => {
-    pressing = !!(e.target as HTMLElement).closest?.(`#${DISCUSS_BODY_ID}`);
+    const body = document.getElementById(DISCUSS_BODY_ID);
+    pressing = !!body && !!(e.target as HTMLElement).closest?.(`#${DISCUSS_BODY_ID}`);
+    if (!pressing || !body) return;
+    pressFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    pressTop = body.scrollTop;
   }, true);
-  for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, () => (pressing = false), true);
+  // A press may end with no pointerup: a context menu takes the release, and so
+  // can the window losing focus (a native drag ends the press with pointercancel).
+  for (const type of ["pointerup", "pointercancel", "contextmenu"]) document.addEventListener(type, endPress, true);
+  window.addEventListener("blur", endPress);
   document.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement;
     if (t?.id !== DISCUSS_INPUT_ID || e.key !== "Enter" || e.shiftKey || e.isComposing) return;

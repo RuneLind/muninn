@@ -32,7 +32,9 @@
  *     while the turn was starting. While turn 2 streams, a selection in turn
  *     1's answer survives the repaints, and a press on turn 1's chip held
  *     across a repaint still reveals its passage, and so does a press on the
- *     streaming turn's own chip.
+ *     streaming turn's own chip. The pane holds still during a press and
+ *     follows the stream again after it, also when a context menu or a blur
+ *     takes the place of the pointerup (that stream is stubbed in the page).
  *  5. **The read-only wiki.** The page payload still says the wiki has an agent,
  *     but the tab is not shown, and a click, a mousedown or Enter on the
  *     controls (forced visible) sends nothing.
@@ -754,6 +756,122 @@ test.describe("Wiki reader: the Discuss tab", () => {
       )
       .toContain("Nothing here.");
     await expect(turn).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+  });
+
+  // The pane does not follow the stream while a press is held in it (the
+  // control under the pointer would move); a press that began at the bottom
+  // resumes following after release, and a press whose pointerup never comes
+  // (a context menu, the window losing focus) does not stop following for good.
+  // The stream is stubbed in the page: many deltas on a timer, which the real
+  // fake's three chunks cannot give, and only the client's scrolling is tested.
+  test("follow-scroll resumes after a press held at the bottom, and after a press that ends in a context menu or a blur", async ({ page }) => {
+    test.setTimeout(120_000);
+    await openPage(page, WIKI, OTHER_REL);
+    await page.locator("#wikiDiscussBtn").click();
+    await expect(page.locator("#discussBody")).toBeVisible();
+    await page.evaluate(() => {
+      const b = document.getElementById("discussBody")!;
+      b.style.flex = "none";
+      b.style.height = "160px";
+      const real = window.fetch.bind(window);
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) !== "/api/wiki/discuss") return real(input, init);
+        const enc = new TextEncoder();
+        const frame = (event: string, data: unknown) => enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        let n = 0;
+        let timer: ReturnType<typeof setInterval>;
+        const stream = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(frame("turn", { turnId: crypto.randomUUID(), seq: 1, discussionId: crypto.randomUUID() }));
+            timer = setInterval(() => {
+              n++;
+              (window as unknown as { __deltas: number }).__deltas = n;
+              c.enqueue(frame("delta", { text: `Delta ${n} carries a sentence long enough to wrap onto a second line in the pane. ` }));
+              if (n === 40) {
+                clearInterval(timer);
+                c.enqueue(frame("done", { answer: "Done." }));
+                c.close();
+              }
+            }, 400);
+          },
+          cancel() {
+            clearInterval(timer);
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }) as typeof fetch;
+    });
+    const deltas = () => page.evaluate(() => (window as unknown as { __deltas?: number }).__deltas ?? 0);
+    const fromBottom = () =>
+      page.evaluate(() => {
+        const b = document.getElementById("discussBody")!;
+        return b.scrollHeight - b.scrollTop - b.clientHeight;
+      });
+    const nextDelta = async () => {
+      const at = await deltas();
+      await expect.poll(deltas, { timeout: 10_000 }).toBeGreaterThan(at);
+      await page.waitForTimeout(100);
+    };
+    const turn = page.locator(".wiki-discuss-turn").first();
+    await page.locator("#wikiDiscussInput").fill("Follow me?");
+    await page.locator("#wikiDiscussInput").press("Enter");
+    await expect.poll(deltas, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+    await nextDelta();
+    expect(await page.evaluate(() => document.getElementById("discussBody")!.scrollHeight > 300), "the answer overflows the pane").toBe(true);
+    expect(await fromBottom()).toBeLessThan(40);
+
+    // A 3 s press on the answer's text: the pane stays put meanwhile.
+    const box = (await turn.locator(".wiki-discuss-answer").boundingBox())!;
+    const [px, py] = [box.x + 20, Math.min(box.y + box.height - 10, 560)];
+    expect(await page.evaluate(([x, y]) => !!document.elementFromPoint(x!, y!)?.closest("#discussBody"), [px, py])).toBe(true);
+    const topAtPress = await page.evaluate(() => document.getElementById("discussBody")!.scrollTop);
+    await page.mouse.move(px, py);
+    await page.mouse.down();
+    await page.waitForTimeout(3000);
+    expect(await page.evaluate(() => document.getElementById("discussBody")!.scrollTop), "no follow-scroll while the press is held").toBe(topAtPress);
+    expect(await fromBottom(), "the answer grew past the margin during the press").toBeGreaterThan(40);
+    await page.mouse.up();
+    await nextDelta();
+    expect(await turn.getAttribute("data-turn-state")).toBe("running");
+    expect(await fromBottom(), "following resumed after the release").toBeLessThan(40);
+
+    // A press that ends in a context menu, or in the window losing focus, with no pointerup.
+    for (const end of ["contextmenu", "blur"] as const) {
+      await page.evaluate((end) => {
+        const a = document.querySelector("#discussBody .wiki-discuss-answer")!;
+        a.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true, button: end === "contextmenu" ? 2 : 0 }));
+        if (end === "contextmenu") a.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+        else window.dispatchEvent(new FocusEvent("blur"));
+      }, end);
+      await nextDelta();
+      await nextDelta();
+      expect(await turn.getAttribute("data-turn-state")).toBe("running");
+      expect(await fromBottom(), `following after a press ended by ${end}`).toBeLessThan(40);
+    }
+
+    // A press at the bottom during which the reader scrolled the pane up: no pull back down.
+    await page.evaluate(() => {
+      const b = document.getElementById("discussBody")!;
+      const a = b.querySelector(".wiki-discuss-answer")!;
+      a.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+      b.scrollTop = 0;
+      a.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, composed: true }));
+    });
+    await nextDelta();
+    expect(await turn.getAttribute("data-turn-state")).toBe("running");
+    expect(await page.evaluate(() => document.getElementById("discussBody")!.scrollTop), "the reader's scroll during the press is kept").toBe(0);
+
+    // A press that began away from the bottom does not pull the pane down after release.
+    await page.evaluate(() => {
+      const b = document.getElementById("discussBody")!;
+      b.scrollTop = 0;
+      const a = b.querySelector(".wiki-discuss-answer")!;
+      a.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, composed: true }));
+      a.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, composed: true }));
+    });
+    await nextDelta();
+    expect(await turn.getAttribute("data-turn-state")).toBe("running");
+    expect(await page.evaluate(() => document.getElementById("discussBody")!.scrollTop), "a press away from the bottom leaves the pane where it was").toBe(0);
   });
 
   test("a read-only wiki: no tab, and no control path sends a turn", async ({ page }) => {

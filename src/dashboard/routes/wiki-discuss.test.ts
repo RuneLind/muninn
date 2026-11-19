@@ -926,6 +926,36 @@ describe("«Continue in Claude Code» (P3)", () => {
       __resetWikiCacheForTest();
     }
   });
+  // Each turn is checked against its own `page_hash`, not the handed-over turn's.
+  test("two turns across an edit: each turn's lines are kept or left out by its own page version", async () => {
+    const rel = "plans/quay.mdx";
+    const file = path.join(agent, rel);
+    await Bun.write(file, PLAN);
+    __resetWikiCacheForTest();
+    try {
+      const { app, store } = setup();
+      const first = await frames(await post(app, { ...PASSAGE, relPath: rel }));
+      const discussionId = first.find((f) => f.event === "turn")!.data.discussionId as string;
+      expect(store.rows[0]!.location).toMatchObject({ found: "exact", fromLine: 15, toLine: 15 });
+      // Version B: two lines above the passage, so it now sits on line 17.
+      await Bun.write(file, PLAN.replace("## Brief\n", "## Brief\n\nA new first line.\n"));
+      __resetWikiCacheForTest();
+      await frames(await post(app, { ...PASSAGE, relPath: rel, discussionId, question: "And the night route?" }));
+      expect(store.rows.map((r) => r.seq)).toEqual([1, 2]);
+      expect(store.rows[1]!.endState).toBe("done");
+      expect(store.rows[1]!.location).toMatchObject({ found: "exact", fromLine: 17, toLine: 17 });
+      const viaSecond = ((await (await postContinue(app, { turnId: store.rows[1]!.id })).json()) as { prompt: string }).prompt;
+      expect(viaSecond).toContain("Turn 1 (passage, lines not given: the page has changed since this turn):");
+      expect(viaSecond).toContain("Turn 2 (passage, line 17):");
+      expect(viaSecond).not.toContain("line 15");
+      const viaFirst = ((await (await postContinue(app, { turnId: store.rows[0]!.id })).json()) as { prompt: string }).prompt;
+      expect(viaFirst).toContain("Turn 1 (passage, lines not given: the page has changed since this turn):");
+      expect(viaFirst).not.toContain("Turn 2");
+    } finally {
+      await rm(file, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
   test("refusals: not admin, a malformed or unknown turn, a running turn, a read-only wiki; none marks the row", async () => {
     const { app, store } = setup();
     await frames(await post(app, PASSAGE));

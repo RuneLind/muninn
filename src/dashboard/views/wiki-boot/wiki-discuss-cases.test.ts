@@ -24,7 +24,7 @@ import {
   openDiscussHandoff,
   setDiscussHandoffEnabled,
 } from "../components/wiki-discuss-handoff.ts";
-import { DISCUSS_INPUT_ID, discussAgentOn, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { DISCUSS_ASK_BTN_ID, DISCUSS_INPUT_ID, discussAgentOn, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { applyWikiReadonlyInputLocks, installWikiReadonlyGuard, WIKI_READONLY_INPUT_PLACEHOLDER } from "../components/wiki-readonly-client.ts";
 
@@ -820,6 +820,92 @@ describe("«Ask Claude Code»: the selection is read when the control is activat
     delete (list as { add?: unknown }).add;
     setDiscussHandoffEnabled(false);
     document.body.innerHTML = "";
+  });
+});
+
+describe("a refused turn does not unlock the discussion while a later one runs (fix round 2 batch 3)", () => {
+  // Turn 1 is refused (no seq), turn 2 streams (seq 1): `discussionLive` is
+  // what keeps a third ask from the box or from «Ask here» from being sent.
+  // Placed before the read-only tests: the guard they install stays on
+  // `document` for the rest of the file and cancels the Ask button's click.
+  const realFetch = globalThis.fetch;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("a third ask from the box or «Ask here» is not sent, and Follow up is disabled while turn 2 runs", async () => {
+    const rel = "plans/live-gate.mdx";
+    initDiscussTab({ wiki: () => "w", relPath: () => rel, switchTab: () => {} });
+    initDiscussHandoff({ wiki: () => "w", relPath: () => rel });
+    document.body.innerHTML =
+      `<div id="wikiBreadcrumb"><button id="wikiFactcheckBtn" type="button">Fact check</button><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
+      `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p></div>` +
+      `<button data-conntab="discuss" hidden>Discuss</button>${discussTabBodyHtml()}`;
+    const enc = new TextEncoder();
+    let closed = false;
+    let close: () => void = () => {};
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url !== "/api/wiki/discuss") return new Response("{}", { status: 404 });
+      sent.push(String(init?.body ?? ""));
+      if (sent.length === 1) return new Response(JSON.stringify({ error: "slow down" }), { status: 429, headers: { "Content-Type": "application/json" } });
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(enc.encode(`event: turn\ndata: ${JSON.stringify({ turnId: crypto.randomUUID(), seq: 1, discussionId: crypto.randomUUID() })}\n\n`));
+          c.enqueue(enc.encode(`event: delta\ndata: ${JSON.stringify({ text: "Six, " })}\n\n`));
+          close = () => {
+            if (!closed) c.close();
+            closed = true;
+          };
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }) as typeof fetch;
+    try {
+      setDiscussHandoffEnabled(true, true);
+      expect(discussAgentOn()).toBe(true);
+      const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement;
+      const btn = document.getElementById(DISCUSS_ASK_BTN_ID) as HTMLButtonElement;
+      const settle = async () => {
+        for (let i = 0; i < 10; i++) await flush();
+      };
+      input.value = "First?";
+      btn.click();
+      await settle();
+      expect(sent.length).toBe(1);
+      expect(btn.disabled).toBe(false);
+      input.value = "Second?";
+      btn.click();
+      await settle();
+      expect(sent.length).toBe(2);
+      // Turn 2 runs: the box's third ask is not sent, and Follow up is disabled.
+      expect(btn.textContent).toBe("Follow up");
+      expect(btn.disabled).toBe(true);
+      input.value = "Third?";
+      btn.click();
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await settle();
+      expect(sent.length).toBe(2);
+      // «Ask here» from the panel: not sent either; the panel says why.
+      document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)!.click();
+      const panel = document.getElementById(DISCUSS_HANDOFF_PANEL_ID)!;
+      panel.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value = "Third, from the panel?";
+      panel.querySelector<HTMLButtonElement>('[data-handoff="ask-here"]')!.click();
+      await settle();
+      expect(sent.length).toBe(2);
+      expect(panel.querySelector(".wiki-handoff-status")!.textContent).toContain("still running");
+      // Turn 2 ends: the button is enabled again.
+      close();
+      await settle();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(btn.disabled).toBe(false);
+    } finally {
+      close();
+      setDiscussHandoffEnabled(false);
+      document.body.innerHTML = "";
+    }
   });
 });
 
