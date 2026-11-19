@@ -165,7 +165,7 @@ describe("readonly guard — which events are cancelled", () => {
     expect(doc.dispatch("click", APPROVE).prevented).toBe(true);
   });
 
-  test("keydown is per-wiki only, and only for the two Enter-submitting inputs", () => {
+  test("keydown is per-wiki only, and only for the Enter-submitting inputs", () => {
     expect(wikiReadonlyGuardPlan(true, false).some((p) => p.type === "keydown")).toBe(false);
     const kd = wikiReadonlyGuardPlan(false, true).find((p) => p.type === "keydown");
     for (const id of WIKI_READONLY_DISABLED_INPUTS) expect(kd?.selector).toContain(id);
@@ -204,5 +204,25 @@ describe("Done's attributes in the read-only selectors", () => {
     const blocked = WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim());
     for (const attr of [STEP_DONE_ATTR, STEP_DONE_CONFIRM_ATTR, STEP_DONE_ALL_ATTR, STEP_DONE_ALL_CONFIRM_ATTR]) expect(blocked).toContain(`[${attr}]`);
     expect(blocked.some((s) => s.includes("cancel") && s.includes("step-done"))).toBe(false);
+  });
+});
+
+describe("Discuss's tab (P3): the controls that call the agent", () => {
+  test("a read-only wiki cancels their click and the box's Enter; a mousedown on them reaches the page; the read slice hides them", async () => {
+    const { WIKI_READ_SLICE_HIDDEN_SELECTOR } = await import("./wiki-read-slice.ts");
+    const { doc, reached } = install({ wiki: true });
+    for (const sel of ["#wikiDiscussAskBtn", '[data-handoff="ask-here"]', "[data-discuss-continue]"]) {
+      const el = new FakeEl([sel]);
+      const click = doc.dispatch("click", el);
+      expect(click.prevented).toBe(true);
+      expect(reached).not.toContain(`click:${sel}`);
+      // Activated on click, so their mousedown is the page's (hideExplainPill's delegate).
+      expect(doc.dispatch("mousedown", el).immediateStopped).toBe(false);
+      expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
+    }
+    const input = new FakeEl(["#wikiDiscussInput"]);
+    expect(doc.dispatch("keydown", input, "Enter").prevented).toBe(true);
+    expect(doc.dispatch("keydown", input, "a").prevented).toBe(false);
+    for (const sel of ['[data-conntab="discuss"]', "#discussBody"]) expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
   });
 });

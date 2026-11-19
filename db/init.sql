@@ -1039,6 +1039,8 @@ CREATE TABLE wiki_discuss_turns (
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   heartbeat_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at    TIMESTAMPTZ,
+  -- When the reader took the turn on to Claude Code (P3, migration 091).
+  handed_over_at TIMESTAMPTZ,
   UNIQUE (discussion_id, seq)
 );
 

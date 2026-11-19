@@ -142,6 +142,12 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // The STALE tab's Check: model calls over the wiki's pages.
   "[data-stale-check]",
   "#wikiClaimRetryAll",
+  // Discuss's tab (P3): its Ask / Follow up, P1's panel's «Ask here» and
+  // «Continue in Claude Code» — the route refuses a read-only wiki, and the
+  // tab is never shown on one; these are the backstop.
+  "#wikiDiscussAskBtn",
+  '[data-handoff="ask-here"]',
+  "[data-discuss-continue]",
   // «Walk me through» on a section heading. The reader renders none on a
   // read-only wiki or under the read slice; this is the backstop.
   "[data-walkthrough-btn]",
@@ -152,6 +158,7 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // half that survives all of them.
   "#wikiAskInput",
   "#wikiFollowupInput",
+  "#wikiDiscussInput",
 ].join(",");
 
 /** The Stale check's counts outside the STALE tab (PR 2b): the article pill,
@@ -240,7 +247,7 @@ export function wikiReadonlyKeyActivates(key: string): boolean {
  * bar, both of which set the same attributes at paint time — can be checked
  * against one list.
  */
-export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput"];
+export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput", "#wikiDiscussInput"];
 
 /**
  * The controls reachable from the **keyboard with no pointer event at all**: the

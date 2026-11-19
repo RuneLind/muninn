@@ -27,7 +27,7 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
-import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_CONTINUE_PATH, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 // Whether this disk folds case (APFS default): the case-only rename test needs one.
 const caseProbe = testTempDirSync(path.join(tmpdir(), "discuss-case-"));
@@ -95,6 +95,7 @@ class MemStore implements DiscussStore {
       createdAt: Date.now(),
       heartbeatAt: Date.now(),
       finishedAt: null,
+      handedOverAt: null,
     };
     this.rows.push(row);
     return { id: row.id, seq };
@@ -118,6 +119,14 @@ class MemStore implements DiscussStore {
   heartbeat = async (id: string) => {
     const r = this.rows.find((x) => x.id === id);
     if (r?.endState === "running") r.heartbeatAt = Date.now();
+  };
+  // The continue route's reads and write (P3).
+  get = async (id: string) => this.rows.find((x) => x.id === id) ?? null;
+  handedOver = async (id: string) => {
+    const r = this.rows.find((x) => x.id === id);
+    if (!r) return null;
+    r.handedOverAt ??= Date.now();
+    return r;
   };
 }
 
@@ -192,6 +201,7 @@ function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof exec
     });
   registerWikiDiscussRoute(app, { profile: "default", dashboardPort: 4321, claudeModel: "fallback-model", decisionTriageRepoRoots: null } as unknown as Config, {
     store,
+    continueStore: store,
     bots: () => [bot(opts.connector ?? "claude-sdk")],
     oneShot,
     surfaceBlocker: async (connector, surface) => {
@@ -860,5 +870,46 @@ describe("one page text per turn: the snapshot's copy is the page the row descri
     expect(store.rows[0]!.endState).toBe("done");
     expect(store.rows[0]!.pageHash).toBe(sha(NOTE));
     expect(calls.wikiSnaps).toHaveLength(0);
+  });
+});
+
+const postContinue = (app: Hono, body: unknown) =>
+  app.request(WIKI_DISCUSS_CONTINUE_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+describe("«Continue in Claude Code» (P3)", () => {
+  test("a finished turn: the prompt carries the discussion up to it, and the turn alone is marked handed over", async () => {
+    const { app, store } = setup();
+    const first = await frames(await post(app, PASSAGE));
+    const discussionId = first.find((f) => f.event === "turn")!.data.discussionId as string;
+    await frames(await post(app, { ...PASSAGE, discussionId, question: "And the night route?" }));
+    expect(store.rows.map((r) => r.seq)).toEqual([1, 2]);
+    const res = await postContinue(app, { turnId: store.rows[0]!.id });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { prompt: string; handedOverAt: number | null };
+    expect(body.prompt).toContain(`Page: ${path.join(agent, "plans/ferry.mdx")}`);
+    expect(body.prompt).toContain("Question: Which stop does the summer route add?");
+    expect(body.prompt).toContain("The summer route stops at Example Island.");
+    // Up to the turn handed over: the later turn stays out.
+    expect(body.prompt).not.toContain("And the night route?");
+    expect(body.handedOverAt).toBeNumber();
+    expect(store.rows[0]!.handedOverAt).toBe(body.handedOverAt);
+    expect(store.rows[1]!.handedOverAt).toBeNull();
+  });
+  test("refusals: not admin, a malformed or unknown turn, a running turn, a read-only wiki; none marks the row", async () => {
+    const { app, store } = setup();
+    await frames(await post(app, PASSAGE));
+    const id = store.rows[0]!.id;
+    const { app: userApp } = setup({ role: "user", store });
+    expect((await postContinue(userApp, { turnId: id })).status).toBe(403);
+    expect((await postContinue(app, { turnId: "nope" })).status).toBe(400);
+    expect((await postContinue(app, { turnId: crypto.randomUUID() })).status).toBe(404);
+    store.rows[0]!.endState = "running";
+    expect((await postContinue(app, { turnId: id })).status).toBe(409);
+    store.rows[0]!.endState = "done";
+    __setReadonlyWikiRootsForTest([agent]);
+    const ro = await postContinue(app, { turnId: id });
+    expect(ro.status).toBe(403);
+    expect(((await ro.json()) as { readonly: boolean }).readonly).toBe(true);
+    expect(store.rows[0]!.handedOverAt).toBeNull();
   });
 });

@@ -12,6 +12,7 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { walkthroughStyles } from "./components/wiki-walkthrough-view.ts";
 import { stepDoneStyles } from "./components/wiki-step-done.ts";
 import { discussHandoffStyles } from "./components/wiki-discuss-handoff.ts";
+import { discussTabBodyHtml, discussTabStyles } from "./components/wiki-discuss-tab-view.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import { mirrorStatusSlotHtml, mirrorStatusStyles } from "./components/wiki-mirror-status.ts";
@@ -336,6 +337,7 @@ export async function renderWikiPage(opts?: {
         <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
         <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
         <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
+        <button class="wiki-conn-tab" data-conntab="discuss" hidden title="Discuss this page with the wiki's agent">Discuss</button>
         <div class="wiki-conn-tools">
           <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
           <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
@@ -361,6 +363,7 @@ export async function renderWikiPage(opts?: {
         ${askBotLine}
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
       </div>
+      ${discussTabBodyHtml()}
     </div>
     <!-- Shown only at or under RAIL_DRAWER_MAX, where the rail has no column
          (issue #623): the one way to the page list there. LAST child, placed
@@ -3843,6 +3846,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${walkthroughStyles()}
     ${stepDoneStyles()}
     ${discussHandoffStyles()}
+    ${discussTabStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${mirrorStatusStyles()}

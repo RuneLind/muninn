@@ -1,0 +1,327 @@
+/// <reference lib="dom" />
+/**
+ * Discuss's tab — the fourth tab of the reader's side pane, on wikis with a
+ * wiki agent (mimir plan muninn-wiki-discuss, P3; the route is
+ * `routes/wiki-discuss.ts`). Not a dialog: a pane body like Ask's.
+ *
+ * The page payload's `reader.discussAgent` (a `.wiki-agent.md` at the wiki
+ * root, the route registered, an admin viewer) shows the tab, through
+ * {@link setDiscussAgentEnabled}, which the handoff module calls per page; a
+ * read-only wiki never shows it. A turn starts from P1's panel («Ask here», a
+ * passage) or from the tab's own box (the whole page first, then a follow-up
+ * in the same discussion); the breadcrumb's 💬 Discuss opens the tab here.
+ *
+ * Each page's discussion lives in {@link discussions}, outside the tab's HTML:
+ * the stream writes into its record and the tab is painted from it, so a turn
+ * keeps streaming while the reader is on another tab or page. The answer goes
+ * through `renderStreamingBody`, the Ask tab's markdown function. A passage
+ * chip finds its passage in the article as it is now (`findPassage`) and
+ * reveals it (`revealElement`); a passage no longer there says so.
+ *
+ * The controls that call the agent (`#wikiDiscussAskBtn`, `#wikiDiscussInput`,
+ * the panel's «Ask here», «Continue in Claude Code») are in the read-only
+ * egress selectors and the input in the keydown one; the tab and its body are
+ * in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
+ */
+
+import { copyText } from "./copy-path.ts";
+import { makeSseFrameParser } from "./client-runtime.ts";
+import { revealElement } from "./wiki-hash-target.ts";
+import { revealRightPane } from "./wiki-pane-toggle.ts";
+import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
+import {
+  applyDiscussFrame,
+  currentTurn,
+  discussRefusalMessage,
+  discussTurnsHtml,
+  findPassage,
+  newTurn,
+  streamClosed,
+  turnLive,
+  type DiscussPassage,
+  type DiscussTurnView,
+  type DiscussionView,
+} from "./wiki-discuss-state.ts";
+import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
+import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
+
+export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
+const DISCUSS_PATH = "/api/wiki/discuss";
+const CONTINUE_PATH = "/api/wiki/discuss/continue";
+/** Set on a text node's wrapper when a found passage starts in bare text. */
+const ANCHOR_CLASS = "wiki-discuss-anchor";
+
+export interface DiscussTabDeps {
+  /** The served wiki's registry name. */
+  wiki(): string;
+  /** The open page's relPath, or null off a page. */
+  relPath(): string | null;
+  /** The shell's tab switch (`switchConnTab`). */
+  switchTab(tab: string): void;
+}
+
+let deps: DiscussTabDeps | null = null;
+let enabled = false;
+/** Every page's discussion this session, by wiki and relPath. */
+const discussions = new Map<string, DiscussionView>();
+let turnSeq = 0;
+/** The page the box's draft was typed on. */
+let draftPage = "";
+let paintQueued = false;
+
+const keyOf = (wiki: string, relPath: string) => `${wiki}\n${relPath}`;
+
+function here(): DiscussionView | null {
+  const relPath = deps?.relPath();
+  if (!deps || !relPath) return null;
+  return discussions.get(keyOf(deps.wiki(), relPath)) ?? null;
+}
+
+function ensureHere(): DiscussionView | null {
+  const relPath = deps?.relPath();
+  if (!deps || !relPath) return null;
+  const k = keyOf(deps.wiki(), relPath);
+  let d = discussions.get(k);
+  if (!d) {
+    d = { wiki: deps.wiki(), relPath, discussionId: null, turns: [] };
+    discussions.set(k, d);
+  }
+  return d;
+}
+
+/** Whether this page offers the tab. */
+export function discussAgentOn(): boolean {
+  return enabled;
+}
+
+/** Per page render: whether the page's wiki has an agent this viewer may use.
+ *  Never on a read-only wiki (the route refuses it; the controls are blocked
+ *  by the egress selectors as a backstop). Leaving the tab while it is shown
+ *  on a page without one goes back to Connections. */
+export function setDiscussAgentEnabled(on: boolean): void {
+  enabled = on && !wikiReadonlyWikiFlag();
+  const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
+  if (tab) tab.hidden = !enabled;
+  const body = document.getElementById(DISCUSS_BODY_ID);
+  if (!enabled && tab?.classList.contains("active")) deps?.switchTab("conn");
+  // A draft belongs to its page: another page starts with an empty box.
+  const page = deps ? `${deps.wiki()}\n${deps.relPath() ?? ""}` : "";
+  if (page !== draftPage) {
+    draftPage = page;
+    const input = body?.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
+    if (input) input.value = "";
+  }
+  paint();
+}
+
+/** Show the tab (the breadcrumb's 💬 Discuss, «Ask here»), the pane first. */
+export function openDiscussTab(focus = false): void {
+  if (!enabled || !deps) return;
+  revealRightPane();
+  deps.switchTab(DISCUSS_TAB);
+  paint();
+  if (focus) document.getElementById(DISCUSS_INPUT_ID)?.focus();
+}
+
+/** «Ask here» from P1's panel: one turn about the passage (or the whole page
+ *  when `passage` is null), in this page's discussion. False when nothing was
+ *  sent (off, off a page, or the discussion's turn still running). */
+export function askInDiscuss(question: string, passage: DiscussPassage | null): boolean {
+  const d = ensureHere();
+  if (!enabled || !d || !question.trim()) return false;
+  const cur = currentTurn(d);
+  if (cur && turnLive(cur)) return false;
+  openDiscussTab();
+  void runTurn(d, question.trim(), passage);
+  return true;
+}
+
+function paint(): void {
+  const body = document.getElementById(DISCUSS_BODY_ID);
+  if (!body) return;
+  const list = body.querySelector<HTMLElement>(".wiki-discuss-turns");
+  const d = here();
+  if (list) {
+    // Follow the stream while the reader is at the bottom of the pane.
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    list.innerHTML = discussTurnsHtml(d);
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+  const cur = d ? currentTurn(d) : null;
+  const live = !!cur && turnLive(cur);
+  const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
+  const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
+  const started = !!d && d.turns.some((t) => t.turnId !== null);
+  if (input) input.placeholder = started ? "Follow up on this discussion…" : "Ask the wiki agent about this page…";
+  if (btn) {
+    btn.textContent = started ? "Follow up" : "Ask";
+    btn.disabled = live;
+  }
+}
+
+/** Paint at most once a frame: deltas arrive many times a second. */
+function schedulePaint(): void {
+  if (paintQueued) return;
+  paintQueued = true;
+  const run = () => {
+    paintQueued = false;
+    paint();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
+async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null): Promise<void> {
+  const turn = newTurn(`t${++turnSeq}`, question, passage);
+  d.turns.push(turn);
+  paint();
+  const body: Record<string, unknown> = { wiki: d.wiki, relPath: d.relPath, question };
+  if (passage) {
+    Object.assign(body, { selection: passage.selection, before: passage.before, after: passage.after, atStart: passage.atStart, atEnd: passage.atEnd, heading: passage.heading });
+    if (passage.edge) body.edge = passage.edge;
+  }
+  if (d.discussionId) body.discussionId = d.discussionId;
+  let res: Response;
+  try {
+    res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body) });
+  } catch {
+    turn.state = "refused";
+    turn.message = "The turn could not start: the server did not answer.";
+    schedulePaint();
+    return;
+  }
+  if (!res.ok || !res.body) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await res.json()) as Record<string, unknown>;
+    } catch {
+      data = null;
+    }
+    turn.state = "refused";
+    turn.message = discussRefusalMessage(res.status, data);
+    schedulePaint();
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = makeSseFrameParser((frame) => {
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(frame.data || "{}") as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const out = applyDiscussFrame(turn, frame.event, data);
+    if (out.discussionId && !d.discussionId) d.discussionId = out.discussionId;
+    schedulePaint();
+  });
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      parser.push(decoder.decode(chunk.value, { stream: true }));
+    }
+    parser.push(decoder.decode());
+    parser.end();
+  } catch {
+    /* the connection dropped: streamClosed says so */
+  }
+  streamClosed(turn);
+  schedulePaint();
+}
+
+function turnByKey(key: string): DiscussTurnView | null {
+  return here()?.turns.find((t) => t.key === key) ?? null;
+}
+
+/** The chip: reveal the passage in the article as it is now, or say it is gone. */
+function revealPassage(key: string): void {
+  const t = turnByKey(key);
+  if (!t?.passage) return;
+  const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
+  const found = article ? findPassage(article, t.passage.selection) : null;
+  t.passageGone = !found;
+  paint();
+  if (!found || !article) return;
+  let el = found.block;
+  if (!el) {
+    // Bare text under the article (the formatter writes no <p>): a wrapper
+    // with no text of its own gives the flash an element.
+    const parent = found.node.parentElement;
+    if (parent && parent !== article && !parent.classList.contains("wiki-article")) el = parent;
+    else if (parent?.classList.contains(ANCHOR_CLASS)) el = parent;
+    else {
+      const span = document.createElement("span");
+      span.className = ANCHOR_CLASS;
+      found.node.replaceWith(span);
+      span.appendChild(found.node);
+      el = span;
+    }
+  }
+  revealElement(article, el);
+}
+
+async function continueInClaudeCode(key: string): Promise<void> {
+  const t = turnByKey(key);
+  if (!t?.turnId || t.handover?.state === "busy") return;
+  t.handover = { state: "busy", note: "Building the prompt…" };
+  paint();
+  let prompt: string | null = null;
+  try {
+    const res = await fetch(CONTINUE_PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ turnId: t.turnId }) });
+    const data = (await res.json().catch(() => null)) as { prompt?: unknown; error?: unknown } | null;
+    if (res.ok && typeof data?.prompt === "string") prompt = data.prompt;
+    else t.handover = { state: "failed", note: typeof data?.error === "string" ? `${data.error} (${res.status})` : `The prompt could not be built (${res.status}).` };
+  } catch {
+    t.handover = { state: "failed", note: "The prompt could not be built: the server did not answer." };
+  }
+  if (prompt === null) {
+    paint();
+    return;
+  }
+  const ok = await copyText(prompt);
+  t.handover = ok
+    ? { state: "done", note: `Copied, ${prompt.length} characters. Paste it into Claude Code.` }
+    : { state: "failed", note: "Copy failed. The prompt is below: copy it by hand.", prompt };
+  paint();
+  if (!ok) {
+    const out = document.querySelector<HTMLTextAreaElement>(`[data-turn-key="${key}"] .wiki-discuss-cont-out`);
+    out?.focus();
+    out?.select();
+  }
+}
+
+/** The tab's own box: the first question about the whole page, then a
+ *  follow-up in the same discussion. */
+function askFromBox(): void {
+  const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
+  const q = input?.value.trim() ?? "";
+  if (!input || !q) return;
+  if (askInDiscuss(q.slice(0, HANDOFF_QUESTION_MAX), null)) input.value = "";
+}
+
+/** Wire the tab once, at boot. */
+export function initDiscussTab(d: DiscussTabDeps): void {
+  deps = d;
+  document.addEventListener("click", (e) => {
+    const t = e.target as HTMLElement;
+    if (!t.closest) return;
+    if (t.closest(`#${DISCUSS_ASK_BTN_ID}`)) {
+      askFromBox();
+      return;
+    }
+    const chip = t.closest<HTMLElement>("[data-discuss-chip]");
+    if (chip) {
+      revealPassage(chip.dataset.discussChip ?? "");
+      return;
+    }
+    const cont = t.closest<HTMLElement>("[data-discuss-continue]");
+    if (cont) void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+  });
+  document.addEventListener("keydown", (e) => {
+    const t = e.target as HTMLElement;
+    if (t?.id !== DISCUSS_INPUT_ID || e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    askFromBox();
+  });
+}

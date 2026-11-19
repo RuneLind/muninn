@@ -61,7 +61,9 @@ import { codeSnapshot, leaseSnapshot, wikiSnapshot, wikiSnapshotHolds, type Snap
 import {
   closeAbandonedDiscussTurns,
   finishDiscussTurn,
+  getDiscussTurn,
   listDiscussTurns,
+  markDiscussTurnHandedOver,
   markDiscussReaderLeft,
   setDiscussTurnCard,
   startDiscussTurn,
@@ -73,6 +75,7 @@ import {
 import { sha256 } from "../../gardener/util.ts";
 import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { buildContextPack } from "../../wiki/discuss-pack.ts";
+import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
 import {
   DISCUSS_TURN_TIMEOUT_MS,
   WIKI_AGENT_RULES_MAX_BYTES,
@@ -98,6 +101,8 @@ import { parseHandoffBody, type HandoffBody } from "./wiki-discuss-handoff.ts";
 import { egressRefusal } from "./wiki-egress.ts";
 
 export const WIKI_DISCUSS_PATH = "/api/wiki/discuss";
+/** «Continue in Claude Code» (P3): `{turnId}` → `{prompt, handedOverAt}`. */
+export const WIKI_DISCUSS_CONTINUE_PATH = "/api/wiki/discuss/continue";
 
 /** The Copilot surface (D2): the knowledge server's search for other pages,
  *  and yggdrasil's listing and graph tools. Never `read_source`,
@@ -214,6 +219,8 @@ export interface DiscussRouteDeps {
   /** Default {@link DISCUSS_HEARTBEAT_MS} and {@link DISCUSS_STALE_RUNNING_MS}. */
   heartbeatMs?: number;
   staleRunningMs?: number;
+  /** The continue route's reads and its one write; default the DB's. */
+  continueStore?: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; handedOver: typeof markDiscussTurnHandedOver };
   log?: { info(msg: string, props: Record<string, unknown>): void; warn(msg: string, props: Record<string, unknown>): void; error(msg: string, props: Record<string, unknown>): void };
 }
 
@@ -355,6 +362,49 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     } catch (err) {
       release();
       throw err;
+    }
+  });
+
+  // «Continue in Claude Code» (P3): the prompt that takes the discussion on to
+  // Claude Code up to this turn, and the turn's `handed_over_at`. No model is
+  // called; it carries the discuss route's guards anyway (admin, JSON, the
+  // wiki's egress prologue), since it marks a row and hands a model-written
+  // answer on. Refusals: 403 role · 415 · 413 · 400 body · 404 unknown turn ·
+  // 404 the turn's wiki is not configured here · 403 `readonly` · 409 the turn
+  // is still running · 500.
+  const contStore = deps.continueStore ?? { get: getDiscussTurn, list: listDiscussTurns, handedOver: markDiscussTurnHandedOver };
+  const smallLimit = bodyLimit({
+    maxSize: 1024,
+    onError: (c) => c.json({ error: "request body is larger than 1024 bytes", code: "too_large" }, 413),
+  });
+  app.post(WIKI_DISCUSS_CONTINUE_PATH, gate, smallLimit, async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "body is not valid JSON" }, 400);
+    }
+    const turnId = (raw as { turnId?: unknown } | null)?.turnId;
+    if (typeof turnId !== "string" || !isValidUuid(turnId)) return c.json({ error: "turnId must be a uuid" }, 400);
+    try {
+      const turn = await contStore.get(turnId.toLowerCase());
+      if (!turn) return c.json({ error: "no discuss turn with that id", reason: "unknown-turn" }, 404);
+      const { entry, unknownWiki } = resolveWikiRequest(getWikiRegistry(), turn.wiki, undefined, process.env.WIKI_DIR);
+      if (unknownWiki) return c.json({ error: `no wiki configured for "${turn.wiki}"` }, 404);
+      const egress = egressRefusal(c, entry, unknownWiki);
+      if (egress) return egress;
+      if (turn.endState === "running") return c.json({ error: "the turn is still running; hand it over once it has ended", reason: "running" }, 409);
+      const turns = (await contStore.list(turn.discussionId)).filter((t) => t.seq <= turn.seq);
+      const prompt = renderContinuePrompt({
+        path: path.join(path.resolve(resolveWikiRoot(entry?.root)), turn.relPath),
+        turns: turns.map((t) => ({ seq: t.seq, selection: t.selection, location: t.location, question: t.question, answer: t.answer, endState: t.endState })),
+      });
+      const marked = await contStore.handedOver(turn.id);
+      log.info("discuss turn handed over on {wiki} {relPath}", { wiki: turn.wiki, relPath: turn.relPath, turnId: turn.id, seq: turn.seq, chars: prompt.length });
+      return c.json({ prompt, chars: prompt.length, handedOverAt: marked?.handedOverAt ?? null });
+    } catch (err) {
+      log.error("discuss continue failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "could not build the prompt" }, 500);
     }
   });
 

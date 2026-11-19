@@ -4,7 +4,7 @@
  * turn rule (sequential and concurrent), a running row whose heartbeat stopped
  * closed as abandoned (by the next start and by the sweep) while one whose
  * heartbeat runs is not, a forced collision on the sequence, the reader-left
- * mark and the card. Invented pages only.
+ * mark, the card and the hand-over mark (migration 091). Invented pages only.
  */
 import { describe, expect, test } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -15,6 +15,7 @@ import {
   getDiscussTurn,
   listDiscussTurns,
   markDiscussReaderLeft,
+  markDiscussTurnHandedOver,
   setDiscussTurnCard,
   startDiscussTurn as startTurn,
   type DiscussTurnStart,
@@ -182,5 +183,21 @@ describe("wiki_discuss_turns", () => {
     await setDiscussTurnCard(t.id, "# Ferry card");
     await finishDiscussTurn(t.id, { endState: "timeout", answer: "", error: "timed out after 300000ms" });
     expect(await getDiscussTurn(t.id)).toMatchObject({ readerLeft: true, card: "# Ferry card", endState: "timeout" });
+  });
+
+  test("a hand-over to Claude Code is stored once, on that turn only", async () => {
+    const d = crypto.randomUUID();
+    const a = await startDiscussTurn(start(d));
+    await done(a.id);
+    const b = await startDiscussTurn(start(d, { question: "And the night route?" }));
+    await done(b.id);
+    expect((await getDiscussTurn(a.id))?.handedOverAt).toBeNull();
+    const first = await markDiscussTurnHandedOver(a.id);
+    expect(first?.handedOverAt).toBeNumber();
+    // A second hand-over keeps the first moment.
+    await Bun.sleep(5);
+    expect((await markDiscussTurnHandedOver(a.id))?.handedOverAt).toBe(first!.handedOverAt);
+    expect((await getDiscussTurn(b.id))?.handedOverAt).toBeNull();
+    expect(await markDiscussTurnHandedOver(crypto.randomUUID())).toBeNull();
   });
 });

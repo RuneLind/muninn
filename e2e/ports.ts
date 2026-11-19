@@ -423,6 +423,8 @@ export const E2E_PORTS = {
   "wiki-live-facts": 3251,
   // Discuss P1: «Ask Claude Code» copies a prompt; a read-only wiki and an opted-out one beside it.
   "wiki-discuss-handoff": 3252,
+  // Discuss P3: the Discuss tab against a claude-sdk bot on the fake Messages API; a read-only wiki beside it.
+  "wiki-discuss-tab": 3253,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

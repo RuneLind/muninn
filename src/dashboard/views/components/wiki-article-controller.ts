@@ -44,6 +44,7 @@ import type { ReaderPayload } from "../../../wiki/render.ts";
 import { adoptLiveFactIssues, type LiveFactsPayload } from "./wiki-live-facts.ts";
 import type { RelatedOrder } from "./wiki-recents.ts";
 import type { WorkedGate } from "./wiki-activity-rank.ts";
+import { discussAgentOn } from "./wiki-discuss-tab.ts";
 
 /** What the article controller reads and calls on the shell, read live through
  *  a function so a value the shell reassigns is never a stale copy. Every
@@ -1044,19 +1045,18 @@ export function switchConnTab(tab: string, focus?: boolean): void {
   // The STALE tab is absent where its routes are (the read slice) and hidden
   // on a read-only instance (D25): the rail stays on Connections there. Decided
   // before the active mark, so only the tab actually shown is marked (A12).
-  if (tab === "stale" && !staleTabAvailable()) tab = "conn";
+  // Discuss's tab (P3) only on a page whose wiki has an agent for this viewer.
+  if ((tab === "stale" && !staleTabAvailable()) || (tab === "discuss" && !discussAgentOn())) tab = "conn";
   document.querySelectorAll(".wiki-conn-tab").forEach((b) => {
     b.classList.toggle("active", b.getAttribute("data-conntab") === tab);
   });
-  const connBody = document.getElementById("connBody");
-  const askBody = document.getElementById("askBody");
-  const staleBody = document.getElementById("staleBody");
-  const ask = tab === "ask";
-  const stale = tab === "stale";
-  if (connBody) connBody.style.display = ask || stale ? "none" : "";
-  if (askBody) askBody.style.display = ask ? "flex" : "none";
-  if (staleBody) staleBody.style.display = stale ? "" : "none";
-  if (ask && focus) {
+  // Each tab's body and how it shows; Connections' when no other tab is on.
+  const bodies: [string, string, string][] = [["connBody", "conn", ""], ["askBody", "ask", "flex"], ["staleBody", "stale", ""], ["discussBody", "discuss", "flex"]];
+  for (const [id, name, display] of bodies) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = tab === name || (name === "conn" && !bodies.some((b) => b[1] === tab)) ? display : "none";
+  }
+  if (tab === "ask" && focus) {
     const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
     if (input) input.focus();
   }

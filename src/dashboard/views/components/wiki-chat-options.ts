@@ -96,6 +96,7 @@ import {
 import { DRAFT_PLAN_ATTR } from "./wiki-issue-rows.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
+import { discussAgentOn, openDiscussTab } from "./wiki-discuss-tab.ts";
 
 // ── The shell port ────────────────────────────────────────────────────
 
@@ -1254,7 +1255,11 @@ function wireChatOptions(): void {
     // unconditionally), exactly as the plain escalate button does.
     if (t.closest("#wikiChatEscOptBtn")) openChatOptions("escalate");
     else if (t.closest("#wikiNewChatBtn")) openChatOptions("direct");
-    else if (t.closest("#" + DISCUSS_ARTICLE_BTN_ID)) openArticleChat();
+    // On a wiki with a wiki agent (Discuss P3) the button opens the Discuss tab.
+    else if (t.closest("#" + DISCUSS_ARTICLE_BTN_ID)) {
+      if (discussAgentOn()) openDiscussTab(true);
+      else openArticleChat();
+    }
     else if (t.closest("[" + DRAFT_PLAN_ATTR + "]")) {
       openArticleChat(t.closest("[" + DRAFT_PLAN_ATTR + "]")!.getAttribute(DRAFT_PLAN_ATTR) || undefined);
     }

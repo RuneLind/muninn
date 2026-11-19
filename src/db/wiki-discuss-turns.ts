@@ -73,6 +73,8 @@ export interface DiscussTurn {
   createdAt: number;
   heartbeatAt: number;
   finishedAt: number | null;
+  /** When the reader took the turn on to Claude Code (migration 091); null until then. */
+  handedOverAt: number | null;
 }
 
 /** The discussion already has a live turn: a `running` row whose heartbeat
@@ -115,6 +117,7 @@ function mapRow(r: Record<string, unknown>): DiscussTurn {
     createdAt: new Date(r.created_at as string).getTime(),
     heartbeatAt: new Date((r.heartbeat_at ?? r.created_at) as string).getTime(),
     finishedAt: r.finished_at ? new Date(r.finished_at as string).getTime() : null,
+    handedOverAt: r.handed_over_at ? new Date(r.handed_over_at as string).getTime() : null,
   };
 }
 
@@ -219,5 +222,16 @@ export async function listDiscussTurns(discussionId: string): Promise<DiscussTur
 
 export async function getDiscussTurn(id: string): Promise<DiscussTurn | null> {
   const [row] = await getDb()`SELECT * FROM wiki_discuss_turns WHERE id = ${id}`;
+  return row ? mapRow(row) : null;
+}
+
+/** The reader took the turn on to Claude Code («Continue in Claude Code»,
+ *  P3). Sets `handed_over_at` the first time only: a second hand-over keeps
+ *  the first moment. Returns the turn, or null when there is no such turn. */
+export async function markDiscussTurnHandedOver(id: string): Promise<DiscussTurn | null> {
+  const [row] = await getDb()`
+    UPDATE wiki_discuss_turns SET handed_over_at = COALESCE(handed_over_at, now())
+    WHERE id = ${id}
+    RETURNING *`;
   return row ? mapRow(row) : null;
 }

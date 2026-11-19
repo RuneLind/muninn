@@ -58,6 +58,7 @@ import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
 import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
 import { registerWikiDiscussHandoffRoute } from "./wiki-discuss-handoff.ts";
 import { registerWikiDiscussRoute } from "./wiki-discuss.ts";
+import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
 import { egressRefusal, readonlyCandidateRoot } from "./wiki-egress.ts";
 import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
 import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
@@ -1827,6 +1828,8 @@ export function registerWikiReadRoutes(
           }),
         // Discuss P1: only where its route is registered, as D7 above.
         tools,
+        // Discuss P3: the rules file is read only for an admin where the route is.
+        tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state !== "absent",
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):
