@@ -125,8 +125,9 @@ const ABANDONED_ERROR = "the turn's process stopped before it ended (no heartbea
  *  `discussionId` is given. Returns the closed turns' ids. A live turn touches
  *  its heartbeat far more often than the bound, so a closed turn is one whose
  *  process is gone or stalled past the bound (the laptop slept mid-turn, say).
- *  A stalled one may still finish later: `finishDiscussTurn` then stores it
- *  `done`, possibly after a newer turn of the same discussion. */
+ *  A stalled one may still finish later: `finishDiscussTurn` then stores the
+ *  end state it is given (`done`, or `timeout`/`error` once past the route's
+ *  deadline), possibly after a newer turn of the same discussion. */
 export async function closeAbandonedDiscussTurns(staleRunningMs: number, discussionId?: string): Promise<string[]> {
   return closeAbandoned(getDb(), staleRunningMs, discussionId);
 }
