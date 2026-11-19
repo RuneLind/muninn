@@ -507,6 +507,32 @@ describe("text the reader shows otherwise than the source spells it", () => {
   });
 });
 
+describe("a selection that starts or ends in a reader label goes to the section", () => {
+  const S = "Run the database migration on staging and verify that the row counts match.";
+  // `nth`: the FactCheck strip's own counts; the first copy is the toolbar's
+  // clone at the article's top, above every heading.
+  const CASES: { name: string; body: string[]; from: string; to: string; nth?: number }[] = [
+    { name: "starts in an untitled Fold's «Details»", body: ["<Fold>", "", S, "", "</Fold>"], from: "Details", to: "counts match." },
+    { name: "starts in a title-less callout's «Note»", body: ["> [!note]", `> ${S}`], from: "Note", to: "counts match." },
+    { name: "ends in a title-less callout's «Note»", body: [S, "", "> [!note]", "> Boats leave early."], from: "Run the", to: "Note" },
+    { name: "starts in a FactCheck's counts", body: ['<FactCheck date="2026-01-02" ok="2">', "", S, "", "</FactCheck>"], from: "2 confirmed", to: "counts match.", nth: 2 },
+  ];
+  for (const { name, body, from, to, nth } of CASES) {
+    test(`${name}: edge added, the heading's section`, async () => {
+      const md = page("## Pier", "", ...body);
+      const a = await readerArticle(md);
+      const range = rangeOf(a, from, { to, nth });
+      expect(discussContext(a, range)?.edge).toBe("added");
+      expect(locate(md, range)).toMatchObject({ found: "section", reason: "added", section: { heading: "Pier" } });
+    });
+    test(`${name}, on a page with no heading: the marked none`, async () => {
+      const md = page(...body);
+      const a = await readerArticle(md);
+      expect(locate(md, rangeOf(a, from, { to, nth }))).toMatchObject({ found: "none", reason: "added", fromLine: null });
+    });
+  }
+});
+
 describe("the heading the client sends", () => {
   test("the heading itself when the selection starts in it, without the reader's 🧭", async () => {
     const md = page("## One", "", "Text one.", "", "## Two", "", "Text two.");

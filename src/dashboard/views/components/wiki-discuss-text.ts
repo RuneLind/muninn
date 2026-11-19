@@ -47,6 +47,9 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
  *  - copies of text that sits elsewhere in the source: the decision views
  *    (`dc-view`: the chain, the PR strip, the question grid);
  *  - what the client redraws: a mermaid fence (an SVG once drawn), an Embed.
+ * Text the reader MOVES is not handled here: a `blocked` lane rendered after
+ * the other lanes (`renderedLaneOrder`), Question cards spliced into an
+ * «Oppfølging» block ahead of where they are written.
  */
 export const DISCUSS_TEXT_SKIP = [
   "button",

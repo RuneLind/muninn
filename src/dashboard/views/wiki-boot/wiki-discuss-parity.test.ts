@@ -63,10 +63,17 @@ const readerArticle = (md: string, title?: string, roles: string[] = ["utvikler"
 
 const serverKey = (md: string, title?: string) => collapseForLocate(md, { stripTitle: title }).text;
 
-/** The selection's text over all of `el`, read by the client's own function. */
-function selectionTextOver(el: Element): string {
+/** The selection's text over `el` from its first non-blank text outside
+ *  {@link DISCUSS_TEXT_SKIP} to its end: a reader-added prefix (a label, a
+ *  button) is left out, everything after it is read. */
+function selectionTextAfterAddedPrefix(el: Element): string {
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let n = w.nextNode();
+  while (n && (!n.textContent!.trim() || n.parentElement?.closest(DISCUSS_TEXT_SKIP))) n = w.nextNode();
+  if (!n) return "";
   const r = document.createRange();
   r.selectNodeContents(el);
+  r.setStart(n, 0);
   const sel = window.getSelection()!;
   sel.removeAllRanges();
   sel.addRange(r);
@@ -335,16 +342,13 @@ describe("the fixture page, after the client's enhancers", () => {
     // order is not one stretch of the source (the client marks it `reordered`).
     const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.matches(".nm-lanes") && !b.closest(".nm-head") && !b.closest(DISCUSS_TEXT_SKIP));
     // A block whose text is all reader-added (a mermaid fence, drawn as an
-    // SVG), or that opens with a reader label (an untitled Fold's summary), is
-    // left out too: a selection there goes to the section by design.
-    const opensAdded = (b: Element) => {
-      const w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
-      for (let n = w.nextNode(); n; n = w.nextNode()) if (n.textContent!.trim()) return !!n.parentElement?.closest(DISCUSS_TEXT_SKIP);
-      return false;
-    };
+    // SVG) is left out: a selection there goes to the section by design. One
+    // that opens with reader-added text (an untitled Fold's «Details», a
+    // fence's Copy button) is read from just after that prefix, so only the
+    // prefix leaves the check and the rest of the block stays in it.
     const missing = blocks
-      .filter((b) => (!b.closest(".nm-lane") || b.matches("li")) && locateKey(discussText(b)) !== "" && !opensAdded(b))
-      .map((b) => locateKey(selectionTextOver(b)))
+      .filter((b) => (!b.closest(".nm-lane") || b.matches("li")) && locateKey(discussText(b)) !== "")
+      .map((b) => locateKey(selectionTextAfterAddedPrefix(b)))
       .filter((k) => k && !server.includes(k));
     expect(missing).toEqual([]);
   });
