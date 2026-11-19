@@ -503,8 +503,11 @@ function upgradeObsidianCallouts(html: string): string {
       const brIdx = rest.indexOf("<br>");
       let title = (brIdx === -1 ? rest : rest.slice(0, brIdx)).trim();
       let body = brIdx === -1 ? "" : rest.slice(brIdx + 4).replace(/^(?:\s*<br>)+/, "").trim();
-      if (!title) title = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
-      const titleHtml = `<strong class="callout-title">${title}</strong>`;
+      // A fallback title is the reader's, not the file's: its own class keeps
+      // it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
+      const fallback = !title;
+      if (fallback) title = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+      const titleHtml = `<strong class="callout-title${fallback ? " callout-title-default" : ""}">${title}</strong>`;
       const bodyHtml = body ? `<div class="callout-body">${body}</div>` : "";
       return `<div class="callout callout-${tone}">${titleHtml}${bodyHtml}</div>`;
     },

@@ -2459,9 +2459,12 @@ const webRenderer: BlockRenderer = {
         // closed; the duplicate-heading test below still compares the title alone.
         const teaser = (attrs.summary ?? "").trim();
         const teaserHtml = teaser ? `<span class="fold-summary">${escapeHtml(teaser)}</span>` : "";
+        // An untitled fold's «Details» is the reader's word, not the file's:
+        // its own class keeps it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
+        const label = title ? escapeHtml(title) : `<span class="fold-label-default">Details</span>`;
         return (
           `<details class="${foldClass(title, attrs.for)}"${openAttr}>` +
-          `<summary>${title ? escapeHtml(title) : "Details"}${teaserHtml}</summary>` +
+          `<summary>${label}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
         );

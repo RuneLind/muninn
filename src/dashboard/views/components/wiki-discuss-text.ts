@@ -30,7 +30,8 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
  * paragraph with no class: there the context check is what falls back.
  *  - the reader's own additions: every button and a standalone code tab's
  *    label, a peek card, a glossary tooltip, the TL;DR and «More about this»
- *    labels, a lane's head (its `who` and `since`), a question card's head,
+ *    labels, an untitled Fold's «Details», a title-less `> [!type]`
+ *    callout's type name, a lane's head (its `who` and `since`), a question card's head,
  *    the Historic stamp, a chart's head and plot, a DeltaTable's change
  *    column, a Query card's head and SQL, a FactCheck strip's date, a
  *    Figure's caption, and the line a DeltaTable, Diagram or Steps shows for
@@ -52,6 +53,8 @@ export const DISCUSS_TEXT_SKIP = [
   `.${PEEK_CLASS}`,
   ".gl-tip",
   ".tldr-label",
+  ".fold-label-default",
+  ".callout-title-default",
   ".tldr-more > summary",
   ".nm-head",
   ".dc-view",
@@ -167,10 +170,15 @@ function readingUnits(article: Element): Unit[] {
 /** `root`'s text as the context reads it: authored order, without the
  *  reader's additions or the hidden parts. */
 export function discussText(root: Element): string {
+  return discussTextParts(root).join("");
+}
+
+/** The pieces {@link discussText} joins, one per text node (or DecisionLog
+ *  separator): the parity test names the one the collapse does not hold. */
+export function discussTextParts(root: Element): string[] {
   return readingUnits(root)
     .filter((u) => !u.skipped && !u.hidden)
-    .map((u) => u.text)
-    .join("");
+    .map((u) => u.text);
 }
 
 /** Text nodes under `root` in document order. */

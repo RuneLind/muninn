@@ -353,3 +353,16 @@ describe("linkRefs: a quoted section title holding a before → after chip", () 
     expect(linked(own)).toEqual({ refs: [], chips: ["12 → 9 ms"] });
   });
 });
+
+describe("refTargets: an untitled fold", () => {
+  test("its «Details» label is still its title, inside its own span", () => {
+    const win = new Window();
+    const root = win.document.createElement("div");
+    root.innerHTML = renderWikiHtml("<Fold>\n\nBody.\n\n</Fold>\n", () => undefined);
+    const fold = root.querySelector("details.fold")!;
+    expect(fold.querySelector(":scope > summary > .fold-label-default")?.textContent).toBe("Details");
+    // An id already set: `ensureId` reads the global document only to mint one.
+    fold.id = "details";
+    expect(refTargets(root as unknown as Element).titles.get("Details")).toBe(fold as unknown as Element);
+  });
+});

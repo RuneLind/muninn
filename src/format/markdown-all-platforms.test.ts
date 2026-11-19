@@ -862,7 +862,7 @@ describe("Fold — a details on the web, an open run-in section everywhere else"
       expect(out).toContain("The probe returned 149 lines.");
     }
     // Only the web surface has somewhere to put a label for a title-less fold.
-    expect(formatWebHtml(plain)).toContain("<summary>Details</summary>");
+    expect(formatWebHtml(plain)).toContain('<summary><span class="fold-label-default">Details</span></summary>');
   });
 
   test("a title carrying markup is handled on every surface", () => {

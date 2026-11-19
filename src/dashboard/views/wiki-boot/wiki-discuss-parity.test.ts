@@ -17,7 +17,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { collapseForLocate } from "../../../wiki/discuss-locate.ts";
 import { locateKey } from "../../../wiki/locate-key.ts";
-import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussText } from "../components/wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussText, discussTextParts } from "../components/wiki-discuss-text.ts";
 import { readerSelectionText } from "../components/wiki-lens.ts";
 import { readerArticle as renderReader } from "./discuss-reader-article.ts";
 
@@ -139,6 +139,35 @@ const FIXTURE = [
   "",
   "> [!note] An Obsidian callout keeps its words.",
   "",
+  // Labels the reader writes where the source has none: an untitled Fold's
+  // «Details», a callout's type name when `> [!type]` has no title.
+  "<Fold>",
+  "",
+  "An untitled fold's body.",
+  "",
+  "</Fold>",
+  "",
+  '<Fold summary="a teaser only">',
+  "",
+  "A teaser fold's body.",
+  "",
+  "</Fold>",
+  "",
+  "> [!note]",
+  "> A note with no title.",
+  "",
+  "> [!caution]",
+  "> A caution with no title.",
+  "",
+  "> [!warning]",
+  "> A warning with no title.",
+  "",
+  "> [!tip]",
+  "> A tip with no title.",
+  "",
+  "> [!danger]",
+  "> A danger with no title.",
+  "",
   'Before <Fact n="1" v="ok">a checked claim</Fact> after.',
   "",
   '<Fact n="2" v="warn">',
@@ -253,11 +282,34 @@ describe("the fixture page, after the client's enhancers", () => {
     // order is not one stretch of the source (the client marks it `reordered`).
     const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.matches(".nm-lanes") && !b.closest(".nm-head") && !b.closest(DISCUSS_TEXT_SKIP));
     // A block whose text is all reader-added (a mermaid fence, drawn as an
-    // SVG) is left out too: a selection there goes to the section by design.
+    // SVG), or that opens with a reader label (an untitled Fold's summary), is
+    // left out too: a selection there goes to the section by design.
+    const opensAdded = (b: Element) => {
+      const w = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) if (n.textContent!.trim()) return !!n.parentElement?.closest(DISCUSS_TEXT_SKIP);
+      return false;
+    };
     const missing = blocks
-      .filter((b) => (!b.closest(".nm-lane") || b.matches("li")) && locateKey(discussText(b)) !== "")
+      .filter((b) => (!b.closest(".nm-lane") || b.matches("li")) && locateKey(discussText(b)) !== "" && !opensAdded(b))
       .map((b) => locateKey(selectionTextOver(b)))
       .filter((k) => k && !server.includes(k));
+    expect(missing).toEqual([]);
+  });
+
+  test("every text the context keeps is in the collapse, in order: a reader addition missing from the skip lists is named", async () => {
+    const a = await readerArticle(FIXTURE, TITLE);
+    const server = serverKey(FIXTURE, TITLE);
+    // Each piece must start where the previous one ended: an `indexOf` from the
+    // cursor lets a short label («Note») match a later word and names the
+    // passage after it instead.
+    const missing: string[] = [];
+    let at = 0;
+    for (const part of discussTextParts(a)) {
+      const k = locateKey(part);
+      if (!k) continue;
+      if (server.startsWith(k, at)) at += k.length;
+      else missing.push(part.trim());
+    }
     expect(missing).toEqual([]);
   });
 
@@ -284,7 +336,11 @@ const FORMS: [string, string][] = [
   ["a table", "| A | B |\n|:--|--:|\n| x | `y` |\n"],
   ["a quote with a number", "> line\n> 1. stays text\n"],
   ["an Obsidian callout", "> [!warning] Mind the gap.\n> More.\n"],
-  ["a fold's title and summary", '<Fold title="Title here" summary="summary here">\n\nBody.\n\n</Fold>\n'],
+  ["an untitled Fold: its «Details» is the reader's", "<Fold>\n\nBody.\n\n</Fold>\n"],
+  ["an untitled Fold with a summary", '<Fold summary="a teaser">\n\nBody.\n\n</Fold>\n'],
+  ["an Obsidian callout with no title: its type name is the reader's", "> [!caution]\n> Body.\n"],
+  ["an Obsidian callout with no title and no body", "Above.\n\n> [!warning]\n\nBelow.\n"],
+  ["a fold's title and summary",'<Fold title="Title here" summary="summary here">\n\nBody.\n\n</Fold>\n'],
   ["a callout's title", '<Callout tone="info" title="Heads up">\n\nBody.\n\n</Callout>\n'],
   ["a TL;DR with its label", '<Tldr label="In short">\n\nShort.\n\n</Tldr>\n'],
   ["inline fact wrappers", 'A <Fact n="3" v="bad">wrong claim</Fact> here.\n'],

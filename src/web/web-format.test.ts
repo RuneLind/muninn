@@ -664,7 +664,7 @@ describe("formatWebHtml — component blocks", () => {
   });
 
   test("an empty title renders `Details`, and a title is escaped", () => {
-    expect(formatWebHtml("<Fold>\n\nx\n\n</Fold>")).toContain("<summary>Details</summary>");
+    expect(formatWebHtml("<Fold>\n\nx\n\n</Fold>")).toContain('<summary><span class="fold-label-default">Details</span></summary>');
     expect(formatWebHtml('<Fold title="a <b> tag">\n\nx\n\n</Fold>')).toContain(
       "<summary>a &lt;b&gt; tag</summary>",
     );

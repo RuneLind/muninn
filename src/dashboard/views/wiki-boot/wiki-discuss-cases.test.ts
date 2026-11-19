@@ -408,10 +408,10 @@ describe("review cases: a range stated as found is never another place's", () =>
     const a = await readerArticle(md);
     const r = locate(md, rangeOf(a, "The pier opens at six", { nth: 2 }));
     expectNotWrong(r, lineOf(md, "The pier opens", 2));
-    // The top copy agrees in full on its left only: on its right the reader
-    // shows the Fold's «Details» label before «more», which the collapse does
-    // not hold. A match needs both sides in full, so it falls back too.
-    expect(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 }))).toMatchObject({ found: "none", reason: "no-agreement", candidates: [lineOf(md, "The pier opens", 1), lineOf(md, "The pier opens", 2)] });
+    // The reader shows the Fold's «Details» label before «more»; the context
+    // leaves it out (P1b), so the top copy agrees on both sides and is placed.
+    // Before that it fell back (`no-agreement`).
+    expectExact(locate(md, rangeOf(a, "The pier opens at six", { nth: 1 })), lineOf(md, "The pier opens", 1));
   });
   test("6: a paragraph first on the page and again after a 1) marker: never the top copy's line", async () => {
     const md = page("The pier opens at six and closes at ten every day of the week.", "", "## Steps", "", "1) The pier opens at six and closes at ten every day of the week.");
@@ -565,6 +565,66 @@ describe("reader-made copies placed away from their source", () => {
     r.setStart(t, 0);
     r.setEnd(t, t.textContent!.length);
     expect(discussContext(a, r)).toBeNull();
+  });
+});
+
+describe("a reader label beside one copy, the same word in the source beside the other", () => {
+  // The label-pair pages (P1b): a passage once after a label the reader writes
+  // (an untitled Fold's «Details», a title-less callout's type name) and once
+  // after that word written in the source, between the same neighbours. With
+  // the label in the client's context the written copy agreed in full on both
+  // sides and took the exact line.
+  const S = "Run the database migration on staging and verify that the row counts match";
+  const LB = "Boats leave early from the north pier on every weekday morning in winter.";
+  const LA = "Kari keeps the winter timetable on the wall beside the ticket office door.";
+  const LABELS: { name: string; reader: string[]; written: string[][] }[] = [
+    { name: "an untitled Fold's «Details»", reader: ["<Fold>", "", S, "", "</Fold>"], written: [["Details", "", S], ["### Details", "", S]] },
+    { name: "«Details» before a Fold's summary", reader: ['<Fold summary="more">', "", S, "", "</Fold>"], written: [["Details more", "", S]] },
+    ...["note", "caution", "warning", "tip", "danger"].map((t) => {
+      const label = t[0]!.toUpperCase() + t.slice(1);
+      return { name: `a title-less [!${t}]'s «${label}»`, reader: [`> [!${t}]`, `> ${S}`], written: [[label, "", S], [`${label}: ${S}`]] };
+    }),
+  ];
+  const pages = LABELS.flatMap(({ name, reader, written }) =>
+    written.flatMap((w) => [
+      { name: `${name}, reader copy first`, md: [LB, "", ...reader, "", LA, "", LB, "", ...w, "", LA].join("\n"), labelCopy: 1 },
+      { name: `${name}, written copy first`, md: [LB, "", ...w, "", LA, "", LB, "", ...reader, "", LA].join("\n"), labelCopy: 2 },
+    ]),
+  );
+  /** Select copy `n` of `sel` (a slice of S) in the reader's text and locate it. */
+  function locateCopy(a: Element, md: string, n: number, sel: string): LocateResult {
+    const f = flat(a);
+    let at = -1;
+    for (let k = 0; k < n; k++) at = f.text.indexOf(S, at + 1);
+    if (at === -1) throw new Error(`copy ${n} not shown`);
+    const off = S.indexOf(sel);
+    const r = document.createRange();
+    r.setStart(...f.pos(at + off));
+    r.setEnd(...f.pos(at + off + sel.length, true));
+    return locate(md, r);
+  }
+  test(`no exact answer names the other copy's line (${pages.length} pages)`, async () => {
+    const wrong: string[] = [];
+    for (const { name, md } of pages) {
+      const a = await readerArticle(md);
+      const lines = md.split("\n").flatMap((l, i) => (l.includes(S) ? [i + 1] : []));
+      expect(lines.length).toBe(2);
+      for (let n = 1; n <= 2; n++) {
+        for (const sel of [S, S.slice(4), S.slice(0, -6)]) {
+          const res = locateCopy(a, md, n, sel);
+          if (res.found === "exact" && res.fromLine !== lines[n - 1]) wrong.push(`${name}: copy ${n} «${sel.slice(0, 12)}…» at line ${res.fromLine}, not ${lines[n - 1]}`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+  });
+  test("the copy beside the reader's label gets its own line, its context without the label", async () => {
+    for (const { name, md, labelCopy } of pages) {
+      const a = await readerArticle(md);
+      const own = md.split("\n").flatMap((l, i) => (l.includes(S) ? [i + 1] : []))[labelCopy - 1]!;
+      const res = locateCopy(a, md, labelCopy, S);
+      expect({ name, found: res.found, from: res.fromLine }).toEqual({ name, found: "exact", from: own });
+    }
   });
 });
 
