@@ -23,25 +23,26 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
 /**
  * Elements whose text the source does not hold where the article shows it,
  * found by diffing the reader's render, after its whole enhancer chain,
- * against the collapse: on real mimir and melosys-kode-wiki pages, then by a
- * probe over one form per component in `COMPONENT_SPEC` in each attribute
- * variant that changes its visible text, plus the reader's post-passes. The
- * parity test holds a row for every component (a test checks that) and for
- * each addition the probe found, but not every attribute variant of each.
- * A selection that starts or ends in one goes to the section.
- *  - the reader's own additions: every button and a standalone code tab's
- *    label, a peek card, a glossary tooltip, the TL;DR and «More about this»
- *    labels, an untitled Fold's «Details», a title-less `> [!type]`
- *    callout's type name, a body-less Verdict's «Yes»/«No», a resolved
- *    Callout's ✓, date and the « · » before its title (the title is the
- *    file's), an AnnotatedCode's file name, a lane's head (its `who` and
- *    `since`, in an «Oppfølging» block or a plain line outside one), a question card's head,
- *    the Historic stamp, a chart's head and plot, a DeltaTable's change
+ * against the collapse, on real mimir and melosys-kode-wiki pages and on one
+ * form per `COMPONENT_SPEC` component. The array is the complete list; the
+ * groups below say what its entries are. The parity test holds a row for
+ * every `COMPONENT_SPEC` component (a test checks that), not every attribute
+ * variant of each. A selection that starts or ends in one goes to the section.
+ *  - the reader's own additions: every button, `svg`, `script`, `style` and
+ *    form control, a standalone code tab's label, a peek card, a glossary
+ *    tooltip, the TL;DR and «More about this» labels, an untitled Fold's
+ *    «Details», a title-less `> [!type]` callout's type name, a body-less
+ *    Verdict's «Yes»/«No», a resolved Callout's ✓, date and the « · » before
+ *    its title (the title is the file's), an AnnotatedCode's file name, a
+ *    lane's head (its `who` and `since`, in an «Oppfølging» block or a plain
+ *    line outside one), a question card's head and «for» line, the Historic
+ *    stamp, a Meter's value, a chart's head and plot, a DeltaTable's change
  *    column, its «Two runs are needed» note and its warning lines, a Query
- *    card's head and SQL, a FactCheck strip's date and counts, a
- *    Figure's caption, and the line a DeltaTable, Diagram or Steps shows for
- *    its `src` when it cannot draw it, the Query explorer's bar (its search
- *    box, `uses` chips and «N of M queries» count);
+ *    card's head and SQL, a RunChecklist's step-count line, a FactCheck
+ *    strip's date and counts, a Figure's caption, the line a DeltaTable,
+ *    Diagram or Steps shows for its `src` when it cannot draw it, and the
+ *    Query explorer's bar (its search box, `uses` chips and «N of M queries»
+ *    count);
  *  - text from a page's sibling files: a CaseBoard, a Query result, a
  *    DeltaTable read from its `src` CSV, a Diagram's or Steps' text form;
  *  - copies of text that sits elsewhere in the source: the decision views
