@@ -68,10 +68,15 @@ export interface DiscussTurn {
   finishedAt: number | null;
 }
 
-/** Another turn of the discussion took the same sequence number first. */
+/** The discussion already has a live turn: a `running` row younger than the
+ *  stale bound, or a concurrent insert that took the same sequence number. */
 export class DiscussTurnConflict extends Error {
-  constructor(discussionId: string) {
-    super(`another turn of discussion ${discussionId} started at the same time`);
+  constructor(discussionId: string, why: "running" | "seq" = "seq") {
+    super(
+      why === "running"
+        ? `the discussion's last turn is still running (discussion ${discussionId})`
+        : `another turn of discussion ${discussionId} started at the same time`,
+    );
     this.name = "DiscussTurnConflict";
   }
 }
@@ -105,9 +110,13 @@ function mapRow(r: Record<string, unknown>): DiscussTurn {
   };
 }
 
-/** Insert a `running` turn as the discussion's next one. Throws
- *  {@link DiscussTurnConflict} when a concurrent insert took that number. */
-export async function startDiscussTurn(input: DiscussTurnStart): Promise<{ id: string; seq: number }> {
+/** Insert a `running` turn as the discussion's next one, in ONE statement
+ *  that refuses when the discussion has a `running` turn younger than
+ *  `staleRunningMs` (an older one is a process that died mid-turn). Throws
+ *  {@link DiscussTurnConflict} on that refusal, and when a concurrent insert
+ *  took the same number: two inserts either see each other's row or compute
+ *  the same `MAX(seq) + 1` and collide on `UNIQUE (discussion_id, seq)`. */
+export async function startDiscussTurn(input: DiscussTurnStart, opts: { staleRunningMs: number }): Promise<{ id: string; seq: number }> {
   const sql = getDb();
   try {
     const [row] = await sql`
@@ -117,8 +126,10 @@ export async function startDiscussTurn(input: DiscussTurnStart): Promise<{ id: s
              ${input.selection}, ${input.question}, ${input.location === null || input.location === undefined ? null : sql.json(input.location as never)},
              ${input.botName}, ${input.connector}, ${input.model}, ${sql.json((input.surface ?? {}) as never)}
       FROM wiki_discuss_turns WHERE discussion_id = ${input.discussionId}
+      HAVING NOT (bool_or(end_state = 'running' AND created_at > now() - ${opts.staleRunningMs}::double precision * interval '1 millisecond') IS TRUE)
       RETURNING id, seq`;
-    return { id: row!.id as string, seq: Number(row!.seq) };
+    if (!row) throw new DiscussTurnConflict(input.discussionId, "running");
+    return { id: row.id as string, seq: Number(row.seq) };
   } catch (err) {
     if ((err as { code?: string }).code === "23505") throw new DiscussTurnConflict(input.discussionId);
     throw err;

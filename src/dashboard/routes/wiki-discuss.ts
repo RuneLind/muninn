@@ -23,9 +23,11 @@
  * unknown wiki · 403 `readonly` a read-only wiki (the egress prologue, right
  * after the wiki resolves) · 404 `no-agent` no `.wiki-agent.md` (the wiki
  * keeps today's Discuss) · 422 `rules-too-large` / 503 `rules-unreadable` ·
- * the page ladder (404/503) · 503 `no-bot` · 422 `connector` an uncovered
+ * the page ladder (404/503) · 503 `no-bot` (no bot, or the wiki's pinned bot
+ * is not configured here) · 422 `connector` an uncovered
  * connector · 503 `surface` `toolSurfaceBlocker` refused the surface · 400/404/409
- * the discussion · 429 `busy` · then the turn row is inserted (409 on a race).
+ * the discussion · 429 `busy` · then the turn row is inserted (409 `busy` when
+ * the database holds another live turn of the discussion).
  *
  * The turn runs to its end and is stored whether or not its reader is still
  * there: nothing in it reads the request's abort signal, and the stream's
@@ -206,58 +208,77 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     if (prepared instanceof Response) return prepared;
     const p = prepared;
 
+    // Check and reserve with no await between, so requests that arrive
+    // together cannot all pass; every path below releases exactly once.
     if (inflight >= DISCUSS_MAX_INFLIGHT) {
       return c.json({ error: `${DISCUSS_MAX_INFLIGHT} discuss turns are already running; try again when one has finished`, reason: "busy" }, 429);
     }
+    inflight++;
+    let reserved = true;
+    const release = () => {
+      if (reserved) {
+        reserved = false;
+        inflight--;
+      }
+    };
     let turn: { id: string; seq: number };
     try {
-      turn = await store.start({
-        discussionId: p.discussionId,
-        wiki: p.wiki,
-        relPath: p.relPath,
-        pageHash: p.pageHash,
-        selection: body.selection?.trim() || null,
-        question: body.question.trim(),
-        location: p.location,
-        botName: p.bot.name,
-        connector: p.connector,
-        model: p.bot.model ?? config.claudeModel ?? null,
-        surface: { kind: p.kind },
-      });
+      turn = await store.start(
+        {
+          discussionId: p.discussionId,
+          wiki: p.wiki,
+          relPath: p.relPath,
+          pageHash: p.pageHash,
+          selection: body.selection?.trim() || null,
+          question: body.question.trim(),
+          location: p.location,
+          botName: p.bot.name,
+          connector: p.connector,
+          model: p.bot.model ?? config.claudeModel ?? null,
+          surface: { kind: p.kind },
+        },
+        { staleRunningMs: DISCUSS_STALE_RUNNING_MS },
+      );
     } catch (err) {
+      release();
       if (err instanceof DiscussTurnConflict) return c.json({ error: err.message, reason: "busy" }, 409);
       log.error("discuss turn insert failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "could not store the turn" }, 500);
     }
-    inflight++;
 
-    return streamSSE(c, async (stream) => {
-      let gone = false;
-      let leftMarked = false;
-      const emit = (event: string, data: unknown) => {
-        if (gone) return;
-        stream.writeSSE({ event, data: JSON.stringify(data) }).catch(() => {
-          gone = true;
-        });
-      };
-      const heartbeat = setInterval(() => emit("heartbeat", {}), 30_000);
-      stream.onAbort(() => {
-        gone = true;
-        clearInterval(heartbeat);
-        if (!leftMarked) {
-          leftMarked = true;
-          store.readerLeft(turn.id).catch((err) => log.warn("discuss reader-left mark failed: {error}", { error: String(err) }));
+    try {
+      return streamSSE(c, async (stream) => {
+        let gone = false;
+        let leftMarked = false;
+        const emit = (event: string, data: unknown) => {
+          if (gone) return;
+          stream.writeSSE({ event, data: JSON.stringify(data) }).catch(() => {
+            gone = true;
+          });
+        };
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        try {
+          heartbeat = setInterval(() => emit("heartbeat", {}), 30_000);
+          stream.onAbort(() => {
+            gone = true;
+            clearInterval(heartbeat);
+            if (!leftMarked) {
+              leftMarked = true;
+              store.readerLeft(turn.id).catch((err) => log.warn("discuss reader-left mark failed: {error}", { error: String(err) }));
+            }
+          });
+          emit("turn", { turnId: turn.id, discussionId: p.discussionId, seq: turn.seq, location: p.location });
+          await runTurn(p, turn, emit);
+          if (!gone) await stream.writeSSE({ event: "end", data: "{}" }).catch(() => {});
+        } finally {
+          release();
+          clearInterval(heartbeat);
         }
       });
-      try {
-        emit("turn", { turnId: turn.id, discussionId: p.discussionId, seq: turn.seq, location: p.location });
-        await runTurn(p, turn, emit);
-        if (!gone) await stream.writeSSE({ event: "end", data: "{}" }).catch(() => {});
-      } finally {
-        inflight--;
-        clearInterval(heartbeat);
-      }
-    });
+    } catch (err) {
+      release();
+      throw err;
+    }
   });
 
   interface Prepared {
@@ -305,7 +326,13 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     const raw = await readWikiPage(index, meta);
     if (raw === null) return c.json({ error: "page file unreadable" }, 503);
 
-    const { bot } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
+    const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
+    // A pinned wiki runs on its pinned bot or not at all: the resolver's
+    // fallback would move a wiki pinned to Copilot (melosys-kode-wiki, D2) onto
+    // a Claude connector on a machine without that bot.
+    if (entry?.synthesisBot && origin !== "pinned") {
+      return c.json({ error: `this wiki is pinned to the bot "${entry.synthesisBot}", which is not configured here`, reason: "no-bot", bot: entry.synthesisBot }, 503);
+    }
     if (!bot) return c.json({ error: "no bot is configured to answer on this wiki", reason: "no-bot" }, 503);
     const connector = bot.connector ?? "claude-cli";
     const kind = discussSurfaceKind(connector);

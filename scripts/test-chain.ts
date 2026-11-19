@@ -72,6 +72,7 @@ export const PINNED: readonly PinnedLink[] = [
   { args: ["src/dashboard/routes/wiki-step-done-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/dashboard/routes/wiki-gardener-drift-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/dashboard/routes/wiki-gardener-factcheck-db.test.ts"], reason: DB_CHAIN },
+  { args: ["src/dashboard/routes/wiki-discuss-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/bot/handler.test.ts"], reason: HANDLERS_CHAIN },
   { args: ["src/bot/middleware.test.ts"], reason: HANDLERS_CHAIN },
   {

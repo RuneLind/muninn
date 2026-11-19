@@ -25,7 +25,7 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
-import { COPILOT_DISCUSS_TOOLS, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+import { COPILOT_DISCUSS_TOOLS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 let dir = "";
 let agent = ""; // a wiki with rules and discuss.repos
@@ -318,6 +318,32 @@ describe("preflight refusals, as JSON before the stream", () => {
     const { app } = setup();
     expect((await post(app, { ...PASSAGE, relPath: "plans/none.mdx" })).status).toBe(404);
   });
+  test("a wiki pinned to a bot that is not configured is refused, never run on the fallback bot", async () => {
+    __setWikiRegistryForTest([{ name: "pinned", root: bare, source: "extra", synthesisBot: "melosys" }]);
+    try {
+      const { app, calls, store } = setup({ deps: { bots: () => [bot("claude-sdk", "ivar")] } });
+      const res = await post(app, { ...PASSAGE, wiki: "pinned" });
+      expect(res.status).toBe(503);
+      const j = (await res.json()) as { reason: string; error: string };
+      expect(j.reason).toBe("no-bot");
+      expect(j.error).toContain("melosys");
+      expect(calls.blocked).toHaveLength(0);
+      expect(calls.wikiSnaps).toHaveLength(0);
+      expect(calls.opts).toHaveLength(0);
+      expect(store.rows).toHaveLength(0);
+      // The pinned bot, when it is there, is the one that answers.
+      const ok = setup({ deps: { bots: () => [bot("claude-sdk", "ivar"), bot("copilot-sdk", "melosys")] } });
+      await (await post(ok.app, { ...PASSAGE, wiki: "pinned" })).text();
+      expect(ok.calls.bots.map((b) => b.name)).toEqual(["melosys"]);
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  });
   test("a connector the table does not cover is refused, before any surface check", async () => {
     const { app, calls, store } = setup({ connector: "openai-compat" });
     const res = await post(app, PASSAGE);
@@ -454,6 +480,56 @@ describe("a turn", () => {
     };
     const { app } = setup({ store });
     expect((await post(app, PASSAGE)).status).toBe(409);
+  });
+  test("requests that arrive together cannot pass the per-process cap", async () => {
+    const store = new MemStore();
+    const realStart = store.start;
+    store.start = async (i) => {
+      await Bun.sleep(20);
+      return realStart(i);
+    };
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { app } = setup({
+      store,
+      oneShot: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gate;
+        active--;
+        return { result: "An answer.", costUsd: 0, toolCalls: [] } as never;
+      },
+    });
+    const n = DISCUSS_MAX_INFLIGHT + 2;
+    const responses = await Promise.all(Array.from({ length: n }, (_, i) => post(app, { wiki: "agent", relPath: "notes/harbour.md", question: `Q${i}` })));
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(2);
+    expect(statuses.filter((s) => s === 200)).toHaveLength(DISCUSS_MAX_INFLIGHT);
+    for (let i = 0; i < 100 && active < DISCUSS_MAX_INFLIGHT; i++) await Bun.sleep(10);
+    expect(peak).toBe(DISCUSS_MAX_INFLIGHT);
+    release();
+    await Promise.all(responses.map((r) => r.text()));
+    // The finished turns gave their slots back.
+    expect((await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "After?" })).status).toBe(200);
+  });
+  test("a turn insert that throws gives its slot back", async () => {
+    const store = new MemStore();
+    const realStart = store.start;
+    let failures = 0;
+    store.start = async (i) => {
+      failures++;
+      // Every other failure is a lost race, the rest a database error.
+      if (failures % 2) throw new DiscussTurnConflict(i.discussionId);
+      throw new Error("connection reset");
+    };
+    const { app } = setup({ store });
+    const statuses: number[] = [];
+    for (let i = 0; i < DISCUSS_MAX_INFLIGHT + 1; i++) statuses.push((await post(app, PASSAGE)).status);
+    expect(statuses).toEqual([409, 500, 409, 500, 409]);
+    store.start = realStart;
+    expect((await post(app, PASSAGE)).status).toBe(200);
   });
   test("a turn that runs past its timeout is stored as timeout and reported in the stream", async () => {
     const { app, store } = setup({
