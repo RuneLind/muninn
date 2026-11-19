@@ -160,6 +160,17 @@ describe("refusal words", () => {
     expect(discussRefusalMessage(403, { error: "Discuss's wiki agent is for admins" })).toBe("Discuss's wiki agent is for admins");
     expect(discussRefusalMessage(500, null)).toBe("The turn could not start (500).");
   });
+
+  // The rules file can change after the page loaded: each refusal the route
+  // answers about it has its own words, never the generic fallback.
+  test("the rules-file refusals: too large and unreadable (a symlink answers unreadable too)", () => {
+    const large = discussRefusalMessage(422, { reason: "rules-too-large", error: "the wiki's .wiki-agent.md is 20000 bytes, over the 16384-byte bound" });
+    const unreadable = discussRefusalMessage(503, { reason: "rules-unreadable", error: "the wiki's .wiki-agent.md cannot be read" });
+    expect(large).toBe("This wiki's agent rules (.wiki-agent.md) are over their size bound since the page loaded (20000 bytes, over the 16384-byte bound), so the agent cannot run. Shorten the file, then reload the page.");
+    expect(unreadable).toBe("This wiki's agent rules (.wiki-agent.md) cannot be read since the page loaded (a symlink, or a file muninn may not read), so the agent cannot run. Fix the file, then reload the page.");
+    expect(large).not.toStartWith("The turn could not start");
+    expect(unreadable).not.toStartWith("The turn could not start");
+  });
 });
 
 describe("the tab's markup", () => {

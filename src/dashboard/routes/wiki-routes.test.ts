@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, symlink } from "node:fs/promises";
+import { rm, mkdir, symlink, chmod } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,6 +35,7 @@ import {
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
 import { countFactWrappers, stripFactWrappers } from "../../format/markdown-ast.ts";
 import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integrate-edits.ts";
+import { WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -550,12 +551,30 @@ describe("GET /api/wiki/html", () => {
       await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
       expect(await flag("admin")).toBe(true);
       expect(await flag("user")).toBe(false);
+      // A rules file the discuss route refuses (422/503) is no agent: the tab
+      // would show while every ask fails.
+      await Bun.write(rules, "x".repeat(WIKI_AGENT_RULES_MAX_BYTES + 1));
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await Bun.write(path.join(root, "agent-rules-target.md"), "# Rules\n");
+      await symlink(path.join(root, "agent-rules-target.md"), rules);
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
+      await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
+      // Root reads a mode-000 file, so the unreadable case needs a plain user.
+      await chmod(rules, 0o000);
+      if (process.getuid?.() !== 0) expect(await flag("admin")).toBe(false);
+      await chmod(rules, 0o644);
+      expect(await flag("admin")).toBe(true);
       // The read slice registers no discuss route.
       __setReadonlyWikiRootsForTest([root]);
       expect(await flag("admin", "nais")).toBe(false);
     } finally {
       __setReadonlyWikiRootsForTest(undefined);
+      await chmod(rules, 0o644).catch(() => {});
       await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
       __resetWikiCacheForTest();
     }
   });

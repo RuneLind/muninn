@@ -164,6 +164,10 @@ export function discussRefusalMessage(status: number, body: { error?: unknown; r
       return status === 429
         ? "Four discuss turns are already running on this muninn. Try again when one has ended."
         : "The discussion's last turn is still running. Wait for it to end, then ask again.";
+    case "rules-too-large":
+      return `This wiki's agent rules (.wiki-agent.md) are over their size bound since the page loaded (${error.replace(/^the wiki's \.wiki-agent\.md is /, "")}), so the agent cannot run. Shorten the file, then reload the page.`;
+    case "rules-unreadable":
+      return "This wiki's agent rules (.wiki-agent.md) cannot be read since the page loaded (a symlink, or a file muninn may not read), so the agent cannot run. Fix the file, then reload the page.";
     case "no-bot":
       return `No bot can answer on this wiki here: ${error || "none is configured"}.`;
     case "no-snapshot":

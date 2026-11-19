@@ -895,6 +895,37 @@ describe("«Continue in Claude Code» (P3)", () => {
     expect(store.rows[0]!.handedOverAt).toBe(body.handedOverAt);
     expect(store.rows[1]!.handedOverAt).toBeNull();
   });
+  // The stored lines were placed against the page as it was then (`page_hash`):
+  // after an edit they would name another line of the file the prompt points at.
+  test("a page edited after the turn: the prompt flags the change and leaves out the stored lines; an unchanged page keeps them", async () => {
+    const rel = "plans/pier.mdx";
+    const file = path.join(agent, rel);
+    await Bun.write(file, PLAN);
+    __resetWikiCacheForTest();
+    try {
+      const { app, store } = setup();
+      await frames(await post(app, { ...PASSAGE, relPath: rel }));
+      const id = store.rows[0]!.id;
+      expect(store.rows[0]!.location).toMatchObject({ found: "exact", fromLine: 15, toLine: 15 });
+      const unchanged = ((await (await postContinue(app, { turnId: id })).json()) as { prompt: string }).prompt;
+      expect(unchanged).toContain("Turn 1 (passage, line 15):");
+      expect(unchanged).not.toContain("changed since");
+      // Two lines above the passage: line 15 is now the Design heading's blank.
+      await Bun.write(file, PLAN.replace("## Brief\n", "## Brief\n\nA new first line.\n"));
+      const changed = ((await (await postContinue(app, { turnId: id })).json()) as { prompt: string }).prompt;
+      expect(changed).not.toContain("line 15");
+      expect(changed).toContain("Turn 1 (passage, lines not given: the page has changed since this turn):");
+      expect(changed).toContain("> The summer route adds a stop at Example Island.");
+      // A page gone since the turn is a change too.
+      await rm(file, { force: true });
+      const gone = ((await (await postContinue(app, { turnId: id })).json()) as { prompt: string }).prompt;
+      expect(gone).not.toContain("line 15");
+      expect(gone).toContain("lines not given: the page has changed since this turn");
+    } finally {
+      await rm(file, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
   test("refusals: not admin, a malformed or unknown turn, a running turn, a read-only wiki; none marks the row", async () => {
     const { app, store } = setup();
     await frames(await post(app, PASSAGE));

@@ -395,9 +395,13 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       if (egress) return egress;
       if (turn.endState === "running") return c.json({ error: "the turn is still running; hand it over once it has ended", reason: "running" }, 409);
       const turns = (await contStore.list(turn.discussionId)).filter((t) => t.seq <= turn.seq);
+      const pagePath = path.join(path.resolve(resolveWikiRoot(entry?.root)), turn.relPath);
+      // A turn's lines were placed on the page it was stored with: against
+      // another text they would name other lines of the file the prompt points at.
+      const live = await readWikiText(pagePath).then(sha256, () => null);
       const prompt = renderContinuePrompt({
-        path: path.join(path.resolve(resolveWikiRoot(entry?.root)), turn.relPath),
-        turns: turns.map((t) => ({ seq: t.seq, selection: t.selection, location: t.location, question: t.question, answer: t.answer, endState: t.endState })),
+        path: pagePath,
+        turns: turns.map((t) => ({ seq: t.seq, selection: t.selection, location: t.location, question: t.question, answer: t.answer, endState: t.endState, pageChanged: live !== t.pageHash })),
       });
       const marked = await contStore.handedOver(turn.id);
       log.info("discuss turn handed over on {wiki} {relPath}", { wiki: turn.wiki, relPath: turn.relPath, turnId: turn.id, seq: turn.seq, chars: prompt.length });

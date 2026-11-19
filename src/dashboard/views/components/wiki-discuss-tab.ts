@@ -33,7 +33,7 @@ import { copyText } from "./copy-path.ts";
 import { makeSseFrameParser } from "./client-runtime.ts";
 import { revealRange } from "./wiki-hash-target.ts";
 import { revealRightPane } from "./wiki-pane-toggle.ts";
-import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
+import { WIKI_READONLY_INPUT_PLACEHOLDER, wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import {
   applyDiscussFrame,
   discussionLive,
@@ -186,7 +186,10 @@ function paint(): void {
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
   const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
   const started = !!d && d.turns.some((t) => t.turnId !== null);
-  if (input) input.placeholder = started ? "Follow up on this discussion…" : "Ask the wiki agent about this page…";
+  // A read-only wiki keeps the boot locks' placeholder: this paint runs on
+  // every page render, after `applyWikiReadonlyInputLocks` (it never re-enables the box).
+  const readonly = discussSendBlocked();
+  if (input) input.placeholder = readonly ? WIKI_READONLY_INPUT_PLACEHOLDER : started ? "Follow up on this discussion…" : "Ask the wiki agent about this page…";
   if (btn) {
     btn.textContent = started ? "Follow up" : "Ask";
     btn.disabled = live;

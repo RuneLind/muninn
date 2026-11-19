@@ -24,8 +24,9 @@ import {
   openDiscussHandoff,
   setDiscussHandoffEnabled,
 } from "../components/wiki-discuss-handoff.ts";
-import { discussAgentOn, initDiscussTab } from "../components/wiki-discuss-tab.ts";
-import { installWikiReadonlyGuard } from "../components/wiki-readonly-client.ts";
+import { DISCUSS_INPUT_ID, discussAgentOn, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
+import { applyWikiReadonlyInputLocks, installWikiReadonlyGuard, WIKI_READONLY_INPUT_PLACEHOLDER } from "../components/wiki-readonly-client.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -902,5 +903,26 @@ describe("the handoff panel with the wiki agent on (fix round 1)", () => {
     document.body.classList.remove("wiki-readonly", "wiki-readonly-wiki");
     setDiscussHandoffEnabled(false);
     document.body.innerHTML = "";
+  });
+});
+
+describe("the Discuss box on a read-only wiki (fix round 1 batch 4)", () => {
+  // The boot-time locks set the read-only placeholder once; a paint after them
+  // (every page render calls `setDiscussAgentEnabled`) must not undo it.
+  test("a paint keeps the read-only placeholder and the box disabled", () => {
+    initDiscussTab({ wiki: () => "w", relPath: () => "plans/harbour.mdx", switchTab: () => {} });
+    document.body.innerHTML = `<button data-conntab="discuss" hidden>Discuss</button>${discussTabBodyHtml()}`;
+    g.__WIKI_READONLY_WIKI__ = true;
+    try {
+      applyWikiReadonlyInputLocks();
+      const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement;
+      expect(input.placeholder).toBe(WIKI_READONLY_INPUT_PLACEHOLDER);
+      setDiscussAgentEnabled(true);
+      expect(input.placeholder).toBe(WIKI_READONLY_INPUT_PLACEHOLDER);
+      expect(input.disabled).toBe(true);
+    } finally {
+      delete g.__WIKI_READONLY_WIKI__;
+      document.body.innerHTML = "";
+    }
   });
 });

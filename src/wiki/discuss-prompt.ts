@@ -125,6 +125,9 @@ export interface ContinueTurn {
   question: string;
   answer: string;
   endState: string;
+  /** The live page's hash differs from the turn's `page_hash` (or the page is
+   *  gone): the stored lines name the page as it was, so they are left out. */
+  pageChanged: boolean;
 }
 
 /** The continue prompt's bound: two handoff prompts, since it carries answers. */
@@ -132,7 +135,8 @@ export const CONTINUE_PROMPT_MAX = 2 * HANDOFF_PROMPT_MAX;
 /** Each answer is cut here before the whole is fitted. */
 const CONTINUE_ANSWER_MAX = 3000;
 
-function turnWhere(location: unknown): string {
+function turnWhere(location: unknown, pageChanged: boolean): string {
+  if (pageChanged) return "lines not given: the page has changed since this turn";
   const loc = location as { found?: unknown; fromLine?: unknown; toLine?: unknown } | null;
   if (!loc || typeof loc.fromLine !== "number" || typeof loc.toLine !== "number") return "not placed";
   const lines = linesLabel(loc.fromLine, loc.toLine);
@@ -160,7 +164,7 @@ export function renderContinuePrompt(input: { path: string; turns: ContinueTurn[
   ];
   const tail = ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
   const block = (t: ContinueTurn, withAnswer: boolean): string[] => [
-    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location)}):` : " (about the whole page):"}`,
+    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : " (about the whole page):"}`,
     ...(t.selection ? [`> ${clampLine(t.selection, 1500)}`] : []),
     `Question: ${clampLine(t.question, HANDOFF_QUESTION_MAX)}`,
     withAnswer

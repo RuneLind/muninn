@@ -194,7 +194,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // Its fix round 1 batch 3 (the box kept until the turn is accepted, finished turns left alone while one
 // streams, no follow-scroll while a press is held in the tab): 904,965 (307,983 gzipped), so the pin
 // moves to 905,100.
-const WIKI_CLIENT_MAX_BYTES = 905_100;
+// Its fix round 1 batch 4 (a paint keeps the read-only placeholder, the two rules-file refusals' words):
+// 905,430 (308,160 gzipped), so the pin moves to 905,600.
+const WIKI_CLIENT_MAX_BYTES = 905_600;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
