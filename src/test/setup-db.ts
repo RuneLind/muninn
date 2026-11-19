@@ -50,6 +50,7 @@ const ALL_TABLES = [
   "summary_factchecks",
   "wiki_answers",
   "wiki_stale_verdicts",
+  "wiki_discuss_turns",
   // Cleared before each test, so no test starts with another file's override.
   // It does not stop a suite's last row outliving it: role-overrides.test.ts
   // clears its own rows in afterAll, and the e2e spec deletes HAIKU_BACKEND

@@ -1,0 +1,512 @@
+/**
+ * `POST /api/wiki/discuss` on temp wikis registered through the registry memo,
+ * with an in-memory turn store, a fake one-shot and fake snapshots: the
+ * preflight's JSON refusals and their order, the surface per connector, the
+ * repos in reach, the card cache, and a turn that runs to its end after its
+ * reader went away. The DB store is `src/db/wiki-discuss-turns.test.ts`.
+ * Invented pages and repo names only (public repo).
+ */
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Hono } from "hono";
+import type { Config } from "../../config.ts";
+import type { BotConfig } from "../../bots/config.ts";
+import type { executeOneShot, OneShotOptions } from "../../ai/one-shot.ts";
+import { __setClaudeCliVersionForTest, type ToolSurface } from "../../ai/tool-surface.ts";
+import type { Snapshot } from "../../ai/snapshots.ts";
+import type { DiscussTurn, DiscussTurnFinish, DiscussTurnStart } from "../../db/wiki-discuss-turns.ts";
+import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
+import type { GitRun } from "../../wiki/decision-triage/git.ts";
+import type { RunOutcome } from "../../wiki/plan-card-run.ts";
+import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
+import { COPILOT_DISCUSS_TOOLS, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+
+let dir = "";
+let agent = ""; // a wiki with rules and discuss.repos
+let bare = ""; // a wiki with rules, no reader config
+let norules = ""; // a wiki without .wiki-agent.md
+let alpha = ""; // a code checkout in reach
+let navrepo = ""; // a checkout the variable resolves, not on the wiki's list
+
+const PLAN = [
+  "---",
+  "title: Ferry timetable",
+  "plan_status: in-flight",
+  "repos: [alpha, navrepo]",
+  "---",
+  "",
+  "# Ferry timetable",
+  "",
+  "## Brief",
+  "",
+  "Kari Nordmann keeps the **winter** timetable in `ferry.yaml`.",
+  "",
+  "## Design",
+  "",
+  "- The summer route adds a stop at Example Island.",
+  "- The night route is unchanged.",
+  "",
+].join("\n");
+const NOTE = "---\ntitle: Harbour note\n---\n\n# Harbour note\n\nThe harbour opens at six.\n";
+const RULES = "# Rules\n\nAnswer the marked passage first.\n\ntools: Bash, Write\n";
+
+class MemStore implements DiscussStore {
+  rows: DiscussTurn[] = [];
+  left: string[] = [];
+  start = async (i: DiscussTurnStart) => {
+    const seq = this.rows.filter((r) => r.discussionId === i.discussionId).length + 1;
+    const row: DiscussTurn = {
+      id: crypto.randomUUID(),
+      discussionId: i.discussionId,
+      seq,
+      wiki: i.wiki,
+      relPath: i.relPath,
+      pageHash: i.pageHash,
+      selection: i.selection,
+      question: i.question,
+      location: i.location,
+      answer: "",
+      endState: "running",
+      error: null,
+      readerLeft: false,
+      botName: i.botName,
+      connector: i.connector,
+      model: i.model,
+      surface: i.surface,
+      card: null,
+      toolCalls: [],
+      proposedEdit: null,
+      costUsd: null,
+      durationMs: null,
+      createdAt: Date.now(),
+      finishedAt: null,
+    };
+    this.rows.push(row);
+    return { id: row.id, seq };
+  };
+  finish = async (id: string, f: DiscussTurnFinish) => {
+    const r = this.rows.find((x) => x.id === id);
+    if (!r || r.endState !== "running") return false;
+    Object.assign(r, { endState: f.endState, answer: f.answer, error: f.error ?? null, card: f.card ?? r.card, toolCalls: f.toolCalls ?? [], proposedEdit: f.proposedEdit ?? null, finishedAt: Date.now() });
+    return true;
+  };
+  readerLeft = async (id: string) => {
+    this.left.push(id);
+    const r = this.rows.find((x) => x.id === id);
+    if (r) r.readerLeft = true;
+  };
+  setCard = async (id: string, card: string) => {
+    const r = this.rows.find((x) => x.id === id);
+    if (r) r.card = card;
+  };
+  list = async (discussionId: string) => this.rows.filter((r) => r.discussionId === discussionId).sort((a, b) => a.seq - b.seq);
+}
+
+interface Calls {
+  prompts: string[];
+  opts: OneShotOptions[];
+  bots: BotConfig[];
+  codeSnaps: string[];
+  wikiSnaps: string[];
+  planCards: number;
+  blocked: { connector: string | undefined; surface: ToolSurface }[];
+}
+
+const bot = (connector: BotConfig["connector"], name = "ivar"): BotConfig => ({
+  name,
+  dir: "/nonexistent",
+  persona: "",
+  telegramAllowedUserIds: [],
+  slackAllowedUserIds: [],
+  connector,
+  model: "invented-model",
+});
+
+/** git as `findRepo` and the own-repo check ask it: each checkout is its own top level, origin named after its folder. */
+const fakeGit: GitRun = async (cwd, args) => {
+  const real = await realpath(cwd).catch(() => cwd);
+  if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: real + "\n", stderr: "", timedOut: false, capped: false } as never;
+  if (args[0] === "remote" && args[2] === "origin") return { ok: true, stdout: `git@example.com:org/${path.basename(real)}.git\n`, stderr: "", timedOut: false, capped: false } as never;
+  return { ok: false, stdout: "", stderr: "", timedOut: false, capped: false } as never;
+};
+
+function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof executeOneShot; store?: MemStore; deps?: Partial<DiscussRouteDeps>; role?: "user" | "admin" } = {}) {
+  const calls: Calls = { prompts: [], opts: [], bots: [], codeSnaps: [], wikiSnaps: [], planCards: 0, blocked: [] };
+  const store = opts.store ?? new MemStore();
+  const app = new Hono();
+  if (opts.role) app.use(async (c, next) => { c.set("role" as never, opts.role as never); await next(); });
+  const oneShot: typeof executeOneShot =
+    opts.oneShot ??
+    (async (prompt, _config, b, o) => {
+      calls.prompts.push(prompt);
+      calls.opts.push(o);
+      calls.bots.push(b);
+      o.onProgress?.({ type: "text_delta", text: "The summer route " });
+      return { result: "The summer route stops at Example Island.\n\nRead: alpha/src/route.ts\nNot checked: nothing else", costUsd: 0.01, toolCalls: [{ id: "t1", name: "Read", displayName: "Read", durationMs: 1, startOffsetMs: 0, input: '{"file_path":"x"}' }] } as never;
+    });
+  registerWikiDiscussRoute(app, { profile: "default", dashboardPort: 4321, claudeModel: "fallback-model", decisionTriageRepoRoots: null } as unknown as Config, {
+    store,
+    bots: () => [bot(opts.connector ?? "claude-sdk")],
+    oneShot,
+    surfaceBlocker: async (connector, surface) => {
+      calls.blocked.push({ connector, surface });
+      return null;
+    },
+    wikiSnapshot: async (d) => {
+      calls.wikiSnaps.push(d);
+      return { kind: "wiki", dir: path.join(dir, "snaps", `wiki-${path.basename(d)}`), key: "k", source: d } satisfies Snapshot;
+    },
+    codeSnapshot: async (d) => {
+      calls.codeSnaps.push(d);
+      return { kind: "code", dir: path.join(dir, "snaps", `code-${path.basename(d)}`), key: "k", source: d, commit: "0123456789abcdef", branch: "main" } satisfies Snapshot;
+    },
+    git: fakeGit,
+    repoRoots: () => `alpha=${alpha},navrepo=${navrepo}`,
+    planCardConfig: () => ({ bin: "/invented/plan-card.ts", roots: [agent, bare] }),
+    planCard: async (): Promise<RunOutcome> => {
+      calls.planCards++;
+      return { ok: true, ms: 1, proc: { exitCode: 0, stdout: JSON.stringify({ text: `# Ferry card\npath: ${agent}/plans/ferry.mdx`, chars: 30, cuts: [] }), stderr: "" } as never };
+    },
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    ...opts.deps,
+  });
+  return { app, calls, store };
+}
+
+const post = (app: Hono, body: unknown, init: RequestInit = {}, type = "application/json") =>
+  app.request(WIKI_DISCUSS_PATH, { method: "POST", headers: { "content-type": type }, body: typeof body === "string" ? body : JSON.stringify(body), ...init });
+
+/** The SSE frames of a finished response, as `{event, data}`. */
+async function frames(res: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
+  const text = await res.text();
+  return text
+    .split("\n\n")
+    .filter((f) => f.trim())
+    .map((f) => ({ event: /^event: (.*)$/m.exec(f)?.[1] ?? "", data: JSON.parse(/^data: (.*)$/m.exec(f)?.[1] ?? "{}") }));
+}
+
+const PASSAGE = {
+  wiki: "agent",
+  relPath: "plans/ferry.mdx",
+  question: "Which stop does the summer route add?",
+  selection: "The summer route adds a stop at Example Island.",
+  before: "timetable in ferry.yaml. Design",
+  after: "The night route is unchanged.",
+  heading: "Design",
+};
+
+beforeAll(async () => {
+  dir = await realpath(await testTempDir(path.join(tmpdir(), "muninn-discuss-agent-")));
+  agent = path.join(dir, "agent");
+  bare = path.join(dir, "bare");
+  norules = path.join(dir, "norules");
+  alpha = path.join(dir, "alpha");
+  navrepo = path.join(dir, "navrepo");
+  await mkdir(alpha, { recursive: true });
+  await mkdir(navrepo, { recursive: true });
+  await Bun.write(path.join(agent, ".wiki-reader.json"), JSON.stringify({ discuss: { handoff: true, repos: ["alpha"] } }));
+  await Bun.write(path.join(agent, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(agent, "plans", "ferry.mdx"), PLAN);
+  await Bun.write(path.join(agent, "notes", "harbour.md"), NOTE);
+  await Bun.write(path.join(bare, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(bare, "plans", "ferry.mdx"), PLAN);
+  await Bun.write(path.join(norules, "plans", "ferry.mdx"), PLAN);
+  __setWikiRegistryForTest([
+    { name: "agent", root: agent, source: "extra" },
+    { name: "bare", root: bare, source: "extra" },
+    { name: "norules", root: norules, source: "extra" },
+  ]);
+});
+
+afterEach(() => {
+  __setReadonlyWikiRootsForTest();
+  __setClaudeCliVersionForTest(undefined);
+});
+
+afterAll(async () => {
+  __resetWikiRegistryForTest();
+  __resetWikiCacheForTest();
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe("preflight refusals, as JSON before the stream", () => {
+  test("a non-admin viewer gets 403 and no turn is stored", async () => {
+    const { app, store, calls } = setup({ role: "user" });
+    const res = await post(app, PASSAGE);
+    expect(res.status).toBe(403);
+    expect(store.rows).toHaveLength(0);
+    expect(calls.blocked).toHaveLength(0);
+  });
+  test("a non-JSON POST gets 415", async () => {
+    const { app } = setup();
+    expect((await post(app, JSON.stringify(PASSAGE), {}, "text/plain")).status).toBe(415);
+  });
+  test("a malformed discussionId gets 400", async () => {
+    const { app } = setup();
+    const res = await post(app, { ...PASSAGE, discussionId: "not-a-uuid" });
+    expect(res.status).toBe(400);
+  });
+  test("a wiki without .wiki-agent.md keeps today's Discuss: 404 no-agent, no bot resolved, nothing stored", async () => {
+    const { app, store, calls } = setup();
+    const res = await post(app, { ...PASSAGE, wiki: "norules" });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { reason: string }).reason).toBe("no-agent");
+    expect(store.rows).toHaveLength(0);
+    expect(calls.blocked).toHaveLength(0);
+  });
+  test("a read-only wiki is refused by the egress check, before its rules file is read", async () => {
+    __setReadonlyWikiRootsForTest([norules, agent]);
+    const { app, store } = setup();
+    // norules has no rules file: a 403 rather than its 404 proves the egress check runs first.
+    for (const wiki of ["norules", "agent"]) {
+      const res = await post(app, { ...PASSAGE, wiki });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { readonly: boolean }).readonly).toBe(true);
+    }
+    expect(store.rows).toHaveLength(0);
+  });
+  test("a rules file over the bound is refused, never cut", async () => {
+    const big = path.join(dir, "big");
+    await Bun.write(path.join(big, WIKI_AGENT_RULES_FILE), "x".repeat(WIKI_AGENT_RULES_MAX_BYTES + 1));
+    await Bun.write(path.join(big, "a.md"), NOTE);
+    __setWikiRegistryForTest([
+      { name: "agent", root: agent, source: "extra" },
+      { name: "big", root: big, source: "extra" },
+    ]);
+    try {
+      const { app } = setup();
+      const res = await post(app, { wiki: "big", relPath: "a.md", question: "q" });
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { reason: string }).reason).toBe("rules-too-large");
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  });
+  test("a rules file that is a symlink is refused", async () => {
+    const linked = path.join(dir, "linked");
+    await mkdir(linked, { recursive: true });
+    await writeFile(path.join(dir, "outside.md"), RULES);
+    await symlink(path.join(dir, "outside.md"), path.join(linked, WIKI_AGENT_RULES_FILE));
+    await Bun.write(path.join(linked, "a.md"), NOTE);
+    __setWikiRegistryForTest([{ name: "linked", root: linked, source: "extra" }]);
+    try {
+      const { app } = setup();
+      const res = await post(app, { wiki: "linked", relPath: "a.md", question: "q" });
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { reason: string }).reason).toBe("rules-unreadable");
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  });
+  test("an unknown page gets 404", async () => {
+    const { app } = setup();
+    expect((await post(app, { ...PASSAGE, relPath: "plans/none.mdx" })).status).toBe(404);
+  });
+  test("a connector the table does not cover is refused, before any surface check", async () => {
+    const { app, calls, store } = setup({ connector: "openai-compat" });
+    const res = await post(app, PASSAGE);
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { reason: string }).reason).toBe("connector");
+    expect(calls.blocked).toHaveLength(0);
+    expect(store.rows).toHaveLength(0);
+  });
+  test("a surface toolSurfaceBlocker refuses is a 503 before any snapshot or turn", async () => {
+    const { app, calls, store } = setup({ deps: { surfaceBlocker: async () => "the installed CLI is too old" } });
+    const res = await post(app, PASSAGE);
+    expect(res.status).toBe(503);
+    const j = (await res.json()) as { reason: string; error: string };
+    expect(j.reason).toBe("surface");
+    expect(j.error).toContain("too old");
+    expect(calls.wikiSnaps).toHaveLength(0);
+    expect(store.rows).toHaveLength(0);
+  });
+  test("the real toolSurfaceBlocker is the default: a claude-cli without --restricted is refused", async () => {
+    __setClaudeCliVersionForTest("2.0.0");
+    const { app, store } = setup({ connector: "claude-cli", deps: { surfaceBlocker: undefined } });
+    const res = await post(app, PASSAGE);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { reason: string }).reason).toBe("surface");
+    expect(store.rows).toHaveLength(0);
+  });
+  test("the pre-flight checks the surface the connector gets: read-and-search on Claude, the named tools on Copilot", async () => {
+    const claude = setup({ connector: "claude-sdk" });
+    await (await post(claude.app, PASSAGE)).text();
+    expect("readSearch" in (claude.calls.blocked[0]!.surface as object)).toBe(true);
+    const copilot = setup({ connector: "copilot-sdk" });
+    await (await post(copilot.app, PASSAGE)).text();
+    expect(copilot.calls.blocked[0]!.surface).toEqual({ mcpTools: COPILOT_DISCUSS_TOOLS });
+  });
+});
+
+describe("a turn", () => {
+  test("runs one one-shot with the rules, the pack and the 5-minute timeout, on read-and-search over the snapshots", async () => {
+    const { app, calls, store } = setup();
+    const res = await post(app, PASSAGE);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const evs = await frames(res);
+    expect(evs.map((e) => e.event)).toEqual(["turn", "status", "status", "status", "delta", "done", "end"]);
+    expect(calls.opts).toHaveLength(1);
+    const o = calls.opts[0]!;
+    expect(o.timeoutMs).toBe(DISCUSS_TURN_TIMEOUT_MS);
+    // The rules file is prose in the system prompt; what it says about tools changes nothing.
+    expect(o.systemPrompt).toContain("Answer the marked passage first.");
+    expect(o.toolSurface).toEqual({ readSearch: [path.join(dir, "snaps", "wiki-agent"), path.join(dir, "snaps", "code-alpha")] });
+    // The pack: the page's path inside the snapshot, never the live path; the passage's lines.
+    const prompt = calls.prompts[0]!;
+    expect(prompt).toContain(`Page file: ${path.join(dir, "snaps", "wiki-agent", "plans", "ferry.mdx")}`);
+    expect(prompt).not.toContain(path.join(agent, "plans", "ferry.mdx"));
+    expect(prompt).toContain("## The marked passage (line 15, Ferry timetable › Design)");
+    expect(prompt).toContain("15: - The summer route adds a stop at Example Island.");
+    expect(prompt.trimEnd().endsWith("Which stop does the summer route add?")).toBe(true);
+    const row = store.rows[0]!;
+    expect(row.endState).toBe("done");
+    expect(row.toolCalls).toEqual([{ name: "Read", input: '{"file_path":"x"}' }]);
+    expect(row.location).toMatchObject({ found: "exact", fromLine: 15, toLine: 15 });
+    expect(evs.find((e) => e.event === "done")!.data.turnId).toBe(row.id);
+  });
+  test("a page whose repos: names a repo outside discuss.repos gets no snapshot of it, and the pack says so", async () => {
+    const { app, calls } = setup();
+    await (await post(app, PASSAGE)).text();
+    expect(calls.codeSnaps).toEqual([alpha]);
+    const prompt = calls.prompts[0]!;
+    expect(prompt).toContain(`- navrepo: ${NOT_IN_REACH}`);
+    expect(prompt).toContain(`- alpha: ${path.join(dir, "snaps", "code-alpha")}`);
+    expect(prompt).not.toContain(navrepo);
+  });
+  test("a wiki whose reader config names no repos puts none in reach", async () => {
+    const { app, calls } = setup();
+    await (await post(app, { ...PASSAGE, wiki: "bare" })).text();
+    expect(calls.codeSnaps).toEqual([]);
+    const prompt = calls.prompts[0]!;
+    expect(prompt).toContain("No repo in reach");
+    expect(prompt).toContain(`- alpha: ${NOT_IN_REACH}`);
+    expect(prompt).toContain(`- navrepo: ${NOT_IN_REACH}`);
+  });
+  test("Copilot gets the named tools and no snapshot; the pack names the page by its path in the wiki", async () => {
+    const { app, calls } = setup({ connector: "copilot-sdk" });
+    await (await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "When does the harbour open?" })).text();
+    expect(calls.opts[0]!.toolSurface).toEqual({ mcpTools: COPILOT_DISCUSS_TOOLS });
+    expect(calls.wikiSnaps).toHaveLength(0);
+    expect(calls.codeSnaps).toHaveLength(0);
+    const prompt = calls.prompts[0]!;
+    expect(prompt).toContain("## The question is about the whole page");
+    expect(prompt).toContain("yggdrasil-search");
+    expect(prompt).not.toContain(agent);
+  });
+  test("the card is built once per discussion and cached by the page hash", async () => {
+    const store = new MemStore();
+    const { app, calls } = setup({ store });
+    const first = await frames(await post(app, PASSAGE));
+    const discussionId = first[0]!.data.discussionId as string;
+    expect(calls.planCards).toBe(1);
+    // Its paths point into the snapshot.
+    expect(calls.prompts[0]).toContain(`path: ${path.join(dir, "snaps", "wiki-agent")}/plans/ferry.mdx`);
+    await (await post(app, { ...PASSAGE, discussionId, question: "And the night route?" })).text();
+    expect(calls.planCards).toBe(1);
+    expect(calls.prompts[1]).toContain("# Ferry card");
+    // The earlier turn is in the second prompt.
+    expect(calls.prompts[1]).toContain("Question about «The summer route adds a stop at Example Island.»: Which stop does the summer route add?");
+    expect(store.rows.map((r) => r.seq)).toEqual([1, 2]);
+    // A changed page is another hash: the card is built again.
+    await Bun.write(path.join(agent, "plans", "ferry.mdx"), PLAN + "\nA new line.\n");
+    __resetWikiCacheForTest();
+    try {
+      await (await post(app, { ...PASSAGE, discussionId, question: "Again?" })).text();
+      expect(calls.planCards).toBe(2);
+    } finally {
+      await Bun.write(path.join(agent, "plans", "ferry.mdx"), PLAN);
+      __resetWikiCacheForTest();
+    }
+  });
+  test("a discussion is refused when unknown, about another page, or still running", async () => {
+    const store = new MemStore();
+    const { app } = setup({ store });
+    expect((await post(app, { ...PASSAGE, discussionId: crypto.randomUUID() })).status).toBe(404);
+    const first = await frames(await post(app, PASSAGE));
+    const discussionId = first[0]!.data.discussionId as string;
+    const other = await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "q", discussionId });
+    expect(other.status).toBe(409);
+    store.rows[0]!.endState = "running";
+    const busy = await post(app, { ...PASSAGE, discussionId });
+    expect(busy.status).toBe(409);
+    expect(((await busy.json()) as { reason: string }).reason).toBe("busy");
+  });
+  test("a turn insert that loses a race is a 409", async () => {
+    const store = new MemStore();
+    store.start = async (i) => {
+      throw new DiscussTurnConflict(i.discussionId);
+    };
+    const { app } = setup({ store });
+    expect((await post(app, PASSAGE)).status).toBe(409);
+  });
+  test("a turn that runs past its timeout is stored as timeout and reported in the stream", async () => {
+    const { app, store } = setup({
+      oneShot: async () => {
+        throw new Error("Claude Agent SDK timed out after 300000ms");
+      },
+    });
+    const evs = await frames(await post(app, PASSAGE));
+    const err = evs.find((e) => e.event === "app_error")!;
+    expect(err.data.endState).toBe("timeout");
+    expect(store.rows[0]!.endState).toBe("timeout");
+    expect(evs.at(-1)!.event).toBe("end");
+  });
+  test("a turn whose reader went away runs to its end and is stored", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let finished = false;
+    const store = new MemStore();
+    const { app } = setup({
+      store,
+      oneShot: async () => {
+        await gate;
+        finished = true;
+        return { result: "The answer, written after the reader left.", costUsd: 0, toolCalls: [] } as never;
+      },
+    });
+    const ctrl = new AbortController();
+    const res = await post(app, PASSAGE, { signal: ctrl.signal });
+    const reader = res.body!.getReader();
+    const firstChunk = new TextDecoder().decode((await reader.read()).value);
+    expect(firstChunk).toContain("event: turn");
+    ctrl.abort();
+    await reader.cancel().catch(() => {});
+    release();
+    for (let i = 0; i < 100 && store.rows[0]?.endState === "running"; i++) await Bun.sleep(10);
+    expect(finished).toBe(true);
+    expect(store.rows[0]!.endState).toBe("done");
+    expect(store.rows[0]!.answer).toBe("The answer, written after the reader left.");
+    expect(store.rows[0]!.readerLeft).toBe(true);
+  });
+  test("a proposed edit in the answer is read with parseEditList and stored", async () => {
+    const answer = [
+      "The page says six; the code says seven.",
+      "",
+      "```json",
+      '{"edits": [{"claimIndex": 1, "verdict": "❌", "old": "The harbour opens at six.", "new": "The harbour opens at seven.", "reason": "harbour.ts:3 opens at 07:00"}]}',
+      "```",
+    ].join("\n");
+    const { app, store } = setup({ oneShot: async () => ({ result: answer, costUsd: 0, toolCalls: [] }) as never });
+    const evs = await frames(await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "Is six right?" }));
+    const edit = store.rows[0]!.proposedEdit as { edits: { old: string; new: string }[]; overLimit: boolean };
+    expect(edit.edits).toEqual([expect.objectContaining({ old: "The harbour opens at six.", new: "The harbour opens at seven." })]);
+    expect(edit.overLimit).toBe(false);
+    expect(evs.find((e) => e.event === "done")!.data.proposedEdit).toEqual(edit);
+  });
+});
