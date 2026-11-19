@@ -18,7 +18,11 @@
  *     (shown newest first), also after the article is rendered anew. After the
  *     page file is edited and the page shown again (the discussion kept, no
  *     reload), the chip says the passage is gone. "In view" is a layout box
- *     against `#articleWrap`, which only a browser has.
+ *     against `#articleWrap`, which only a browser has. The reveal lands in
+ *     place: the section bar names the section of a line under a later
+ *     heading, a cell deep in a Query result is inside both its
+ *     `.query-table-wrap` and `#articleWrap`, and a wide table's far-right
+ *     cell is inside its `.tablewrap`.
  *  3. **The follow-up and the hand-over, in the database.** The follow-up box
  *     sends turn 2 of the same discussion; «Continue in Claude Code» copies a
  *     prompt and sets `handed_over_at` on that turn's row only.
@@ -65,6 +69,8 @@ const CHIP_REL = "plans/chip-targets.mdx";
 const DUP = "The ferry leaves at nine on every weekday morning from the north pier.";
 const DEEP = "Line 50 of the long run says something different about berth number 50.";
 const FOLDED = "Paragraph 40 in the fold talks about crossing number 40 and its tides.";
+const CELL = "Berth seventy is the one with the crane.";
+const FAR_RIGHT = "Farright the last column holds this.";
 const CHIP_PAGE = [
   "---",
   "title: Chip targets",
@@ -100,7 +106,23 @@ const CHIP_PAGE = [
   ...Array.from({ length: 44 }, (_, k) => `Paragraph ${k} in the fold talks about crossing number ${k} and its tides.\n`),
   "</Fold>",
   "",
+  "## Data",
+  "",
+  '<Query id="Q-1" question="Which berths?" answer="Eighty." csv="chip-data/q1.csv" />',
+  "",
+  "## Wide",
+  "",
+  "<ComparisonTable>",
+  "",
+  `| ${Array.from({ length: 24 }, (_, k) => `Column${k}`).join(" | ")} |`,
+  `| ${Array.from({ length: 24 }, () => "---").join(" | ")} |`,
+  `| ${Array.from({ length: 23 }, (_, k) => `Widecellvalue${k}withoutanybreaks`).join(" | ")} | ${FAR_RIGHT} |`,
+  "",
+  "</ComparisonTable>",
+  "",
 ].join("\n");
+/** The Query card's result: 80 rows, so its `.query-table-wrap` scrolls. */
+const CHIP_CSV = ["berth,note", ...Array.from({ length: 80 }, (_, k) => (k === 70 ? `70,${CELL}` : `${k},Berth ${k} is ordinary`))].join("\n") + "\n";
 const BULLET = "R2, behind. The check compares the frontmatter status_date with the date on the Brief's Status line.";
 const PAGE = [
   "---",
@@ -166,6 +188,8 @@ test.beforeAll(async () => {
     await mkdir(path.join(r, "notes"), { recursive: true });
     await writeFile(path.join(r, REL), PAGE, "utf8");
     await writeFile(path.join(r, CHIP_REL), CHIP_PAGE, "utf8");
+    await mkdir(path.join(r, "plans", "chip-data"), { recursive: true });
+    await writeFile(path.join(r, "plans", "chip-data", "q1.csv"), CHIP_CSV, "utf8");
     await writeFile(path.join(r, OTHER_REL), "---\ntitle: Other\n---\n\n# Other\n\nNothing here.\n", "utf8");
     await writeFile(path.join(r, ".wiki-agent.md"), "# Rules\n\nAnswer the marked passage first, and name the files you read.\n", "utf8");
     gitInit(r);
@@ -506,6 +530,70 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await toTop();
     await chip(2).click();
     expect.soft((await revealed(page, DUP, 1)).holdsCopy, "the second copy after a new render").toBe(true);
+  });
+
+  test("the chip reveals in place: the section bar names the passage's section, an inner scroller and a wide table scroll to it", async ({ page }) => {
+    test.setTimeout(240_000);
+    await openPage(page, WIKI, CHIP_REL);
+    await selectText(page, DEEP);
+    await askHere(page, "What does line 50 say?", 1);
+    await selectText(page, CELL);
+    await askHere(page, "Which berth has the crane?", 2);
+    await selectText(page, FAR_RIGHT);
+    await askHere(page, "What is in the last column?", 3);
+    const chip = (seq: number) => page.locator(`.wiki-discuss-turn[data-turn-seq="${seq}"] [data-discuss-chip]`);
+    const toTop = () =>
+      page.evaluate(() => {
+        document.getElementById("articleWrap")!.scrollTop = 0;
+        for (const w of Array.from(document.querySelectorAll(".wiki-article .query-table-wrap, .wiki-article .tablewrap"))) {
+          w.scrollTop = 0;
+          w.scrollLeft = 0;
+        }
+      });
+    /** The text's own box against `#articleWrap` and against its nearest `sel` ancestor. */
+    const boxes = (text: string, sel: string) =>
+      page.evaluate(
+        ([text, sel]) => {
+          const article = document.querySelector("#articleWrap .wiki-article")!;
+          const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+          for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+            const at = n.data.indexOf(text as string);
+            if (at === -1) continue;
+            const r = document.createRange();
+            r.setStart(n, at);
+            r.setEnd(n, at + (text as string).length);
+            const b = r.getBoundingClientRect();
+            const w = document.getElementById("articleWrap")!.getBoundingClientRect();
+            const s = n.parentElement!.closest(sel as string)!.getBoundingClientRect();
+            const inside = (o: DOMRect) => ({ v: b.top >= o.top - 1 && b.bottom <= o.bottom + 1, h: b.left >= o.left - 1 && b.right <= o.right + 1 });
+            return { wrap: inside(w), own: inside(s), box: { top: b.top, left: b.left } };
+          }
+          throw new Error(`no ${text}`);
+        },
+        [text, sel] as const,
+      );
+
+    // (a) Plain text under `## Long`: the section bar names Long, also after a 1 px scroll.
+    await toTop();
+    await chip(1).click();
+    await expect.soft(page.locator("#wikiSectionBar .wiki-sec-t"), "the bar names the passage's section").toHaveText("Long");
+    await page.evaluate(() => (document.getElementById("articleWrap")!.scrollTop += 1));
+    await expect.soft(page.locator("#wikiSectionBar .wiki-sec-t"), "still Long after a 1 px scroll").toHaveText("Long");
+
+    // (b) Row 70 of a Query result, inside `.query-table-wrap` far down the page.
+    await toTop();
+    expect((await boxes(CELL, ".query-table-wrap")).wrap.v, "the cell starts out of view").toBe(false);
+    await chip(2).click();
+    const cell = await boxes(CELL, ".query-table-wrap");
+    expect.soft(cell.wrap.v, `the cell inside #articleWrap (${JSON.stringify(cell.box)})`).toBe(true);
+    expect.soft(cell.own.v, "the cell inside its .query-table-wrap").toBe(true);
+
+    // (c) The far-right cell of a wide table inside `.tablewrap`.
+    await toTop();
+    await chip(3).click();
+    const far = await boxes(FAR_RIGHT, ".tablewrap");
+    expect.soft(far.own.h, `the cell horizontally inside its .tablewrap (${JSON.stringify(far.box)})`).toBe(true);
+    expect.soft(far.wrap.v, "the cell inside #articleWrap").toBe(true);
   });
 
   test("a refusal keeps the typed question; while a turn streams, turn 1's selection and chip survive", async ({ page }) => {

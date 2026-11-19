@@ -65,41 +65,100 @@ export const RANGE_FLASH_HIGHLIGHT = "wiki-range-flash";
 const RANGE_FLASH_MS = 2000;
 let rangeFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** The nearest ancestor of `el` that scrolls, else the document's scroller. */
-function scrollerOf(el: Element): Element | null {
-  for (let p: Element | null = el.parentElement; p; p = p.parentElement) {
-    const y = getComputedStyle(p).overflowY;
-    if ((y === "auto" || y === "scroll") && p.scrollHeight > p.clientHeight) return p;
-  }
-  return document.scrollingElement;
+/** Whether `el` scrolls on that axis: an `auto`/`scroll`/`overlay` overflow with more to show. */
+function scrollsOn(el: Element, axis: "x" | "y"): boolean {
+  const o = axis === "y" ? getComputedStyle(el).overflowY : getComputedStyle(el).overflowX;
+  if (o !== "auto" && o !== "scroll" && o !== "overlay") return false;
+  return axis === "y" ? el.scrollHeight > el.clientHeight : el.scrollWidth > el.clientWidth;
+}
+
+/** How far to move a view `[lo, hi]` so `[a, b]` is inside it: 0 when it is,
+ *  else the least move, the start winning when `[a, b]` is the longer. */
+function nearestDelta(a: number, b: number, lo: number, hi: number): number {
+  if (a >= lo && b <= hi) return 0;
+  if (a < lo || b - a > hi - lo) return a - lo;
+  return b - hi;
 }
 
 /**
- * Reveal a stretch of text, not an element: the same reveal event and fold
- * opening as {@link revealElement}, then the range's own box is scrolled into
- * its scroller (a third down, or its top when it is taller) and the range alone
- * is highlighted for a moment through the CSS Custom Highlight API, which
- * changes nothing in the DOM. Without that API, `fallback` (the smallest block
- * holding the range, when there is one) gets the element flash instead.
+ * The element the reveal event goes out from: the passage's own parent, or,
+ * for text directly under `root` (`formatWebHtml` writes no `<p>`), the
+ * nearest `<br>` or heading before it on that level, which sits in the same
+ * section and is never a block a lens hides; failing those, the nearest
+ * element before it, then after it. Never `root`: a listener that pins the
+ * section holding the target reads the article as the first section.
+ */
+function revealTarget(root: Element, node: Node): Element | null {
+  const own = node.nodeType === 1 ? (node as Element) : node.parentElement;
+  if (own && own !== root) return own;
+  let top: Node = node;
+  while (top.parentNode && top.parentNode !== root) top = top.parentNode;
+  let before: Element | null = null;
+  for (let p = top.previousSibling; p; p = p.previousSibling) {
+    if (p.nodeType !== 1) continue;
+    const el = p as Element;
+    if (el.tagName === "BR" || /^H[1-6]$/.test(el.tagName)) return el;
+    before ??= el;
+  }
+  if (before) return before;
+  for (let n = top.nextSibling; n; n = n.nextSibling) if (n.nodeType === 1) return n as Element;
+  return null;
+}
+
+/**
+ * Bring `range`'s own box into every scroller around it, innermost first and
+ * on both axes, as `scrollIntoView` does for an element: the least move in an
+ * inner scroller (a `.query-table-wrap`, a wide table's `.tablewrap`), and in
+ * the first scroller around `root` (the article pane) the box a third down, or
+ * its top when it is taller. The box is measured again after each move.
+ */
+function scrollRangeIntoView(root: Element, range: Range): void {
+  const scrollers: Element[] = [];
+  const startEl = range.startContainer.nodeType === 1 ? (range.startContainer as Element) : range.startContainer.parentElement;
+  for (let p = startEl; p; p = p.parentElement) {
+    if (p === document.scrollingElement || p === document.body) continue;
+    if (scrollsOn(p, "x") || scrollsOn(p, "y")) scrollers.push(p);
+  }
+  const pane = scrollers.find((s) => s.contains(root) && s !== root) ?? null;
+  for (const sc of scrollers) {
+    const box = range.getBoundingClientRect();
+    const r = sc.getBoundingClientRect();
+    const top = r.top + sc.clientTop;
+    const left = r.left + sc.clientLeft;
+    if (scrollsOn(sc, "y")) {
+      if (sc === pane) {
+        const offset = Math.max(0, Math.min((sc.clientHeight - box.height) / 2, sc.clientHeight / 3));
+        sc.scrollTop += box.top - top - offset;
+      } else sc.scrollTop += nearestDelta(box.top, box.bottom, top, top + sc.clientHeight);
+    }
+    if (scrollsOn(sc, "x")) sc.scrollLeft += nearestDelta(box.left, box.right, left, left + sc.clientWidth);
+  }
+  // The document itself, when no pane holds the article.
+  if (!pane) {
+    const box = range.getBoundingClientRect();
+    const offset = Math.max(0, Math.min((window.innerHeight - box.height) / 2, window.innerHeight / 3));
+    const dx = nearestDelta(box.left, box.right, 0, document.documentElement.clientWidth);
+    window.scrollBy(dx, box.top - offset);
+  }
+}
+
+/**
+ * Reveal a stretch of text, not an element: the reveal event (from the element
+ * at the passage, {@link revealTarget}) and the fold opening of
+ * {@link revealElement}, then the range's own box is scrolled into every
+ * scroller around it on both axes ({@link scrollRangeIntoView}) and the range
+ * alone is highlighted for a moment through the CSS Custom Highlight API,
+ * which changes nothing in the DOM. Without that API, `fallback` (the smallest
+ * block holding the range, when there is one) gets the element flash instead.
  */
 export function revealRange(root: Element, range: Range, fallback: Element | null = null): void {
-  const start = range.startContainer.nodeType === 1 ? (range.startContainer as Element) : range.startContainer.parentElement;
-  if (!start) return;
-  start.dispatchEvent(new CustomEvent(REVEAL_EVENT, { bubbles: true }));
+  revealTarget(root, range.startContainer)?.dispatchEvent(new CustomEvent(REVEAL_EVENT, { bubbles: true }));
   for (const n of [range.startContainer, range.endContainer]) {
     for (let p: Element | null = n.nodeType === 1 ? (n as Element) : n.parentElement; p && p !== root; p = p.parentElement) {
       if (p instanceof HTMLDetailsElement) p.open = true;
     }
   }
-  const box = range.getBoundingClientRect();
-  const sc = scrollerOf(start);
-  if (sc) {
-    const doc = sc === document.scrollingElement;
-    const top = doc ? 0 : sc.getBoundingClientRect().top;
-    const height = doc ? window.innerHeight : sc.clientHeight;
-    const offset = Math.max(0, Math.min((height - box.height) / 2, height / 3));
-    sc.scrollTop += box.top - top - offset;
-  }
+  scrollRangeIntoView(root, range);
   // Map-like in the browser; the dom lib types it without the Map methods.
   const highlights = (globalThis as unknown as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
   const Highlight = (globalThis as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
