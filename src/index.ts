@@ -15,6 +15,7 @@ import {
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
+import { startSnapshotSweeper } from "./ai/snapshots.ts";
 import { waitForPendingExtractions } from "./ai/extraction-tracker.ts";
 import { logResolvedHaikuBackends } from "./ai/haiku-direct.ts";
 import { disconnectAll as disconnectAllMcp } from "./ai/mcp-tool-caller.ts";
@@ -22,6 +23,7 @@ import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
+import { startDiscussTurnSweep, stopDiscussTurnSweep } from "./dashboard/routes/wiki-discuss.ts";
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
@@ -146,6 +148,10 @@ initDb(config);
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
+// Sweep the read-and-search snapshots now and every 15 minutes: one unused for
+// an hour, or a build a crash left half-done, is removed (`src/ai/snapshots.ts`).
+startSnapshotSweeper();
+
 // Warm the WORKED-on ledger memo for every registered wiki (fire-and-forget,
 // beside the embeddings warm-up and for the same reason). The index folds in
 // whatever is warm and never waits, and it is itself TTL-cached at 5 minutes —
@@ -179,6 +185,13 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+// Discuss turns whose process died (no heartbeat) are closed as `abandoned`,
+// now and every minute; the route lives in the `wiki` group, so only where it
+// is served (`src/dashboard/routes/wiki-discuss.ts`).
+if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
+  startDiscussTurnSweep();
 }
 
 // GCS bucket mirrors feeding read-only wiki roots (fire-and-forget; every
@@ -589,6 +602,7 @@ async function shutdown() {
   killLiveProcessGroups();
   stopScheduler();
   stopStaleHandoffSweep();
+  stopDiscussTurnSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();
   const retentionCleanupStopped = stopRetentionCleanup();
   const staleConfirmStopped = stopStaleConfirmLoop();

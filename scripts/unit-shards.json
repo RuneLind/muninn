@@ -29,6 +29,7 @@
       "src/bot/topic-commands.test.ts",
       "src/slack/slack-format.test.ts",
       "src/ai/agent-cwd.test.ts",
+      "src/ai/snapshots.test.ts",
       "src/ai/one-shot-carrier.test.ts",
       "src/benchmarks/judge.test.ts",
       "src/ai/result-parser.test.ts",
@@ -77,6 +78,8 @@
       "src/dashboard/routes/wiki-decision-triage-status.test.ts",
       "src/dashboard/routes/wiki-decision-triage-run.test.ts",
       "src/dashboard/routes/wiki-plan-card.test.ts",
+      "src/dashboard/routes/wiki-discuss-handoff.test.ts",
+      "src/dashboard/routes/wiki-discuss.test.ts",
       "src/dashboard/routes/wiki-series-routes.test.ts",
       "src/dashboard/routes/wiki-gardener-routes.test.ts",
       "src/dashboard/routes/wiki-readonly-roots.test.ts",
@@ -297,7 +300,10 @@
       "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-ask-boot.test.ts",
-      "src/dashboard/views/wiki-boot/wiki-article-series-boot.test.ts"
+      "src/dashboard/views/wiki-boot/wiki-article-series-boot.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-discuss-parity.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-discuss-cases.test.ts",
+      "src/dashboard/routes/wiki-discuss-db.test.ts"
     ]
   ]
 }

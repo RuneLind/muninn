@@ -277,6 +277,46 @@ export interface WikiReaderConfig {
    * `owner/repo#n`). A bad field warns and is dropped.
    */
   prGrammar?: PrGrammar | null;
+  /**
+   * Discuss (mimir plan muninn-wiki-discuss): `"discuss": {"handoff": true}`
+   * offers «Ask Claude Code» in the reader, which copies a prompt naming the
+   * page's path and the passage's lines. Absent ⇒ off. A bad block or value
+   * warns and reads as off. Cosmetic, so it may live here: losing the file
+   * hides two controls that call no model.
+   *
+   * `"repos": [...]` lists the repos the wiki agent (P2b) may read a snapshot
+   * of, by name (`DECISION_TRIAGE_REPO_ROOTS` finds the checkout). It fails
+   * closed: absent, malformed or a file that does not parse puts no repo in
+   * reach.
+   */
+  discuss?: { handoff: boolean; repos?: string[] };
+}
+
+/** `.wiki-reader.json`'s `discuss` block: `{handoff: boolean, repos?: string[]}`,
+ *  else off with a warning. `repos` keeps only safe repo names; a bad list
+ *  warns and is dropped (no repo in reach). */
+export function parseDiscussReaderConfig(raw: unknown): { handoff: boolean; repos?: string[]; warning?: string } {
+  if (raw === undefined) return { handoff: false };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { handoff: false, warning: "is not an object — ignoring it" };
+  const o = raw as Record<string, unknown>;
+  const warnings: string[] = [];
+  let repos: string[] | undefined;
+  if (o.repos !== undefined) {
+    if (!Array.isArray(o.repos)) warnings.push("repos is not a list of repo names — no repo is in reach");
+    else {
+      repos = [];
+      for (const r of o.repos) {
+        if (typeof r === "string" && /^[\w.-]+$/.test(r.trim()) && r.trim() !== "." && r.trim() !== "..") {
+          if (!repos.includes(r.trim())) repos.push(r.trim());
+        } else warnings.push(`repos entry ${JSON.stringify(r)} is not a repo name — dropped`);
+      }
+    }
+  }
+  const h = o.handoff;
+  let handoff = false;
+  if (h !== undefined && typeof h !== "boolean") warnings.push("handoff is not true or false — ignoring it");
+  else handoff = h === true;
+  return { handoff, ...(repos ? { repos } : {}), ...(warnings.length ? { warning: warnings.join("; ") } : {}) };
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -2250,6 +2290,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   if (whatsNew.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
   }
+  const discuss = parseDiscussReaderConfig(obj.discuss);
+  if (discuss.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "discuss", reason: discuss.warning });
+  }
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
   // of the block, so a typo costs one weight rather than the section.
@@ -2281,6 +2325,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
     workMap: { kind: workMap.kind },
     whatsNew: { mode: whatsNew.mode },
+    discuss: { handoff: discuss.handoff, ...(discuss.repos ? { repos: discuss.repos } : {}) },
     prGrammar: prGrammar.grammar,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
@@ -4487,10 +4532,16 @@ export function __wikiIndexBuildsStartedForTest(): number {
   return buildsStarted;
 }
 
+/** The one decoding of a page file: UTF-8 with a leading BOM dropped
+ *  (`Bun.file().text()`). Rejects when the file cannot be read. */
+export function readWikiText(absPath: string): Promise<string> {
+  return Bun.file(absPath).text();
+}
+
 /** Raw markdown of one page (by resolved meta). Null when the file vanished. */
 export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promise<string | null> {
   try {
-    return await Bun.file(path.join(index.root, meta.relPath)).text();
+    return await readWikiText(path.join(index.root, meta.relPath));
   } catch {
     return null;
   }

@@ -87,6 +87,7 @@ describe("the live chain", () => {
       "src/dashboard/routes/wiki-step-done-db.test.ts",
       "src/dashboard/routes/wiki-gardener-drift-db.test.ts",
       "src/dashboard/routes/wiki-gardener-factcheck-db.test.ts",
+      "src/dashboard/routes/wiki-discuss-db.test.ts",
       "src/bot/handler.test.ts",
       "src/bot/middleware.test.ts",
       "watchers",
@@ -114,6 +115,8 @@ describe("the live chain", () => {
       "src/dashboard/views/wiki-boot/wiki-article-series-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-ask-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-discuss-cases.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-discuss-parity.test.ts",
       "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts",
     ];
     const t = readTree();

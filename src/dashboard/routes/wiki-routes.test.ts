@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import {
   registerWikiRoutes,
   __resetWikiDigestCacheForTest,
@@ -414,6 +415,8 @@ describe("GET /api/wiki/html", () => {
       agentLens: false,
       // Auth off with no owner: no viewer role; auth off is admin, so «Se som rolle».
       roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
+      // The wiki's `.wiki-reader.json` sets no `discuss` block.
+      discussHandoff: false,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
@@ -496,6 +499,31 @@ describe("GET /api/wiki/html", () => {
       restore("PLAN_CARD_BIN", saved.bin);
       restore("WIKI_STAMP_ROOTS", saved.roots);
       restore("MUNINN_PROFILE", saved.profile);
+    }
+  });
+
+  // Discuss P1 (finding 10): «Ask Claude Code» only where its route is
+  // registered — the tool half, which MUNINN_PROFILE=nais drops.
+  test("/api/wiki/page discussHandoff follows the profile's route groups", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ discuss: { handoff: true } }));
+    await Bun.write(path.join(root, "concepts/Handoff Page.mdx"), "---\ntitle: Handoff Page\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const flag = async (profile: "default" | "nais") => {
+      const a = new Hono();
+      registerWikiRoutes(a, { profile } as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Handoff Page.mdx"));
+      return ((await res.json()) as { reader: { discussHandoff: boolean } }).reader.discussHandoff;
+    };
+    try {
+      expect(await flag("default")).toBe(true);
+      // The read slice serves only a read-only root.
+      __setReadonlyWikiRootsForTest([root]);
+      expect(await flag("default")).toBe(true);
+      expect(await flag("nais")).toBe(false);
+    } finally {
+      __setReadonlyWikiRootsForTest(undefined);
+      await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+      __resetWikiCacheForTest();
     }
   });
 

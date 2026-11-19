@@ -6,7 +6,7 @@ How to reach it (measured 2026-11-03):
 
 - **Search it this way, never plain:** `rg -n -o '.{0,120}<term>.{0,120}' src/wiki/reference/notes.md`. With the Grep tool: `output_mode: content`, `-o`, the same pattern and that path. Lines are long: plain `rg` prints each whole line and plain Grep returns "Omitted long matching line". Do not use `grep -o` here: in a Claude Code shell it returns nothing for this pattern and exits 1, which reads as no note. Keep the window at 120 chars or less.
 - **Before editing a file:** search its basename and the exported functions you are changing. **To look up a topic:** find its heading in the index and search a few plain words of it, never the whole heading: parens and brackets are regex metacharacters, and 63 of the 73 headings match nothing verbatim.
-- **No hit:** zero hits on a basename means no note under that name, not no rule: 26 of the 118 non-test `src/wiki/**/*.ts` have none, among them the main write seam `page-write.ts`, while `writeWikiPage` hits 12 lines. Search the exported function names, then the index, then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` finds which.
+- **No hit:** zero hits on a basename means no note under that name, not no rule: the main write seam `page-write.ts` has none, while `writeWikiPage` hits 14 lines. Search the exported function names, then the index, then the neighbouring module's `notes.md`, or its `CLAUDE.md` where it has none; `rg -l <term> src -g '{CLAUDE,notes}.md'` finds which.
 - **Read a hit:** `Read` about 30 lines from the hit, not the whole section (up to 70k chars). If `Read` cuts a long line, fold it to a scratch file; `Read` that path or windowed `rg` it: a later Bash call has lost `$t`. Write the full path: a bare `notes.md` from the repo root prints an empty file's path and exits 0.
 
   ```bash
@@ -137,6 +137,7 @@ Pages and routes:
 - Stale check — the counts everywhere (`wiki-stale-summary.ts`, `wiki-stale-marks.ts`)
 - Stale check — the fix paths (PR 3: `stale-fix.ts`, `stale-fix-verdicts.ts`, Apply, Send to Gardener) [trap]
 - Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
+- Discuss handoff (`discuss-locate.ts`) [trap]
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
 - Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
 - Owner-step checks (`src/wiki/step-checks/`, `GET /api/wiki/step-checks`, `MUNINN_MACHINE`) [trap]

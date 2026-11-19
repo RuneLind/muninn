@@ -117,6 +117,7 @@ import {
 import { pageProvenance, type ProvenanceContext } from "../../wiki/provenance-service.ts";
 import { trackerAdapter } from "../../wiki/trackers/index.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
+import { stampInterpreterArgv } from "../../wiki/stamp-roots.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("wiki", "stamp");
@@ -202,22 +203,7 @@ export function stampChildEnv(
   return env;
 }
 
-/**
- * The interpreter half of the spawn: `<bun> --no-env-file` when `WIKI_STAMP_BUN`
- * names a Bun binary, the bare interpreter otherwise.
- *
- * Bun loads `.env` from its working directory — muninn's own repo root — so
- * without the flag every secret {@link stampChildEnv} leaves out comes back
- * (measured: the real-Bun test in `wiki-stamp.test.ts` reads `leaked`). Bun is
- * recognised by basename (`bun`, `bun-<variant>`, either with `.exe`); any other
- * interpreter gets no flag, because node and deno load no `.env` on their own
- * and would reject one they do not know.
- */
-export function stampInterpreterArgv(interpreter: string): string[] {
-  return /^bun(-[\w.]+)?(\.exe)?$/i.test(path.basename(interpreter))
-    ? [interpreter, "--no-env-file"]
-    : [interpreter];
-}
+export { stampInterpreterArgv };
 
 /** What {@link decideStampRequest} answers. `null` means "let it through". */
 export interface StampRequestRefusal {
