@@ -290,13 +290,39 @@ export interface ProposedEdit extends EditListResult {
 }
 
 /**
- * The proposed edit in an answer: the last fenced block (```json or bare) that
- * `parseEditList` reads as an edit list with at least one item. Null when the
- * answer proposes none. Read here so the stored turn carries it; P4 applies it.
+ * The bodies of an answer's fenced code blocks, in order. A fence opens with
+ * three or more backticks or tildes (up to three spaces in, any info string)
+ * and closes on a line of the same character, at least as long, and nothing
+ * else; an unclosed fence runs to the end. CRLF reads as LF.
+ */
+export function fencedBlocks(text: string): { info: string; body: string }[] {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const out: { info: string; body: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]!);
+    if (!open) continue;
+    const fence = open[1]!;
+    const info = open[2]!.trim();
+    // A backtick fence's info string holds no backtick (CommonMark): that line is inline code.
+    if (fence[0] === "`" && info.includes("`")) continue;
+    const closer = new RegExp(`^ {0,3}${fence[0] === "`" ? "`" : "~"}{${fence.length},}[ \t]*$`);
+    const body: string[] = [];
+    let j = i + 1;
+    for (; j < lines.length && !closer.test(lines[j]!); j++) body.push(lines[j]!);
+    out.push({ info, body: body.join("\n") });
+    i = j;
+  }
+  return out;
+}
+
+/**
+ * The proposed edit in an answer: the last fenced block, whatever its info
+ * string, that holds `"edits"` and that `parseEditList` reads as an edit list
+ * with at least one item. Null when the answer proposes none. Read here so the
+ * stored turn carries it; P4 applies it.
  */
 export function extractProposedEdit(answer: string): ProposedEdit | null {
-  const fences = [...answer.matchAll(/```(?:json)?[ \t]*\n([\s\S]*?)\n[ \t]*```/g)].map((m) => m[1]!);
-  for (const body of fences.reverse()) {
+  for (const { body } of fencedBlocks(answer).reverse()) {
     if (!/"edits"\s*:/.test(body)) continue;
     const parsed = parseEditList(body);
     if (parsed && parsed.edits.length + parsed.dropped.length > 0) return { ...parsed, overLimit: parsed.edits.length > 1 };

@@ -7,7 +7,8 @@
  * Invented pages and repo names only (public repo).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -18,14 +19,14 @@ import { __setClaudeCliVersionForTest, type ToolSurface } from "../../ai/tool-su
 import type { Snapshot } from "../../ai/snapshots.ts";
 import type { DiscussTurn, DiscussTurnFinish, DiscussTurnStart } from "../../db/wiki-discuss-turns.ts";
 import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
-import type { GitRun } from "../../wiki/decision-triage/git.ts";
+import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import type { RunOutcome } from "../../wiki/plan-card-run.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
-import { COPILOT_DISCUSS_TOOLS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 let dir = "";
 let agent = ""; // a wiki with rules and discuss.repos
@@ -133,13 +134,38 @@ const bot = (connector: BotConfig["connector"], name = "ivar"): BotConfig => ({
   model: "invented-model",
 });
 
-/** git as `findRepo` and the own-repo check ask it: each checkout is its own top level, origin named after its folder. */
+/** git as `findRepo`, the own-repo check and the snapshot preflight ask it: each checkout is its own top level, origin named after its folder; every wiki is a work tree that lists each file on disk. */
 const fakeGit: GitRun = async (cwd, args) => {
   const real = await realpath(cwd).catch(() => cwd);
   if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: real + "\n", stderr: "", timedOut: false, capped: false } as never;
+  if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return { ok: true, stdout: "true\n", stderr: "", timedOut: false, capped: false } as never;
+  if (args[0] === "ls-files") {
+    const rel = args[args.length - 1]!;
+    const there = await Bun.file(path.join(real, rel)).exists();
+    return { ok: true, stdout: there ? `${rel}\0` : "", stderr: "", timedOut: false, capped: false } as never;
+  }
   if (args[0] === "remote" && args[2] === "origin") return { ok: true, stdout: `git@example.com:org/${path.basename(real)}.git\n`, stderr: "", timedOut: false, capped: false } as never;
   return { ok: false, stdout: "", stderr: "", timedOut: false, capped: false } as never;
 };
+
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/** The fake wiki snapshot's copy: each file of `from` whose bytes differ, one copy at a time, so concurrent turns never read a half-written file. */
+let copying: Promise<void> = Promise.resolve();
+function copyTree(from: string, to: string): Promise<void> {
+  const run = copying.then(async () => {
+    for (const e of await readdir(from, { recursive: true, withFileTypes: true })) {
+      if (!e.isFile()) continue;
+      const src = path.join(e.parentPath, e.name);
+      const dst = path.join(to, path.relative(from, src));
+      const text = await readFile(src);
+      const old = await readFile(dst).catch(() => null);
+      if (!old || !old.equals(text)) await Bun.write(dst, text);
+    }
+  });
+  copying = run.catch(() => {});
+  return run;
+}
 
 function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof executeOneShot; store?: MemStore; deps?: Partial<DiscussRouteDeps>; role?: "user" | "admin" } = {}) {
   const calls: Calls = { prompts: [], opts: [], bots: [], codeSnaps: [], wikiSnaps: [], planCards: 0, blocked: [] };
@@ -165,7 +191,9 @@ function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof exec
     },
     wikiSnapshot: async (d) => {
       calls.wikiSnaps.push(d);
-      return { kind: "wiki", dir: path.join(dir, "snaps", `wiki-${path.basename(d)}`), key: "k", source: d } satisfies Snapshot;
+      const to = path.join(dir, "snaps", `wiki-${path.basename(d)}`);
+      await copyTree(d, to);
+      return { kind: "wiki", dir: to, key: "k", source: d } satisfies Snapshot;
     },
     codeSnapshot: async (d) => {
       calls.codeSnaps.push(d);
@@ -394,7 +422,8 @@ describe("a turn", () => {
     expect(evs.map((e) => e.event)).toEqual(["turn", "status", "status", "status", "delta", "done", "end"]);
     expect(calls.opts).toHaveLength(1);
     const o = calls.opts[0]!;
-    expect(o.timeoutMs).toBe(DISCUSS_TURN_TIMEOUT_MS);
+    // The connector's own timeout is cleanup past the route's deadline.
+    expect(o.timeoutMs).toBe(DISCUSS_TURN_TIMEOUT_MS + DISCUSS_CONNECTOR_GRACE_MS);
     // The rules file is prose in the system prompt; what it says about tools changes nothing.
     expect(o.systemPrompt).toContain("Answer the marked passage first.");
     expect(o.toolSurface).toEqual({ readSearch: [path.join(dir, "snaps", "wiki-agent"), path.join(dir, "snaps", "code-alpha")] });
@@ -538,30 +567,61 @@ describe("a turn", () => {
     store.start = realStart;
     expect((await post(app, PASSAGE)).status).toBe(200);
   });
-  test("a turn that runs past its timeout is stored as timeout and reported in the stream", async () => {
+  test("a model call past the route's deadline is stored as timeout and reported in the stream, whatever the connector does", async () => {
     const { app, store } = setup({
+      deps: { timeoutMs: 50 },
       oneShot: async () => {
-        throw new Error("Claude Agent SDK timed out after 300000ms");
+        await Bun.sleep(400);
+        return { result: "Too late.", costUsd: 0, toolCalls: [] } as never;
       },
     });
     const evs = await frames(await post(app, PASSAGE));
     const err = evs.find((e) => e.event === "app_error")!;
     expect(err.data.endState).toBe("timeout");
     expect(store.rows[0]!.endState).toBe("timeout");
+    expect(store.rows[0]!.answer).toBe("");
     expect(evs.at(-1)!.event).toBe("end");
+  });
+  test("an error whose message says «timed out after» is an error, not a timeout: a snapshot's git call, a relayed tool timeout", async () => {
+    const snap = setup({
+      deps: {
+        wikiSnapshot: async () => {
+          throw new Error("snapshot: git ls-files timed out after 10000 ms");
+        },
+      },
+    });
+    const evs = await frames(await post(snap.app, PASSAGE));
+    expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("error");
+    expect(snap.store.rows[0]).toMatchObject({ endState: "error", error: "snapshot: git ls-files timed out after 10000 ms" });
+    expect(snap.calls.opts).toHaveLength(0);
+    const relayed = setup({
+      oneShot: async () => {
+        throw new Error("search_knowledge: search timed out after 30000ms");
+      },
+    });
+    const evs2 = await frames(await post(relayed.app, PASSAGE));
+    const err = evs2.find((e) => e.event === "app_error")!;
+    expect(err.data.endState).toBe("error");
+    expect(err.data.message).toContain("search timed out after 30000ms");
+    expect(relayed.store.rows[0]!.endState).toBe("error");
   });
   test("a turn that fails after streaming stores the text and the tool calls its reader was shown", async () => {
     const { app, store } = setup({
+      deps: { timeoutMs: 50 },
       oneShot: async (_p, _c, _b, o) => {
         o.onProgress?.({ type: "text_delta", text: "Half an " });
         o.onProgress?.({ type: "tool_start", id: "t1", name: "Grep", displayName: "Grep", input: '{"pattern":"ferry"}' });
         o.onProgress?.({ type: "tool_end", id: "t1", name: "Grep", displayName: "Grep" });
         o.onProgress?.({ type: "text_delta", text: "answer" });
+        await Bun.sleep(300);
+        // Past the deadline: the run the route left behind streams on, and none of it is stored.
+        o.onProgress?.({ type: "text_delta", text: " and more" });
         throw new Error("Claude Agent SDK timed out after 300000ms");
       },
     });
     const evs = await frames(await post(app, PASSAGE));
     expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("timeout");
+    expect(evs.filter((e) => e.event === "delta").map((e) => e.data.text)).toEqual(["Half an ", "answer"]);
     expect(store.rows[0]).toMatchObject({ endState: "timeout", answer: "Half an answer", toolCalls: [{ name: "Grep", input: '{"pattern":"ferry"}' }] });
   });
   test("a done turn stores the final answer and the result's tool calls, not the streamed text", async () => {
@@ -616,5 +676,107 @@ describe("a turn", () => {
     expect(edit.edits).toEqual([expect.objectContaining({ old: "The harbour opens at six.", new: "The harbour opens at seven." })]);
     expect(edit.overLimit).toBe(false);
     expect(evs.find((e) => e.event === "done")!.data.proposedEdit).toEqual(edit);
+  });
+});
+
+describe("one page text per turn: the snapshot's copy is the page the row describes", () => {
+  test("a page edited between the preflight and the snapshot is refused, never answered from the other version", async () => {
+    const page = path.join(agent, "notes", "harbour.md");
+    const edited = NOTE.replace("six", "seven");
+    const { app, store, calls } = setup({
+      deps: {
+        wikiSnapshot: async (d) => {
+          // The owner saves the page while the turn starts: the copy is H2.
+          await Bun.write(page, edited);
+          const to = path.join(dir, "snaps", "wiki-edited");
+          await copyTree(d, to);
+          return { kind: "wiki", dir: to, key: "k", source: d } satisfies Snapshot;
+        },
+      },
+    });
+    try {
+      const evs = await frames(await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "When does it open?" }));
+      const row = store.rows[0]!;
+      const copy = await readFile(path.join(dir, "snaps", "wiki-edited", "notes", "harbour.md"), "utf8");
+      expect(copy).toBe(edited);
+      // Either the row describes the copy, or the turn was refused; here it is refused.
+      expect(row.pageHash).toBe(sha(NOTE));
+      expect(row.pageHash).not.toBe(sha(copy));
+      expect(row.endState).toBe("error");
+      expect(row.error).toContain("the page changed on disk while the turn started");
+      expect(calls.opts).toHaveLength(0);
+      expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("error");
+    } finally {
+      await Bun.write(page, NOTE);
+      __resetWikiCacheForTest();
+    }
+  });
+  test("an unchanged page: the stored hash is the snapshot copy's, and the pack's section is its text", async () => {
+    const { app, store, calls } = setup();
+    await (await post(app, PASSAGE)).text();
+    const copy = await readFile(path.join(dir, "snaps", "wiki-agent", "plans", "ferry.mdx"), "utf8");
+    expect(store.rows[0]!.pageHash).toBe(sha(copy));
+    expect(calls.prompts[0]).toContain("15: - The summer route adds a stop at Example Island.");
+  });
+  test("a snapshot without the page fails the turn naming the cause, before any model call", async () => {
+    const { app, store, calls } = setup({
+      deps: {
+        wikiSnapshot: async (d) => {
+          const to = path.join(dir, "snaps", "wiki-empty");
+          await mkdir(to, { recursive: true });
+          return { kind: "wiki", dir: to, key: "k", source: d } satisfies Snapshot;
+        },
+      },
+    });
+    const evs = await frames(await post(app, PASSAGE));
+    expect(store.rows[0]!.endState).toBe("error");
+    expect(store.rows[0]!.error).toContain("the page is not in the wiki's snapshot");
+    expect(calls.opts).toHaveLength(0);
+    expect(evs.find((e) => e.event === "app_error")!.data.message).toContain("not in the wiki's snapshot");
+  });
+  test("with real git: a page git ignores is refused in the preflight, and a wiki that is no work tree too", async () => {
+    const repo = path.join(dir, "gitwiki");
+    await Bun.write(path.join(repo, WIKI_AGENT_RULES_FILE), RULES);
+    await Bun.write(path.join(repo, ".gitignore"), "drafts/\n");
+    await Bun.write(path.join(repo, "notes", "open.md"), NOTE);
+    await Bun.write(path.join(repo, "drafts", "hidden.md"), NOTE);
+    const init = Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+    expect(init.exitCode).toBe(0);
+    __setWikiRegistryForTest([
+      { name: "gitwiki", root: repo, source: "extra" },
+      { name: "agent", root: agent, source: "extra" },
+    ]);
+    try {
+      const { app, store, calls } = setup({ deps: { git: realGit } });
+      const ignored = await post(app, { wiki: "gitwiki", relPath: "drafts/hidden.md", question: "q" });
+      expect(ignored.status).toBe(422);
+      const j = (await ignored.json()) as { reason: string; error: string };
+      expect(j.reason).toBe("page-not-in-snapshot");
+      expect(j.error).not.toContain(repo);
+      // The listed page passes the same check.
+      const open = await post(app, { wiki: "gitwiki", relPath: "notes/open.md", question: "q" });
+      expect(open.status).toBe(200);
+      await open.text();
+      // The agent wiki is a plain folder: no snapshot can be built of it.
+      const plain = await post(app, PASSAGE);
+      expect(plain.status).toBe(503);
+      expect(((await plain.json()) as { reason: string }).reason).toBe("no-snapshot");
+      expect(store.rows.map((r) => r.relPath)).toEqual(["notes/open.md"]);
+      expect(calls.wikiSnaps).toEqual([repo]);
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  });
+  test("Copilot has no snapshot: no git preflight, and the hash is the live read's", async () => {
+    const { app, store, calls } = setup({ connector: "copilot-sdk", deps: { git: realGit } });
+    await (await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "q" })).text();
+    expect(store.rows[0]!.endState).toBe("done");
+    expect(store.rows[0]!.pageHash).toBe(sha(NOTE));
+    expect(calls.wikiSnaps).toHaveLength(0);
   });
 });

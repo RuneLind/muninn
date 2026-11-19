@@ -25,8 +25,10 @@
  * keeps today's Discuss) · 422 `rules-too-large` / 503 `rules-unreadable` ·
  * the page ladder (404/503) · 503 `no-bot` (no bot, or the wiki's pinned bot
  * is not configured here) · 422 `connector` an uncovered
- * connector · 503 `surface` `toolSurfaceBlocker` refused the surface · 400/404/409
- * the discussion · 429 `busy` · then the turn row is inserted (409 `busy` when
+ * connector · 503 `surface` `toolSurfaceBlocker` refused the surface · on
+ * read-and-search, 503 `no-snapshot` (the wiki is no git work tree) and 422
+ * `page-not-in-snapshot` (the page is ignored by git, or reached through a
+ * symlink) · 400/404/409 the discussion · 429 `busy` · then the turn row is inserted (409 `busy` when
  * the database holds another live turn of the discussion).
  *
  * A live turn is one whose process still beats: the route touches the row's
@@ -44,6 +46,7 @@
  */
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { Context, Hono, Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
@@ -54,7 +57,7 @@ import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig, type Connecto
 import { executeOneShot } from "../../ai/one-shot.ts";
 import { toolSurfaceBlocker, type ToolSurface } from "../../ai/tool-surface.ts";
 import { snapshotRootDir } from "../../ai/agent-cwd.ts";
-import { codeSnapshot, leaseSnapshot, wikiSnapshot, type Snapshot } from "../../ai/snapshots.ts";
+import { codeSnapshot, leaseSnapshot, wikiSnapshot, wikiSnapshotHolds, type Snapshot } from "../../ai/snapshots.ts";
 import {
   closeAbandonedDiscussTurns,
   finishDiscussTurn,
@@ -114,6 +117,26 @@ export const DISCUSS_HEARTBEAT_MS = 15_000;
  *  that died: 12 missed beats, so a beat delayed by the wiki snapshot's
  *  synchronous copy (it blocks the event loop) is not read as a death. */
 export const DISCUSS_STALE_RUNNING_MS = 3 * 60 * 1000;
+/** How long past the route's deadline the connector's own timeout kills the
+ *  run: the route's timer decides `timeout`, the connector's is cleanup. */
+export const DISCUSS_CONNECTOR_GRACE_MS = 15_000;
+
+/** The route's own deadline on the model call: the only cause stored as `timeout`. */
+export class DiscussTurnTimeout extends Error {
+  constructor(ms: number) {
+    super(`the model call ran past ${ms} ms`);
+    this.name = "DiscussTurnTimeout";
+  }
+}
+
+/** A read-and-search turn whose snapshot does not hold the page the row was
+ *  stored with (its `page_hash`, location and pack): never run on another text. */
+function snapshotPageError(copy: string | null, pageHash: string): string | null {
+  if (copy === null) return "the page is not in the wiki's snapshot (git ignores it, or it is reached through a symlink), so the agent cannot read it";
+  if (sha256(copy) !== pageHash) return "the page changed on disk while the turn started, so the snapshot holds another version than the one this turn was stored with; ask again";
+  return null;
+}
+
 /** How often the sweep closes abandoned turns on every discussion. */
 export const DISCUSS_SWEEP_MS = 60_000;
 
@@ -398,6 +421,18 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     const probe: ToolSurface = kind === "mcpTools" ? { mcpTools: COPILOT_DISCUSS_TOOLS } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };
     const refused = await blocker(connector, probe);
     if (refused) return c.json({ error: `the wiki agent cannot run on ${bot.name}: ${refused}`, reason: "surface" }, 503);
+    if (kind === "readSearch") {
+      // The agent reads the page from the wiki's snapshot: refuse a page the
+      // snapshot would not hold before a turn is stored for it.
+      const holds = await wikiSnapshotHolds(wikiRoot, meta.relPath, git);
+      if (!holds.ok && holds.reason === "not-a-work-tree") {
+        return c.json({ error: "the wiki agent reads a snapshot of the wiki, and this wiki is not a git work tree", reason: "no-snapshot" }, 503);
+      }
+      if (!holds.ok) {
+        const why = holds.reason === "not-listed" ? "git ignores it" : "it is reached through a symlink or is not a regular file";
+        return c.json({ error: `the wiki agent cannot read this page: its snapshot of the wiki leaves it out (${why})`, reason: "page-not-in-snapshot" }, 422);
+      }
+    }
 
     let discussionId = body.discussionId;
     let earlier: DiscussTurn[] = [];
@@ -507,6 +542,15 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         }
         reach = { kind: "readSearch", wikiSnapshot: wiki.dir, repos, missed, own: r.own };
         pagePath = path.join(wiki.dir, p.relPath);
+        // One page text per turn: the copy the agent will Read is the text the
+        // row's hash, location and the pack describe (a snapshot is never
+        // rewritten). The Copilot path has no snapshot; its hash is the live read's.
+        const copy = await readFile(pagePath, "utf8").catch((err: NodeJS.ErrnoException) => {
+          if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+          throw err;
+        });
+        const mismatch = snapshotPageError(copy, p.pageHash);
+        if (mismatch) throw new Error(mismatch);
       } else {
         reach = { kind: "mcpTools", tools: COPILOT_DISCUSS_TOOLS };
         pagePath = p.relPath;
@@ -529,10 +573,18 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const surface: ToolSurface = reach.kind === "readSearch" ? { readSearch: [reach.wikiSnapshot, ...reach.repos.map((r) => r.dir)] } : { mcpTools: reach.tools };
       emit("status", { phase: "model", read: reach.kind === "readSearch" ? { wiki: true, repos: reach.repos.map((r) => r.name), missed: reach.missed.map((m) => m.name) } : { tools: reach.tools } });
 
-      const res = await oneShot(prompt, config, p.bot, {
+      // The route owns the deadline: its timer alone makes a `timeout`. The
+      // connector's own timeout lands later, to stop the run it leaves behind.
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => {
+          reject(new DiscussTurnTimeout(timeoutMs));
+        }, timeoutMs);
+      });
+      const call = oneShot(prompt, config, p.bot, {
         toolSurface: surface,
         systemPrompt: renderAgentSystemPrompt(p.wiki, p.rules),
-        timeoutMs,
+        timeoutMs: timeoutMs + DISCUSS_CONNECTOR_GRACE_MS,
         onProgress: (ev) => {
           if (ev.type === "text_delta") {
             streamed += ev.text;
@@ -543,6 +595,13 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
           }
         },
       });
+      call.catch(() => {}); // after the deadline nobody awaits it
+      let res: Awaited<typeof call>;
+      try {
+        res = await Promise.race([call, deadline]);
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
       const answer = res.result ?? "";
       const toolCalls: DiscussToolCall[] = (res.toolCalls ?? []).map((tc) => ({ name: tc.name, input: abbreviate(tc.input) }));
       const proposedEdit = extractProposedEdit(answer);
@@ -552,7 +611,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       emit("done", { turnId: turn.id, discussionId: p.discussionId, endState: "done", answer, proposedEdit, toolCalls, costUsd: res.costUsd ?? null, durationMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const endState = /timed out after/i.test(message) ? "timeout" : "error";
+      const endState = err instanceof DiscussTurnTimeout ? "timeout" : "error";
       const durationMs = Math.round(performance.now() - t0);
       await store
         .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools, durationMs })

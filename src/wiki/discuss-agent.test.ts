@@ -145,3 +145,30 @@ describe("extractProposedEdit", () => {
     expect(two?.overLimit).toBe(true);
   });
 });
+
+describe("extractProposedEdit: the fences an answer really has", () => {
+  const EDIT = '{"edits":[{"claimIndex":1,"verdict":"❌","old":"opens at six","new":"opens at seven","reason":"harbour.ts:3"}]}';
+  const found = (answer: string) => extractProposedEdit(answer)?.edits.map((e) => e.new);
+  const cited = "Code:\n\n```ts\nconst opens = 7;\n```\n\nThe edit:\n\n";
+  test("a cited ```ts block before the ```json edits block", () => {
+    expect(found(`${cited}\`\`\`json\n${EDIT}\n\`\`\``)).toEqual(["opens at seven"]);
+  });
+  test("the same with the Read: and Not checked: lines after it", () => {
+    expect(found(`${cited}\`\`\`json\n${EDIT}\n\`\`\`\n\nRead: alpha/src/harbour.ts\nNot checked: nothing`)).toEqual(["opens at seven"]);
+  });
+  test("a ```JSON label, a ```jsonc label and a ~~~json fence", () => {
+    expect(found(`${cited}\`\`\`JSON\n${EDIT}\n\`\`\``)).toEqual(["opens at seven"]);
+    expect(found(`${cited}\`\`\`jsonc\n${EDIT}\n\`\`\``)).toEqual(["opens at seven"]);
+    expect(found(`${cited}~~~json\n${EDIT}\n~~~\n`)).toEqual(["opens at seven"]);
+  });
+  test("CRLF line endings", () => {
+    expect(found(`${cited}\`\`\`json\n${EDIT}\n\`\`\`\n\nRead: x`.replace(/\n/g, "\r\n"))).toEqual(["opens at seven"]);
+  });
+  test("a longer fence holding a ``` line closes only on a fence at least as long; two edits keep overLimit", () => {
+    const two = '{"edits":[{"old":"a","new":"b"},{"old":"c","new":"d"}]}';
+    // A ``` line inside the 4-backtick block: shorter than the opener, it does not close it.
+    const e = extractProposedEdit(`${cited}\`\`\`\`json\n\`\`\`\n${two}\n\`\`\`\`\n`);
+    expect(e?.edits.map((x) => x.new)).toEqual(["b", "d"]);
+    expect(e?.overLimit).toBe(true);
+  });
+});

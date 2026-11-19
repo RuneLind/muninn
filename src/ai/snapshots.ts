@@ -251,15 +251,19 @@ export async function codeSnapshot(repoDir: string, opts: SnapshotOptions = {}):
 }
 
 /** The files a wiki snapshot holds, relative to the wiki directory, sorted. */
-export async function wikiSnapshotFiles(wikiDir: string, git: GitRun = realGit): Promise<string[]> {
-  // -z: names verbatim. An untracked nested repository is listed as `dir/`, which is skipped.
-  // The global ignore rules can live under XDG_CONFIG_HOME or GIT_CONFIG_GLOBAL, which the runner's allowlist drops.
+/** The global ignore rules can live under XDG_CONFIG_HOME or GIT_CONFIG_GLOBAL, which the runner's allowlist drops. */
+function ignoreRulesEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of ["XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"] as const) {
     const value = process.env[name];
     if (value) env[name] = value;
   }
-  const res = await git(wikiDir, ["ls-files", "-co", "--exclude-standard", "-z"], { env });
+  return env;
+}
+
+export async function wikiSnapshotFiles(wikiDir: string, git: GitRun = realGit): Promise<string[]> {
+  // -z: names verbatim. An untracked nested repository is listed as `dir/`, which is skipped.
+  const res = await git(wikiDir, ["ls-files", "-co", "--exclude-standard", "-z"], { env: ignoreRulesEnv() });
   if (!res.ok || res.capped || res.timedOut) {
     throw new Error(`snapshot: cannot list the files of ${wikiDir}${res.capped ? " (the listing was cut short)" : ""}.`);
   }
@@ -305,6 +309,29 @@ function wikiSourceFile(base: string, rel: string): number | null {
     }
   }
   return null;
+}
+
+/** Why {@link wikiSnapshot} would not hold a file: the wiki is no git work
+ *  tree (no snapshot can be built), git does not list the file (ignored), or
+ *  it is reached through a symlink or is no regular file. */
+export type WikiSnapshotHolds = { ok: true } | { ok: false; reason: "not-a-work-tree" | "not-listed" | "not-a-plain-file" };
+
+/**
+ * Whether a snapshot of `wikiDir` would hold `rel`, by the two rules
+ * {@link wikiSnapshot} copies by: git lists it (`ls-files -co
+ * --exclude-standard`) and {@link wikiSourceFile} accepts it. Nothing is
+ * copied. A listing git cannot answer throws.
+ */
+export async function wikiSnapshotHolds(wikiDir: string, rel: string, git: GitRun = realGit): Promise<WikiSnapshotHolds> {
+  const source = realpathSync(wikiDir);
+  const inside = await git(source, ["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.ok || inside.stdout.trim() !== "true") return { ok: false, reason: "not-a-work-tree" };
+  const res = await git(source, ["ls-files", "-co", "--exclude-standard", "-z", "--", rel], { env: ignoreRulesEnv() });
+  if (!res.ok || res.capped || res.timedOut) throw new Error(`snapshot: cannot list ${rel} in ${source}.`);
+  // The pathspec is the one file: any entry is it, in git's spelling (case can differ on a case-insensitive disk).
+  if (!res.stdout.split("\0").some((p) => p !== "")) return { ok: false, reason: "not-listed" };
+  if (wikiSourceFile(source, rel) === null) return { ok: false, reason: "not-a-plain-file" };
+  return { ok: true };
 }
 
 /** The files of `files` that {@link wikiSourceFile} accepts, and their summed size; nothing is read. */
