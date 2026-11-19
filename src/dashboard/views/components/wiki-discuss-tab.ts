@@ -35,14 +35,16 @@ import { revealRange } from "./wiki-hash-target.ts";
 import { revealRightPane } from "./wiki-pane-toggle.ts";
 import { WIKI_READONLY_INPUT_PLACEHOLDER, wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import {
+  anchorRange,
   applyDiscussFrame,
   discussionLive,
   discussRefusalMessage,
   findPassage,
+  keepAnchor,
   newTurn,
   patchDiscussTurns,
-  renderedPassageText,
   streamClosed,
+  type DiscussAnchor,
   type DiscussPassage,
   type DiscussTurnView,
   type DiscussionView,
@@ -70,8 +72,9 @@ const discussions = new Map<string, DiscussionView>();
 let turnSeq = 0;
 /** The reader's selection behind each passage turn, by turn key, for this
  *  session only (a reload keeps the stored `selection` and its context):
- *  the range as selected and the text it covered as rendered. */
-const anchors = new Map<string, { range: Range; rendered: string }>();
+ *  its boundaries, held weakly so a re-rendered article is not kept alive,
+ *  and the text it covered as rendered. */
+const anchors = new Map<string, DiscussAnchor>();
 /** The page the box's draft was typed on. */
 let draftPage = "";
 /** What the box held when it sent a turn, and on which page: the box is
@@ -210,10 +213,7 @@ function schedulePaint(): void {
 
 async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): Promise<void> {
   const turn = newTurn(`t${++turnSeq}`, question, passage);
-  if (selected) {
-    const range = selected.cloneRange();
-    anchors.set(turn.key, { range, rendered: renderedPassageText(range) });
-  }
+  if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
   paint();
   const body: Record<string, unknown> = { wiki: d.wiki, relPath: d.relPath, question };
@@ -279,8 +279,6 @@ function turnByKey(key: string): DiscussTurnView | null {
   return here()?.turns.find((t) => t.key === key) ?? null;
 }
 
-const compactText = (s: string) => s.replace(/\s+/g, "");
-
 /** The chip: reveal the passage in the article as it is now, or say it is gone. */
 function revealPassage(key: string): void {
   const t = turnByKey(key);
@@ -290,10 +288,9 @@ function revealPassage(key: string): void {
   let block: Element | null = null;
   const kept = anchors.get(key);
   if (article && kept) {
-    const r = kept.range;
-    // Still the reader's selection: in this article, over the same text.
-    if (article.contains(r.startContainer) && article.contains(r.endContainer) && compactText(renderedPassageText(r)) === compactText(kept.rendered)) range = r;
-    else {
+    // Still the reader's selection (in this article, over the same text), else its rendered text.
+    range = anchorRange(kept, article);
+    if (!range) {
       const f = findPassage(article, kept.rendered, t.passage);
       if (f) [range, block] = [f.range, f.block];
     }

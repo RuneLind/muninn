@@ -31,7 +31,8 @@
  *     the box; an accepted one clears it, unless the reader typed a new draft
  *     while the turn was starting. While turn 2 streams, a selection in turn
  *     1's answer survives the repaints, and a press on turn 1's chip held
- *     across a repaint still reveals its passage.
+ *     across a repaint still reveals its passage, and so does a press on the
+ *     streaming turn's own chip.
  *  5. **The read-only wiki.** The page payload still says the wiki has an agent,
  *     but the tab is not shown, and a click, a mousedown or Enter on the
  *     controls (forced visible) sends nothing.
@@ -719,6 +720,40 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await expect.poll(sameWords, { timeout: 90_000 }).toBe(rowsBefore + 1);
     await page.waitForTimeout(1500);
     await expect(input).toHaveValue("Same words?");
+  });
+
+  test("a press on the streaming turn's own chip, held across a repaint, reveals its passage", async ({ page }) => {
+    test.setTimeout(120_000);
+    await openPage(page, WIKI, OTHER_REL);
+    await selectText(page, "Nothing here.");
+    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await panel.locator("textarea.wiki-handoff-q").fill("What is here?");
+    await panel.locator("[data-handoff=ask-here]").click();
+    const turn = page.locator(".wiki-discuss-turn").first();
+    // The first chunk is in: two more deltas and the end are still to come.
+    await expect(page.locator('.wiki-discuss-turn[data-turn-state="running"] .wiki-discuss-answer')).toContainText("R2 reads the frontmatter", { timeout: 90_000 });
+    await page.evaluate(() => (globalThis as unknown as { CSS: { highlights?: Map<string, unknown> } }).CSS.highlights?.clear());
+    const chip = turn.locator("[data-discuss-chip]");
+    const box = (await chip.boundingBox())!;
+    const [px, py] = [box.x + box.width / 2, box.y + box.height / 2];
+    const turnHtml = () => page.evaluate(() => document.querySelector(".wiki-discuss-turn")?.outerHTML ?? "");
+    const before = await turnHtml();
+    await page.mouse.move(px, py);
+    await page.mouse.down();
+    await expect.poll(turnHtml, { timeout: 30_000 }).not.toBe(before);
+    const stateAtRelease = await turn.getAttribute("data-turn-state");
+    await page.mouse.up();
+    expect(stateAtRelease, "the press was released while the turn still ran").toBe("running");
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-range-flash");
+          return hl && hl.size ? [...hl][0]!.toString() : "";
+        }),
+      )
+      .toContain("Nothing here.");
+    await expect(turn).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
   });
 
   test("a read-only wiki: no tab, and no control path sends a turn", async ({ page }) => {

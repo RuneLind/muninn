@@ -20,7 +20,9 @@ import {
   streamClosed,
   type DiscussionView,
 } from "./wiki-discuss-state.ts";
+import * as discussState from "./wiki-discuss-state.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
+import { discussContext } from "./wiki-discuss-text.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
 
@@ -235,10 +237,13 @@ describe("patching the turns list", () => {
     expect(list.querySelector('[data-turn-key="t2"] .wiki-discuss-answer')?.textContent).toContain("The answer streams.");
     // Order by seq, one element per turn.
     expect(Array.from(list.children).map((c) => c.getAttribute("data-turn-key"))).toEqual(["t1", "t2"]);
-    // The finished turn's own state changed: it is redrawn.
+    // The finished turn's own state changed: the part that changed is drawn
+    // in, in the same turn element (compared by identity flag: a failing toBe
+    // on a happy-dom node hangs its diff printer).
     t1.passageGone = true;
     patchDiscussTurns(list, d);
-    expect(list.querySelector('[data-turn-key="t1"]')).not.toBe(first);
+    expect(list.querySelector('[data-turn-key="t1"]') === first).toBe(true);
+    expect(list.querySelector('[data-turn-key="t1"]')!.outerHTML).toBe(discussTurnHtml(t1));
     expect(list.querySelector('[data-turn-key="t1"] .wiki-discuss-gone')).not.toBeNull();
     expect(list.children.length).toBe(2);
     // Another page's discussion (or none): the list holds only what it has.
@@ -344,5 +349,117 @@ describe("findPassage", () => {
     const a = article(`<p>${head} ${filler} ${tail}</p>`);
     expect(findPassage(a, `${head} ${tail}`)).toBeNull();
     expect(findPassage(article(`<p>${head} ${tail}</p>`), `${head} ${tail}`)).not.toBeNull();
+  });
+});
+
+describe("a passage on the page twice, next to text only the reader shows (fix round 2 batch 2)", () => {
+  // The turn's before/after were read by `discussContext`, which leaves out
+  // every reader-only element; the copies are scored on the same reading, so a
+  // label next to the selected copy does not cost it the match.
+  const dup = "The ferry leaves at nine on every weekday morning from the north pier.";
+  const long = (lead: string) => `${lead} ${Array.from({ length: 8 }, (_, k) => `word${k} of a long paragraph that runs well past the context bound`).join(", ")}.`;
+  const P = long("Pier paragraph:");
+  const Q = long("Quay paragraph:");
+  const R = long("Rest paragraph:");
+  const R2 = long("Run paragraph:");
+  const fold = `<h2>Ferries</h2><p>${Q}</p><p id="one">${dup}</p><p>${R}</p><p>${P}</p><details class="fold"><summary class="fold-summary"><span class="fold-label-default">Details</span></summary><div class="fold-body"><p id="two">${dup}</p><p>${R}</p></div></details>`;
+  const figcaption = `<h2>Ferries</h2><p>${Q}</p><p id="one">${dup}</p><p>${R}</p><p>${P}</p><figure><figcaption>A map of the north pier.</figcaption></figure><p id="two">${dup}</p><p>${R}</p>`;
+  const codeTab = `<h2>Ferries</h2><p>${P}</p><p id="one">${dup}</p><p>${R}</p><p>${P}</p><p id="two">${dup}</p><div class="code-tab-standalone"><div class="code-tab-label">shell</div><pre><code>${R2}</code></pre></div>`;
+  for (const [name, html] of [["fold-default", fold], ["figcaption", figcaption], ["code-tab", codeTab]] as const) {
+    test(`${name}: the selected second copy is the one found`, () => {
+      const a = article(html);
+      const two = a.querySelector("#two")!;
+      const r = a.ownerDocument.createRange();
+      r.selectNodeContents(two);
+      const ctx = discussContext(a, r)!;
+      expect(ctx).not.toBeNull();
+      const f = findPassage(a, dup, { before: ctx.before, after: ctx.after });
+      expect(f?.block?.id).toBe("two");
+      // The first copy, selected, is still the one found.
+      const r1 = a.ownerDocument.createRange();
+      r1.selectNodeContents(a.querySelector("#one")!);
+      const ctx1 = discussContext(a, r1)!;
+      expect(findPassage(a, dup, { before: ctx1.before, after: ctx1.after })?.block?.id).toBe("one");
+    });
+  }
+});
+
+describe("a kept selection after the article is rendered anew (fix round 2 batch 2)", () => {
+  test("the anchor holds no node of the old article, and the passage is still found by its rendered text", () => {
+    const html = '<h2>Brief</h2><p>Before.</p><p id="p">The pier opens at <strong>six</strong> on weekdays.</p><p>After.</p>';
+    const a = article(html);
+    const p = a.querySelector("#p")!;
+    const r = a.ownerDocument.createRange();
+    r.selectNodeContents(p);
+    const anchor = discussState.keepAnchor(r);
+    // Still the reader's selection: the live range itself.
+    expect(discussState.anchorRange(anchor, a)?.toString()).toBe("The pier opens at six on weekdays.");
+    // Nothing in the anchor holds a node or a range strongly: only weak refs, offsets and text.
+    const strong = (v: unknown): boolean => {
+      if (v instanceof WeakRef || v === null || typeof v !== "object") return false;
+      if ("nodeType" in (v as object) || "commonAncestorContainer" in (v as object)) return true;
+      return Object.values(v as object).some(strong);
+    };
+    expect(strong(anchor)).toBe(false);
+    // The article is rendered anew: the old tree is detached.
+    a.innerHTML = html;
+    expect(discussState.anchorRange(anchor, a)).toBeNull();
+    for (const v of Object.values(anchor)) if (v instanceof WeakRef) expect(v.deref()).toBeUndefined();
+    const f = findPassage(a, anchor.rendered, null);
+    expect(f?.block?.id).toBe("p");
+  });
+  test("an old article nothing else holds is collected though the anchor is kept", async () => {
+    const win = new Window();
+    const wrap = win.document.createElement("div");
+    win.document.body.appendChild(wrap);
+    const html = '<div class="wiki-article"><p id="p">The pier opens at six on weekdays.</p></div>';
+    wrap.innerHTML = html;
+    const anchor = (() => {
+      const r = win.document.createRange();
+      r.selectNodeContents(wrap.querySelector("#p")!);
+      return discussState.keepAnchor(r as unknown as Range);
+    })();
+    wrap.innerHTML = html;
+    for (let i = 0; i < 5; i++) {
+      Bun.gc(true);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const refs = Object.values(anchor).filter((v): v is WeakRef<object> => v instanceof WeakRef);
+    expect(refs.length).toBeGreaterThan(0);
+    for (const v of refs) expect(v.deref()).toBeUndefined();
+  });
+});
+
+describe("the streaming turn's chip across repaints (fix round 2 batch 2)", () => {
+  test("its chip and question are the same nodes frame after frame; the answer and status are redrawn", () => {
+    const win = new Window();
+    const list = win.document.createElement("div") as unknown as HTMLElement;
+    win.document.body.appendChild(list as unknown as Parameters<typeof win.document.body.appendChild>[0]);
+    const t = newTurn("t1", "Which stop?", passage);
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: null, turns: [t] };
+    patchDiscussTurns(list, d);
+    const chip = list.querySelector('[data-discuss-chip="t1"]');
+    const q = list.querySelector(".wiki-discuss-q");
+    expect(chip).not.toBeNull();
+    applyDiscussFrame(t, "turn", { turnId: "id-1", seq: 1, discussionId: "d" });
+    patchDiscussTurns(list, d);
+    applyDiscussFrame(t, "status", { phase: "model" });
+    for (const piece of ["The ", "summer ", "route."]) {
+      applyDiscussFrame(t, "delta", { text: piece });
+      patchDiscussTurns(list, d);
+      expect(list.querySelector('[data-discuss-chip="t1"]') === chip).toBe(true);
+      expect(list.querySelector(".wiki-discuss-q") === q).toBe(true);
+    }
+    const turnEl = list.querySelector('[data-turn-key="t1"]')!;
+    expect(turnEl.getAttribute("data-turn-state")).toBe("running");
+    expect(turnEl.getAttribute("data-turn-seq")).toBe("1");
+    expect(turnEl.querySelector(".wiki-discuss-answer")?.textContent).toContain("The summer route.");
+    expect(turnEl.querySelector(".wiki-discuss-status")?.textContent).toContain("The agent is reading");
+    applyDiscussFrame(t, "done", { answer: "It stops at Example Island." });
+    patchDiscussTurns(list, d);
+    // The whole turn now reads as its markup says, the chip kept.
+    expect(list.querySelector('[data-turn-key="t1"]')!.outerHTML).toBe(discussTurnHtml(t));
+    expect(list.querySelector('[data-discuss-chip="t1"]') === chip).toBe(true);
+    expect(list.querySelector(".wiki-discuss-status")).toBeNull();
   });
 });

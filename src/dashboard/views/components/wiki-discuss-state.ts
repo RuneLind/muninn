@@ -12,7 +12,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { DISCUSS_TEXT_HIDDEN } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, discussContext } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /** How a turn stands in the tab. `sending` until the route's `turn` event;
@@ -244,6 +244,33 @@ export function discussTurnsHtml(d: DiscussionView | null): string {
 const drawn = new WeakMap<Element, string>();
 
 /**
+ * Bring a drawn turn element to `fresh`'s markup in place: its attributes, and
+ * only the parts whose markup changed. While a turn streams, its chip and its
+ * question stay the same nodes, so a press on the chip survives the repaints;
+ * the answer and the status line are redrawn.
+ */
+function patchTurn(el: Element, fresh: Element): void {
+  for (const { name } of Array.from(el.attributes)) if (!fresh.hasAttribute(name)) el.removeAttribute(name);
+  for (const { name, value } of Array.from(fresh.attributes)) if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+  const want = Array.from(fresh.children);
+  const old = Array.from(el.children);
+  let k = 0;
+  for (const part of want) {
+    // The next old part with the same markup is kept; the old parts it skips are gone.
+    const html = part.outerHTML;
+    let j = k;
+    while (j < old.length && old[j]!.outerHTML !== html) j++;
+    if (j < old.length) {
+      for (; k < j; k++) old[k]!.remove();
+      k = j + 1;
+      continue;
+    }
+    el.insertBefore(part, old[k] ?? null);
+  }
+  for (; k < old.length; k++) old[k]!.remove();
+}
+
+/**
  * Bring `list` to `d`'s turns, redrawing only a turn whose markup changed: a
  * finished turn's element stays the same node while another turn streams, so
  * a selection, focus or a press in it survives the repaints. A list the pane
@@ -269,8 +296,8 @@ export function patchDiscussTurns(list: HTMLElement, d: DiscussionView | null): 
     if (!el || drawn.get(el) !== html) {
       tpl.innerHTML = html;
       const fresh = tpl.content.firstElementChild!;
-      if (el) el.replaceWith(fresh);
-      el = fresh;
+      if (el) patchTurn(el, fresh);
+      else el = fresh;
       drawn.set(el, html);
     }
     if (list.children[i] !== el) list.insertBefore(el, list.children[i] ?? null);
@@ -341,6 +368,43 @@ export function renderedPassageText(range: Range): string {
 }
 
 /**
+ * The reader's selection behind a passage turn, kept for the chip: its
+ * boundaries through weak references, so an article the reader re-rendered is
+ * not held alive by it (a kept `Range` pins its whole detached tree), and the
+ * text it covered as rendered, which finds the passage after a re-render.
+ */
+export interface DiscussAnchor {
+  start: WeakRef<Node> | null;
+  startOffset: number;
+  end: WeakRef<Node> | null;
+  endOffset: number;
+  rendered: string;
+}
+
+export function keepAnchor(range: Range): DiscussAnchor {
+  return { start: new WeakRef(range.startContainer), startOffset: range.startOffset, end: new WeakRef(range.endContainer), endOffset: range.endOffset, rendered: renderedPassageText(range) };
+}
+
+/** The kept selection as a range, while it is still in `article` over the
+ *  same text; else null, and the anchor lets go of its boundaries for good. */
+export function anchorRange(anchor: DiscussAnchor, article: Element): Range | null {
+  const s = anchor.start?.deref();
+  const e = anchor.end?.deref();
+  if (s && e && article.contains(s) && article.contains(e)) {
+    try {
+      const r = article.ownerDocument.createRange();
+      r.setStart(s, anchor.startOffset);
+      r.setEnd(e, anchor.endOffset);
+      if (compact(renderedPassageText(r)) === compact(anchor.rendered)) return r;
+    } catch {
+      /* an offset past a node edited since: not the selection any more */
+    }
+  }
+  anchor.start = anchor.end = null;
+  return null;
+}
+
+/**
  * Find the passage `selection` in `article` as it is rendered now. White
  * space is ignored (a selection across list items reads with newlines the DOM
  * does not hold), so is text inside the reader's own controls. Both ends must
@@ -374,16 +438,6 @@ export function findPassage(article: Element, selection: string, context?: Passa
     hits.push({ from: i, to: j + tail.length });
   }
   if (hits.length === 0) return null;
-  let hit = hits[0]!;
-  if (hits.length > 1 && context) {
-    const before = compact(context.before ?? "");
-    const after = compact(context.after ?? "");
-    let best = 0;
-    for (const h of hits) {
-      const score = commonSuffix(text.slice(Math.max(0, h.from - before.length), h.from), before) + commonPrefix(text.slice(h.to, h.to + after.length), after);
-      if (score > best) [best, hit] = [score, h];
-    }
-  }
   // A compact index to the text node and offset of that character.
   const at = (c: number): { node: Text; offset: number } => {
     let k = 0;
@@ -397,13 +451,33 @@ export function findPassage(article: Element, selection: string, context?: Passa
     }
     return { node, offset: node.data.length };
   };
-  const a = at(hit.from);
-  const b = at(hit.to - 1);
-  const range = doc.createRange();
-  range.setStart(a.node, a.offset);
-  range.setEnd(b.node, b.offset + 1);
+  const rangeOf = (h: { from: number; to: number }): Range => {
+    const a = at(h.from);
+    const b = at(h.to - 1);
+    const r = doc.createRange();
+    r.setStart(a.node, a.offset);
+    r.setEnd(b.node, b.offset + 1);
+    return r;
+  };
+  let hit = hits[0]!;
+  let range = rangeOf(hit);
+  if (hits.length > 1 && context) {
+    // Each copy's surroundings are read as the turn's `before`/`after` were
+    // (`discussContext`, which leaves out every reader-only element), not as
+    // the match above reads the page: a Fold's «Details» label or a caption
+    // next to the selected copy must not cost it the match.
+    const before = compact(context.before ?? "");
+    const after = compact(context.after ?? "");
+    let best = 0;
+    for (const h of hits) {
+      const r = h === hit ? range : rangeOf(h);
+      const around = discussContext(article, r);
+      const score = around ? commonSuffix(compact(around.before), before) + commonPrefix(compact(around.after), after) : 0;
+      if (score > best) [best, hit, range] = [score, h, r];
+    }
+  }
   const common = range.commonAncestorContainer;
   const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
-  return { node: a.node, range, block };
+  return { node: range.startContainer as Text, range, block };
 }
