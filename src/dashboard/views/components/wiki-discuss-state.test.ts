@@ -9,6 +9,7 @@ import { Window } from "happy-dom";
 import {
   applyDiscussFrame,
   currentTurn,
+  discussionLive,
   discussRefusalMessage,
   discussTurnHtml,
   discussTurnsHtml,
@@ -81,6 +82,40 @@ describe("the current turn", () => {
     expect(currentTurn(d)?.key).toBe("c");
     c.state = "refused";
     expect(currentTurn(d)?.key).toBe("b");
+    // An older turn still running keeps the discussion live though it is not current.
+    a.state = "running";
+    expect(currentTurn(d)?.key).toBe("b");
+    expect(discussionLive(d)).toBe(true);
+  });
+
+  test("a refused turn (no seq) does not hide a later numbered turn that runs", () => {
+    const t1 = newTurn("t1", "q1", null);
+    applyDiscussFrame(t1, "turn", { turnId: "A", seq: 1 });
+    applyDiscussFrame(t1, "done", { answer: "one" });
+    const t2 = newTurn("t2", "q2", null);
+    t2.state = "refused"; // e.g. a 429: no row, no seq
+    const t3 = newTurn("t3", "q3", null);
+    applyDiscussFrame(t3, "turn", { turnId: "C", seq: 2 });
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [t1, t2, t3] };
+    expect(currentTurn(d)?.key).toBe("t3");
+    expect(currentTurn(d)?.state).toBe("running");
+    expect(discussionLive(d)).toBe(true);
+    applyDiscussFrame(t3, "done", { answer: "three" });
+    expect(discussionLive(d)).toBe(false);
+  });
+
+  test("a turn dropped before its `turn` event (no seq) does not hide a later numbered turn", () => {
+    const t1 = newTurn("t1", "q1", null);
+    applyDiscussFrame(t1, "turn", { turnId: "A", seq: 1 });
+    applyDiscussFrame(t1, "done", { answer: "one" });
+    const t4 = newTurn("t4", "q4", null);
+    streamClosed(t4);
+    expect(t4).toMatchObject({ state: "dropped", seq: null });
+    const t3 = newTurn("t3", "q3", null);
+    applyDiscussFrame(t3, "turn", { turnId: "C", seq: 2 });
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [t1, t4, t3] };
+    expect(currentTurn(d)?.key).toBe("t3");
+    expect(discussionLive(d)).toBe(true);
   });
 });
 

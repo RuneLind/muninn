@@ -39,7 +39,7 @@ import { copyText } from "./copy-path.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
 import { DISCUSS_TEXT_HIDDEN, discussContext, touchesPeek, type DiscussContext } from "./wiki-discuss-text.ts";
 import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX, HANDOFF_SELECTION_MIN } from "../../../wiki/discuss-bounds.ts";
-import { askInDiscuss, discussAgentOn, setDiscussAgentEnabled } from "./wiki-discuss-tab.ts";
+import { askInDiscuss, discussAgentOn, discussSendBlocked, setDiscussAgentEnabled } from "./wiki-discuss-tab.ts";
 
 export const DISCUSS_HANDOFF_SEL_BTN_ID = "wikiDiscussHandoffBtn";
 export const DISCUSS_HANDOFF_PAGE_BTN_ID = "wikiDiscussHandoffPageBtn";
@@ -283,6 +283,12 @@ function askHere(): void {
   const now = asking;
   if (!el || !now || !discussAgentOn()) return;
   const status = el.querySelector<HTMLElement>(".wiki-handoff-status")!;
+  // ⌘/Ctrl+Enter reaches here from the question box, which no read-only
+  // selector covers: check at the send, not only through the agent flag.
+  if (discussSendBlocked()) {
+    status.textContent = "This wiki is read-only: nothing on it is sent to a model.";
+    return;
+  }
   const question = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value.trim();
   if (!question) {
     status.textContent = "Type a question first.";
@@ -303,7 +309,8 @@ async function copyPrompt(): Promise<void> {
   if (!el || !now || !deps || inFlight || !handoffOn) return;
   const status = el.querySelector<HTMLElement>(".wiki-handoff-status")!;
   const out = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-out")!;
-  const copyBtn = el.querySelector<HTMLButtonElement>(".wiki-handoff-copy")!;
+  // Its own button: «Ask here» shares the class and comes first.
+  const copyBtn = el.querySelector<HTMLButtonElement>('[data-handoff="copy"]')!;
   const question = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value.trim();
   if (!question) {
     status.textContent = "Type a question first.";

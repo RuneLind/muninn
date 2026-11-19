@@ -31,13 +31,12 @@ import { revealRightPane } from "./wiki-pane-toggle.ts";
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import {
   applyDiscussFrame,
-  currentTurn,
+  discussionLive,
   discussRefusalMessage,
   discussTurnsHtml,
   findPassage,
   newTurn,
   streamClosed,
-  turnLive,
   type DiscussPassage,
   type DiscussTurnView,
   type DiscussionView,
@@ -114,6 +113,14 @@ export function setDiscussAgentEnabled(on: boolean): void {
   paint();
 }
 
+/** Is this wiki read-only right now? Read at every send, independent of
+ *  {@link enabled}: the window flag, or the class the read-only guard stamps.
+ *  The keydown guard does not cover P1's question box, so this is the
+ *  backstop for its ⌘/Ctrl+Enter. */
+export function discussSendBlocked(): boolean {
+  return wikiReadonlyWikiFlag() || !!document.body?.classList.contains("wiki-readonly-wiki");
+}
+
 /** Show the tab (the breadcrumb's 💬 Discuss, «Ask here»), the pane first. */
 export function openDiscussTab(focus = false): void {
   if (!enabled || !deps) return;
@@ -125,12 +132,11 @@ export function openDiscussTab(focus = false): void {
 
 /** «Ask here» from P1's panel: one turn about the passage (or the whole page
  *  when `passage` is null), in this page's discussion. False when nothing was
- *  sent (off, off a page, or the discussion's turn still running). */
+ *  sent (off, read-only, off a page, or a turn of the discussion still running). */
 export function askInDiscuss(question: string, passage: DiscussPassage | null): boolean {
+  if (!enabled || discussSendBlocked()) return false;
   const d = ensureHere();
-  if (!enabled || !d || !question.trim()) return false;
-  const cur = currentTurn(d);
-  if (cur && turnLive(cur)) return false;
+  if (!d || !question.trim() || discussionLive(d)) return false;
   openDiscussTab();
   void runTurn(d, question.trim(), passage);
   return true;
@@ -147,8 +153,7 @@ function paint(): void {
     list.innerHTML = discussTurnsHtml(d);
     if (atBottom) body.scrollTop = body.scrollHeight;
   }
-  const cur = d ? currentTurn(d) : null;
-  const live = !!cur && turnLive(cur);
+  const live = !!d && discussionLive(d);
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
   const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
   const started = !!d && d.turns.some((t) => t.turnId !== null);

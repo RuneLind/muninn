@@ -21,8 +21,11 @@ import {
   DISCUSS_HANDOFF_PANEL_ID,
   DISCUSS_HANDOFF_SEL_BTN_ID,
   initDiscussHandoff,
+  openDiscussHandoff,
   setDiscussHandoffEnabled,
 } from "../components/wiki-discuss-handoff.ts";
+import { discussAgentOn, initDiscussTab } from "../components/wiki-discuss-tab.ts";
+import { installWikiReadonlyGuard } from "../components/wiki-readonly-client.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -814,6 +817,89 @@ describe("«Ask Claude Code»: the selection is read when the control is activat
     await flush();
     expect(reads.length).toBe(1);
     delete (list as { add?: unknown }).add;
+    setDiscussHandoffEnabled(false);
+    document.body.innerHTML = "";
+  });
+});
+
+describe("the handoff panel with the wiki agent on (fix round 1)", () => {
+  type Call = { url: string; body: string };
+  const realFetch = globalThis.fetch;
+  let calls: Call[] = [];
+  const stubFetch = (respond: (url: string) => Response) => {
+    calls = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, body: String(init?.body ?? "") });
+      return respond(url);
+    }) as typeof fetch;
+  };
+  const panelEl = () => document.getElementById(DISCUSS_HANDOFF_PANEL_ID)!;
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const pageHtml = () =>
+    `<div id="wikiBreadcrumb"><button id="wikiFactcheckBtn" type="button">Fact check</button><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
+    `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p></div>`;
+
+  beforeAll(() => {
+    initDiscussTab({ wiki: () => "w", relPath: () => "plans/harbour.mdx", switchTab: () => {} });
+  });
+  afterAll(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test("Copy prompt disables and refocuses its own button, never «Ask here»", async () => {
+    document.body.innerHTML = pageHtml();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => {} }, configurable: true });
+    // Cast: an assignment inside the fetch closure does not widen a `null` initializer's narrowed type.
+    let disabledAtFetch = null as { copy: boolean; askHere: boolean } | null;
+    stubFetch(() => {
+      disabledAtFetch = {
+        copy: panelEl().querySelector<HTMLButtonElement>('[data-handoff="copy"]')!.disabled,
+        askHere: panelEl().querySelector<HTMLButtonElement>('[data-handoff="ask-here"]')!.disabled,
+      };
+      return new Response(JSON.stringify({ prompt: "the prompt" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    setDiscussHandoffEnabled(true, true);
+    expect(discussAgentOn()).toBe(true);
+    document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)!.click();
+    const copy = panelEl().querySelector<HTMLButtonElement>('[data-handoff="copy"]')!;
+    const askHere = panelEl().querySelector<HTMLButtonElement>('[data-handoff="ask-here"]')!;
+    expect(askHere).not.toBeNull();
+    panelEl().querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value = "Why six?";
+    copy.click();
+    for (let i = 0; i < 5; i++) await flush();
+    expect(calls.map((c) => c.url)).toEqual(["/api/wiki/discuss/handoff"]);
+    expect(disabledAtFetch).toEqual({ copy: true, askHere: false });
+    expect(panelEl().querySelector(".wiki-handoff-status")!.textContent).toContain("Copied");
+    // Compare by attribute and identity flag: a failing toBe on a happy-dom node hangs its diff printer.
+    expect(document.activeElement?.getAttribute("data-handoff")).toBe("copy");
+    expect(document.activeElement === copy).toBe(true);
+    setDiscussHandoffEnabled(false);
+    document.body.innerHTML = "";
+  });
+
+  test("⌘/Ctrl+Enter in the panel sends nothing to the agent on a read-only wiki, even with the agent flag on", async () => {
+    document.body.innerHTML = pageHtml();
+    stubFetch(() => new Response(JSON.stringify({ error: "x" }), { status: 403, headers: { "Content-Type": "application/json" } }));
+    // The agent flag is computed while the page reads as writable (the flag computed wrongly)...
+    setDiscussHandoffEnabled(false, true);
+    expect(discussAgentOn()).toBe(true);
+    openDiscussHandoff(false);
+    expect(panelEl().hidden).toBe(false);
+    // ...then the wiki is read-only and its guard is installed.
+    g.__WIKI_READONLY_WIKI__ = true;
+    installWikiReadonlyGuard();
+    expect(document.body.classList.contains("wiki-readonly-wiki")).toBe(true);
+    const q = panelEl().querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!;
+    q.value = "Why six?";
+    q.focus();
+    q.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 5; i++) await flush();
+    expect(calls.filter((c) => c.url.startsWith("/api/wiki/discuss"))).toEqual([]);
+    // The panel's own check answered, not a busy note from the tab.
+    expect(panelEl().querySelector(".wiki-handoff-status")!.textContent).toContain("read-only");
+    delete g.__WIKI_READONLY_WIKI__;
+    document.body.classList.remove("wiki-readonly", "wiki-readonly-wiki");
     setDiscussHandoffEnabled(false);
     document.body.innerHTML = "";
   });

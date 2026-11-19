@@ -74,14 +74,29 @@ export function turnLive(t: DiscussTurnView): boolean {
 
 /** The current turn: the highest `seq`, never the last to finish (a turn
  *  closed as abandoned may still finish after a newer one started). A turn
- *  without a `seq` yet is the newest: it was sent after every numbered one. */
+ *  still `sending` (no `seq` yet) is the newest: it was sent after every
+ *  numbered one. A turn without a `seq` that is no longer live (refused, or
+ *  dropped before its `turn` event) never hides a numbered turn; it is current
+ *  only when no turn has a `seq`. */
 export function currentTurn(d: DiscussionView): DiscussTurnView | null {
   let best: DiscussTurnView | null = null;
+  let sending: DiscussTurnView | null = null;
+  let unnumbered: DiscussTurnView | null = null;
   for (const t of d.turns) {
-    if (t.seq === null) return t.state === "refused" ? best : t;
+    if (t.seq === null) {
+      if (t.state === "sending") sending = t;
+      else if (t.state !== "refused") unnumbered = t;
+      continue;
+    }
     if (!best || (best.seq ?? 0) < t.seq) best = t;
   }
-  return best;
+  return sending ?? best ?? unnumbered;
+}
+
+/** A turn of the discussion is live, wherever it sits: the tab sends no
+ *  other turn meanwhile (the route would answer 409 busy). */
+export function discussionLive(d: DiscussionView): boolean {
+  return d.turns.some(turnLive);
 }
 
 const END_STATES: ReadonlySet<string> = new Set(["done", "error", "timeout", "abandoned"]);
