@@ -38,9 +38,9 @@ import {
   applyDiscussFrame,
   discussionLive,
   discussRefusalMessage,
-  discussTurnsHtml,
   findPassage,
   newTurn,
+  patchDiscussTurns,
   renderedPassageText,
   streamClosed,
   type DiscussPassage,
@@ -74,7 +74,16 @@ let turnSeq = 0;
 const anchors = new Map<string, { range: Range; rendered: string }>();
 /** The page the box's draft was typed on. */
 let draftPage = "";
+/** What the box held when it sent a turn, and on which page: the box is
+ *  cleared when that turn is accepted, only if it still holds exactly that. */
+interface BoxSend {
+  text: string;
+  page: string;
+}
 let paintQueued = false;
+/** A press is held in the tab: the pane does not follow the stream meanwhile,
+ *  or the control under the pointer would move before the release. */
+let pressing = false;
 
 const keyOf = (wiki: string, relPath: string) => `${wiki}\n${relPath}`;
 
@@ -142,12 +151,24 @@ export function openDiscussTab(focus = false): void {
  *  when `passage` is null), in this page's discussion. False when nothing was
  *  sent (off, read-only, off a page, or a turn of the discussion still running). */
 export function askInDiscuss(question: string, passage: DiscussPassage | null, selected: Range | null = null): boolean {
+  return startTurn(question, passage, selected, null);
+}
+
+function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): boolean {
   if (!enabled || discussSendBlocked()) return false;
   const d = ensureHere();
   if (!d || !question.trim() || discussionLive(d)) return false;
   openDiscussTab();
-  void runTurn(d, question.trim(), passage, passage ? selected : null);
+  void runTurn(d, question.trim(), passage, passage ? selected : null, box);
   return true;
+}
+
+/** The turn the box sent was accepted: empty the box, unless the reader has
+ *  since typed something else there or moved to another page. */
+function clearSentBox(box: BoxSend): void {
+  if (draftPage !== box.page) return;
+  const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
+  if (input && input.value === box.text) input.value = "";
 }
 
 function paint(): void {
@@ -157,8 +178,8 @@ function paint(): void {
   const d = here();
   if (list) {
     // Follow the stream while the reader is at the bottom of the pane.
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    list.innerHTML = discussTurnsHtml(d);
+    const atBottom = !pressing && body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    patchDiscussTurns(list, d);
     if (atBottom) body.scrollTop = body.scrollHeight;
   }
   const live = !!d && discussionLive(d);
@@ -184,7 +205,7 @@ function schedulePaint(): void {
   else setTimeout(run, 0);
 }
 
-async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null): Promise<void> {
+async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): Promise<void> {
   const turn = newTurn(`t${++turnSeq}`, question, passage);
   if (selected) {
     const range = selected.cloneRange();
@@ -230,6 +251,10 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     }
     const out = applyDiscussFrame(turn, frame.event, data);
     if (out.discussionId && !d.discussionId) d.discussionId = out.discussionId;
+    if (frame.event === "turn" && box) {
+      clearSentBox(box);
+      box = null;
+    }
     schedulePaint();
   });
   try {
@@ -310,12 +335,13 @@ async function continueInClaudeCode(key: string): Promise<void> {
 }
 
 /** The tab's own box: the first question about the whole page, then a
- *  follow-up in the same discussion. */
+ *  follow-up in the same discussion. The box keeps the question until the
+ *  route accepts the turn (its `turn` event), so a refusal leaves it to retry. */
 function askFromBox(): void {
   const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
   const q = input?.value.trim() ?? "";
   if (!input || !q) return;
-  if (askInDiscuss(q.slice(0, HANDOFF_QUESTION_MAX), null)) input.value = "";
+  startTurn(q.slice(0, HANDOFF_QUESTION_MAX), null, null, { text: input.value, page: draftPage });
 }
 
 /** Wire the tab once, at boot. */
@@ -336,6 +362,10 @@ export function initDiscussTab(d: DiscussTabDeps): void {
     const cont = t.closest<HTMLElement>("[data-discuss-continue]");
     if (cont) void continueInClaudeCode(cont.dataset.discussContinue ?? "");
   });
+  document.addEventListener("pointerdown", (e) => {
+    pressing = !!(e.target as HTMLElement).closest?.(`#${DISCUSS_BODY_ID}`);
+  }, true);
+  for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, () => (pressing = false), true);
   document.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement;
     if (t?.id !== DISCUSS_INPUT_ID || e.key !== "Enter" || e.shiftKey || e.isComposing) return;

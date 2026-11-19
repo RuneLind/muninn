@@ -139,12 +139,16 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
   }
 }
 
-/** The stream ended: a turn still running lost its reader, not its run. */
+/** The stream ended: a turn still running lost its reader, not its run. The
+ *  tab keeps discussions in memory and no route lists a discussion's turns, so
+ *  the words never promise that a reload shows the turn. */
 export function streamClosed(t: DiscussTurnView): void {
   if (!turnLive(t)) return;
   t.state = "dropped";
   t.phase = null;
-  t.message = "The connection closed before the turn ended. The server runs it to its end and stores it; reload the page later to read it.";
+  t.message = t.turnId
+    ? "The connection closed before the turn ended. The server runs it to its end and stores it, but this tab cannot show it, and reloading the page does not bring it back. Once it has ended, «Continue in Claude Code» copies the discussion with its answer."
+    : "The connection closed before the turn started here. The server may still run it and store it, but this tab cannot show it, and reloading the page does not bring it back.";
 }
 
 /** Readable words for a refusal the route answered as JSON before its stream
@@ -219,13 +223,54 @@ export function discussTurnHtml(t: DiscussTurnView): string {
   return parts.join("");
 }
 
-/** The turns list, oldest first by `seq` (an unnumbered turn last). */
+const HINT_HTML = `<div class="wiki-discuss-hint">Select a passage and choose «Ask here», or ask about the whole page below. The wiki agent reads the page and the code it names, and answers here.</div>`;
+
+/** Oldest first by `seq` (an unnumbered turn last). */
+function turnsInOrder(d: DiscussionView): DiscussTurnView[] {
+  return [...d.turns].sort((a, b) => (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER));
+}
+
+/** The turns list's markup, oldest first. */
 export function discussTurnsHtml(d: DiscussionView | null): string {
+  if (!d || d.turns.length === 0) return HINT_HTML;
+  return turnsInOrder(d).map(discussTurnHtml).join("");
+}
+
+/** The markup each turn element was drawn from. */
+const drawn = new WeakMap<Element, string>();
+
+/**
+ * Bring `list` to `d`'s turns, redrawing only a turn whose markup changed: a
+ * finished turn's element stays the same node while another turn streams, so
+ * a selection, focus or a press in it survives the repaints. A list the pane
+ * rendered anew holds no turn element and is drawn whole.
+ */
+export function patchDiscussTurns(list: HTMLElement, d: DiscussionView | null): void {
   if (!d || d.turns.length === 0) {
-    return `<div class="wiki-discuss-hint">Select a passage and choose «Ask here», or ask about the whole page below. The wiki agent reads the page and the code it names, and answers here.</div>`;
+    if (list.innerHTML !== HINT_HTML) list.innerHTML = HINT_HTML;
+    return;
   }
-  const turns = [...d.turns].sort((a, b) => (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER));
-  return turns.map(discussTurnHtml).join("");
+  const turns = turnsInOrder(d);
+  const keys = new Set(turns.map((t) => t.key));
+  const have = new Map<string, Element>();
+  for (const el of Array.from(list.children)) {
+    const k = el.getAttribute("data-turn-key");
+    if (k !== null && keys.has(k) && drawn.has(el) && !have.has(k)) have.set(k, el);
+    else el.remove();
+  }
+  const tpl = list.ownerDocument.createElement("template");
+  turns.forEach((t, i) => {
+    const html = discussTurnHtml(t);
+    let el = have.get(t.key);
+    if (!el || drawn.get(el) !== html) {
+      tpl.innerHTML = html;
+      const fresh = tpl.content.firstElementChild!;
+      if (el) el.replaceWith(fresh);
+      el = fresh;
+      drawn.set(el, html);
+    }
+    if (list.children[i] !== el) list.insertBefore(el, list.children[i] ?? null);
+  });
 }
 
 // ── Where a passage sits in the rendered article ─────────────────────────

@@ -15,6 +15,7 @@ import {
   discussTurnsHtml,
   findPassage,
   newTurn,
+  patchDiscussTurns,
   renderedPassageText,
   streamClosed,
   type DiscussionView,
@@ -63,6 +64,29 @@ describe("a turn moved by the stream", () => {
     applyDiscussFrame(done, "done", { answer: "x" });
     streamClosed(done);
     expect(done.state).toBe("done");
+  });
+});
+
+describe("a dropped stream's words", () => {
+  // The tab keeps discussions in memory only and no route lists a
+  // discussion's turns back, so a reload shows an empty tab.
+  test("never promise that a reload brings the turn back", () => {
+    const withId = newTurn("t1", "q", null);
+    applyDiscussFrame(withId, "turn", { turnId: "a", seq: 1 });
+    streamClosed(withId);
+    const noId = newTurn("t2", "q", null);
+    streamClosed(noId);
+    for (const t of [withId, noId]) {
+      expect(t.message).not.toMatch(/reload the page later|reload the page to read/i);
+      expect(t.message).toContain("this tab cannot show it");
+    }
+    // With a turn id the turn offers «Continue in Claude Code», which builds
+    // its prompt from the stored turn once it has ended.
+    expect(withId.message).toContain("«Continue in Claude Code»");
+    expect(discussTurnHtml(withId)).toContain('data-discuss-continue="t1"');
+    // Without one there is no such button, so the words do not name it.
+    expect(noId.message).not.toContain("Continue in Claude Code");
+    expect(discussTurnHtml(noId)).not.toContain("data-discuss-continue");
   });
 });
 
@@ -162,6 +186,71 @@ describe("the tab's markup", () => {
     expect(html).toContain("That passage is no longer in the page.");
     expect(html).not.toContain("data-discuss-continue");
     expect(discussTurnsHtml(null)).toContain("Ask here");
+  });
+});
+
+describe("patching the turns list", () => {
+  const listIn = () => {
+    const win = new Window();
+    const list = win.document.createElement("div");
+    win.document.body.appendChild(list);
+    return list as unknown as HTMLElement;
+  };
+  const done = (key: string, seq: number) => {
+    const t = newTurn(key, `q${seq}`, passage);
+    applyDiscussFrame(t, "turn", { turnId: `id-${seq}`, seq });
+    applyDiscussFrame(t, "done", { answer: `answer ${seq}` });
+    return t;
+  };
+  test("a finished turn's element is left alone while another turn streams; a changed turn is redrawn", () => {
+    const list = listIn();
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [] };
+    patchDiscussTurns(list, d);
+    expect(list.textContent).toContain("Ask here");
+    const t1 = done("t1", 1);
+    const t2 = newTurn("t2", "q2", null);
+    d.turns.push(t1, t2);
+    patchDiscussTurns(list, d);
+    expect(list.querySelector(".wiki-discuss-hint")).toBeNull();
+    const first = list.querySelector('[data-turn-key="t1"]');
+    expect(first).not.toBeNull();
+    applyDiscussFrame(t2, "turn", { turnId: "id-2", seq: 2 });
+    for (const piece of ["The ", "answer ", "streams."]) {
+      applyDiscussFrame(t2, "delta", { text: piece });
+      patchDiscussTurns(list, d);
+      // The same node: a selection, focus or a pressed button in it survives.
+      expect(list.querySelector('[data-turn-key="t1"]')).toBe(first);
+    }
+    expect(list.querySelector('[data-turn-key="t2"] .wiki-discuss-answer')?.textContent).toContain("The answer streams.");
+    // Order by seq, one element per turn.
+    expect(Array.from(list.children).map((c) => c.getAttribute("data-turn-key"))).toEqual(["t1", "t2"]);
+    // The finished turn's own state changed: it is redrawn.
+    t1.passageGone = true;
+    patchDiscussTurns(list, d);
+    expect(list.querySelector('[data-turn-key="t1"]')).not.toBe(first);
+    expect(list.querySelector('[data-turn-key="t1"] .wiki-discuss-gone')).not.toBeNull();
+    expect(list.children.length).toBe(2);
+    // Another page's discussion (or none): the list holds only what it has.
+    patchDiscussTurns(list, null);
+    expect(list.querySelectorAll(".wiki-discuss-turn").length).toBe(0);
+    expect(list.textContent).toContain("Ask here");
+  });
+  test("a turn that gains a seq moves into place; nodes left by another page are dropped", () => {
+    const list = listIn();
+    const a = done("a", 1);
+    const refused = newTurn("r", "q", null);
+    refused.state = "refused";
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [a, refused] };
+    patchDiscussTurns(list, d);
+    const b = newTurn("b", "q2", null);
+    d.turns.push(b);
+    patchDiscussTurns(list, d);
+    applyDiscussFrame(b, "turn", { turnId: "id-2", seq: 2 });
+    patchDiscussTurns(list, d);
+    expect(Array.from(list.children).map((c) => c.getAttribute("data-turn-key"))).toEqual(["a", "b", "r"]);
+    const other: DiscussionView = { wiki: "w", relPath: "q.md", discussionId: "e", turns: [done("z", 1)] };
+    patchDiscussTurns(list, other);
+    expect(Array.from(list.children).map((c) => c.getAttribute("data-turn-key"))).toEqual(["z"]);
   });
 });
 

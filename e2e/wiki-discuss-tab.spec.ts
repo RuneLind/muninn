@@ -22,7 +22,13 @@
  *  3. **The follow-up and the hand-over, in the database.** The follow-up box
  *     sends turn 2 of the same discussion; «Continue in Claude Code» copies a
  *     prompt and sets `handed_over_at` on that turn's row only.
- *  4. **The read-only wiki.** The page payload still says the wiki has an agent,
+ *  4. **A refusal keeps the question; a stream leaves finished turns alone.**
+ *     A refused send (a stubbed 409, a network failure) leaves the question in
+ *     the box; an accepted one clears it, unless the reader typed a new draft
+ *     while the turn was starting. While turn 2 streams, a selection in turn
+ *     1's answer survives the repaints, and a press on turn 1's chip held
+ *     across a repaint still reveals its passage.
+ *  5. **The read-only wiki.** The page payload still says the wiki has an agent,
  *     but the tab is not shown, and a click, a mousedown or Enter on the
  *     controls (forced visible) sends nothing.
  *
@@ -500,6 +506,131 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await toTop();
     await chip(2).click();
     expect.soft((await revealed(page, DUP, 1)).holdsCopy, "the second copy after a new render").toBe(true);
+  });
+
+  test("a refusal keeps the typed question; while a turn streams, turn 1's selection and chip survive", async ({ page }) => {
+    test.setTimeout(180_000);
+    await openPage(page, WIKI, OTHER_REL);
+    await page.locator("#wikiDiscussBtn").click();
+    const input = page.locator("#wikiDiscussInput");
+
+    // A refusal (409 busy) and a network failure: the question stays in the box.
+    await page.route("**/api/wiki/discuss", (route) => route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "a turn is running", reason: "busy" }) }), { times: 1 });
+    await input.fill("First question?");
+    await input.press("Enter");
+    await expect(page.locator('.wiki-discuss-turn[data-turn-state="refused"]')).toContainText("still running");
+    await expect(input).toHaveValue("First question?");
+    await page.route("**/api/wiki/discuss", (route) => route.abort(), { times: 1 });
+    await input.press("Enter");
+    await expect(page.locator('.wiki-discuss-turn[data-turn-state="refused"]')).toHaveCount(2);
+    await expect(input).toHaveValue("First question?");
+
+    // Turn 1, about a passage, from P1's panel.
+    await selectText(page, "Nothing here.");
+    await askHere(page, "What is here?", 1);
+    const answer1 = page.locator('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer');
+    await expect(answer1).toContainText("R2 reads the frontmatter");
+
+    // Turn 2 from the box (the question kept from the refusals): accepted, the box clears.
+    await input.press("Enter");
+    const turn2 = page.locator('.wiki-discuss-turn[data-turn-seq="2"]');
+    await expect(turn2).toHaveAttribute("data-turn-state", "running", { timeout: 90_000 });
+    await expect(input).toHaveValue("");
+
+    // While turn 2 streams, select turn 1's answer and wait for a repaint.
+    await expect(turn2.locator(".wiki-discuss-answer")).toContainText("R2 reads the frontmatter", { timeout: 90_000 });
+    const turn2Html = () => page.evaluate(() => document.querySelector('.wiki-discuss-turn[data-turn-seq="2"]')?.outerHTML ?? "");
+    let before = await turn2Html();
+    await page.evaluate(() => {
+      const a = document.querySelector('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer')!;
+      const r = document.createRange();
+      r.selectNodeContents(a);
+      getSelection()!.removeAllRanges();
+      getSelection()!.addRange(r);
+    });
+    await expect.poll(turn2Html, { timeout: 30_000 }).not.toBe(before);
+    await page.waitForTimeout(100);
+    const sel = await page.evaluate(() => {
+      const s = getSelection()!;
+      const a = document.querySelector('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer');
+      return { text: s.toString(), inTurn1: !!a && !!s.anchorNode && a.contains(s.anchorNode) };
+    });
+    expect(sel.inTurn1, "the selection is still in turn 1's answer").toBe(true);
+    expect(sel.text).toContain("R2 reads the frontmatter");
+
+    // A press on turn 1's chip held across a repaint still reveals the passage.
+    await page.evaluate(() => (globalThis as unknown as { CSS: { highlights?: Map<string, unknown> } }).CSS.highlights?.clear());
+    // The chip in view, and the pane 20px from its bottom, so the next delta
+    // would scroll the pane to follow the stream; the press must land on the chip.
+    const chip1 = page.locator('.wiki-discuss-turn[data-turn-seq="1"] [data-discuss-chip]');
+    await chip1.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const slack = await page.evaluate(() => {
+      const b = document.getElementById("discussBody")!;
+      b.scrollTop = 0;
+      b.style.flex = "none";
+      b.style.height = `${b.scrollHeight - 20}px`;
+      return b.scrollHeight - b.scrollTop - b.clientHeight;
+    });
+    expect(slack).toBeGreaterThan(0);
+    expect(slack).toBeLessThan(40);
+    const box = (await chip1.boundingBox())!;
+    const [px, py] = [box.x + box.width / 2, box.y + box.height / 2];
+    expect(await page.evaluate(([x, y]) => !!document.elementFromPoint(x!, y!)?.closest('.wiki-discuss-turn[data-turn-seq="1"] [data-discuss-chip]'), [px, py])).toBe(true);
+    before = await turn2Html();
+    await page.mouse.move(px, py);
+    await page.mouse.down();
+    await expect.poll(turn2Html, { timeout: 30_000 }).not.toBe(before);
+    await page.mouse.up();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-range-flash");
+          return hl && hl.size ? [...hl][0]!.toString() : "";
+        }),
+      )
+      .toContain("Nothing here.");
+    await expect(turn2).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+
+    // Turn 3: a new draft typed while the turn starts is not cleared when it is accepted.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/discuss", async (route) => {
+      await held;
+      await route.continue();
+    }, { times: 1 });
+    await input.fill("Second question?");
+    await input.press("Enter");
+    await expect(page.locator('.wiki-discuss-turn[data-turn-state="sending"]')).toHaveCount(1);
+    await input.fill("A new draft");
+    release();
+    const turn3 = page.locator('.wiki-discuss-turn[data-turn-seq="3"]');
+    await expect(turn3).toHaveAttribute("data-turn-state", /running|done/, { timeout: 90_000 });
+    await expect(turn3.locator(".wiki-discuss-q")).toHaveText("Second question?");
+    await expect(input).toHaveValue("A new draft");
+    await expect(turn3).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+    await expect(input).toHaveValue("A new draft");
+
+    // Turn 4 is accepted after the reader moved to another page and typed the
+    // same words there: that page's box is its own draft, never cleared.
+    const sameWords = async () => (await sql!`SELECT count(*)::int AS n FROM wiki_discuss_turns WHERE wiki = ${WIKI} AND rel_path = ${OTHER_REL} AND question = 'Same words?'`)[0]!.n as number;
+    const rowsBefore = await sameWords();
+    let release4!: () => void;
+    const held4 = new Promise<void>((r) => (release4 = r));
+    await page.route("**/api/wiki/discuss", async (route) => {
+      await held4;
+      await route.continue();
+    }, { times: 1 });
+    await input.fill("Same words?");
+    await input.press("Enter");
+    await expect(page.locator('.wiki-discuss-turn[data-turn-state="sending"]')).toHaveCount(1);
+    await page.locator(`#wikiList [data-relpath="${REL}"]`).first().click();
+    await expect(page.locator("#articleWrap .wiki-article")).toContainText("The night route is unchanged.");
+    await page.locator('[data-conntab="discuss"]').click();
+    await input.fill("Same words?");
+    release4();
+    await expect.poll(sameWords, { timeout: 90_000 }).toBe(rowsBefore + 1);
+    await page.waitForTimeout(1500);
+    await expect(input).toHaveValue("Same words?");
   });
 
   test("a read-only wiki: no tab, and no control path sends a turn", async ({ page }) => {
