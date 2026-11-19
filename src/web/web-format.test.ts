@@ -319,7 +319,7 @@ describe("formatWebHtml — component blocks", () => {
 
   test("Verdict self-closing uses default label", () => {
     expect(formatWebHtml("<Verdict value=\"no\" />")).toBe(
-      '<span class="verdict verdict-no">No</span>',
+      '<span class="verdict verdict-no verdict-default">No</span>',
     );
   });
 
@@ -737,7 +737,7 @@ describe("formatWebHtml — inline components (Verdict/Pill mid-text)", () => {
 
   test("self-closing inline Verdict uses the default label", () => {
     const out = formatWebHtml("done <Verdict value=\"no\"/> today");
-    expect(out).toContain('done <span class="verdict verdict-no">No</span> today');
+    expect(out).toContain('done <span class="verdict verdict-no verdict-default">No</span> today');
   });
 
   test("inline Pill inner text is escaped (no HTML injection)", () => {

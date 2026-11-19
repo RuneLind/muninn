@@ -584,6 +584,15 @@ describe("a reader label beside one copy, the same word in the source beside the
       const label = t[0]!.toUpperCase() + t.slice(1);
       return { name: `a title-less [!${t}]'s «${label}»`, reader: [`> [!${t}]`, `> ${S}`], written: [[label, "", S], [`${label}: ${S}`]] };
     }),
+    // A body-less Verdict's fallback label, a resolved Callout's ✓ and date
+    // (and the « · » before its title), an AnnotatedCode's file name.
+    ...(["yes", "no"] as const).map((v) => {
+      const label = v === "yes" ? "Yes" : "No";
+      return { name: `a body-less Verdict's «${label}»`, reader: [`Is it ok? <Verdict value="${v}" /> ${S}`], written: [[`Is it ok? ${label} ${S}`]] };
+    }),
+    { name: "a resolved Callout's ✓ and date", reader: ['<Callout resolved="2026-01-02">', "", S, "", "</Callout>"], written: [["✓ 2026-01-02", "", S], ["2026-01-02", "", S]] },
+    { name: "a resolved Callout's ✓, date and « · » before its title", reader: ['<Callout resolved="2026-01-02" title="Pier">', "", S, "", "</Callout>"], written: [["✓ 2026-01-02 · Pier", "", S]] },
+    { name: "an AnnotatedCode's file name", reader: ['<AnnotatedCode file="harbour.ts">', "", "```ts", S, "```", "", "</AnnotatedCode>"], written: [["harbour.ts", "", "```ts", S, "```"]] },
   ];
   const pages = LABELS.flatMap(({ name, reader, written }) =>
     written.flatMap((w) => [

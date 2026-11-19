@@ -2306,7 +2306,7 @@ const webRenderer: BlockRenderer = {
           // original body kept behind the fold so the history stays readable.
           // The author's tone is dropped — the row reports the outcome.
           const t = attrs.title?.trim();
-          const titleHtml = t ? ` · <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
+          const titleHtml = t ? ` <span class="callout-resolved-sep">·</span> <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
           return (
             `<details class="callout callout-good callout-resolved">` +
             `<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ` +
@@ -2322,8 +2322,12 @@ const webRenderer: BlockRenderer = {
       }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = children.trim() || (value === "yes" ? "Yes" : "No");
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        // A body-less Verdict shows a fallback label the file does not hold:
+        // `verdict-default` marks it for Discuss's context (DISCUSS_TEXT_SKIP).
+        const label = children.trim();
+        return label
+          ? `<span class="verdict verdict-${value}">${label}</span>`
+          : `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);
@@ -2647,8 +2651,8 @@ const webRenderer: BlockRenderer = {
     switch (name) {
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = text.trim() ? escapeHtml(text.trim()) : value === "yes" ? "Yes" : "No";
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        if (!text.trim()) return `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
+        return `<span class="verdict verdict-${value}">${escapeHtml(text.trim())}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);

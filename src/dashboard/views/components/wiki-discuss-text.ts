@@ -31,7 +31,9 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
  *  - the reader's own additions: every button and a standalone code tab's
  *    label, a peek card, a glossary tooltip, the TL;DR and «More about this»
  *    labels, an untitled Fold's «Details», a title-less `> [!type]`
- *    callout's type name, a lane's head (its `who` and `since`), a question card's head,
+ *    callout's type name, a body-less Verdict's «Yes»/«No», a resolved
+ *    Callout's ✓, date and the « · » before its title (the title is the
+ *    file's), an AnnotatedCode's file name, a lane's head (its `who` and `since`), a question card's head,
  *    the Historic stamp, a chart's head and plot, a DeltaTable's change
  *    column, a Query card's head and SQL, a FactCheck strip's date, a
  *    Figure's caption, and the line a DeltaTable, Diagram or Steps shows for
@@ -55,6 +57,11 @@ export const DISCUSS_TEXT_SKIP = [
   ".tldr-label",
   ".fold-label-default",
   ".callout-title-default",
+  ".verdict-default",
+  ".callout-resolved-mark",
+  ".callout-resolved-date",
+  ".callout-resolved-sep",
+  ".annotated-code-file",
   ".tldr-more > summary",
   ".nm-head",
   ".dc-view",

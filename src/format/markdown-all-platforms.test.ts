@@ -935,7 +935,7 @@ describe("Callout resolved= — a closed issue collapses to one ✓ row", () => 
     expect(out).not.toContain("callout-warn");
     expect(out).toContain(
       '<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ' +
-        '<span class="callout-resolved-date">2026-09-28</span> · ' +
+        '<span class="callout-resolved-date">2026-09-28</span> <span class="callout-resolved-sep">·</span> ' +
         '<span class="callout-resolved-title">Gate-kjøringer mangler feltene</span></summary>',
     );
     expect(out).not.toContain("<details class=\"callout callout-good callout-resolved\" open");
