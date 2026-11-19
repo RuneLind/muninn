@@ -142,9 +142,10 @@ describe("the live chain", () => {
   });
 
   test("the exclude list starts with the live-bot integration test", () => {
-    expect(EXCLUDED.map((e) => e.file)).toEqual(["src/chat/integration.test.ts"]);
+    expect(EXCLUDED.map((e) => e.file)).toEqual(["src/chat/integration.test.ts", "scripts/wiki-export-html.browser.test.ts"]);
     const { links } = generate(readTree(), readTable());
     expect(chainScript(links)).not.toContain("src/chat/integration.test.ts");
+    expect(chainScript(links)).not.toContain("scripts/wiki-export-html.browser.test.ts");
   });
 
   test("the no-tests exemption list starts empty", () => {
