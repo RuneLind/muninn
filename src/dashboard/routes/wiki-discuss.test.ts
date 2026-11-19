@@ -7,7 +7,7 @@
  * Invented pages and repo names only (public repo).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { rmSync, writeFileSync, existsSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -26,11 +26,11 @@ import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
-import { testTempDir } from "../../test/temp-dir.ts";
+import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
 import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 // Whether this disk folds case (APFS default): the case-only rename test needs one.
-const caseProbe = mkdtempSync(path.join(tmpdir(), "discuss-case-"));
+const caseProbe = testTempDirSync(path.join(tmpdir(), "discuss-case-"));
 writeFileSync(path.join(caseProbe, "CaseProbe"), "");
 const caseInsensitiveDisk = existsSync(path.join(caseProbe, "caseprobe"));
 rmSync(caseProbe, { recursive: true, force: true });
