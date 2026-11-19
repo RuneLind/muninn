@@ -138,3 +138,20 @@ export function stampableFor(opts: {
   if ((opts.isReadonlyRoot ?? isReadonlyWikiRoot)(wikiDir)) return false;
   return true;
 }
+
+/**
+ * The interpreter half of the spawn: `<bun> --no-env-file` when `WIKI_STAMP_BUN`
+ * names a Bun binary, the bare interpreter otherwise.
+ *
+ * Bun loads `.env` from its working directory — muninn's own repo root — so
+ * without the flag every secret `stampChildEnv` (`routes/wiki-stamp.ts`) leaves out comes back
+ * (measured: the real-Bun test in `routes/wiki-stamp.test.ts` reads `leaked`). Bun is
+ * recognised by basename (`bun`, `bun-<variant>`, either with `.exe`); any other
+ * interpreter gets no flag, because node and deno load no `.env` on their own
+ * and would reject one they do not know.
+ */
+export function stampInterpreterArgv(interpreter: string): string[] {
+  return /^bun(-[\w.]+)?(\.exe)?$/i.test(path.basename(interpreter))
+    ? [interpreter, "--no-env-file"]
+    : [interpreter];
+}

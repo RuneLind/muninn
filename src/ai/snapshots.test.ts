@@ -9,7 +9,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { testTempDirSync } from "../test/temp-dir.ts";
-import { codeSnapshot, leaseSnapshot, sweepSnapshots, wikiSnapshot, wikiSnapshotFiles, SNAPSHOT_IDLE_MS } from "./snapshots.ts";
+import { codeSnapshot, leaseSnapshot, sweepSnapshots, wikiSnapshot, wikiSnapshotFiles, wikiSnapshotHolds, SNAPSHOT_IDLE_MS } from "./snapshots.ts";
 
 let base: string;
 let root: string;
@@ -166,6 +166,51 @@ describe("wikiSnapshot", () => {
     expect(second.dir).not.toBe(first.dir);
     expect(readFileSync(join(second.dir, "concepts", "a.md"), "utf8")).toBe("second edit\n");
     expect(readFileSync(join(first.dir, "concepts", "a.md"), "utf8")).toBe("uncommitted edit\n");
+  });
+});
+
+describe("wikiSnapshotHolds", () => {
+  test("answers what wikiSnapshot copies: a listed plain file yes; an ignored page, a page through a link and a non-repo no", async () => {
+    const wiki = join(base, "holds");
+    mkdirSync(join(wiki, "private"), { recursive: true });
+    mkdirSync(join(base, "holds-outside"), { recursive: true });
+    git(wiki, "init");
+    writeFileSync(join(wiki, ".gitignore"), "private/\n");
+    writeFileSync(join(wiki, "page.md"), "# page\n");
+    writeFileSync(join(wiki, "private", "secret.md"), "# secret\n");
+    writeFileSync(join(base, "holds-outside", "far.md"), "# far\n");
+    symlinkSync(join(base, "holds-outside"), join(wiki, "linked"));
+    symlinkSync(join(base, "holds-outside", "far.md"), join(wiki, "alias.md"));
+    const snap = await wikiSnapshot(wiki, { root });
+    expect(await wikiSnapshotHolds(wiki, "page.md")).toEqual({ ok: true });
+    expect(existsSync(join(snap.dir, "page.md"))).toBe(true);
+    expect(await wikiSnapshotHolds(wiki, "private/secret.md")).toEqual({ ok: false, reason: "not-listed" });
+    expect(existsSync(join(snap.dir, "private", "secret.md"))).toBe(false);
+    // git lists neither a page beyond a linked folder nor follows the link; it lists a linked file, which is no plain file.
+    expect(await wikiSnapshotHolds(wiki, "linked/far.md")).toEqual({ ok: false, reason: "not-listed" });
+    expect(existsSync(join(snap.dir, "linked", "far.md"))).toBe(false);
+    expect(await wikiSnapshotHolds(wiki, "alias.md")).toEqual({ ok: false, reason: "not-a-plain-file" });
+    expect(existsSync(join(snap.dir, "alias.md"))).toBe(false);
+    expect(await wikiSnapshotHolds(join(base, "holds-outside"), "far.md")).toEqual({ ok: false, reason: "not-a-work-tree" });
+  });
+});
+
+describe("wikiSnapshotHolds on a case-only rename", () => {
+  test.skipIf(!caseInsensitive)("a tracked Page.md renamed to page.md without git mv is held, as wikiSnapshot copies it", async () => {
+    const wiki = join(base, "holds-case");
+    mkdirSync(join(wiki, "notes"), { recursive: true });
+    git(wiki, "init");
+    writeFileSync(join(wiki, "notes", "Page.md"), "# page\n");
+    git(wiki, "add", ".");
+    git(wiki, "commit", "-m", "init");
+    renameSync(join(wiki, "notes", "Page.md"), join(wiki, "notes", "page.md"));
+    expect(readdirSync(join(wiki, "notes"))).toEqual(["page.md"]);
+    expect(await wikiSnapshotFiles(wiki)).toEqual(["notes/Page.md"]);
+    const snap = await wikiSnapshot(wiki, { root });
+    expect(readFileSync(join(snap.dir, "notes", "page.md"), "utf8")).toBe("# page\n");
+    expect(await wikiSnapshotHolds(wiki, "notes/page.md")).toEqual({ ok: true });
+    // A name that is no variant of a listed file is still not held.
+    expect(await wikiSnapshotHolds(wiki, "notes/other.md")).toEqual({ ok: false, reason: "not-listed" });
   });
 });
 

@@ -23,6 +23,7 @@ import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
+import { startDiscussTurnSweep, stopDiscussTurnSweep } from "./dashboard/routes/wiki-discuss.ts";
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
@@ -184,6 +185,13 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+// Discuss turns whose process died (no heartbeat) are closed as `abandoned`,
+// now and every minute; the route lives in the `wiki` group, so only where it
+// is served (`src/dashboard/routes/wiki-discuss.ts`).
+if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
+  startDiscussTurnSweep();
 }
 
 // GCS bucket mirrors feeding read-only wiki roots (fire-and-forget; every
@@ -594,6 +602,7 @@ async function shutdown() {
   killLiveProcessGroups();
   stopScheduler();
   stopStaleHandoffSweep();
+  stopDiscussTurnSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();
   const retentionCleanupStopped = stopRetentionCleanup();
   const staleConfirmStopped = stopStaleConfirmLoop();

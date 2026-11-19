@@ -20,7 +20,6 @@ src/benchmarks/worktree.ts 1
 src/benchmarks/yggdrasil-manager.ts 2
 src/dashboard/routes/benchmark-routes.ts 1
 src/dashboard/routes/wiki-felles-publish.ts 2
-src/dashboard/routes/wiki-plan-card.ts 1
 src/dashboard/routes/wiki-stamp.ts 1
 src/gcp/access-token.ts 1
 src/hivemind/broker.ts 1
