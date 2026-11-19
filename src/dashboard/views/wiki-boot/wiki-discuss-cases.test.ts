@@ -593,6 +593,11 @@ describe("a reader label beside one copy, the same word in the source beside the
     { name: "a resolved Callout's ✓ and date", reader: ['<Callout resolved="2026-01-02">', "", S, "", "</Callout>"], written: [["✓ 2026-01-02", "", S], ["2026-01-02", "", S]] },
     { name: "a resolved Callout's ✓, date and « · » before its title", reader: ['<Callout resolved="2026-01-02" title="Pier">', "", S, "", "</Callout>"], written: [["✓ 2026-01-02 · Pier", "", S]] },
     { name: "an AnnotatedCode's file name", reader: ['<AnnotatedCode file="harbour.ts">', "", "```ts", S, "```", "", "</AnnotatedCode>"], written: [["harbour.ts", "", "```ts", S, "```"]] },
+    // A FactCheck's counts, a one-run DeltaTable's note under the table, a
+    // DeltaTable's attribute warning above it.
+    { name: "a FactCheck's counts", reader: ['<FactCheck date="2026-01-02" ok="2" warn="1">', "", S, "", "</FactCheck>"], written: [["✓ 2 confirmed ⚠ 1 needs care", "", S]] },
+    { name: "a one-run DeltaTable's «Two runs are needed for a delta»", reader: ["<DeltaTable>", "", "| Pier | Week 1 |", "|---|---|", "| North | 10 |", "", "</DeltaTable>", "", S], written: [["| Pier | Week 1 |", "|---|---|", "| North | 10 |", "", "Two runs are needed for a delta", "", S]] },
+    { name: "a DeltaTable's unknown decimal= warning", reader: ['<DeltaTable decimal="weird">', "", S, "", "| Pier | Week 1 | Week 2 |", "|---|---|---|", "| North | 10 | 12 |", "", "</DeltaTable>"], written: [[S, "", "Unknown decimal value: weird — use comma or dot", "", "| Pier | Week 1 | Week 2 |", "|---|---|---|", "| North | 10 | 12 |"]] },
   ];
   const pages = LABELS.flatMap(({ name, reader, written }) =>
     written.flatMap((w) => [

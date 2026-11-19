@@ -22,24 +22,28 @@ import { FACT_CHIP_SELECTOR, PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /**
  * Elements whose text the source does not hold where the article shows it,
- * found by diffing real mimir and melosys-kode-wiki renders, after the reader's
- * whole enhancer chain, against the collapse; the parity test's fixture holds
- * each component that adds one. A selection that starts or ends in one goes
- * to the section. A
- * Lane outside an «Oppfølging» block shows its `who` and `since` in a plain
- * paragraph with no class: there the context check is what falls back.
+ * found by diffing the reader's render, after its whole enhancer chain,
+ * against the collapse: on real mimir and melosys-kode-wiki pages, then by a
+ * probe over one form per component in `COMPONENT_SPEC` in each attribute
+ * variant that changes its visible text, plus the reader's post-passes. The
+ * parity test holds a row for every component (a test checks that) and for
+ * each addition the probe found, but not every attribute variant of each.
+ * A selection that starts or ends in one goes to the section.
  *  - the reader's own additions: every button and a standalone code tab's
  *    label, a peek card, a glossary tooltip, the TL;DR and «More about this»
  *    labels, an untitled Fold's «Details», a title-less `> [!type]`
  *    callout's type name, a body-less Verdict's «Yes»/«No», a resolved
  *    Callout's ✓, date and the « · » before its title (the title is the
- *    file's), an AnnotatedCode's file name, a lane's head (its `who` and `since`), a question card's head,
+ *    file's), an AnnotatedCode's file name, a lane's head (its `who` and
+ *    `since`, in an «Oppfølging» block or a plain line outside one), a question card's head,
  *    the Historic stamp, a chart's head and plot, a DeltaTable's change
- *    column, a Query card's head and SQL, a FactCheck strip's date, a
+ *    column, its «Two runs are needed» note and its warning lines, a Query
+ *    card's head and SQL, a FactCheck strip's date and counts, a
  *    Figure's caption, and the line a DeltaTable, Diagram or Steps shows for
  *    its `src` when it cannot draw it, the Query explorer's bar (its search
  *    box, `uses` chips and «N of M queries» count);
- *  - text from a page's sibling files: a CaseBoard, a Query result;
+ *  - text from a page's sibling files: a CaseBoard, a Query result, a
+ *    DeltaTable read from its `src` CSV, a Diagram's or Steps' text form;
  *  - copies of text that sits elsewhere in the source: the decision views
  *    (`dc-view`: the chain, the PR strip, the question grid);
  *  - what the client redraws: a mermaid fence (an SVG once drawn), an Embed.
@@ -73,6 +77,11 @@ export const DISCUSS_TEXT_SKIP = [
   ".vc-plot",
   ".dt-delta",
   ".dt-unavailable",
+  ".dt-note",
+  ".dt-warning",
+  ".dt-file",
+  ".dgm-text",
+  ".lane-plain-head",
   ".caseboard",
   ".query-head",
   ".query-sql",
@@ -83,6 +92,7 @@ export const DISCUSS_TEXT_SKIP = [
   ".stp-unavailable",
   ".dgm-unavailable",
   ".fc-strip-lead",
+  ".fc-count",
   ".code-tab-label",
   "figcaption",
   ".embed",

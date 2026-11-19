@@ -1117,9 +1117,12 @@ function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): st
     const csv = readCsvFile(d.src, "Table");
     table = !csv.ok
       ? blockNote("dt-unavailable", csv.note)
-      : (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
+      : // `dt-file`: the table is the CSV's, not the page's (DISCUSS_TEXT_SKIP).
+        `<div class="dt-file">` +
+        (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
         deltaTableHtml(deltaGrid(csv.header, csv.shown, csv.headerWidth), d, queryCellHtml, (s) => s) +
-        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "");
+        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "") +
+        `</div>`;
   } else if (k !== -1) {
     const t = rawChildren[k] as Extract<Block, { type: "table" }>;
     table = deltaTableHtml(deltaGrid(t.headers, t.rows), d, renderInline, stripEmphasis);
@@ -2522,7 +2525,9 @@ const webRenderer: BlockRenderer = {
           : lane.since && lane.since !== attrs.since?.trim()
             ? `<span ${READER_ONLY_ATTR}> — since ${escapeHtml(since)}</span>`
             : ` — since ${escapeHtml(since)}`;
-        return `<p><strong>${label}${sinceHtml}</strong></p>${children}`;
+        // `lane-plain-head`: who= and since= are attributes, not text the
+        // page holds (DISCUSS_TEXT_SKIP).
+        return `<p class="lane-plain-head"><strong>${label}${sinceHtml}</strong></p>${children}`;
       }
       case "Query": {
         // One card per query: header (id, question, answer, run date, uses),
