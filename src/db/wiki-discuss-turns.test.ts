@@ -1,9 +1,10 @@
 /**
  * `wiki_discuss_turns` (migration 090) against the test database: a turn
  * inserted running and finished once, the discussion's sequence, the one-live-
- * turn rule (sequential and concurrent, and a stale running row), a forced
- * collision on the sequence, the reader-left mark and the card. Invented pages
- * only.
+ * turn rule (sequential and concurrent), a running row whose heartbeat stopped
+ * closed as abandoned (by the next start and by the sweep) while one whose
+ * heartbeat runs is not, a forced collision on the sequence, the reader-left
+ * mark and the card. Invented pages only.
  */
 import { describe, expect, test } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -18,6 +19,9 @@ import {
   startDiscussTurn as startTurn,
   type DiscussTurnStart,
 } from "./wiki-discuss-turns.ts";
+// The heartbeat and the sweep through the namespace, so this file loads
+// against a store that has neither.
+import * as turns from "./wiki-discuss-turns.ts";
 
 setupTestDb();
 
@@ -94,12 +98,50 @@ describe("wiki_discuss_turns", () => {
     expect((await listDiscussTurns(d)).filter((t) => t.endState === "running")).toHaveLength(1);
   });
 
-  test("a running turn older than the stale bound does not block the discussion", async () => {
+  test("a running turn whose heartbeat stopped is closed as abandoned by the next start, which then runs", async () => {
     const d = crypto.randomUUID();
-    const dead = await startDiscussTurn(start(d));
-    await getDb()`UPDATE wiki_discuss_turns SET created_at = now() - ${STALE_MS + 60_000}::double precision * interval '1 millisecond' WHERE id = ${dead.id}`;
-    const next = await startDiscussTurn(start(d, { question: "After the crash?" }));
+    const dead = await startTurn(start(d), { staleRunningMs: 200 });
+    await Bun.sleep(300);
+    const next = await startTurn(start(d, { question: "After the crash?" }), { staleRunningMs: 200 });
     expect(next.seq).toBe(2);
+    const row = await getDiscussTurn(dead.id);
+    expect(row?.endState).toBe("abandoned");
+    expect(row?.finishedAt).not.toBeNull();
+    // A turn whose process only stalled past the bound still stores its result.
+    expect(await done(dead.id)).toBe(true);
+    expect((await getDiscussTurn(dead.id))?.endState).toBe("done");
+  });
+
+  test("a running turn whose heartbeat runs is never closed and keeps blocking its discussion", async () => {
+    const d = crypto.randomUUID();
+    const live = await startTurn(start(d), { staleRunningMs: 200 });
+    for (let i = 0; i < 12; i++) {
+      await Bun.sleep(50);
+      await turns.touchDiscussTurn(live.id);
+    }
+    // Long past any turn timeout since it started, but still beating.
+    await getDb()`UPDATE wiki_discuss_turns SET created_at = now() - interval '8 minutes' WHERE id = ${live.id}`;
+    expect(await turns.closeAbandonedDiscussTurns(200)).not.toContain(live.id);
+    const err = await startTurn(start(d, { question: "Second?" }), { staleRunningMs: 200 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DiscussTurnConflict);
+    expect((await getDiscussTurn(live.id))?.endState).toBe("running");
+  });
+
+  test("the sweep closes every running turn whose heartbeat is past the bound, and nothing else", async () => {
+    const [d1, d2, d3] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+    const stale = await startDiscussTurn(start(d1));
+    const finished = await startDiscussTurn(start(d2));
+    await done(finished.id);
+    const fresh = await startDiscussTurn(start(d3));
+    await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - ${STALE_MS + 60_000}::double precision * interval '1 millisecond' WHERE id IN (${stale.id}, ${finished.id})`;
+    const closed = await turns.closeAbandonedDiscussTurns(STALE_MS);
+    expect(closed).toContain(stale.id);
+    expect(closed).not.toContain(finished.id);
+    expect(closed).not.toContain(fresh.id);
+    expect(await getDiscussTurn(stale.id)).toMatchObject({ endState: "abandoned", error: expect.stringContaining("heartbeat") });
+    expect((await getDiscussTurn(stale.id))?.finishedAt).not.toBeNull();
+    expect((await getDiscussTurn(finished.id))?.endState).toBe("done");
+    expect((await getDiscussTurn(fresh.id))?.endState).toBe("running");
   });
 
   test("an insert that collides on the sequence number is a conflict", async () => {

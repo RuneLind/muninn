@@ -1024,7 +1024,7 @@ CREATE TABLE wiki_discuss_turns (
   question       TEXT NOT NULL,
   location       JSONB,
   answer         TEXT NOT NULL DEFAULT '',
-  end_state      TEXT NOT NULL DEFAULT 'running' CHECK (end_state IN ('running', 'done', 'error', 'timeout')),
+  end_state      TEXT NOT NULL DEFAULT 'running' CHECK (end_state IN ('running', 'done', 'error', 'timeout', 'abandoned')),
   error          TEXT,
   reader_left    BOOLEAN NOT NULL DEFAULT false,
   bot_name       TEXT NOT NULL,
@@ -1037,11 +1037,13 @@ CREATE TABLE wiki_discuss_turns (
   cost_usd       DOUBLE PRECISION,
   duration_ms    INTEGER,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  heartbeat_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at    TIMESTAMPTZ,
   UNIQUE (discussion_id, seq)
 );
 
 CREATE INDEX idx_wiki_discuss_turns_page ON wiki_discuss_turns (wiki, rel_path, created_at DESC);
+CREATE INDEX idx_wiki_discuss_turns_running ON wiki_discuss_turns (heartbeat_at) WHERE end_state = 'running';
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

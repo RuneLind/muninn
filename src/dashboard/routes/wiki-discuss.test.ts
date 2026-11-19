@@ -85,6 +85,7 @@ class MemStore implements DiscussStore {
       costUsd: null,
       durationMs: null,
       createdAt: Date.now(),
+      heartbeatAt: Date.now(),
       finishedAt: null,
     };
     this.rows.push(row);
@@ -106,6 +107,10 @@ class MemStore implements DiscussStore {
     if (r) r.card = card;
   };
   list = async (discussionId: string) => this.rows.filter((r) => r.discussionId === discussionId).sort((a, b) => a.seq - b.seq);
+  heartbeat = async (id: string) => {
+    const r = this.rows.find((x) => x.id === id);
+    if (r?.endState === "running") r.heartbeatAt = Date.now();
+  };
 }
 
 interface Calls {
@@ -468,7 +473,9 @@ describe("a turn", () => {
     const discussionId = first[0]!.data.discussionId as string;
     const other = await post(app, { wiki: "agent", relPath: "notes/harbour.md", question: "q", discussionId });
     expect(other.status).toBe(409);
+    // Running and beating, though it started longer ago than any turn timeout.
     store.rows[0]!.endState = "running";
+    store.rows[0]!.createdAt = Date.now() - 8 * 60 * 1000;
     const busy = await post(app, { ...PASSAGE, discussionId });
     expect(busy.status).toBe(409);
     expect(((await busy.json()) as { reason: string }).reason).toBe("busy");
@@ -542,6 +549,31 @@ describe("a turn", () => {
     expect(err.data.endState).toBe("timeout");
     expect(store.rows[0]!.endState).toBe("timeout");
     expect(evs.at(-1)!.event).toBe("end");
+  });
+  test("a turn that fails after streaming stores the text and the tool calls its reader was shown", async () => {
+    const { app, store } = setup({
+      oneShot: async (_p, _c, _b, o) => {
+        o.onProgress?.({ type: "text_delta", text: "Half an " });
+        o.onProgress?.({ type: "tool_start", id: "t1", name: "Grep", displayName: "Grep", input: '{"pattern":"ferry"}' });
+        o.onProgress?.({ type: "tool_end", id: "t1", name: "Grep", displayName: "Grep" });
+        o.onProgress?.({ type: "text_delta", text: "answer" });
+        throw new Error("Claude Agent SDK timed out after 300000ms");
+      },
+    });
+    const evs = await frames(await post(app, PASSAGE));
+    expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("timeout");
+    expect(store.rows[0]).toMatchObject({ endState: "timeout", answer: "Half an answer", toolCalls: [{ name: "Grep", input: '{"pattern":"ferry"}' }] });
+  });
+  test("a done turn stores the final answer and the result's tool calls, not the streamed text", async () => {
+    const { app, store } = setup({
+      oneShot: async (_p, _c, _b, o) => {
+        o.onProgress?.({ type: "text_delta", text: "Let me look. " });
+        o.onProgress?.({ type: "tool_start", id: "t1", name: "Grep", displayName: "Grep", input: "{}" });
+        return { result: "Example Island.", costUsd: 0, toolCalls: [{ id: "t1", name: "Read", displayName: "Read", durationMs: 1, startOffsetMs: 0, input: "{}" }] } as never;
+      },
+    });
+    await frames(await post(app, PASSAGE));
+    expect(store.rows[0]).toMatchObject({ endState: "done", answer: "Example Island.", toolCalls: [{ name: "Read", input: "{}" }] });
   });
   test("a turn whose reader went away runs to its end and is stored", async () => {
     let release!: () => void;

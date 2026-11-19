@@ -29,6 +29,14 @@
  * the discussion · 429 `busy` · then the turn row is inserted (409 `busy` when
  * the database holds another live turn of the discussion).
  *
+ * A live turn is one whose process still beats: the route touches the row's
+ * `heartbeat_at` every {@link DISCUSS_HEARTBEAT_MS} from the insert to the
+ * end, however long the snapshots, the card or the model take. A `running`
+ * row whose heartbeat is older than {@link DISCUSS_STALE_RUNNING_MS} is a
+ * process that died: the next start on its discussion closes it as
+ * `abandoned` in the insert's transaction, and {@link startDiscussTurnSweep}
+ * closes the rest.
+ *
  * The turn runs to its end and is stored whether or not its reader is still
  * there: nothing in it reads the request's abort signal, and the stream's
  * writes are guarded. In the `wiki` route group, which `MUNINN_PROFILE=nais`
@@ -48,11 +56,13 @@ import { toolSurfaceBlocker, type ToolSurface } from "../../ai/tool-surface.ts";
 import { snapshotRootDir } from "../../ai/agent-cwd.ts";
 import { codeSnapshot, leaseSnapshot, wikiSnapshot, type Snapshot } from "../../ai/snapshots.ts";
 import {
+  closeAbandonedDiscussTurns,
   finishDiscussTurn,
   listDiscussTurns,
   markDiscussReaderLeft,
   setDiscussTurnCard,
   startDiscussTurn,
+  touchDiscussTurn,
   DiscussTurnConflict,
   type DiscussToolCall,
   type DiscussTurn,
@@ -98,9 +108,39 @@ export const COPILOT_DISCUSS_TOOLS: Record<string, string[]> = {
 
 /** Turns this process runs at once, across every discussion. */
 export const DISCUSS_MAX_INFLIGHT = 4;
-/** A `running` turn older than this no longer blocks its discussion: its
- *  process died mid-turn. */
-export const DISCUSS_STALE_RUNNING_MS = DISCUSS_TURN_TIMEOUT_MS + 2 * 60 * 1000;
+/** How often a running turn touches its row's `heartbeat_at`. */
+export const DISCUSS_HEARTBEAT_MS = 15_000;
+/** A `running` turn whose heartbeat is older than this belongs to a process
+ *  that died: 12 missed beats, so a beat delayed by the wiki snapshot's
+ *  synchronous copy (it blocks the event loop) is not read as a death. */
+export const DISCUSS_STALE_RUNNING_MS = 3 * 60 * 1000;
+/** How often the sweep closes abandoned turns on every discussion. */
+export const DISCUSS_SWEEP_MS = 60_000;
+
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Close abandoned turns now and every {@link DISCUSS_SWEEP_MS} (idempotent,
+ *  unref'd): a turn whose process died is closed within the stale bound plus
+ *  one sweep, whether or not its discussion is continued. */
+export function startDiscussTurnSweep(close: typeof closeAbandonedDiscussTurns = closeAbandonedDiscussTurns): void {
+  if (sweepTimer) return;
+  const log = getLog("wiki", "discuss");
+  const tick = () => {
+    close(DISCUSS_STALE_RUNNING_MS)
+      .then((ids) => {
+        if (ids.length > 0) log.info("closed {n} abandoned discuss turn(s)", { n: ids.length, turnIds: ids });
+      })
+      .catch((err) => log.warn("discuss turn sweep failed: {error}", { error: err instanceof Error ? err.message : String(err) }));
+  };
+  tick();
+  sweepTimer = setInterval(tick, DISCUSS_SWEEP_MS);
+  sweepTimer.unref?.();
+}
+
+export function stopDiscussTurnSweep(): void {
+  if (sweepTimer) clearInterval(sweepTimer);
+  sweepTimer = null;
+}
 
 type SurfaceKind = "readSearch" | "mcpTools";
 
@@ -123,6 +163,7 @@ export interface DiscussStore {
   readerLeft: typeof markDiscussReaderLeft;
   setCard: typeof setDiscussTurnCard;
   list: typeof listDiscussTurns;
+  heartbeat: typeof touchDiscussTurn;
 }
 
 const dbStore: DiscussStore = {
@@ -131,6 +172,7 @@ const dbStore: DiscussStore = {
   readerLeft: markDiscussReaderLeft,
   setCard: setDiscussTurnCard,
   list: listDiscussTurns,
+  heartbeat: touchDiscussTurn,
 };
 
 export interface DiscussRouteDeps {
@@ -146,6 +188,9 @@ export interface DiscussRouteDeps {
   /** `DECISION_TRIAGE_REPO_ROOTS`'s raw value; default the config's. */
   repoRoots?: () => string | null;
   timeoutMs?: number;
+  /** Default {@link DISCUSS_HEARTBEAT_MS} and {@link DISCUSS_STALE_RUNNING_MS}. */
+  heartbeatMs?: number;
+  staleRunningMs?: number;
   log?: { info(msg: string, props: Record<string, unknown>): void; warn(msg: string, props: Record<string, unknown>): void; error(msg: string, props: Record<string, unknown>): void };
 }
 
@@ -175,6 +220,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   const blocker = deps.surfaceBlocker ?? toolSurfaceBlocker;
   const git = deps.git ?? realGit;
   const timeoutMs = deps.timeoutMs ?? DISCUSS_TURN_TIMEOUT_MS;
+  const heartbeatMs = deps.heartbeatMs ?? DISCUSS_HEARTBEAT_MS;
+  const staleRunningMs = deps.staleRunningMs ?? DISCUSS_STALE_RUNNING_MS;
   let inflight = 0;
 
   const gate = async (c: Context, next: Next) => {
@@ -237,7 +284,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
           model: p.bot.model ?? config.claudeModel ?? null,
           surface: { kind: p.kind },
         },
-        { staleRunningMs: DISCUSS_STALE_RUNNING_MS },
+        { staleRunningMs },
       );
     } catch (err) {
       release();
@@ -257,6 +304,12 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
           });
         };
         let heartbeat: ReturnType<typeof setInterval> | undefined;
+        // The row's heartbeat, from here to the end of the turn: what keeps a
+        // live turn from being read as abandoned.
+        const beat = setInterval(() => {
+          store.heartbeat(turn.id).catch((err) => log.warn("discuss turn heartbeat failed: {error}", { error: String(err) }));
+        }, heartbeatMs);
+        beat.unref?.();
         try {
           heartbeat = setInterval(() => emit("heartbeat", {}), 30_000);
           stream.onAbort(() => {
@@ -273,6 +326,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         } finally {
           release();
           clearInterval(heartbeat);
+          clearInterval(beat);
         }
       });
     } catch (err) {
@@ -355,7 +409,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         return c.json({ error: "that discussion is about another page", reason: "other-page" }, 409);
       }
       const last = earlier[earlier.length - 1]!;
-      if (last.endState === "running" && Date.now() - last.createdAt < DISCUSS_STALE_RUNNING_MS) {
+      if (last.endState === "running" && Date.now() - last.heartbeatAt < staleRunningMs) {
         return c.json({ error: "the discussion's last turn is still running", reason: "busy" }, 409);
       }
     } else discussionId = randomUUID();
@@ -423,10 +477,14 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   async function runTurn(p: Prepared, turn: { id: string; seq: number }, emit: (event: string, data: unknown) => void): Promise<void> {
     const t0 = performance.now();
     const releases: (() => void)[] = [];
-    let answer = "";
     let card: string | null = null;
-    const toolCalls: DiscussToolCall[] = [];
+    // What the reader was shown, kept for a turn that fails before `res`.
+    let streamed = "";
+    const streamedTools: DiscussToolCall[] = [];
     try {
+      // The discussion as the insert left it: a turn it closed as abandoned
+      // reads so in the prompt, not as running.
+      const earlier = (await store.list(p.discussionId).catch(() => p.earlier)).filter((t) => t.id !== turn.id);
       let reach: AgentReach;
       let pagePath: string;
       if (p.kind === "readSearch") {
@@ -465,7 +523,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         reach,
         card: cardText,
         cardNote: c.note,
-        earlier: p.earlier.map((t) => ({ question: t.question, selection: t.selection, answer: t.answer, endState: t.endState })),
+        earlier: earlier.map((t) => ({ question: t.question, selection: t.selection, answer: t.answer, endState: t.endState })),
         question: p.body.question,
       });
       const surface: ToolSurface = reach.kind === "readSearch" ? { readSearch: [reach.wikiSnapshot, ...reach.repos.map((r) => r.dir)] } : { mcpTools: reach.tools };
@@ -476,12 +534,17 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         systemPrompt: renderAgentSystemPrompt(p.wiki, p.rules),
         timeoutMs,
         onProgress: (ev) => {
-          if (ev.type === "text_delta") emit("delta", { text: ev.text });
-          else if (ev.type === "tool_start") emit("tool", { name: ev.name, input: abbreviate(ev.input, 200) });
+          if (ev.type === "text_delta") {
+            streamed += ev.text;
+            emit("delta", { text: ev.text });
+          } else if (ev.type === "tool_start") {
+            streamedTools.push({ name: ev.name, input: abbreviate(ev.input) });
+            emit("tool", { name: ev.name, input: abbreviate(ev.input, 200) });
+          }
         },
       });
-      answer = res.result ?? "";
-      for (const tc of res.toolCalls ?? []) toolCalls.push({ name: tc.name, input: abbreviate(tc.input) });
+      const answer = res.result ?? "";
+      const toolCalls: DiscussToolCall[] = (res.toolCalls ?? []).map((tc) => ({ name: tc.name, input: abbreviate(tc.input) }));
       const proposedEdit = extractProposedEdit(answer);
       const durationMs = Math.round(performance.now() - t0);
       await store.finish(turn.id, { endState: "done", answer, card, toolCalls, proposedEdit, costUsd: res.costUsd ?? null, durationMs });
@@ -492,7 +555,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const endState = /timed out after/i.test(message) ? "timeout" : "error";
       const durationMs = Math.round(performance.now() - t0);
       await store
-        .finish(turn.id, { endState, answer, error: message, card, toolCalls, durationMs })
+        .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools, durationMs })
         .catch((e) => log.error("discuss turn finish failed: {error}", { error: String(e) }));
       log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.relPath, turnId: turn.id, endState, error: message, ms: durationMs });
       emit("app_error", { type: "error", turnId: turn.id, endState, message: endState === "timeout" ? `The turn ran past ${Math.round(timeoutMs / 60000)} minutes and was stopped.` : `The turn failed: ${message}` });
