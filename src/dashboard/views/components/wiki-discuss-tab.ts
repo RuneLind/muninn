@@ -5,7 +5,8 @@
  * `routes/wiki-discuss.ts`). Not a dialog: a pane body like Ask's.
  *
  * The page payload's `reader.discussAgent` (a `.wiki-agent.md` at the wiki
- * root, the route registered, an admin viewer) shows the tab, through
+ * root that the route accepts, the route registered, an admin viewer) shows
+ * the tab, through
  * {@link setDiscussAgentEnabled}, which the handoff module calls per page; a
  * read-only wiki never shows it. A turn starts from P1's panel («Ask here», a
  * passage) or from the tab's own box (the whole page first, then a follow-up

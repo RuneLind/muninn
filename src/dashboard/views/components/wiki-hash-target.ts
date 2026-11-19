@@ -33,7 +33,8 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
 }
 
 /**
- * Every path that reveals an element goes through here (D3): a `#id` in the
+ * Every path that reveals an element goes through here (D3), except the Discuss
+ * chip, which reveals a text range through {@link revealRange}: a `#id` in the
  * URL, a bare id link, a card's chip, a header pill. It dispatches
  * {@link REVEAL_EVENT} on the element first, so a filter or a lens that hid it
  * shows it again, then opens the folds around it, scrolls and flashes.
@@ -83,9 +84,10 @@ function nearestDelta(a: number, b: number, lo: number, hi: number): number {
 /**
  * The element the reveal event goes out from: the passage's own parent, or,
  * for text directly under `root` (`formatWebHtml` writes no `<p>`), the
- * nearest `<br>` or heading before it on that level, which sits in the same
- * section and is never a block a lens hides; failing those, the nearest
- * element before it, then after it. Never `root`: a listener that pins the
+ * nearest `<br>` or heading before it on that level; failing those, the
+ * nearest element before it, then after it. That target can sit in the section
+ * before a top-level Fold the text follows, and the fallback can be a block a
+ * lens hides (a fence): both open follow-ups on the plan page. Never `root`: a listener that pins the
  * section holding the target reads the article as the first section.
  */
 function revealTarget(root: Element, node: Node): Element | null {
@@ -110,7 +112,8 @@ function revealTarget(root: Element, node: Node): Element | null {
  * on both axes, as `scrollIntoView` does for an element: the least move in an
  * inner scroller (a `.query-table-wrap`, a wide table's `.tablewrap`), and in
  * the first scroller around `root` (the article pane) the box a third down, or
- * its top when it is taller. The box is measured again after each move.
+ * centred when it is taller than a third (its top when taller than the pane). A sticky table header is not
+ * allowed for (an open follow-up). The box is measured again after each move.
  */
 function scrollRangeIntoView(root: Element, range: Range): void {
   const scrollers: Element[] = [];
