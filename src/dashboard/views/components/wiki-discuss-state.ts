@@ -234,8 +234,9 @@ export function discussTurnsHtml(d: DiscussionView | null): string {
  *  hidden set is what the selection's own reading leaves out (P1b), so a
  *  passage read through a fact chip still matches. */
 const SKIP = `button, script, style, svg, textarea, input, select, .${PEEK_CLASS}, ${DISCUSS_TEXT_HIDDEN}`;
-/** The block a found passage reveals: the nearest of these around its start. */
-const BLOCK = "li, p, h1, h2, h3, h4, h5, h6, td, th, dt, dd, blockquote, pre, figure, summary, details, .callout, tr";
+/** The smallest block around a found passage, the fallback flash where the
+ *  browser has no highlights. A `<details>` is never it: that is a whole fold. */
+const BLOCK = "li, p, h1, h2, h3, h4, h5, h6, td, th, dt, dd, blockquote, pre, figure, summary, .callout, tr";
 /** How many characters (white space dropped) of each end of the passage are matched. */
 const KEY_CHARS = 48;
 
@@ -243,15 +244,64 @@ function compact(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
+/** A passage found in the article: the text node it starts in, the range over
+ *  exactly its text, and the smallest block holding all of it (null when that
+ *  would be the article or a fold). */
+export interface FoundPassage {
+  node: Text;
+  range: Range;
+  block: Element | null;
+}
+
+/** The context a turn carries about where its passage was selected. */
+export interface PassageContext {
+  before?: string;
+  after?: string;
+}
+
+function commonPrefix(a: string, b: string): number {
+  let n = 0;
+  while (n < a.length && n < b.length && a[n] === b[n]) n++;
+  return n;
+}
+
+function commonSuffix(a: string, b: string): number {
+  let n = 0;
+  while (n < a.length && n < b.length && a[a.length - 1 - n] === b[b.length - 1 - n]) n++;
+  return n;
+}
+
+/** The text the article walk reads from `range` (the reader's controls and
+ *  hidden additions left out), so a passage kept as the reader saw it is
+ *  searched as {@link findPassage} reads the page. */
+export function renderedPassageText(range: Range): string {
+  const root = range.commonAncestorContainer;
+  const parts: string[] = [];
+  const take = (n: Text) => {
+    if (n.parentElement?.closest(SKIP) || !range.intersectsNode(n)) return;
+    const a = n === range.startContainer ? range.startOffset : 0;
+    const b = n === range.endContainer ? range.endOffset : n.data.length;
+    parts.push(n.data.slice(a, b));
+  };
+  if (root.nodeType === 3) take(root as Text);
+  else {
+    const walker = (root.ownerDocument ?? (root as Document)).createTreeWalker(root, 4);
+    for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) take(n);
+  }
+  return parts.join(" ");
+}
+
 /**
- * Find the passage `selection` in `article` as it is rendered now: the text
- * node where it starts and the block around it. White space is ignored (a
- * selection across list items reads with newlines the DOM does not hold), so
- * is text inside the reader's own controls. Both ends must be there, in
- * order, within the passage's length again: an edited passage whose first
- * words survive elsewhere does not count. Null when it is not in the page.
+ * Find the passage `selection` in `article` as it is rendered now. White
+ * space is ignored (a selection across list items reads with newlines the DOM
+ * does not hold), so is text inside the reader's own controls. Both ends must
+ * be there, in order, within the passage's length again: an edited passage
+ * whose first words survive elsewhere does not count. When the text occurs
+ * more than once, `context` (the turn's `before`/`after`) picks the copy whose
+ * surroundings match it longest; a tie, or no context, is the first copy in
+ * page order. Null when it is not in the page.
  */
-export function findPassage(article: Element, selection: string): { node: Text; block: Element | null } | null {
+export function findPassage(article: Element, selection: string, context?: PassageContext | null): FoundPassage | null {
   const want = compact(selection);
   if (!want) return null;
   const head = want.slice(0, KEY_CHARS);
@@ -268,14 +318,43 @@ export function findPassage(article: Element, selection: string): { node: Text; 
     nodes.push({ node: n, at: text.length });
     text += c;
   }
+  const hits: { from: number; to: number }[] = [];
   for (let i = text.indexOf(head); i !== -1; i = text.indexOf(head, i + 1)) {
     const j = text.indexOf(tail, i + Math.max(0, want.length - tail.length));
     if (j === -1 || j - i > want.length * 2 + KEY_CHARS) continue;
-    let k = 0;
-    while (k + 1 < nodes.length && nodes[k + 1]!.at <= i) k++;
-    const node = nodes[k]!.node;
-    const block = node.parentElement?.closest(BLOCK) ?? null;
-    return { node, block: block && article.contains(block) && block !== article ? block : null };
+    hits.push({ from: i, to: j + tail.length });
   }
-  return null;
+  if (hits.length === 0) return null;
+  let hit = hits[0]!;
+  if (hits.length > 1 && context) {
+    const before = compact(context.before ?? "");
+    const after = compact(context.after ?? "");
+    let best = 0;
+    for (const h of hits) {
+      const score = commonSuffix(text.slice(Math.max(0, h.from - before.length), h.from), before) + commonPrefix(text.slice(h.to, h.to + after.length), after);
+      if (score > best) [best, hit] = [score, h];
+    }
+  }
+  // A compact index to the text node and offset of that character.
+  const at = (c: number): { node: Text; offset: number } => {
+    let k = 0;
+    while (k + 1 < nodes.length && nodes[k + 1]!.at <= c) k++;
+    const { node, at: base } = nodes[k]!;
+    let seen = base;
+    for (let o = 0; o < node.data.length; o++) {
+      if (/\s/.test(node.data[o]!)) continue;
+      if (seen === c) return { node, offset: o };
+      seen++;
+    }
+    return { node, offset: node.data.length };
+  };
+  const a = at(hit.from);
+  const b = at(hit.to - 1);
+  const range = doc.createRange();
+  range.setStart(a.node, a.offset);
+  range.setEnd(b.node, b.offset + 1);
+  const common = range.commonAncestorContainer;
+  const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
+  const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
+  return { node: a.node, range, block };
 }

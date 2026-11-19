@@ -15,6 +15,7 @@ import {
   discussTurnsHtml,
   findPassage,
   newTurn,
+  renderedPassageText,
   streamClosed,
   type DiscussionView,
 } from "./wiki-discuss-state.ts";
@@ -192,6 +193,49 @@ describe("findPassage", () => {
     expect(findPassage(a, "The summer route adds a stop at Example Island and runs until August.")).not.toBeNull();
     expect(findPassage(a, "The summer route adds a stop at Example Island and runs until September, every day.")).toBeNull();
     expect(findPassage(a, "")).toBeNull();
+  });
+  test("a passage on the page twice: the copy whose context the turn carries, else the first", () => {
+    const dup = "The ferry leaves at nine on every weekday morning from the north pier.";
+    const a = article(`<h2>First</h2><p id="one">${dup}</p><p>Line 3 says something about berths.</p><h2>Second</h2><p id="two">${dup}</p><p>After the second copy comes a closing note.</p>`);
+    const ctx = (before: string, after: string, heading: string) => ({ selection: dup, before, after, atStart: false, atEnd: false, heading });
+    expect(findPassage(a, dup, ctx("Second", "After the second copy comes a closing note.", "Second"))?.block?.id).toBe("two");
+    expect(findPassage(a, dup, ctx("First", "Line 3 says something about berths.", "First"))?.block?.id).toBe("one");
+    // Only one side of the context tells them apart: it still decides.
+    expect(findPassage(a, dup, ctx("", "After the second copy", ""))?.block?.id).toBe("two");
+    // Context that matches neither copy: the first in page order.
+    expect(findPassage(a, dup, ctx("Nowhere", "Nothing like it", ""))?.block?.id).toBe("one");
+    expect(findPassage(a, dup)?.block?.id).toBe("one");
+  });
+  test("the range is the passage's own text, not its run or its fold", () => {
+    const lines = Array.from({ length: 60 }, (_, k) => `Line ${k} of the long run says something about berth ${k}.`);
+    const paras = Array.from({ length: 44 }, (_, k) => `Paragraph ${k} in the fold talks about crossing ${k}.`);
+    const a = article(`<h2>Long</h2>${lines.join("\n")}<details class="fold"><summary>Fold</summary><div class="fold-body">${paras.join("<br><br>")}</div></details>`);
+    const deep = findPassage(a, lines[50]!);
+    expect(deep!.range.toString()).toBe(lines[50]!);
+    expect(deep!.block).toBeNull();
+    // Deep in a fold's bare text: still only its text, and the fold is no block.
+    const folded = findPassage(a, paras[40]!);
+    expect(folded!.range.toString()).toBe(paras[40]!);
+    expect(folded!.range.startContainer.parentElement!.className).toBe("fold-body");
+    expect(folded!.block).toBeNull();
+    // Across inline markup the range starts and ends on the passage's first and last characters.
+    const b = article("<p>Before. <strong>R2, behind.</strong> The check reads <code>status_date</code> today. After.</p>");
+    expect(findPassage(b, "R2, behind. The check reads status_date today.")!.range.toString()).toBe("R2, behind. The check reads status_date today.");
+  });
+  test("a selection over DecisionLog items shown newest first: found by its rendered text, not its authored one", () => {
+    const a = article('<section class="decision-log"><ul class="dl-list"><li data-dl-order="1"><span class="dl-id">D5</span> The newest decision text moves the list.</li><li data-dl-order="0"><span class="dl-id">D4</span> The older decision text keeps the list.</li></ul></section>');
+    const authored = "- D4 The older decision text keeps the list.\n- D5 The newest decision text moves the list.";
+    expect(findPassage(a, authored)).toBeNull();
+    const items = a.querySelectorAll("li");
+    const r = a.ownerDocument.createRange();
+    r.setStart(items[0]!, 0);
+    r.setEnd(items[1]!, items[1]!.childNodes.length);
+    const rendered = renderedPassageText(r);
+    const f = findPassage(a, rendered);
+    expect(f!.range.toString().replace(/\s+/g, " ")).toBe("D5 The newest decision text moves the list.D4 The older decision text keeps the list.");
+    // The reader's controls in the range are not part of its text.
+    items[0]!.insertAdjacentHTML("beforeend", "<button>mer</button>");
+    expect(renderedPassageText(r)).not.toContain("mer");
   });
   test("both ends present but far apart is not the passage: the page grew text inside it", () => {
     const head = "The summer route adds a stop at Example Island on every weekday morning";

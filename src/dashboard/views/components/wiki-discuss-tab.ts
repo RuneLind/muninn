@@ -15,8 +15,13 @@
  * the stream writes into its record and the tab is painted from it, so a turn
  * keeps streaming while the reader is on another tab or page. The answer goes
  * through `renderStreamingBody`, the Ask tab's markdown function. A passage
- * chip finds its passage in the article as it is now (`findPassage`) and
- * reveals it (`revealElement`); a passage no longer there says so.
+ * chip reveals its passage (`revealRange`: the text itself scrolled into view
+ * and highlighted, nothing added to the DOM). It looks first for the reader's
+ * own selection, kept in memory with the turn ({@link anchors}): the range
+ * while it is still in the article with the same text, then the text it
+ * covered as rendered, which a DecisionLog selection needs (the turn's
+ * `selection` is in authored order, with list markers the page does not show);
+ * last the turn's `selection`. A passage no longer there says so.
  *
  * The controls that call the agent (`#wikiDiscussAskBtn`, `#wikiDiscussInput`,
  * the panel's «Ask here», «Continue in Claude Code») are in the read-only
@@ -26,7 +31,7 @@
 
 import { copyText } from "./copy-path.ts";
 import { makeSseFrameParser } from "./client-runtime.ts";
-import { revealElement } from "./wiki-hash-target.ts";
+import { revealRange } from "./wiki-hash-target.ts";
 import { revealRightPane } from "./wiki-pane-toggle.ts";
 import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import {
@@ -36,6 +41,7 @@ import {
   discussTurnsHtml,
   findPassage,
   newTurn,
+  renderedPassageText,
   streamClosed,
   type DiscussPassage,
   type DiscussTurnView,
@@ -47,8 +53,6 @@ import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB } fr
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
-/** Set on a text node's wrapper when a found passage starts in bare text. */
-const ANCHOR_CLASS = "wiki-discuss-anchor";
 
 export interface DiscussTabDeps {
   /** The served wiki's registry name. */
@@ -64,6 +68,10 @@ let enabled = false;
 /** Every page's discussion this session, by wiki and relPath. */
 const discussions = new Map<string, DiscussionView>();
 let turnSeq = 0;
+/** The reader's selection behind each passage turn, by turn key, for this
+ *  session only (a reload keeps the stored `selection` and its context):
+ *  the range as selected and the text it covered as rendered. */
+const anchors = new Map<string, { range: Range; rendered: string }>();
 /** The page the box's draft was typed on. */
 let draftPage = "";
 let paintQueued = false;
@@ -133,12 +141,12 @@ export function openDiscussTab(focus = false): void {
 /** «Ask here» from P1's panel: one turn about the passage (or the whole page
  *  when `passage` is null), in this page's discussion. False when nothing was
  *  sent (off, read-only, off a page, or a turn of the discussion still running). */
-export function askInDiscuss(question: string, passage: DiscussPassage | null): boolean {
+export function askInDiscuss(question: string, passage: DiscussPassage | null, selected: Range | null = null): boolean {
   if (!enabled || discussSendBlocked()) return false;
   const d = ensureHere();
   if (!d || !question.trim() || discussionLive(d)) return false;
   openDiscussTab();
-  void runTurn(d, question.trim(), passage);
+  void runTurn(d, question.trim(), passage, passage ? selected : null);
   return true;
 }
 
@@ -176,8 +184,12 @@ function schedulePaint(): void {
   else setTimeout(run, 0);
 }
 
-async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null): Promise<void> {
+async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null): Promise<void> {
   const turn = newTurn(`t${++turnSeq}`, question, passage);
+  if (selected) {
+    const range = selected.cloneRange();
+    anchors.set(turn.key, { range, rendered: renderedPassageText(range) });
+  }
   d.turns.push(turn);
   paint();
   const body: Record<string, unknown> = { wiki: d.wiki, relPath: d.relPath, question };
@@ -239,31 +251,32 @@ function turnByKey(key: string): DiscussTurnView | null {
   return here()?.turns.find((t) => t.key === key) ?? null;
 }
 
+const compactText = (s: string) => s.replace(/\s+/g, "");
+
 /** The chip: reveal the passage in the article as it is now, or say it is gone. */
 function revealPassage(key: string): void {
   const t = turnByKey(key);
   if (!t?.passage) return;
   const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
-  const found = article ? findPassage(article, t.passage.selection) : null;
-  t.passageGone = !found;
-  paint();
-  if (!found || !article) return;
-  let el = found.block;
-  if (!el) {
-    // Bare text under the article (the formatter writes no <p>): a wrapper
-    // with no text of its own gives the flash an element.
-    const parent = found.node.parentElement;
-    if (parent && parent !== article && !parent.classList.contains("wiki-article")) el = parent;
-    else if (parent?.classList.contains(ANCHOR_CLASS)) el = parent;
+  let range: Range | null = null;
+  let block: Element | null = null;
+  const kept = anchors.get(key);
+  if (article && kept) {
+    const r = kept.range;
+    // Still the reader's selection: in this article, over the same text.
+    if (article.contains(r.startContainer) && article.contains(r.endContainer) && compactText(renderedPassageText(r)) === compactText(kept.rendered)) range = r;
     else {
-      const span = document.createElement("span");
-      span.className = ANCHOR_CLASS;
-      found.node.replaceWith(span);
-      span.appendChild(found.node);
-      el = span;
+      const f = findPassage(article, kept.rendered, t.passage);
+      if (f) [range, block] = [f.range, f.block];
     }
   }
-  revealElement(article, el);
+  if (article && !range) {
+    const f = findPassage(article, t.passage.selection, t.passage);
+    if (f) [range, block] = [f.range, f.block];
+  }
+  t.passageGone = !range;
+  paint();
+  if (article && range) revealRange(article, range, block);
 }
 
 async function continueInClaudeCode(key: string): Promise<void> {

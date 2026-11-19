@@ -10,9 +10,15 @@
  *     real wiki snapshot) against the fake Messages API, and the SSE stream is
  *     read and rendered by the tab. The fake sends its answer in chunks 700 ms
  *     apart, so the answer is seen in the tab while the turn still runs.
- *  2. **The chip in the real article.** It scrolls the bullet into view and
- *     flashes it; after the page file is edited and the page shown again (the
- *     discussion kept, no reload), the chip says the passage is gone.
+ *  2. **The chip in the real article.** It scrolls the passage's own text
+ *     into view and highlights only that text (a CSS highlight, no element
+ *     added or flashed): a bullet, a line deep in one long run of lines (one
+ *     text node), the second copy of a sentence on the page twice, a paragraph
+ *     deep in a long closed Fold, and a selection over two DecisionLog items
+ *     (shown newest first), also after the article is rendered anew. After the
+ *     page file is edited and the page shown again (the discussion kept, no
+ *     reload), the chip says the passage is gone. "In view" is a layout box
+ *     against `#articleWrap`, which only a browser has.
  *  3. **The follow-up and the hand-over, in the database.** The follow-up box
  *     sends turn 2 of the same discussion; «Continue in Claude Code» copies a
  *     prompt and sets `handed_over_at` on that turn's row only.
@@ -49,6 +55,46 @@ const WIKI = "e2e-discuss";
 const RO_WIKI = "e2e-discuss-ro";
 const REL = "plans/first-screen.mdx";
 const OTHER_REL = "notes/other.md";
+const CHIP_REL = "plans/chip-targets.mdx";
+const DUP = "The ferry leaves at nine on every weekday morning from the north pier.";
+const DEEP = "Line 50 of the long run says something different about berth number 50.";
+const FOLDED = "Paragraph 40 in the fold talks about crossing number 40 and its tides.";
+const CHIP_PAGE = [
+  "---",
+  "title: Chip targets",
+  "---",
+  "",
+  "# Chip targets",
+  "",
+  "## Decisions",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **D4** — The older decision keeps the berth list in this page.",
+  "- **D5** — The newest decision moves the berth list to a page of its own.",
+  "",
+  "</DecisionLog>",
+  "",
+  "## First",
+  "",
+  DUP,
+  "",
+  "## Long",
+  "",
+  ...Array.from({ length: 60 }, (_, k) => `Line ${k} of the long run says something different about berth number ${k}.`),
+  "",
+  "## Second",
+  "",
+  DUP,
+  "",
+  "After the second copy comes a closing note about the summer timetable.",
+  "",
+  '<Fold title="Forty paragraphs">',
+  "",
+  ...Array.from({ length: 44 }, (_, k) => `Paragraph ${k} in the fold talks about crossing number ${k} and its tides.\n`),
+  "</Fold>",
+  "",
+].join("\n");
 const BULLET = "R2, behind. The check compares the frontmatter status_date with the date on the Brief's Status line.";
 const PAGE = [
   "---",
@@ -113,6 +159,7 @@ test.beforeAll(async () => {
     await mkdir(path.join(r, "plans"), { recursive: true });
     await mkdir(path.join(r, "notes"), { recursive: true });
     await writeFile(path.join(r, REL), PAGE, "utf8");
+    await writeFile(path.join(r, CHIP_REL), CHIP_PAGE, "utf8");
     await writeFile(path.join(r, OTHER_REL), "---\ntitle: Other\n---\n\n# Other\n\nNothing here.\n", "utf8");
     await writeFile(path.join(r, ".wiki-agent.md"), "# Rules\n\nAnswer the marked passage first, and name the files you read.\n", "utf8");
     gitInit(r);
@@ -182,7 +229,7 @@ test.afterAll(async () => {
 
 async function openPage(page: Page, wiki: string, rel = REL): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
-  await expect(page.locator("#articleWrap .wiki-article")).toContainText(rel === REL ? "The night route is unchanged." : "Nothing here.");
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(rel === REL ? "The night route is unchanged." : rel === CHIP_REL ? "Paragraph 43 in the fold" : "Nothing here.");
 }
 
 /** Select the bullet's text in the article, as P1's spec does. */
@@ -207,6 +254,79 @@ function bulletInView(page: Page): Promise<boolean> {
     return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
   });
 }
+
+/** Select the `nth` copy of `text` in the article (inside one text node). */
+async function selectText(page: Page, text: string, nth = 0): Promise<void> {
+  await page.evaluate(
+    ([text, nth]) => {
+      const article = document.querySelector("#articleWrap .wiki-article")!;
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      let k = 0;
+      for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+        for (let at = n.data.indexOf(text as string); at !== -1; at = n.data.indexOf(text as string, at + 1)) {
+          if (k++ !== nth) continue;
+          const r = document.createRange();
+          r.setStart(n, at);
+          r.setEnd(n, at + (text as string).length);
+          getSelection()!.removeAllRanges();
+          getSelection()!.addRange(r);
+          return;
+        }
+      }
+      throw new Error(`no copy ${nth} of ${text}`);
+    },
+    [text, nth] as const,
+  );
+}
+
+/** «Ask here» on the live selection; resolves when turn `seq` is done. */
+async function askHere(page: Page, question: string, seq: number): Promise<void> {
+  await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+  const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+  await expect(panel).toBeVisible();
+  await panel.locator("textarea.wiki-handoff-q").fill(question);
+  await panel.locator("[data-handoff=ask-here]").click();
+  await expect(panel).toBeHidden();
+  await expect(page.locator(`.wiki-discuss-turn[data-turn-seq="${seq}"]`)).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+}
+
+/**
+ * What the chip revealed: the text it flashed (a highlighted range or an
+ * element with the flash class), whether that holds the `nth` copy of `text`,
+ * whether the `nth` copy's own box is inside `#articleWrap`, whether any
+ * `<details>` carries the flash, and whether a wrapper was left in the article.
+ */
+function revealed(page: Page, text: string, nth = 0) {
+  return page.evaluate(
+    ([text, nth]) => {
+      const article = document.querySelector("#articleWrap .wiki-article")!;
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      let copy: Range | null = null;
+      let k = 0;
+      for (let n = walker.nextNode() as Text | null; n && !copy; n = walker.nextNode() as Text | null) {
+        for (let at = n.data.indexOf(text as string); at !== -1; at = n.data.indexOf(text as string, at + 1)) {
+          if (k++ !== nth) continue;
+          copy = document.createRange();
+          copy.setStart(n, at);
+          copy.setEnd(n, at + (text as string).length);
+          break;
+        }
+      }
+      const wrap = document.getElementById("articleWrap")!.getBoundingClientRect();
+      const box = copy?.getBoundingClientRect();
+      const inView = !!box && box.height > 0 && box.top >= wrap.top - 1 && box.bottom <= wrap.bottom + 1;
+      const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-range-flash");
+      const range = hl && hl.size ? [...hl][0]! : null;
+      const el = article.querySelector(".wiki-hash-flash");
+      const flashed = range ? range.toString() : (el?.textContent ?? "");
+      const holdsCopy = !!copy && (range ? range.intersectsNode(copy.startContainer) && range.toString().includes(text as string) : !!el?.contains(copy.startContainer));
+      return { inView, flashed, holdsCopy, detailsFlashed: !!article.querySelector("details.wiki-hash-flash"), anchors: article.querySelectorAll(".wiki-discuss-anchor").length };
+    },
+    [text, nth] as const,
+  );
+}
+
+const flat = (s: string) => s.replace(/\s+/g, "");
 
 test.describe("Wiki reader: the Discuss tab", () => {
   test("select, ask here, the answer streams in the tab, the chip scrolls; a follow-up; Continue in Claude Code; a passage gone", async ({ page, context }) => {
@@ -244,7 +364,6 @@ test.describe("Wiki reader: the Discuss tab", () => {
     const turn1 = page.locator('.wiki-discuss-turn[data-turn-seq="1"]');
     await expect(page.locator('.wiki-discuss-turn[data-turn-state="running"] .wiki-discuss-answer')).toContainText("R2 reads the frontmatter", { timeout: 90_000 });
     const midStream = await turn1.locator(".wiki-discuss-answer").innerText();
-    console.log("MID-STREAM", JSON.stringify(midStream));
     expect(midStream).not.toContain("status-date-check.ts");
     await expect(turn1).toHaveAttribute("data-turn-state", "done", { timeout: 60_000 });
     const answer = turn1.locator(".wiki-discuss-answer");
@@ -260,7 +379,12 @@ test.describe("Wiki reader: the Discuss tab", () => {
     expect(await bulletInView(page)).toBe(false);
     await turn1.locator("[data-discuss-chip]").click();
     await expect.poll(() => bulletInView(page)).toBe(true);
-    await expect(page.locator(".wiki-article li.wiki-hash-flash")).toContainText("R2, behind.");
+    // Only the bullet's text is highlighted; no element is wrapped or flashed.
+    const lit = await page.evaluate(() => {
+      const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-range-flash");
+      return hl && hl.size ? [...hl][0]!.toString() : "";
+    });
+    expect(lit.replace(/\s+/g, " ").trim()).toBe(BULLET);
 
     // A follow-up from the tab's box: turn 2 of the same discussion.
     await page.locator("#wikiDiscussInput").fill("And where is that date read?");
@@ -279,7 +403,6 @@ test.describe("Wiki reader: the Discuss tab", () => {
       SELECT seq, discussion_id, end_state, selection, location, handed_over_at
       FROM wiki_discuss_turns WHERE wiki = ${WIKI} AND rel_path = ${REL} ORDER BY created_at DESC LIMIT 2`;
     const [r2, r1] = rows as unknown as { seq: number; discussion_id: string; end_state: string; selection: string | null; location: { found: string } | null; handed_over_at: Date | null }[];
-    console.log("DISCUSS-ROWS", JSON.stringify(rows));
     expect(r1!.seq).toBe(1);
     expect(r2!.seq).toBe(2);
     expect(r2!.discussion_id).toBe(r1!.discussion_id);
@@ -299,6 +422,84 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await page.locator('[data-conntab="discuss"]').click();
     await turn1.locator("[data-discuss-chip]").click();
     await expect(turn1.locator(".wiki-discuss-gone")).toHaveText("That passage is no longer in the page.");
+  });
+
+  test("the chip reveals the passage itself: deep in a long run, the copy selected, in a long closed Fold, across DecisionLog items", async ({ page }) => {
+    test.setTimeout(240_000);
+    await openPage(page, WIKI, CHIP_REL);
+    // 1. Deep in one long run of lines (one text node: the formatter writes no <p>).
+    await selectText(page, DEEP);
+    await askHere(page, "What does line 50 say?", 1);
+    // 2. The second copy of a sentence that is on the page twice.
+    await selectText(page, DUP, 1);
+    await askHere(page, "Why is this sentence here twice?", 2);
+    // 3. Paragraph 40 of a long Fold, which is closed again before the chip.
+    await page.evaluate(() => {
+      document.querySelector<HTMLDetailsElement>(".wiki-article details.fold")!.open = true;
+    });
+    await selectText(page, FOLDED);
+    await askHere(page, "What about crossing 40?", 3);
+    // 4. Both DecisionLog items, as the reader shows them (newest first).
+    await page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll(".wiki-article section.decision-log li"));
+      const r = document.createRange();
+      r.setStart(items[0]!, 0);
+      r.setEnd(items[items.length - 1]!, items[items.length - 1]!.childNodes.length);
+      getSelection()!.removeAllRanges();
+      getSelection()!.addRange(r);
+    });
+    await askHere(page, "Which decision holds?", 4);
+
+    const chip = (seq: number) => page.locator(`.wiki-discuss-turn[data-turn-seq="${seq}"] [data-discuss-chip]`);
+    const toTop = () =>
+      page.evaluate(() => {
+        document.getElementById("articleWrap")!.scrollTop = 0;
+        for (const d of Array.from(document.querySelectorAll<HTMLDetailsElement>(".wiki-article details.fold"))) d.open = false;
+      });
+
+    await toTop();
+    expect((await revealed(page, DEEP)).inView).toBe(false);
+    await chip(1).click();
+    const deep = await revealed(page, DEEP);
+    expect.soft(deep.inView, "line 50 in view").toBe(true);
+    expect.soft(flat(deep.flashed), "only line 50 flashed").toBe(flat(DEEP));
+    expect.soft(deep.anchors, "no wrapper left in the article").toBe(0);
+
+    await toTop();
+    await chip(2).click();
+    const dup = await revealed(page, DUP, 1);
+    expect.soft(dup.holdsCopy, "the second copy revealed").toBe(true);
+    expect.soft(dup.inView, "the second copy in view").toBe(true);
+    expect.soft(flat(dup.flashed), "only the sentence flashed").toBe(flat(DUP));
+
+    await toTop();
+    await chip(3).click();
+    const folded = await revealed(page, FOLDED);
+    expect.soft(folded.inView, "paragraph 40 in view").toBe(true);
+    expect.soft(folded.detailsFlashed, "the fold is not flashed").toBe(false);
+    expect.soft(flat(folded.flashed), "only paragraph 40 flashed").toBe(flat(FOLDED));
+    expect.soft(await page.locator(".wiki-article details.fold").evaluate((d) => (d as HTMLDetailsElement).open)).toBe(true);
+
+    await toTop();
+    await chip(4).click();
+    await expect.soft(page.locator('.wiki-discuss-turn[data-turn-seq="4"] .wiki-discuss-gone'), "the DecisionLog passage is found").toHaveCount(0);
+    const dl = await revealed(page, "The newest decision moves");
+    expect.soft(dl.flashed, "both items revealed").toContain("The older decision keeps");
+    expect.soft(dl.flashed).toContain("The newest decision moves");
+
+    // Shown again (the article rendered anew, the discussion kept): the
+    // DecisionLog passage is still found, the duplicate still the second copy.
+    await page.locator(`#wikiList [data-relpath="${OTHER_REL}"]`).first().click();
+    await expect(page.locator("#articleWrap .wiki-article")).toContainText("Nothing here.");
+    await page.goBack();
+    await expect(page.locator("#articleWrap .wiki-article")).toContainText("Paragraph 43 in the fold");
+    await page.locator('[data-conntab="discuss"]').click();
+    await toTop();
+    await chip(4).click();
+    await expect.soft(page.locator('.wiki-discuss-turn[data-turn-seq="4"] .wiki-discuss-gone'), "found after a new render").toHaveCount(0);
+    await toTop();
+    await chip(2).click();
+    expect.soft((await revealed(page, DUP, 1)).holdsCopy, "the second copy after a new render").toBe(true);
   });
 
   test("a read-only wiki: no tab, and no control path sends a turn", async ({ page }) => {

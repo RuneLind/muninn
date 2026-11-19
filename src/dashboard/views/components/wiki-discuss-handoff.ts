@@ -296,7 +296,7 @@ function askHere(): void {
   }
   const p = now.passage;
   const passage = p ? { selection: p.selection, before: p.before, after: p.after, atStart: p.atStart, atEnd: p.atEnd, heading: p.heading, ...(p.edge ? { edge: p.edge } : {}) } : null;
-  if (!askInDiscuss(question, passage)) {
+  if (!askInDiscuss(question, passage, p?.range ?? null)) {
     status.textContent = "This page's discussion has a turn still running: ask when it has ended.";
     return;
   }

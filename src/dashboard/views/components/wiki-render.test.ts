@@ -189,7 +189,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // skipped): 889,003 (302,696 gzipped), so the pin moves to 889,200.
 // 2026-11-19, Discuss P3's tab (wiki-discuss-tab.ts, wiki-discuss-state.ts, «Ask here» in the panel):
 // 901,059 (306,466 gzipped), so the pin moves to 901,200.
-const WIKI_CLIENT_MAX_BYTES = 901_200;
+// Its fix round 1 batch 2 (the chip reveals the passage's own range, the copy the reader selected,
+// a DecisionLog selection by its rendered text): 903,750 (307,511 gzipped), so the pin moves to 903,900.
+const WIKI_CLIENT_MAX_BYTES = 903_900;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

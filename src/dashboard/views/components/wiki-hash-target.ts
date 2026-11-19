@@ -58,3 +58,68 @@ export function revealElement(root: Element, el: Element): void {
   };
   el.addEventListener("animationend", end);
 }
+
+/** The CSS highlight a revealed range is painted with (`::highlight(…)`). */
+export const RANGE_FLASH_HIGHLIGHT = "wiki-range-flash";
+/** How long the highlight stays, the element flash's length. */
+const RANGE_FLASH_MS = 2000;
+let rangeFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** The nearest ancestor of `el` that scrolls, else the document's scroller. */
+function scrollerOf(el: Element): Element | null {
+  for (let p: Element | null = el.parentElement; p; p = p.parentElement) {
+    const y = getComputedStyle(p).overflowY;
+    if ((y === "auto" || y === "scroll") && p.scrollHeight > p.clientHeight) return p;
+  }
+  return document.scrollingElement;
+}
+
+/**
+ * Reveal a stretch of text, not an element: the same reveal event and fold
+ * opening as {@link revealElement}, then the range's own box is scrolled into
+ * its scroller (a third down, or its top when it is taller) and the range alone
+ * is highlighted for a moment through the CSS Custom Highlight API, which
+ * changes nothing in the DOM. Without that API, `fallback` (the smallest block
+ * holding the range, when there is one) gets the element flash instead.
+ */
+export function revealRange(root: Element, range: Range, fallback: Element | null = null): void {
+  const start = range.startContainer.nodeType === 1 ? (range.startContainer as Element) : range.startContainer.parentElement;
+  if (!start) return;
+  start.dispatchEvent(new CustomEvent(REVEAL_EVENT, { bubbles: true }));
+  for (const n of [range.startContainer, range.endContainer]) {
+    for (let p: Element | null = n.nodeType === 1 ? (n as Element) : n.parentElement; p && p !== root; p = p.parentElement) {
+      if (p instanceof HTMLDetailsElement) p.open = true;
+    }
+  }
+  const box = range.getBoundingClientRect();
+  const sc = scrollerOf(start);
+  if (sc) {
+    const doc = sc === document.scrollingElement;
+    const top = doc ? 0 : sc.getBoundingClientRect().top;
+    const height = doc ? window.innerHeight : sc.clientHeight;
+    const offset = Math.max(0, Math.min((height - box.height) / 2, height / 3));
+    sc.scrollTop += box.top - top - offset;
+  }
+  // Map-like in the browser; the dom lib types it without the Map methods.
+  const highlights = (globalThis as unknown as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+  const Highlight = (globalThis as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+  if (highlights && Highlight) {
+    const h = new Highlight(range.cloneRange());
+    highlights.set(RANGE_FLASH_HIGHLIGHT, h);
+    if (rangeFlashTimer !== null) clearTimeout(rangeFlashTimer);
+    rangeFlashTimer = setTimeout(() => {
+      rangeFlashTimer = null;
+      if (highlights.get(RANGE_FLASH_HIGHLIGHT) === h) highlights.delete(RANGE_FLASH_HIGHLIGHT);
+    }, RANGE_FLASH_MS);
+  } else if (fallback) {
+    fallback.classList.remove(HASH_FLASH_CLASS);
+    void (fallback as HTMLElement).offsetWidth;
+    fallback.classList.add(HASH_FLASH_CLASS);
+    const end = (e: Event) => {
+      if (e.target !== fallback) return;
+      fallback.classList.remove(HASH_FLASH_CLASS);
+      fallback.removeEventListener("animationend", end);
+    };
+    fallback.addEventListener("animationend", end);
+  }
+}
