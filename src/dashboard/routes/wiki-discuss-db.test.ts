@@ -38,6 +38,9 @@ beforeAll(async () => {
   const wiki = path.join(dir, "harbour");
   await Bun.write(path.join(wiki, WIKI_AGENT_RULES_FILE), "# Rules\n\nAnswer briefly.\n");
   await Bun.write(path.join(wiki, "notes", "harbour.md"), "---\ntitle: Harbour note\n---\n\n# Harbour note\n\nThe harbour opens at six.\n");
+  // A git work tree: the read-and-search preflight (`wikiSnapshotHolds`) refuses a wiki that is not one.
+  const init = Bun.spawnSync(["git", "init", "-q"], { cwd: wiki, stdout: "pipe", stderr: "pipe" });
+  if (init.exitCode !== 0) throw new Error(`git init: ${init.stderr.toString()}`);
   __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra" }]);
 });
 
@@ -93,7 +96,10 @@ test("a live turn whose snapshots outlast the stale bound still blocks its discu
     wikiSnapshot: async (d) => {
       snapshotting();
       await held;
-      return { kind: "wiki", dir: path.join(dir, "snap"), key: "k", source: d };
+      // The turn reads the page from the snapshot's copy and checks its hash.
+      const snap = path.join(dir, "snap");
+      await Bun.write(path.join(snap, "notes", "harbour.md"), Bun.file(path.join(d, "notes", "harbour.md")));
+      return { kind: "wiki", dir: snap, key: "k", source: d };
     },
     oneShot: async () => ({ result: "At six.", costUsd: 0, toolCalls: [] }) as never,
     surfaceBlocker: async () => null,
