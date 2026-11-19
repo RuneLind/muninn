@@ -22,7 +22,7 @@ import {
 } from "./wiki-discuss-state.ts";
 import * as discussState from "./wiki-discuss-state.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { discussContext } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
 
@@ -461,5 +461,131 @@ describe("the streaming turn's chip across repaints (fix round 2 batch 2)", () =
     expect(list.querySelector('[data-turn-key="t1"]')!.outerHTML).toBe(discussTurnHtml(t));
     expect(list.querySelector('[data-discuss-chip="t1"]') === chip).toBe(true);
     expect(list.querySelector(".wiki-discuss-status")).toBeNull();
+  });
+});
+
+describe("which copy of a repeated passage the chip finds (class check, fix round 3)", () => {
+  // Every case: the turn's before/after are what `discussContext` read around
+  // the copy the reader selected, and `findPassage` must find that copy.
+  const dup = "The ferry leaves at nine on every weekday morning from the north pier.";
+  const longText = (lead: string) => `${lead} ${Array.from({ length: 8 }, (_, k) => `word${k} of a long paragraph that runs well past the context bound`).join(", ")}.`;
+  const contextOf = (a: Element, sel: string) => {
+    const r = a.ownerDocument.createRange();
+    r.selectNodeContents(a.querySelector(sel)!);
+    const c = discussContext(a, r)!;
+    return { before: c.before, after: c.after };
+  };
+  /** `n` copies, each between a lead and a note that name it. */
+  const copies = (n: number) => Array.from({ length: n }, (_, k) => `<p>Lead ${k} before copy ${k}.</p><p id="c${k}">${dup}</p><p>Note ${k} after copy ${k}.</p>`).join("");
+  /** Counts how many times the context reading's skip test runs: once per element per reading. */
+  const countReadings = <T>(a: Element, run: () => T): { value: T; calls: number; elements: number } => {
+    const proto = (a.ownerDocument.defaultView as unknown as { Element: { prototype: Element } }).Element.prototype;
+    const orig = proto.matches;
+    let calls = 0;
+    proto.matches = function (this: Element, s: string) {
+      if (s === DISCUSS_TEXT_SKIP) calls++;
+      return orig.call(this, s);
+    };
+    try {
+      return { value: run(), calls, elements: a.querySelectorAll("*").length };
+    } finally {
+      proto.matches = orig;
+    }
+  };
+
+  test("one copy: found, and no context reading is built", () => {
+    const a = article(copies(1));
+    const ctx = contextOf(a, "#c0");
+    const { value, calls } = countReadings(a, () => findPassage(a, dup, ctx));
+    expect(value?.block?.id).toBe("c0");
+    expect(calls).toBe(0);
+  });
+  for (const n of [2, 5, 500]) {
+    for (const k of [...new Set([0, Math.floor(n / 2), n - 1])]) {
+      test(`${n} copies: copy ${k} selected is the one found`, () => {
+        const a = article(copies(n));
+        expect(findPassage(a, dup, contextOf(a, `#c${k}`))?.block?.id).toBe(`c${k}`);
+      });
+    }
+  }
+  test("a heading next to the selected copy", () => {
+    const a = article(`<h2>Pier</h2><p id="c0">${dup}</p><p>${longText("Shared")}</p><h2>Quay</h2><p id="c1">${dup}</p><p>${longText("Shared")}</p>`);
+    expect(findPassage(a, dup, contextOf(a, "#c1"))?.block?.id).toBe("c1");
+    expect(findPassage(a, dup, contextOf(a, "#c0"))?.block?.id).toBe("c0");
+  });
+  test("copies at the very start and the very end of the article", () => {
+    const a = article(`<p id="c0">${dup}</p><p>Middle text between the two copies.</p><p id="c1">${dup}</p>`);
+    expect(findPassage(a, dup, contextOf(a, "#c0"))?.block?.id).toBe("c0");
+    expect(findPassage(a, dup, contextOf(a, "#c1"))?.block?.id).toBe("c1");
+  });
+  test("labels only the reader shows, right next to a copy at the article's edge", () => {
+    const a = article(`<figure><figcaption>A map.</figcaption></figure><p id="c0">${dup}</p><p>${longText("Middle")}</p><p id="c1">${dup}</p><div class="code-tab-standalone"><div class="code-tab-label">shell</div></div>`);
+    expect(findPassage(a, dup, contextOf(a, "#c0"))?.block?.id).toBe("c0");
+    expect(findPassage(a, dup, contextOf(a, "#c1"))?.block?.id).toBe("c1");
+  });
+  test("a copy that ends in a reader-only label (a figcaption), told apart only by what follows", () => {
+    const lead = longText("Same lead");
+    const fig = (k: number) => `<p>${lead}</p><figure><p id="c${k}">${dup}</p><figcaption>A map.</figcaption></figure><p>Note ${k} after the map.</p>`;
+    const a = article(fig(0) + fig(1));
+    const r = a.ownerDocument.createRange();
+    r.setStart(a.querySelector("#c1")!.firstChild!, 0);
+    const cap = a.querySelectorAll("figcaption")[1]!.firstChild as Text;
+    r.setEnd(cap, cap.data.length);
+    const c = discussContext(a, r)!;
+    const f = findPassage(a, `${dup} A map.`, { before: c.before, after: c.after });
+    expect((f?.range.startContainer as Text).parentElement?.id).toBe("c1");
+  });
+  test("only `before` tells the copies apart (identical text after each)", () => {
+    const tail = longText("Same tail");
+    const a = article(`<p>Pier lead.</p><p id="c0">${dup}</p><p>${tail}</p><p>Quay lead.</p><p id="c1">${dup}</p><p>${tail}</p>`);
+    const ctx = contextOf(a, "#c1");
+    expect(findPassage(a, dup, ctx)?.block?.id).toBe("c1");
+    expect(findPassage(a, dup, { before: ctx.before })?.block?.id).toBe("c1");
+    expect(findPassage(a, dup, { before: contextOf(a, "#c0").before })?.block?.id).toBe("c0");
+  });
+  test("only `after` tells the copies apart (identical text before each)", () => {
+    const lead = longText("Same lead");
+    const a = article(`<p>${lead}</p><p id="c0">${dup}</p><p>Pier note.</p><p>${lead}</p><p id="c1">${dup}</p><p>Quay note.</p>`);
+    const ctx = contextOf(a, "#c1");
+    expect(findPassage(a, dup, ctx)?.block?.id).toBe("c1");
+    expect(findPassage(a, dup, { after: ctx.after })?.block?.id).toBe("c1");
+    expect(findPassage(a, dup, { after: contextOf(a, "#c0").after })?.block?.id).toBe("c0");
+  });
+  test("no context, empty context or a tie: the first copy", () => {
+    const lead = longText("Same lead");
+    const tail = longText("Same tail");
+    const a = article(`<p>${lead}</p><p id="c0">${dup}</p><p>${tail}</p><p>${lead}</p><p id="c1">${dup}</p><p>${tail}</p><p>${lead}</p><p id="c2">${dup}</p><p>${tail}</p>`);
+    expect(findPassage(a, dup)?.block?.id).toBe("c0");
+    expect(findPassage(a, dup, null)?.block?.id).toBe("c0");
+    expect(findPassage(a, dup, {})?.block?.id).toBe("c0");
+    expect(findPassage(a, dup, { before: "", after: "" })?.block?.id).toBe("c0");
+    // The middle copy selected: its surroundings read the same as the others'.
+    expect(findPassage(a, dup, contextOf(a, "#c1"))?.block?.id).toBe("c0");
+  });
+  test("`before`/`after` longer than the page text", () => {
+    const a = article(`<p>Pier.</p><p id="c0">${dup}</p><p>Quay.</p><p id="c1">${dup}</p><p>End.</p>`);
+    const pad = "x".repeat(5000);
+    const c1 = contextOf(a, "#c1");
+    expect(findPassage(a, dup, { before: pad + c1.before, after: c1.after + pad })?.block?.id).toBe("c1");
+    const c0 = contextOf(a, "#c0");
+    expect(findPassage(a, dup, { before: pad + c0.before, after: c0.after + pad })?.block?.id).toBe("c0");
+  });
+  test("cost: 600 copies, the article's context reading is built once", () => {
+    const paras = Array.from({ length: 600 }, (_, k) => `<p id="p${k}">Paragraph ${k} takes the route past berth ${k}.</p>`).join("");
+    const a = article(`<h2>Routes</h2>${paras}`);
+    const r = a.ownerDocument.createRange();
+    const t = a.querySelector("#p300")!.firstChild as Text;
+    const from = t.data.indexOf("the route");
+    r.setStart(t, from);
+    r.setEnd(t, from + "the route".length);
+    const c = discussContext(a, r)!;
+    const t0 = performance.now();
+    const { value, calls, elements } = countReadings(a, () => findPassage(a, "the route", { before: c.before, after: c.after }));
+    const ms = performance.now() - t0;
+    expect(value?.block?.id).toBe("p300");
+    expect(value?.range.toString()).toBe("the route");
+    // One reading: the skip test runs at most once per element.
+    expect(calls).toBeLessThanOrEqual(elements);
+    expect(ms).toBeLessThan(1000);
   });
 });

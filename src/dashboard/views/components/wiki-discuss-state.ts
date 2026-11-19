@@ -12,7 +12,8 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { DISCUSS_TEXT_HIDDEN, discussContext } from "./wiki-discuss-text.ts";
+import { HANDOFF_CONTEXT_MAX } from "../../../wiki/discuss-bounds.ts";
+import { DISCUSS_TEXT_HIDDEN, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /** How a turn stands in the tab. `sending` until the route's `turn` event;
@@ -438,11 +439,18 @@ export function findPassage(article: Element, selection: string, context?: Passa
     hits.push({ from: i, to: j + tail.length });
   }
   if (hits.length === 0) return null;
-  // A compact index to the text node and offset of that character.
+  // A compact index to the text node and offset of that character. The node
+  // is found by binary search: this runs twice per copy, and a page can hold
+  // a short passage hundreds of times.
   const at = (c: number): { node: Text; offset: number } => {
-    let k = 0;
-    while (k + 1 < nodes.length && nodes[k + 1]!.at <= c) k++;
-    const { node, at: base } = nodes[k]!;
+    let lo = 0;
+    let hi = nodes.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (nodes[mid]!.at <= c) lo = mid;
+      else hi = mid - 1;
+    }
+    const { node, at: base } = nodes[lo]!;
     let seen = base;
     for (let o = 0; o < node.data.length; o++) {
       if (/\s/.test(node.data[o]!)) continue;
@@ -460,22 +468,32 @@ export function findPassage(article: Element, selection: string, context?: Passa
     return r;
   };
   let hit = hits[0]!;
-  let range = rangeOf(hit);
-  if (hits.length > 1 && context) {
+  const before = compact(context?.before ?? "");
+  const after = compact(context?.after ?? "");
+  if (hits.length > 1 && (before || after)) {
     // Each copy's surroundings are read as the turn's `before`/`after` were
-    // (`discussContext`, which leaves out every reader-only element), not as
-    // the match above reads the page: a Fold's «Details» label or a caption
-    // next to the selected copy must not cost it the match.
-    const before = compact(context.before ?? "");
-    const after = compact(context.after ?? "");
+    // (the context reading, which leaves out every reader-only element), not
+    // as the match above reads the page: a Fold's «Details» label or a caption
+    // next to the selected copy must not cost it the match. The article is
+    // read once, and each copy's surroundings are slices of that reading, at
+    // most `HANDOFF_CONTEXT_MAX` characters a side, as `before`/`after` are.
+    const reading = discussReading(article);
     let best = 0;
     for (const h of hits) {
-      const r = h === hit ? range : rangeOf(h);
-      const around = discussContext(article, r);
-      const score = around ? commonSuffix(compact(around.before), before) + commonPrefix(compact(around.after), after) : 0;
-      if (score > best) [best, hit, range] = [score, h, r];
+      const a = at(h.from);
+      const b = at(h.to - 1);
+      const s = reading.at(a.node, a.offset);
+      const e = reading.at(b.node, b.offset + 1);
+      if (s === null || e === null) continue;
+      const around = {
+        before: compact(reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s)),
+        after: compact(reading.text.slice(e, e + HANDOFF_CONTEXT_MAX)),
+      };
+      const score = commonSuffix(around.before, before) + commonPrefix(around.after, after);
+      if (score > best) [best, hit] = [score, h];
     }
   }
+  const range = rangeOf(hit);
   const common = range.commonAncestorContainer;
   const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;

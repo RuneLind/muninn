@@ -202,7 +202,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // a streaming turn patched part by part): 907,204 (308,700 gzipped), so the pin moves to 907,400.
 // Its fix round 2 batch 3 (following resumes after a press that began at the bottom; a press ended by a
 // context menu or a blur): 907,528 (308,790 gzipped), so the pin moves to 907,700.
-const WIKI_CLIENT_MAX_BYTES = 907_700;
+// Its fix round 3 (the copies scored on one reading of the article, sliced per copy): 908,038
+// (308,995 gzipped), so the pin moves to 908,200.
+const WIKI_CLIENT_MAX_BYTES = 908_200;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
