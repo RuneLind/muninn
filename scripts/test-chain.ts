@@ -118,6 +118,7 @@ export const PINNED: readonly PinnedLink[] = [
 /** Test files no chain link runs. */
 export const EXCLUDED: readonly { file: string; reason: string }[] = [
   { file: "src/chat/integration.test.ts", reason: "sends real messages through a bot on 3010 (`test:integration`)" },
+  { file: "scripts/wiki-export-html.browser.test.ts", reason: "launches headless Chromium through Playwright; run it by hand" },
 ];
 
 /**
