@@ -150,7 +150,7 @@ describe("renderWikiHtml", () => {
   test("a bare [!note] with no title falls back to the type name; ordinary blockquotes untouched", () => {
     const html = renderWikiHtml("> [!note]\n> Just a note body.", resolve);
     expect(html).toContain('class="callout callout-info"');
-    expect(html).toContain('<strong class="callout-title">Note</strong>');
+    expect(html).toContain('<strong class="callout-title callout-title-default">Note</strong>');
 
     const plain = renderWikiHtml("> Just a regular quote.", resolve);
     expect(plain).toContain("<blockquote>Just a regular quote.</blockquote>");

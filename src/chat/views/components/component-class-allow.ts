@@ -28,7 +28,7 @@ import { HIGHLIGHT_TOKEN_CLASSES } from "../../../format/highlight.ts";
 export const COMPONENT_CLASS_ALLOW = new Set([
   "callout", "callout-info", "callout-warn", "callout-good", "callout-bad",
   "callout-title", "callout-body",
-  "verdict", "verdict-yes", "verdict-no",
+  "verdict", "verdict-yes", "verdict-no", "verdict-default",
   "pill", "pill-rec", "pill-warn",
   "figure", "figure-body", "caption", "fileref", "tablewrap",
   // `<Embed>` — the fallback line only; the iframe exists in the wiki reader alone.
@@ -67,13 +67,13 @@ export const COMPONENT_CLASS_ALLOW = new Set([
   // the one that carries behaviour rather than looks: it is the ONLY thing
   // hiding the section heading a fold's title repeats, so a stripped class
   // renders the same words twice in chat and once in the reader.
-  "fold", "fold-body", "fold-heading-dup", "fold-summary",
+  "fold", "fold-body", "fold-heading-dup", "fold-summary", "fold-label-default",
   // `<Callout resolved>` and `<Historic>`: wiki-authoring blocks, outside the
   // model vocabulary, but chat renders any markdown that reaches it (a pasted
   // page, a `/research` answer quoting one), and a stripped class drops the
   // dimming or leaves the resolved row unstyled.
   "callout-resolved", "callout-resolved-row", "callout-resolved-mark",
-  "callout-resolved-date", "callout-resolved-title",
+  "callout-resolved-date", "callout-resolved-sep", "callout-resolved-title",
   "historic", "historic-stamp", "historic-mark", "historic-since", "historic-note",
   "historic-body",
   // `<NextMoves>` / `<Lane>`: same reason. Chat renders the lane grid (without

@@ -109,13 +109,14 @@ export function findRefs(text: string, ids: ReadonlySet<string>, titles: Readonl
   return out;
 }
 
-/** A fold's title: its summary's own text, without the teaser span. */
+/** A fold's title: its summary's own text, without the teaser span; an
+ *  untitled fold's «Details» label counts, as it did before it had a span. */
 function foldTitle(fold: Element): string {
   const summary = fold.querySelector(":scope > summary");
   if (!summary) return "";
   let t = "";
   summary.childNodes.forEach((n) => {
-    if (n.nodeType === 3) t += n.textContent ?? "";
+    if (n.nodeType === 3 || (n as Element).classList?.contains("fold-label-default")) t += n.textContent ?? "";
   });
   return t.trim();
 }

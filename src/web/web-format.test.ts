@@ -319,7 +319,7 @@ describe("formatWebHtml — component blocks", () => {
 
   test("Verdict self-closing uses default label", () => {
     expect(formatWebHtml("<Verdict value=\"no\" />")).toBe(
-      '<span class="verdict verdict-no">No</span>',
+      '<span class="verdict verdict-no verdict-default">No</span>',
     );
   });
 
@@ -664,7 +664,7 @@ describe("formatWebHtml — component blocks", () => {
   });
 
   test("an empty title renders `Details`, and a title is escaped", () => {
-    expect(formatWebHtml("<Fold>\n\nx\n\n</Fold>")).toContain("<summary>Details</summary>");
+    expect(formatWebHtml("<Fold>\n\nx\n\n</Fold>")).toContain('<summary><span class="fold-label-default">Details</span></summary>');
     expect(formatWebHtml('<Fold title="a <b> tag">\n\nx\n\n</Fold>')).toContain(
       "<summary>a &lt;b&gt; tag</summary>",
     );
@@ -737,7 +737,7 @@ describe("formatWebHtml — inline components (Verdict/Pill mid-text)", () => {
 
   test("self-closing inline Verdict uses the default label", () => {
     const out = formatWebHtml("done <Verdict value=\"no\"/> today");
-    expect(out).toContain('done <span class="verdict verdict-no">No</span> today');
+    expect(out).toContain('done <span class="verdict verdict-no verdict-default">No</span> today');
   });
 
   test("inline Pill inner text is escaped (no HTML injection)", () => {

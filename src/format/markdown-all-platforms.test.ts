@@ -862,7 +862,7 @@ describe("Fold — a details on the web, an open run-in section everywhere else"
       expect(out).toContain("The probe returned 149 lines.");
     }
     // Only the web surface has somewhere to put a label for a title-less fold.
-    expect(formatWebHtml(plain)).toContain("<summary>Details</summary>");
+    expect(formatWebHtml(plain)).toContain('<summary><span class="fold-label-default">Details</span></summary>');
   });
 
   test("a title carrying markup is handled on every surface", () => {
@@ -935,7 +935,7 @@ describe("Callout resolved= — a closed issue collapses to one ✓ row", () => 
     expect(out).not.toContain("callout-warn");
     expect(out).toContain(
       '<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ' +
-        '<span class="callout-resolved-date">2026-09-28</span> · ' +
+        '<span class="callout-resolved-date">2026-09-28</span> <span class="callout-resolved-sep">·</span> ' +
         '<span class="callout-resolved-title">Gate-kjøringer mangler feltene</span></summary>',
     );
     expect(out).not.toContain("<details class=\"callout callout-good callout-resolved\" open");

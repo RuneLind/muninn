@@ -421,7 +421,7 @@ describe("fix round 2: an id is not the head of a longer one", () => {
 describe("fix round 2: a Lane outside NextMoves on the reader", () => {
   test("a derived label and a normalised since are reader-only; who= text is not", () => {
     const html = reader(['<Lane kind="waiting" role="fag" since="07.10.2026">', "", "- x", "", "</Lane>"].join("\n"));
-    expect(html).toContain("<p><strong><span data-reader-only>Venter på fag</span><span data-reader-only> — since 2026-10-07</span></strong></p>");
+    expect(html).toContain('<p class="lane-plain-head"><strong><span data-reader-only>Venter på fag</span><span data-reader-only> — since 2026-10-07</span></strong></p>');
     expect(reader(['<Lane kind="you">', "", "- x", "", "</Lane>"].join("\n"))).toContain("<strong><span data-reader-only>Du</span></strong>");
     expect(reader(['<Lane kind="you" who="Kari" since="2026-10-01">', "", "- x", "", "</Lane>"].join("\n"))).toContain(
       "<strong>Kari — since 2026-10-01</strong>",

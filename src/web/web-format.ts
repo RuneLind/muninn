@@ -1117,9 +1117,12 @@ function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): st
     const csv = readCsvFile(d.src, "Table");
     table = !csv.ok
       ? blockNote("dt-unavailable", csv.note)
-      : (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
+      : // `dt-file`: the table is the CSV's, not the page's (DISCUSS_TEXT_SKIP).
+        `<div class="dt-file">` +
+        (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
         deltaTableHtml(deltaGrid(csv.header, csv.shown, csv.headerWidth), d, queryCellHtml, (s) => s) +
-        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "");
+        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "") +
+        `</div>`;
   } else if (k !== -1) {
     const t = rawChildren[k] as Extract<Block, { type: "table" }>;
     table = deltaTableHtml(deltaGrid(t.headers, t.rows), d, renderInline, stripEmphasis);
@@ -2306,7 +2309,7 @@ const webRenderer: BlockRenderer = {
           // original body kept behind the fold so the history stays readable.
           // The author's tone is dropped — the row reports the outcome.
           const t = attrs.title?.trim();
-          const titleHtml = t ? ` · <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
+          const titleHtml = t ? ` <span class="callout-resolved-sep">·</span> <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
           return (
             `<details class="callout callout-good callout-resolved">` +
             `<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ` +
@@ -2322,8 +2325,12 @@ const webRenderer: BlockRenderer = {
       }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = children.trim() || (value === "yes" ? "Yes" : "No");
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        // A body-less Verdict shows a fallback label the file does not hold:
+        // `verdict-default` marks it for Discuss's context (DISCUSS_TEXT_SKIP).
+        const label = children.trim();
+        return label
+          ? `<span class="verdict verdict-${value}">${label}</span>`
+          : `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);
@@ -2459,9 +2466,12 @@ const webRenderer: BlockRenderer = {
         // closed; the duplicate-heading test below still compares the title alone.
         const teaser = (attrs.summary ?? "").trim();
         const teaserHtml = teaser ? `<span class="fold-summary">${escapeHtml(teaser)}</span>` : "";
+        // An untitled fold's «Details» is the reader's word, not the file's:
+        // its own class keeps it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
+        const label = title ? escapeHtml(title) : `<span class="fold-label-default">Details</span>`;
         return (
           `<details class="${foldClass(title, attrs.for)}"${openAttr}>` +
-          `<summary>${title ? escapeHtml(title) : "Details"}${teaserHtml}</summary>` +
+          `<summary>${label}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
         );
@@ -2515,7 +2525,9 @@ const webRenderer: BlockRenderer = {
           : lane.since && lane.since !== attrs.since?.trim()
             ? `<span ${READER_ONLY_ATTR}> — since ${escapeHtml(since)}</span>`
             : ` — since ${escapeHtml(since)}`;
-        return `<p><strong>${label}${sinceHtml}</strong></p>${children}`;
+        // `lane-plain-head`: who= and since= are attributes, not text the
+        // page holds (DISCUSS_TEXT_SKIP).
+        return `<p class="lane-plain-head"><strong>${label}${sinceHtml}</strong></p>${children}`;
       }
       case "Query": {
         // One card per query: header (id, question, answer, run date, uses),
@@ -2644,8 +2656,8 @@ const webRenderer: BlockRenderer = {
     switch (name) {
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = text.trim() ? escapeHtml(text.trim()) : value === "yes" ? "Yes" : "No";
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        if (!text.trim()) return `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
+        return `<span class="verdict verdict-${value}">${escapeHtml(text.trim())}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);

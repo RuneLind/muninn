@@ -15,9 +15,10 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
+import { COMPONENT_SPEC } from "../../../format/component-spec.ts";
 import { collapseForLocate } from "../../../wiki/discuss-locate.ts";
 import { locateKey } from "../../../wiki/locate-key.ts";
-import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussText } from "../components/wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussText, discussTextParts } from "../components/wiki-discuss-text.ts";
 import { readerSelectionText } from "../components/wiki-lens.ts";
 import { readerArticle as renderReader } from "./discuss-reader-article.ts";
 
@@ -62,10 +63,17 @@ const readerArticle = (md: string, title?: string, roles: string[] = ["utvikler"
 
 const serverKey = (md: string, title?: string) => collapseForLocate(md, { stripTitle: title }).text;
 
-/** The selection's text over all of `el`, read by the client's own function. */
-function selectionTextOver(el: Element): string {
+/** The selection's text over `el` from its first non-blank text outside
+ *  {@link DISCUSS_TEXT_SKIP} to its end: a reader-added prefix (a label, a
+ *  button) is left out, everything after it is read. */
+function selectionTextAfterAddedPrefix(el: Element): string {
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let n = w.nextNode();
+  while (n && (!n.textContent!.trim() || n.parentElement?.closest(DISCUSS_TEXT_SKIP))) n = w.nextNode();
+  if (!n) return "";
   const r = document.createRange();
   r.selectNodeContents(el);
+  r.setStart(n, 0);
   const sel = window.getSelection()!;
   sel.removeAllRanges();
   sel.addRange(r);
@@ -139,6 +147,67 @@ const FIXTURE = [
   "",
   "> [!note] An Obsidian callout keeps its words.",
   "",
+  // Labels the reader writes where the source has none: an untitled Fold's
+  // «Details», a callout's type name when `> [!type]` has no title.
+  "<Fold>",
+  "",
+  "An untitled fold's body.",
+  "",
+  "</Fold>",
+  "",
+  '<Fold summary="a teaser only">',
+  "",
+  "A teaser fold's body.",
+  "",
+  "</Fold>",
+  "",
+  "> [!note]",
+  "> A note with no title.",
+  "",
+  "> [!caution]",
+  "> A caution with no title.",
+  "",
+  "> [!warning]",
+  "> A warning with no title.",
+  "",
+  "> [!tip]",
+  "> A tip with no title.",
+  "",
+  "> [!danger]",
+  "> A danger with no title.",
+  "",
+  // More text the reader writes from attributes or as a fallback: a body-less
+  // Verdict's «Yes»/«No», a resolved Callout's ✓, date and separator, an
+  // AnnotatedCode's file name. A Verdict's own words and a Callout's title
+  // are the file's.
+  'Is the pier open? <Verdict value="yes" /> In summer.',
+  "",
+  'Is the north pier open? <Verdict value="no" /> Not in winter.',
+  "",
+  'Are the boards up? <Verdict value="yes">Mostly</Verdict> by now.',
+  "",
+  '<Callout resolved="2026-01-02">',
+  "",
+  "The tide gauge was fixed.",
+  "",
+  "</Callout>",
+  "",
+  '<Callout tone="warn" resolved="2026-01-03" title="Pier lights">',
+  "",
+  "The pier lights were replaced.",
+  "",
+  "</Callout>",
+  "",
+  '<AnnotatedCode file="src/harbour.ts">',
+  "",
+  "```ts",
+  "const piers = 2;",
+  "```",
+  "",
+  "Two piers, north and south.",
+  "",
+  "</AnnotatedCode>",
+  "",
   'Before <Fact n="1" v="ok">a checked claim</Fact> after.',
   "",
   '<Fact n="2" v="warn">',
@@ -209,11 +278,31 @@ const FIXTURE = [
   "",
   "</Query>",
   "",
-  '<FactCheck date="2026-11-01">',
+  // Its counts (`✓ 2 confirmed`, …) are written from attributes, and the
+  // reader's toolbar clones them to the top of the article.
+  '<FactCheck date="2026-11-01" ok="2" warn="1">',
   "",
   "The pier claim was checked.",
   "",
   "</FactCheck>",
+  "",
+  // A DeltaTable's lines from its attributes or its shape: «Two runs are
+  // needed for a delta» under a one-run table, an attribute warning above one.
+  "<DeltaTable>",
+  "",
+  "| Pier | Week 1 |",
+  "|---|---|",
+  "| North | 10 |",
+  "",
+  "</DeltaTable>",
+  "",
+  '<DeltaTable decimal="weird">',
+  "",
+  "| Pier | Week 1 | Week 2 |",
+  "|---|---|---|",
+  "| South | 10 | 12 |",
+  "",
+  "</DeltaTable>",
   "",
 ].join("\n");
 
@@ -253,11 +342,31 @@ describe("the fixture page, after the client's enhancers", () => {
     // order is not one stretch of the source (the client marks it `reordered`).
     const blocks = Array.from(a.querySelectorAll(BLOCKS)).filter((b) => !b.matches(".nm-lanes") && !b.closest(".nm-head") && !b.closest(DISCUSS_TEXT_SKIP));
     // A block whose text is all reader-added (a mermaid fence, drawn as an
-    // SVG) is left out too: a selection there goes to the section by design.
+    // SVG) is left out: a selection there goes to the section by design. One
+    // that opens with reader-added text (an untitled Fold's «Details», a
+    // fence's Copy button) is read from just after that prefix, so only the
+    // prefix leaves the check and the rest of the block stays in it.
     const missing = blocks
       .filter((b) => (!b.closest(".nm-lane") || b.matches("li")) && locateKey(discussText(b)) !== "")
-      .map((b) => locateKey(selectionTextOver(b)))
+      .map((b) => locateKey(selectionTextAfterAddedPrefix(b)))
       .filter((k) => k && !server.includes(k));
+    expect(missing).toEqual([]);
+  });
+
+  test("every text the context keeps is in the collapse, in order: a reader addition missing from the skip lists is named", async () => {
+    const a = await readerArticle(FIXTURE, TITLE);
+    const server = serverKey(FIXTURE, TITLE);
+    // Each piece must start where the previous one ended: an `indexOf` from the
+    // cursor lets a short label («Note») match a later word and names the
+    // passage after it instead.
+    const missing: string[] = [];
+    let at = 0;
+    for (const part of discussTextParts(a)) {
+      const k = locateKey(part);
+      if (!k) continue;
+      if (server.startsWith(k, at)) at += k.length;
+      else missing.push(part.trim());
+    }
     expect(missing).toEqual([]);
   });
 
@@ -284,8 +393,46 @@ const FORMS: [string, string][] = [
   ["a table", "| A | B |\n|:--|--:|\n| x | `y` |\n"],
   ["a quote with a number", "> line\n> 1. stays text\n"],
   ["an Obsidian callout", "> [!warning] Mind the gap.\n> More.\n"],
-  ["a fold's title and summary", '<Fold title="Title here" summary="summary here">\n\nBody.\n\n</Fold>\n'],
+  ["an untitled Fold: its «Details» is the reader's", "<Fold>\n\nBody.\n\n</Fold>\n"],
+  ["an untitled Fold with a summary", '<Fold summary="a teaser">\n\nBody.\n\n</Fold>\n'],
+  ["an Obsidian callout with no title: its type name is the reader's", "> [!caution]\n> Body.\n"],
+  ["an Obsidian callout with no title and no body", "Above.\n\n> [!warning]\n\nBelow.\n"],
+  ["a fold's title and summary",'<Fold title="Title here" summary="summary here">\n\nBody.\n\n</Fold>\n'],
   ["a callout's title", '<Callout tone="info" title="Heads up">\n\nBody.\n\n</Callout>\n'],
+  ["a body-less Verdict: its «Yes» is the reader's", 'Is it ok? <Verdict value="yes" /> Sure.\n'],
+  ["a body-less Verdict: its «No» is the reader's", 'Is it ok? <Verdict value="no" /> Not yet.\n'],
+  ["a body-less Verdict on its own line (the block renderer)", 'Above.\n\n<Verdict value="no" />\n\nBelow.\n'],
+  ["a body-less paired Verdict on its own lines", 'Above.\n\n<Verdict value="yes">\n</Verdict>\n\nBelow.\n'],
+  ["a Verdict with words on its own lines", 'Above.\n\n<Verdict value="yes">\nShipped\n</Verdict>\n\nBelow.\n'],
+  ["a Verdict's own words are the file's", 'Is it ok? <Verdict value="no">Not quite</Verdict> yet.\n'],
+  ["a resolved Callout: its ✓ and date are the reader's", '<Callout resolved="2026-01-02">\n\nBody.\n\n</Callout>\n'],
+  ["a resolved Callout's title is the file's", '<Callout resolved="2026-01-02" title="Pier fixed">\n\nBody.\n\n</Callout>\n'],
+  ["an AnnotatedCode's file name is the reader's", '<AnnotatedCode file="src/a.ts">\n\n```ts\nconst a = 1;\n```\n\nA note.\n\n</AnnotatedCode>\n'],
+  ["a FactCheck's counts are the reader's", '<FactCheck date="2026-11-01" ok="2" warn="1">\n\nChecked.\n\n</FactCheck>\n'],
+  ["a FactCheck's four counts, no date", '<FactCheck ok="2" warn="1" bad="3" unknown="4">\n\nChecked.\n\n</FactCheck>\n'],
+  ["a FactCheck's counts with marks on the page (the toolbar's copy)", 'A <Fact n="1" v="ok">claim</Fact> here.\n\n<FactCheck date="2026-11-01" ok="1">\n\n### 1. claim\n\nEvidence.\n\n</FactCheck>\n'],
+  ["a one-run DeltaTable: «Two runs are needed for a delta» is the reader's", "<DeltaTable>\n\n| Metric | Run 1 |\n|---|---|\n| Hits | 10 |\n\n</DeltaTable>\n\nAfter.\n"],
+  ["a DeltaTable's unknown better= warning is the reader's", '<DeltaTable better="sideways">\n\n| Metric | Run 1 | Run 2 |\n|---|---|---|\n| Hits | 10 | 12 |\n\n</DeltaTable>\n'],
+  ["a DeltaTable's better= naming no row: its warning is the reader's", '<DeltaTable better="Nope:higher">\n\n| Metric | Run 1 | Run 2 |\n|---|---|---|\n| Hits | 10 | 12 |\n\n</DeltaTable>\n'],
+  ["a DeltaTable's unknown decimal= warning is the reader's", 'Intro.\n\n<DeltaTable decimal="weird">\n\n| Metric | Run 1 | Run 2 |\n|---|---|---|\n| Hits | 10 | 12 |\n\n</DeltaTable>\n'],
+  ["a DeltaTable's better= direction and delta column", '<DeltaTable better="higher">\n\nIntro words.\n\n| Metric | Run 1 | Run 2 |\n|---|---|---|\n| Hits | 10 | 12 |\n\n</DeltaTable>\n'],
+  ["a Lane outside NextMoves: its who= and since= line is the reader's", 'Above.\n\n<Lane kind="you" who="Kari" since="2026-01-02">\n\n- Do it.\n\n</Lane>\n\nBelow.\n'],
+  // One row per component the rows above leave out, each agreeing already:
+  // a guard that a change to its render shows here.
+  ["a Pill's words, inline", "A <Pill tone=\"rec\">pick</Pill> here.\n"],
+  ["a ComparisonTable", "<ComparisonTable>\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n</ComparisonTable>\n"],
+  ["a Diff", "<Diff>\n\n```diff\n- old\n+ new\n```\n\n</Diff>\n"],
+  ["a FileTree", "<FileTree>\n\n```\nsrc/\n  a.ts\n```\n\n</FileTree>\n"],
+  ["a Historic block with since= and note=", 'Above.\n\n<Historic since="2026-01-02" note="Replaced by X">\n\nOld text.\n\n</Historic>\n\nBelow.\n'],
+  ["a CaseBoard with no file", 'Above.\n\n<CaseBoard src="cases.yaml" />\n\nBelow.\n'],
+  ["a Question card and its DecisionLog item", '<Question id="O3" choices="Yes|No" to="Kari">\n\nShould we?\n\n</Question>\n\n<DecisionLog>\n\n- **O3** — Keep it?\n\n</DecisionLog>\n'],
+  ["a TL;DR with a More part", "<Tldr>\n\nShort.\n\n<More>\n\nLonger.\n\n</More>\n\n</Tldr>\n"],
+  ["StatusRows as tiles", '<StatusRows view="tiles" tones="Plan=good">\n\n- **Plan:** open\n- **Owner:** Kari\n\n</StatusRows>\n'],
+  ["a bars Chart with a caption", '<Chart kind="bars" value="N" caption="Cap">\n\n| A | N |\n|---|---:|\n| a | 1 |\n\n</Chart>\n'],
+  ["a RuleTree with a title", '<RuleTree title="Rule" outcomes="Renew=good">\n\n- Is it late?\n  - *Yes:* → Return\n  - *No:* → Renew\n\n</RuleTree>\n'],
+  ["a Glossary and a term it marks", "<Glossary>\n\n- **Pier** — where boats stop.\n\n</Glossary>\n\nThe pier is busy.\n"],
+  ["a SystemMap with caption=, external= and groups=", '<SystemMap caption="Map" external="PDL" groups="web=front">\n\n| From | To | Status |\n|---|---|---|\n| web | PDL | ok |\n\n</SystemMap>\n'],
+  ["a Check in a you step", '<NextMoves>\n\n<Lane kind="you">\n\n- Run it <Check migration="086" />\n\n</Lane>\n\n</NextMoves>\n'],
   ["a TL;DR with its label", '<Tldr label="In short">\n\nShort.\n\n</Tldr>\n'],
   ["inline fact wrappers", 'A <Fact n="3" v="bad">wrong claim</Fact> here.\n'],
   ["a block fact wrapper", '<Fact n="4" v="ok">\nA checked paragraph.\n</Fact>\n'],
@@ -335,6 +482,39 @@ describe("forms: the enhanced render and the collapse agree", () => {
     test(name, async () => {
       const title = name.startsWith("the leading H1") ? "Same title" : undefined;
       expect(locateKey(discussText(await readerArticle(md, title)))).toBe(serverKey(md, title));
+    });
+  }
+});
+
+/** Forms that read a sibling file (`files`): what the reader builds from the
+ *  file is not in the page source, so the context leaves it out. */
+const LIFECYCLE = JSON.stringify({ meta: { title: "Order", views: [{ id: "v", label: "View", focus: ["new"] }] }, lanes: [{ id: "main", label: "Main" }], states: [{ id: "new", label: "New", lane: "main", col: 1 }], transitions: [] });
+const FILES: Record<string, string> = {
+  "runs.csv": "Metric,Run 1,Run 2\nHits,10,12\n",
+  "bad.csv": 'Metric,Run 1,Run 2\nHits,10,"12\n',
+  "order.lifecycle.json": LIFECYCLE,
+};
+const pageFiles = {
+  get: (ref: string) =>
+    ref in FILES ? { ok: true as const, text: FILES[ref]!, svg: { svg: null, problem: "missing" as const, unknownElements: [], unknownAttrs: [], unknownClasses: [] } } : undefined,
+};
+const FILE_FORMS: [string, string][] = [
+  ["a DeltaTable from its src= CSV", "Above.\n\n<DeltaTable src=\"runs.csv\" />\n\nBelow.\n"],
+  ["a DeltaTable from its src= CSV, with an intro body", '<DeltaTable src="runs.csv">\n\nIntro words.\n\n</DeltaTable>\n\nBelow.\n'],
+  ["a DeltaTable from a CSV with an unterminated quote", 'Above.\n\n<DeltaTable src="bad.csv" />\n\nBelow.\n'],
+  ["a Diagram's text form, read from its src= file", 'Above.\n\n<Diagram src="order.lifecycle.json" />\n\nBelow.\n'],
+  ["a Steps' text form, read from its src= file", 'Above.\n\n<Steps src="order.lifecycle.json" />\n\nBelow.\n'],
+];
+
+test("every component in COMPONENT_SPEC has a row in the fixture or the forms", () => {
+  const all = [FIXTURE, ...FORMS.map(([, md]) => md), ...FILE_FORMS.map(([, md]) => md)].join("\n");
+  expect(Object.keys(COMPONENT_SPEC).filter((c) => !new RegExp(`<${c}[\\s/>]`).test(all))).toEqual([]);
+});
+
+describe("forms with a sibling file: the enhanced render and the collapse agree", () => {
+  for (const [name, md] of FILE_FORMS) {
+    test(name, async () => {
+      expect(locateKey(discussText(await renderReader(md, { roles: ["utvikler"], files: pageFiles })))).toBe(serverKey(md));
     });
   }
 });
