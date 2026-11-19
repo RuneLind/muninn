@@ -4532,10 +4532,16 @@ export function __wikiIndexBuildsStartedForTest(): number {
   return buildsStarted;
 }
 
+/** The one decoding of a page file: UTF-8 with a leading BOM dropped
+ *  (`Bun.file().text()`). Rejects when the file cannot be read. */
+export function readWikiText(absPath: string): Promise<string> {
+  return Bun.file(absPath).text();
+}
+
 /** Raw markdown of one page (by resolved meta). Null when the file vanished. */
 export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promise<string | null> {
   try {
-    return await Bun.file(path.join(index.root, meta.relPath)).text();
+    return await readWikiText(path.join(index.root, meta.relPath));
   } catch {
     return null;
   }

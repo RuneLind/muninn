@@ -312,25 +312,41 @@ function wikiSourceFile(base: string, rel: string): number | null {
 }
 
 /** Why {@link wikiSnapshot} would not hold a file: the wiki is no git work
- *  tree (no snapshot can be built), git does not list the file (ignored), or
- *  it is reached through a symlink or is no regular file. */
+ *  tree (no snapshot can be built), no entry of its listing is the file
+ *  (ignored), or it is reached through a symlink or is no regular file. */
 export type WikiSnapshotHolds = { ok: true } | { ok: false; reason: "not-a-work-tree" | "not-listed" | "not-a-plain-file" };
 
+/** Whether `a` and `b` under `base` name one file on this disk (one inode): a
+ *  case or Unicode-normalisation variant does on a case-insensitive one. */
+function sameFile(base: string, a: string, b: string): boolean {
+  try {
+    const x = lstatSync(join(base, a));
+    const y = lstatSync(join(base, b));
+    return x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Whether a snapshot of `wikiDir` would hold `rel`, by the two rules
- * {@link wikiSnapshot} copies by: git lists it (`ls-files -co
- * --exclude-standard`) and {@link wikiSourceFile} accepts it. Nothing is
+ * Whether a snapshot of `wikiDir` holds a file that reads as `rel`, decided
+ * from what {@link wikiSnapshot} copies: its own listing
+ * ({@link wikiSnapshotFiles}) and {@link wikiSourceFile}. An entry matches
+ * when it is `rel`, or, in git's spelling, differs from it only in case or
+ * Unicode normalisation and is the same file on disk (a case-only rename
+ * without `git mv` on a case-insensitive disk): the copy is then written in
+ * git's spelling and read back as `rel` on the same kind of disk. Nothing is
  * copied. A listing git cannot answer throws.
  */
 export async function wikiSnapshotHolds(wikiDir: string, rel: string, git: GitRun = realGit): Promise<WikiSnapshotHolds> {
   const source = realpathSync(wikiDir);
   const inside = await git(source, ["rev-parse", "--is-inside-work-tree"]);
   if (!inside.ok || inside.stdout.trim() !== "true") return { ok: false, reason: "not-a-work-tree" };
-  const res = await git(source, ["ls-files", "-co", "--exclude-standard", "-z", "--", rel], { env: ignoreRulesEnv() });
-  if (!res.ok || res.capped || res.timedOut) throw new Error(`snapshot: cannot list ${rel} in ${source}.`);
-  // The pathspec is the one file: any entry is it, in git's spelling (case can differ on a case-insensitive disk).
-  if (!res.stdout.split("\0").some((p) => p !== "")) return { ok: false, reason: "not-listed" };
-  if (wikiSourceFile(source, rel) === null) return { ok: false, reason: "not-a-plain-file" };
+  const fold = (p: string) => p.normalize("NFC").toLowerCase();
+  const want = fold(rel);
+  const listed = (await wikiSnapshotFiles(source, git)).filter((p) => p === rel || (fold(p) === want && sameFile(source, p, rel)));
+  if (listed.length === 0) return { ok: false, reason: "not-listed" };
+  if (listed.every((p) => wikiSourceFile(source, p) === null)) return { ok: false, reason: "not-a-plain-file" };
   return { ok: true };
 }
 

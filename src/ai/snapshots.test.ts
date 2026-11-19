@@ -195,6 +195,25 @@ describe("wikiSnapshotHolds", () => {
   });
 });
 
+describe("wikiSnapshotHolds on a case-only rename", () => {
+  test.skipIf(!caseInsensitive)("a tracked Page.md renamed to page.md without git mv is held, as wikiSnapshot copies it", async () => {
+    const wiki = join(base, "holds-case");
+    mkdirSync(join(wiki, "notes"), { recursive: true });
+    git(wiki, "init");
+    writeFileSync(join(wiki, "notes", "Page.md"), "# page\n");
+    git(wiki, "add", ".");
+    git(wiki, "commit", "-m", "init");
+    renameSync(join(wiki, "notes", "Page.md"), join(wiki, "notes", "page.md"));
+    expect(readdirSync(join(wiki, "notes"))).toEqual(["page.md"]);
+    expect(await wikiSnapshotFiles(wiki)).toEqual(["notes/Page.md"]);
+    const snap = await wikiSnapshot(wiki, { root });
+    expect(readFileSync(join(snap.dir, "notes", "page.md"), "utf8")).toBe("# page\n");
+    expect(await wikiSnapshotHolds(wiki, "notes/page.md")).toEqual({ ok: true });
+    // A name that is no variant of a listed file is still not held.
+    expect(await wikiSnapshotHolds(wiki, "notes/other.md")).toEqual({ ok: false, reason: "not-listed" });
+  });
+});
+
 describe("wikiSnapshot: what it refuses to read", () => {
   function newWiki(name: string): string {
     const dir = join(base, name);

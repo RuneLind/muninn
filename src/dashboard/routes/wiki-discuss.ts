@@ -33,9 +33,10 @@
  *
  * A live turn is one whose process still beats: the route touches the row's
  * `heartbeat_at` every {@link DISCUSS_HEARTBEAT_MS} from the insert to the
- * end, however long the snapshots, the card or the model take. A `running`
- * row whose heartbeat is older than {@link DISCUSS_STALE_RUNNING_MS} is a
- * process that died: the next start on its discussion closes it as
+ * end, except while the wiki snapshot's synchronous copy blocks the event
+ * loop (measured up to 24.5 s at the snapshot limits, inside the bound). A
+ * `running` row whose heartbeat is older than {@link DISCUSS_STALE_RUNNING_MS}
+ * is a process that died or stalled: the next start on its discussion closes it as
  * `abandoned` in the insert's transaction, and {@link startDiscussTurnSweep}
  * closes the rest.
  *
@@ -46,7 +47,6 @@
  */
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import type { Context, Hono, Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
@@ -91,7 +91,7 @@ import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "../
 import { planCardFromOutcome, runPlanCard } from "../../wiki/plan-card-run.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
-import { getWikiIndex, parseFrontmatter, readWikiPage, resolveWikiRoot } from "../../wiki/store.ts";
+import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot } from "../../wiki/store.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { parseHandoffBody, type HandoffBody } from "./wiki-discuss-handoff.ts";
@@ -516,6 +516,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     // What the reader was shown, kept for a turn that fails before `res`.
     let streamed = "";
     const streamedTools: DiscussToolCall[] = [];
+    let pastDeadline = false;
     try {
       // The discussion as the insert left it: a turn it closed as abandoned
       // reads so in the prompt, not as running.
@@ -545,7 +546,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         // One page text per turn: the copy the agent will Read is the text the
         // row's hash, location and the pack describe (a snapshot is never
         // rewritten). The Copilot path has no snapshot; its hash is the live read's.
-        const copy = await readFile(pagePath, "utf8").catch((err: NodeJS.ErrnoException) => {
+        // Read as `readWikiPage` reads (a leading BOM dropped), so both hashes are of one decoding.
+        const copy = await readWikiText(pagePath).catch((err: NodeJS.ErrnoException) => {
           if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
           throw err;
         });
@@ -575,9 +577,12 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
 
       // The route owns the deadline: its timer alone makes a `timeout`. The
       // connector's own timeout lands later, to stop the run it leaves behind.
+      // Past the deadline the connector's events reach no one: not the stream
+      // (finish and the closing writes are still to come) and not the row.
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<never>((_, reject) => {
         deadlineTimer = setTimeout(() => {
+          pastDeadline = true;
           reject(new DiscussTurnTimeout(timeoutMs));
         }, timeoutMs);
       });
@@ -586,6 +591,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         systemPrompt: renderAgentSystemPrompt(p.wiki, p.rules),
         timeoutMs: timeoutMs + DISCUSS_CONNECTOR_GRACE_MS,
         onProgress: (ev) => {
+          if (pastDeadline) return;
           if (ev.type === "text_delta") {
             streamed += ev.text;
             emit("delta", { text: ev.text });
@@ -614,7 +620,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const endState = err instanceof DiscussTurnTimeout ? "timeout" : "error";
       const durationMs = Math.round(performance.now() - t0);
       await store
-        .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools, durationMs })
+        .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools.slice(), durationMs })
         .catch((e) => log.error("discuss turn finish failed: {error}", { error: String(e) }));
       log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.relPath, turnId: turn.id, endState, error: message, ms: durationMs });
       emit("app_error", { type: "error", turnId: turn.id, endState, message: endState === "timeout" ? `The turn ran past ${Math.round(timeoutMs / 60000)} minutes and was stopped.` : `The turn failed: ${message}` });

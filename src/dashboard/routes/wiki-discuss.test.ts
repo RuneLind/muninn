@@ -7,7 +7,8 @@
  * Invented pages and repo names only (public repo).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdir, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,6 +28,12 @@ import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+
+// Whether this disk folds case (APFS default): the case-only rename test needs one.
+const caseProbe = mkdtempSync(path.join(tmpdir(), "discuss-case-"));
+writeFileSync(path.join(caseProbe, "CaseProbe"), "");
+const caseInsensitiveDisk = existsSync(path.join(caseProbe, "caseprobe"));
+rmSync(caseProbe, { recursive: true, force: true });
 
 let dir = "";
 let agent = ""; // a wiki with rules and discuss.repos
@@ -140,9 +147,11 @@ const fakeGit: GitRun = async (cwd, args) => {
   if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: real + "\n", stderr: "", timedOut: false, capped: false } as never;
   if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return { ok: true, stdout: "true\n", stderr: "", timedOut: false, capped: false } as never;
   if (args[0] === "ls-files") {
-    const rel = args[args.length - 1]!;
-    const there = await Bun.file(path.join(real, rel)).exists();
-    return { ok: true, stdout: there ? `${rel}\0` : "", stderr: "", timedOut: false, capped: false } as never;
+    // The whole tree, or the one path after `--`.
+    const all = (await readdir(real, { recursive: true, withFileTypes: true })).filter((e) => e.isFile()).map((e) => path.relative(real, path.join(e.parentPath, e.name)));
+    const dd = args.indexOf("--");
+    const listed = dd >= 0 ? all.filter((p) => p === args[dd + 1]) : all;
+    return { ok: true, stdout: listed.map((p) => `${p}\0`).join(""), stderr: "", timedOut: false, capped: false } as never;
   }
   if (args[0] === "remote" && args[2] === "origin") return { ok: true, stdout: `git@example.com:org/${path.basename(real)}.git\n`, stderr: "", timedOut: false, capped: false } as never;
   return { ok: false, stdout: "", stderr: "", timedOut: false, capped: false } as never;
@@ -624,6 +633,32 @@ describe("a turn", () => {
     expect(evs.filter((e) => e.event === "delta").map((e) => e.data.text)).toEqual(["Half an ", "answer"]);
     expect(store.rows[0]).toMatchObject({ endState: "timeout", answer: "Half an answer", toolCalls: [{ name: "Grep", input: '{"pattern":"ferry"}' }] });
   });
+  test("events after the deadline reach neither the stream nor the row, however long the row's finish takes", async () => {
+    const store = new MemStore();
+    const realFinish = store.finish;
+    store.finish = async (id, f) => {
+      await Bun.sleep(150);
+      return realFinish(id, f);
+    };
+    const { app } = setup({
+      store,
+      deps: { timeoutMs: 50 },
+      oneShot: async (_p, _c, _b, o) => {
+        o.onProgress?.({ type: "text_delta", text: "early " });
+        await Bun.sleep(100);
+        // Past the deadline, before the slow finish resolves.
+        o.onProgress?.({ type: "text_delta", text: "LATE" });
+        o.onProgress?.({ type: "tool_start", id: "t9", name: "Read", displayName: "Read", input: '{"file_path":"late"}' });
+        await Bun.sleep(300);
+        return { result: "Too late.", costUsd: 0, toolCalls: [] } as never;
+      },
+    });
+    const evs = await frames(await post(app, PASSAGE));
+    expect(evs.filter((e) => e.event === "delta").map((e) => e.data.text)).toEqual(["early "]);
+    expect(evs.filter((e) => e.event === "tool")).toEqual([]);
+    expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("timeout");
+    expect(store.rows[0]).toMatchObject({ endState: "timeout", answer: "early ", toolCalls: [] });
+  });
   test("a done turn stores the final answer and the result's tool calls, not the streamed text", async () => {
     const { app, store } = setup({
       oneShot: async (_p, _c, _b, o) => {
@@ -718,6 +753,23 @@ describe("one page text per turn: the snapshot's copy is the page the row descri
     expect(store.rows[0]!.pageHash).toBe(sha(copy));
     expect(calls.prompts[0]).toContain("15: - The summer route adds a stop at Example Island.");
   });
+  test("a page that starts with a UTF-8 BOM: the copy is read as the reader reads the page, and the turn ends done", async () => {
+    const page = path.join(agent, "notes", "bom.md");
+    await Bun.write(page, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(NOTE)]));
+    __resetWikiCacheForTest();
+    try {
+      const { app, store, calls } = setup();
+      const evs = await frames(await post(app, { wiki: "agent", relPath: "notes/bom.md", question: "When does it open?" }));
+      const copy = await readFile(path.join(dir, "snaps", "wiki-agent", "notes", "bom.md"));
+      expect(copy[0]).toBe(0xef);
+      expect(store.rows[0]).toMatchObject({ endState: "done", error: null, pageHash: sha(NOTE) });
+      expect(calls.opts).toHaveLength(1);
+      expect(evs.find((e) => e.event === "done")).toBeDefined();
+    } finally {
+      await rm(page, { force: true });
+      __resetWikiCacheForTest();
+    }
+  });
   test("a snapshot without the page fails the turn naming the cause, before any model call", async () => {
     const { app, store, calls } = setup({
       deps: {
@@ -763,6 +815,36 @@ describe("one page text per turn: the snapshot's copy is the page the row descri
       expect(((await plain.json()) as { reason: string }).reason).toBe("no-snapshot");
       expect(store.rows.map((r) => r.relPath)).toEqual(["notes/open.md"]);
       expect(calls.wikiSnaps).toEqual([repo]);
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  });
+  test.skipIf(!caseInsensitiveDisk)("with real git: a page renamed in case only, without git mv, passes the preflight and is answered", async () => {
+    const repo = path.join(dir, "casewiki");
+    await Bun.write(path.join(repo, WIKI_AGENT_RULES_FILE), RULES);
+    await Bun.write(path.join(repo, "notes", "Page.md"), NOTE);
+    const run = (...args: string[]) => {
+      const p = Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: repo });
+      expect(p.exitCode).toBe(0);
+    };
+    run("init", "-q");
+    run("add", ".");
+    run("commit", "-qm", "init");
+    // A case-only rename the plain way: git still tracks notes/Page.md.
+    await rename(path.join(repo, "notes", "Page.md"), path.join(repo, "notes", "page.md"));
+    __setWikiRegistryForTest([{ name: "casewiki", root: repo, source: "extra" }]);
+    __resetWikiCacheForTest();
+    try {
+      const { app, store } = setup({ deps: { git: realGit } });
+      const res = await post(app, { wiki: "casewiki", relPath: "notes/page.md", question: "q" });
+      expect(res.status).toBe(200);
+      await res.text();
+      expect(store.rows[0]).toMatchObject({ relPath: "notes/page.md", endState: "done" });
     } finally {
       __setWikiRegistryForTest([
         { name: "agent", root: agent, source: "extra" },
