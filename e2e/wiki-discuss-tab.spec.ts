@@ -31,10 +31,12 @@
  *     the box; an accepted one clears it, unless the reader typed a new draft
  *     while the turn was starting. While turn 2 streams, a selection in turn
  *     1's answer survives the repaints, and a press on turn 1's chip held
- *     across a repaint still reveals its passage, and so does a press on the
- *     streaming turn's own chip. The pane holds still during a press and
- *     follows the stream again after it, also when a context menu or a blur
- *     takes the place of the pointerup (that stream is stubbed in the page).
+ *     across a repaint still reveals its passage (turn 2's real stream is held
+ *     open in the page for those steps, so a slow runner cannot finish it
+ *     first), and so does a press on the streaming turn's own chip. The pane
+ *     holds still during a press and follows the stream again after it, also
+ *     when a context menu or a blur takes the place of the pointerup (that
+ *     stream is stubbed in the page).
  *  5. **The read-only wiki.** The page payload still says the wiki has an agent,
  *     but the tab is not shown, and a click, a mousedown or Enter on the
  *     controls (forced visible) sends nothing.
@@ -622,6 +624,62 @@ test.describe("Wiki reader: the Discuss tab", () => {
     const answer1 = page.locator('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer');
     await expect(answer1).toContainText("R2 reads the frontmatter");
 
+    // Turn 2's real stream is held in the page after its first delta: the fake's
+    // three chunks 700 ms apart can end before the steps below on a slow runner
+    // (CI run 44638214225). `step()` feeds one extra delta (one repaint) on demand;
+    // `release()` lets the held frames through, and the `done` frame's answer
+    // replaces the text the extra deltas added.
+    await page.evaluate(() => {
+      const real = window.fetch.bind(window);
+      let armed = true;
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const res = await real(input, init);
+        if (!armed || String(input) !== "/api/wiki/discuss" || !res.ok || !res.body) return res;
+        armed = false;
+        const enc = new TextEncoder();
+        const dec = new TextDecoder();
+        const upstream = res.body.getReader();
+        let ctl!: ReadableStreamDefaultController<Uint8Array>;
+        let holding = false;
+        let heldOnce = false;
+        let ended = false;
+        let pending = "";
+        const held: Uint8Array[] = [];
+        const send = (bytes: Uint8Array) => (holding ? held.push(bytes) : ctl.enqueue(bytes));
+        const hold = { step: () => ctl.enqueue(enc.encode(`event: delta\ndata: ${JSON.stringify({ text: " (held)" })}\n\n`)), release: () => {
+          holding = false;
+          for (const b of held.splice(0)) ctl.enqueue(b);
+          if (ended) ctl.close();
+        } };
+        (window as unknown as { __turn2Hold: typeof hold }).__turn2Hold = hold;
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            ctl = c;
+            void (async () => {
+              for (;;) {
+                const chunk = await upstream.read();
+                if (chunk.done) break;
+                pending += dec.decode(chunk.value, { stream: true });
+                let cut: number;
+                while ((cut = pending.indexOf("\n\n")) >= 0) {
+                  const frame = pending.slice(0, cut + 2);
+                  pending = pending.slice(cut + 2);
+                  send(enc.encode(frame));
+                  if (!heldOnce && /^event: delta$/m.test(frame)) holding = heldOnce = true;
+                }
+              }
+              if (pending) send(enc.encode(pending));
+              ended = true;
+              if (!holding) ctl.close();
+            })();
+          },
+        });
+        return new Response(body, { status: res.status, headers: res.headers });
+      }) as typeof fetch;
+    });
+    const turn2Step = () => page.evaluate(() => (window as unknown as { __turn2Hold: { step(): void } }).__turn2Hold.step());
+    const turn2Running = (why: string) => expect(turn2, `turn 2 still streams ${why}`).toHaveAttribute("data-turn-state", "running", { timeout: 1_000 });
+
     // Turn 2 from the box (the question kept from the refusals): accepted, the box clears.
     await input.press("Enter");
     const turn2 = page.locator('.wiki-discuss-turn[data-turn-seq="2"]');
@@ -631,6 +689,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
     // While turn 2 streams, select turn 1's answer and wait for a repaint.
     await expect(turn2.locator(".wiki-discuss-answer")).toContainText("R2 reads the frontmatter", { timeout: 90_000 });
     const turn2Html = () => page.evaluate(() => document.querySelector('.wiki-discuss-turn[data-turn-seq="2"]')?.outerHTML ?? "");
+    await turn2Running("before turn 1's answer is selected");
     let before = await turn2Html();
     await page.evaluate(() => {
       const a = document.querySelector('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer')!;
@@ -639,6 +698,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
       getSelection()!.removeAllRanges();
       getSelection()!.addRange(r);
     });
+    await turn2Step();
     await expect.poll(turn2Html, { timeout: 30_000 }).not.toBe(before);
     await page.waitForTimeout(100);
     const sel = await page.evaluate(() => {
@@ -667,10 +727,13 @@ test.describe("Wiki reader: the Discuss tab", () => {
     const box = (await chip1.boundingBox())!;
     const [px, py] = [box.x + box.width / 2, box.y + box.height / 2];
     expect(await page.evaluate(([x, y]) => !!document.elementFromPoint(x!, y!)?.closest('.wiki-discuss-turn[data-turn-seq="1"] [data-discuss-chip]'), [px, py])).toBe(true);
+    await turn2Running("before the press on turn 1's chip");
     before = await turn2Html();
     await page.mouse.move(px, py);
     await page.mouse.down();
+    await turn2Step();
     await expect.poll(turn2Html, { timeout: 30_000 }).not.toBe(before);
+    await turn2Running("when the press on turn 1's chip is released");
     await page.mouse.up();
     await expect
       .poll(() =>
@@ -680,6 +743,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
         }),
       )
       .toContain("Nothing here.");
+    await page.evaluate(() => (window as unknown as { __turn2Hold: { release(): void } }).__turn2Hold.release());
     await expect(turn2).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
 
     // Turn 3: a new draft typed while the turn starts is not cleared when it is accepted.
