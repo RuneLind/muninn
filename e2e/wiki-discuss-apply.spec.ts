@@ -194,8 +194,13 @@ test("the card shows the diff and marks the bullet; Apply writes the range only,
   await expect(mark).toContainText("R2, behind.");
 
   await card.locator("[data-discuss-apply]").click();
-  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toContainText("Applied to the page, with a log.md entry and a commit.");
   await expect(page.locator("#articleWrap .wiki-article")).toContainText("not with any date in the frontmatter.");
+  // After the page renders again the reader is still on Discuss, looking at the applied card.
+  await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+  const applied = page.locator('.wiki-discuss-edit[data-edit-state="applied"]');
+  await expect(applied).toBeVisible();
+  await expect(applied).toContainText("Applied to the page, with a log.md entry and a commit.");
+  await expect(applied.locator(".wiki-discuss-edit-done")).toBeFocused();
   await expect(mark).toHaveCount(0);
 
   const text = await pageText();
@@ -241,6 +246,96 @@ test("a page changed and committed after the preview: Apply is refused on the ca
   const edited = PAGE.replace("The north pier", "The south pier");
   await resetPage(edited);
   await card.locator("[data-discuss-apply]").click();
-  await expect(page.locator('.wiki-discuss-edit[data-edit-state="refused"]')).toContainText("The page changed since the edit was shown.");
+  const refused = page.locator('.wiki-discuss-edit[data-edit-state="refused"]');
+  await expect(refused).toContainText("The page changed since the edit was shown.");
+  await expect(refused.locator("[data-discuss-apply]")).toHaveCount(0);
   expect(await pageText()).toBe(edited);
+  // «Preview again» previews the same turn against the page as it is now: fresh hashes, and Apply writes.
+  await refused.locator("[data-discuss-repreview]").click();
+  const again = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(again).toBeVisible();
+  await again.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  expect(await pageText()).toBe(edited.replace(OLD, NEW));
+});
+
+test("an edit far down the page: after Apply the article shows the changed passage, not its top", async ({ page }) => {
+  const filler = Array.from({ length: 80 }, (_, i) => `Filler paragraph ${i + 1} about the harbour timetable.\n`).join("\n");
+  const tail = "The last berth closes at dusk.";
+  const long = PAGE + "\n" + filler + "\n" + tail + "\n";
+  await resetPage(long);
+  await askWithEdit(page, edit(tail, "The last berth closes an hour after dusk."));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("The last berth closes an hour after dusk.");
+  // The changed words themselves sit inside the article pane's visible box, which scrolled down to them.
+  await expect
+    .poll(() =>
+      page.evaluate((words) => {
+        const wrap = document.getElementById("articleWrap")!;
+        const walker = document.createTreeWalker(wrap, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          const at = n.textContent!.indexOf(words);
+          if (at === -1) continue;
+          const range = document.createRange();
+          range.setStart(n, at);
+          range.setEnd(n, at + words.length);
+          const r = range.getBoundingClientRect();
+          const w = wrap.getBoundingClientRect();
+          return r.top >= w.top && r.bottom <= w.bottom;
+        }
+        return false;
+      }, "an hour after dusk."),
+    )
+    .toBe(true);
+  expect(await page.locator("#articleWrap").evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
+test("Apply's answer lost after the write: the card finds out, shows it applied and renders the page again", async ({ page }) => {
+  await askWithEdit(page, edit(OLD, NEW));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  // The request reaches the server and writes; its answer never reaches the page.
+  await page.route("**/api/wiki/discuss/apply", async (route) => {
+    if (route.request().postData()?.includes("baseHash")) {
+      await route.fetch();
+      await route.abort();
+    } else await route.continue();
+  });
+  await card.locator("[data-discuss-apply]").click();
+  const applied = page.locator('.wiki-discuss-edit[data-edit-state="applied"]');
+  await expect(applied).toBeVisible();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("not with any date in the frontmatter.");
+  await expect(page.locator(".wiki-discuss-edit")).not.toContainText("nothing was written");
+  expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
+});
+
+test("a transient refusal (uncommitted changes) keeps Apply: committed, the same card applies", async ({ page }) => {
+  await askWithEdit(page, edit(OLD, NEW));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  // HEAD moves on while the file on disk stays the page the preview read: the page is dirty, its hash unchanged.
+  await resetPage(PAGE.replace("The north pier", "The south pier"));
+  await writeFile(path.join(root, REL), PAGE, "utf8");
+  await card.locator("[data-discuss-apply]").click();
+  await expect(card.locator(".wiki-discuss-error")).toBeVisible();
+  await expect(card.locator("[data-discuss-apply]")).toBeEnabled();
+  expect(await pageText()).toBe(PAGE);
+  git("commit", "-qam", "commit the hand edit");
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
+});
+
+test("a preview the server did not answer offers «Preview again»", async ({ page }) => {
+  await page.route("**/api/wiki/discuss/apply", (route) => route.abort(), { times: 1 });
+  await askWithEdit(page, edit(OLD, NEW));
+  const failed = page.locator('.wiki-discuss-edit[data-edit-state="failed"]');
+  await expect(failed).toContainText("The preview could not be fetched");
+  await failed.locator("[data-discuss-repreview]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"] [data-discuss-apply]')).toBeEnabled();
 });

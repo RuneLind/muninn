@@ -656,3 +656,116 @@ describe("the proposed edit's card (P4)", () => {
     expect(html).not.toContain("<button type=\"button\" class=\"wiki-discuss-apply\"");
   });
 });
+
+describe("retrying the card after a refusal or a lost answer (fix round 1 batch 4)", () => {
+  const preview = discussState.readEditPreview({
+    ok: true,
+    before: "old words.",
+    after: "new words.",
+    beforeCtx: "",
+    afterCtx: "",
+    fromLine: 3,
+    toLine: 3,
+    note: null,
+    findings: [],
+    pageChangedSinceTurn: false,
+    logEntry: "",
+    baseHash: "b1",
+    previewHash: "p1",
+    markText: "old words.",
+  })!;
+  const turnWith = (edit: discussState.DiscussEditView) => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-t1", seq: 1 });
+    applyDiscussFrame(t, "done", { answer: "a", proposedEdit: { edits: [{ old: "x", new: "y" }] } });
+    t.edit = edit;
+    return discussTurnHtml(t, true);
+  };
+
+  test("a transient Apply refusal keeps the previewed card and its Apply, with the reason", () => {
+    const cases: [number, Record<string, unknown>][] = [
+      [409, { locked: true, error: "A session is writing to this wiki: x. Try again in a moment." }],
+      [409, { dirty: true, error: "The page has uncommitted changes. Commit or discard them, then try again." }],
+      [409, { held: true, error: "A Gardener card holds this page." }],
+      [503, { error: "The Gardener's cards could not be read, so the page's claim is unknown." }],
+      [500, { error: "write failed" }],
+    ];
+    for (const [status, body] of cases) {
+      const e = discussState.editAfterApplyRefusal(preview, status, body);
+      expect(e.state).toBe("ready");
+      expect(e.preview).toBe(preview);
+      expect(e.message).toContain(body.error as string);
+      expect(turnWith(e)).toContain('data-discuss-apply="t1"');
+    }
+  });
+
+  test("stale or changed: the hashes are dropped, no Apply, and «Preview again» instead", () => {
+    for (const body of [{ stale: true, error: "The page changed since the edit was shown. Preview it again." }, { changed: true, error: "What Apply writes changed since the preview. Preview again." }]) {
+      const e = discussState.editAfterApplyRefusal(preview, 409, body);
+      expect(e.state).toBe("refused");
+      expect(e.preview).toBeNull();
+      expect(e.retry).toBe("preview");
+      const html = turnWith(e);
+      expect(html).not.toContain("data-discuss-apply");
+      expect(html).toContain('data-discuss-repreview="t1"');
+      expect(html).toContain(">Preview again</button>");
+      expect(html).not.toContain("Discard this card, or ask again");
+    }
+  });
+
+  test("a permanent Apply refusal stays final: no Apply, no «Preview again»", () => {
+    const cases: [number, Record<string, unknown>][] = [
+      [409, { reason: "superseded", error: "x" }],
+      [409, { reason: "applied", error: "x" }],
+      [409, { reason: "not-done", error: "the turn ended error, not done" }],
+      [409, { refused: true, code: "fact-wrapper", error: "the edit's range is inside a fact wrapper" }],
+      [409, { refused: true, code: "no-change", error: "the edit changes nothing" }],
+      [403, { readonly: true, error: "This wiki is read-only here." }],
+    ];
+    for (const [status, body] of cases) {
+      const e = discussState.editAfterApplyRefusal(preview, status, body);
+      expect(e.state).toBe("refused");
+      expect(e.retry ?? null).toBeNull();
+      const html = turnWith(e);
+      expect(html).not.toContain("data-discuss-apply");
+      expect(html).not.toContain("data-discuss-repreview");
+    }
+  });
+
+  test("a failed preview offers «Preview again» when it was transient, and nothing when it was final", () => {
+    for (const [status, body] of [[0, null], [503, { error: "the rules file cannot be read", reason: "rules-unreadable" }], [500, null]] as [number, Record<string, unknown> | null][]) {
+      const e = discussState.editAfterPreviewFailure(status, body);
+      expect(e.retry).toBe("preview");
+      expect(turnWith(e)).toContain('data-discuss-repreview="t1"');
+    }
+    for (const body of [{ reason: "superseded", error: "x" }, { refused: true, code: "ambiguous", error: "the old text is on the page twice" }]) {
+      const e = discussState.editAfterPreviewFailure(409, body);
+      expect(e.state).toBe("refused");
+      expect(turnWith(e)).not.toContain("data-discuss-repreview");
+    }
+  });
+
+  test("a lost Apply answer never claims nothing was written: the re-preview decides", () => {
+    // The turn now reads as applied: the write landed; show it and render the page again.
+    const applied = discussState.editAfterLostApply(preview, { ok: false, status: 409, body: { reason: "applied", error: "this edit is already applied" } });
+    expect(applied.edit.state).toBe("applied");
+    expect(applied.reload).toBe(true);
+    // Still offered: the outcome is unknown, Apply is offered with the fresh hashes.
+    const fresh = { ...preview, baseHash: "b2", previewHash: "p2" };
+    const again = discussState.editAfterLostApply(preview, { ok: true, status: 200, body: { ...fresh, ok: true } });
+    expect(again.edit.state).toBe("ready");
+    expect(again.edit.preview?.baseHash).toBe("b2");
+    expect(again.edit.message).toContain("unknown");
+    expect(again.reload).toBe(true);
+    // The server does not answer at all: unknown, and a way to find out.
+    const down = discussState.editAfterLostApply(preview, { ok: false, status: 0, body: null });
+    expect(down.edit.message).toContain("unknown");
+    expect(down.edit.retry).toBe("lost");
+    expect(down.edit.preview).toBeNull();
+    for (const r of [applied, again, down]) expect(r.edit.message ?? "").not.toContain("nothing was written");
+  });
+
+  test("the applied note can take focus, so the tab can move the reader to it", () => {
+    expect(turnWith({ state: "applied", preview, message: "Applied." })).toMatch(/<div class="wiki-discuss-edit-done" role="status" tabindex="-1">Applied\.<\/div>/);
+  });
+});

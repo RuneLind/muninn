@@ -84,6 +84,51 @@ export interface DiscussEditView {
   state: DiscussEditState;
   preview: DiscussEditPreview | null;
   message: string | null;
+  /** The card's way on when it holds no Apply: `preview` previews the same
+   *  turn again (fresh hashes); `lost` asks again whether a lost Apply wrote. */
+  retry?: "preview" | "lost" | null;
+}
+
+/** A refusal that may pass on its own: no answer, a server error, another
+ *  writer (`locked`), uncommitted changes (`dirty`) or a Gardener card (`held`). */
+function transientEditRefusal(status: number, body: Record<string, unknown> | null): boolean {
+  return status === 0 || status >= 500 || body?.locked === true || body?.dirty === true || body?.held === true;
+}
+
+/** The card after Apply answered a refusal (`status` ≠ 0). A transient one
+ *  keeps the preview and its Apply: the route checks both hashes again, so a
+ *  page changed meanwhile answers `stale` and writes nothing. `stale` and
+ *  `changed` drop the hashes and offer «Preview again»; the rest are final. */
+export function editAfterApplyRefusal(preview: DiscussEditPreview, status: number, body: Record<string, unknown> | null): DiscussEditView {
+  const message = discussEditRefusalMessage(status, body);
+  if (body?.stale === true || body?.changed === true) return { state: "refused", preview: null, message, retry: "preview" };
+  if (transientEditRefusal(status, body)) return { state: "ready", preview, message };
+  return { state: "refused", preview, message };
+}
+
+/** The card after a preview gave none: «Preview again» when it may pass, else final. */
+export function editAfterPreviewFailure(status: number, body: Record<string, unknown> | null): DiscussEditView {
+  if (status === 0) return { state: "failed", preview: null, message: "The preview could not be fetched: the server did not answer.", retry: "preview" };
+  return { state: "refused", preview: null, message: discussEditRefusalMessage(status, body), retry: transientEditRefusal(status, body) ? "preview" : null };
+}
+
+/** Words for an Apply whose answer was found written after it was lost. */
+export const LOST_APPLY_APPLIED = "Applied to the page. Apply's answer was lost, so whether log.md and the commit followed is not shown here.";
+
+/**
+ * The card after Apply's answer was lost (the request may have written), from
+ * a fresh preview of the same turn (`r`). The turn reads as applied: it is,
+ * and the page is rendered again. Still offered: the outcome is unknown, and
+ * Apply is offered with the fresh hashes (a write that landed meanwhile makes
+ * it answer `stale` or `applied`). No answer again: unknown, with a way to ask.
+ */
+export function editAfterLostApply(preview: DiscussEditPreview, r: { ok: boolean; status: number; body: Record<string, unknown> | null }): { edit: DiscussEditView; reload: boolean } {
+  const lost = "Apply's answer did not arrive, so whether it wrote is unknown";
+  if (r.body?.reason === "applied") return { edit: { state: "applied", preview, message: LOST_APPLY_APPLIED }, reload: true };
+  const fresh = r.ok ? readEditPreview(r.body) : null;
+  if (fresh) return { edit: { state: "ready", preview: fresh, message: `${lost}; the turn does not read as applied now. Apply again to write it.` }, reload: true };
+  if (r.status === 0) return { edit: { state: "failed", preview: null, message: `${lost}, and the server does not answer now. Check again to find out.`, retry: "lost" }, reload: false };
+  return { edit: { state: "refused", preview: null, message: `${lost}. ${discussEditRefusalMessage(r.status, r.body)}`, retry: transientEditRefusal(r.status, r.body) ? "lost" : null }, reload: true };
 }
 
 /** A preview body as the route answers it, or null when it is not one. */
@@ -116,7 +161,7 @@ export function discussEditRefusalMessage(status: number, body: Record<string, u
   const error = typeof body?.error === "string" ? body.error : "";
   if (body?.readonly === true) return `This wiki is read-only here: nothing is written. ${error}`.trim();
   if (body?.refused === true) return `This edit cannot be applied: ${error}.`;
-  if (body?.stale === true || body?.changed === true) return `${error} Discard this card, or ask again for a fresh edit.`;
+  if (body?.stale === true || body?.changed === true) return error;
   if (body?.dirty === true || body?.held === true || body?.locked === true) return error;
   switch (body?.reason) {
     case "superseded":
@@ -309,12 +354,14 @@ export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
     }
     if (p.pageChangedSinceTurn && e.state === "ready") parts.push(`<div class="wiki-discuss-edit-why">The page changed since this turn; the old text is still there exactly once, and the diff is against the page as it is now.</div>`);
   }
-  if (e.message) parts.push(`<div class="${e.state === "applied" ? "wiki-discuss-edit-done" : "wiki-discuss-error"}" role="${e.state === "applied" ? "status" : "alert"}">${esc(e.message)}</div>`);
+  // The applied note takes focus after the page renders again (`tabindex="-1"`).
+  if (e.message) parts.push(e.state === "applied" ? `<div class="wiki-discuss-edit-done" role="status" tabindex="-1">${esc(e.message)}</div>` : `<div class="wiki-discuss-error" role="alert">${esc(e.message)}</div>`);
   if (e.state !== "applied") {
     const busy = e.state === "applying" ? " disabled" : "";
     parts.push(
       `<div class="wiki-discuss-actions">` +
         (e.state === "ready" || e.state === "applying" ? `<button type="button" class="wiki-discuss-apply" data-discuss-apply="${key}"${busy}>${e.state === "applying" ? "Applying…" : "Apply"}</button>` : "") +
+        (e.retry && (e.state === "refused" || e.state === "failed") ? `<button type="button" class="wiki-discuss-apply" data-discuss-repreview="${key}">${e.retry === "lost" ? "Check again" : "Preview again"}</button>` : "") +
         `<button type="button" class="wiki-discuss-continue" data-discuss-reword="${key}"${busy}>Change the wording</button>` +
         `<button type="button" class="wiki-discuss-continue" data-discuss-discard="${key}"${busy}>Discard</button>` +
         `</div>`,
