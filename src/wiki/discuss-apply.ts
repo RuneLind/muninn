@@ -279,6 +279,57 @@ function newTextFor(body: string, fileStart: number, before: string, edit: Integ
   return nl > 0 && body[nl - 1] === "\r" ? neu.replace(/\n/g, "\r\n") : neu;
 }
 
+/** The length of `t`'s leading or trailing white space. */
+const wsRun = (t: string, side: "lead" | "trail") => t.match(side === "lead" ? /^\s*/ : /\s*$/)![0].length;
+
+/**
+ * How much of the range's edge white space the new text keeps as it is: the
+ * common prefix of `before` and `after` within `before`'s leading white space,
+ * and the common suffix within its trailing white space. That much is left out
+ * of the range (the content is the same either way), so the range holds only
+ * edge white space the edit removes or changes, and a line break the page's
+ * markup owns (the frontmatter's last, a fence line's CR) stays out of it when
+ * the new text keeps it.
+ */
+function keptEdges(before: string, after: string): { cutLead: number; cutTrail: number } {
+  let cutLead = 0;
+  while (cutLead < Math.min(wsRun(before, "lead"), after.length) && before[cutLead] === after[cutLead]) cutLead++;
+  let cutTrail = 0;
+  // A white-space-only new text is counted once: what the lead kept is not kept again by the trail.
+  const trailCap = Math.min(wsRun(before, "trail"), after.length - cutLead);
+  while (cutTrail < trailCap && before[before.length - 1 - cutTrail] === after[after.length - 1 - cutTrail]) cutTrail++;
+  return { cutLead, cutTrail };
+}
+
+/** The line of `body` around `at`, its line break included. */
+function lineSpan(body: string, at: number): { start: number; end: number } {
+  const nl = body.indexOf("\n", at);
+  return { start: body.lastIndexOf("\n", at - 1) + 1, end: nl === -1 ? body.length : nl + 1 };
+}
+
+/**
+ * The refusal for an edit whose range's edge white space (what is left of it
+ * once {@link keptEdges} has cut what the new text keeps) takes a character the
+ * page's markup owns, or null: the frontmatter block, or a fence line or a line
+ * holding a fact-check sentinel, each with its line break and indent. The old
+ * text's words matched outside them, so the edit would change that markup
+ * (join a line onto it, or take its line break or indent), and it is named as
+ * that, never as an old text inside a zone. A component tag holds no white
+ * space at its edges; where it stands is {@link markupChange}'s to compare.
+ */
+function edgeMarkup(body: string, from: number, to: number): DiscussEditRefusal | null {
+  const range = body.slice(from, to);
+  const leadEnd = from + wsRun(range, "lead");
+  const trailStart = to - wsRun(range, "trail");
+  if (leadEnd === from && trailStart === to) return null;
+  for (const t of pageMarkup(body)) {
+    if (t.kind === "tag") continue;
+    const own = t.kind === "frontmatter" ? { start: 0, end: t.text.length } : lineSpan(body, t.start);
+    if ((from < own.end && leadEnd > own.start) || (trailStart < own.end && to > own.start)) return changed(t, false);
+  }
+  return null;
+}
+
 /** The edits a stored `proposed_edit` holds, read again as `parseEditList` reads an answer. */
 function storedEdits(proposed: unknown): { edits: IntegrateEdit[]; dropped: string[] } | null {
   if (!proposed || typeof proposed !== "object" || !Array.isArray((proposed as { edits?: unknown }).edits)) return null;
@@ -341,14 +392,21 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
   if (wrapperSpans(body, map).some((w) => from < w.end && to > w.start)) {
     return refuse("fact-wrapper", "the edit's range is inside a fact wrapper; a wrapper's verdict is the fact check's to change");
   }
-  const before = body.slice(from, to);
-  const after = newTextFor(body, from, before, edit);
-  if (after === before) {
+  const wide = body.slice(from, to);
+  const wideAfter = newTextFor(body, from, wide, edit);
+  if (wideAfter === wide) {
     if (edgeSpace(edit.old, "lead") !== edgeSpace(edit.new, "lead") || edgeSpace(edit.old, "trail") !== edgeSpace(edit.new, "trail")) {
       return refuse("edge-space", "the edit changes only white space at the old text's edges, and the page does not hold that white space where the old text matched (the match ignored it); edit the page in Claude Code");
     }
     return refuse("no-change", "the edit's new text is what the page already says; there is nothing to apply");
   }
+  const { cutLead, cutTrail } = keptEdges(wide, wideAfter);
+  from += cutLead;
+  to -= cutTrail;
+  const before = wide.slice(cutLead, wide.length - cutTrail);
+  const after = wideAfter.slice(cutLead, wideAfter.length - cutTrail);
+  const edge = edgeMarkup(body, from, to);
+  if (edge) return edge;
   const markup = markupChange(body, from, to, after);
   if (markup) return markup;
   const start = bom + from;

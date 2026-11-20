@@ -616,3 +616,145 @@ describe("class check: pageMarkup adds the sentinels to markdownMarkup", () => {
     expect(pageMarkup(body).filter((t) => t.kind !== "sentinel")).toEqual(markdownMarkup(body));
   });
 });
+
+// ── Class check (fix round 3, widening): the edge white space an edit takes ──
+
+const toCrlf = (s: string) => s.replace(/\n/g, "\r\n");
+/** What the reader shows, line breaks and white space left out: two pages whose
+ *  only difference is a paragraph split or a blank line read the same. */
+const readerText = (md: string) => render(md).replace(/<br\s*\/?>/g, "").replace(/\s+/g, "");
+const outcome = (r: DiscussEditPlan | DiscussEditRefusal) => (r.ok ? "ok" : r.code);
+/** The codes an edit that changes the page's markup is refused with; never one
+ *  that says the old text sits inside a zone, since its words matched outside. */
+const MARKUP_CHANGE_CODES = ["new-fence", "new-frontmatter", "new-markup", "fact-check-block"];
+
+const BEFORE_RANGE: [string, string | null][] = [
+  ["frontmatter closer", "---\ntitle: x\n---"],
+  ["fence closer", "```js\ncode\n```"],
+  ["block component closer", "<Callout>\n\nInside.\n\n</Callout>"],
+  ["list item", "- item one\n- item two"],
+  ["table row", "| a | b |\n| - | - |\n| 1 | 2 |"],
+  ["heading", "# Heading"],
+  ["plain paragraph", "Plain para."],
+  ["fact-check sentinel", "<!-- factcheck:start -->\nChecked.\n<!-- factcheck:end -->"],
+  ["page start", null],
+];
+const AFTER_RANGE: [string, string | null][] = [
+  ["fence opener", "```js\ncode\n```"],
+  ["block component opener", "<Callout>\n\nInside.\n\n</Callout>"],
+  ["list item", "- item one\n- item two"],
+  ["table row", "| a | b |\n| - | - |\n| 1 | 2 |"],
+  ["heading", "# Heading"],
+  ["plain paragraph", "Plain para."],
+  ["fact-check sentinel", "<!-- factcheck:start -->\nChecked.\n<!-- factcheck:end -->"],
+  ["page end", null],
+];
+const EDGE_SPACE: [string, string][] = [["none", ""], ["a line break", "\n"], ["a blank line", "\n\n"], ["spaces", "  "], ["mixed", " \n\n"]];
+const NEW_EDGE = ["keeps", "drops", "adds a line break to"] as const;
+
+/**
+ * One cell: a page of a neighbour block, a blank line and the edited paragraph
+ * (or the paragraph at the page's start or end), and an edit whose old text
+ * carries `ws` on one side of the paragraph's words. The expected result is
+ * read off the page, not off the code:
+ * - the page holds `ws` there: the edit is the old text with that white space
+ *   replaced by the new text, as the exact tier would write it;
+ * - it does not: only the words change, and a line break the new text adds
+ *   beyond the old text's white space stays.
+ * An edit that applies writes that result, on LF and on the page's CRLF copy
+ * (with CRLF line endings, from an LF or a CRLF edit); an edit refused on one
+ * is refused with the same code on the other, the code is one that names a
+ * markup change, and the reader shows the result asked for differently from
+ * the words-only result: a refusal needs a markup change to justify it.
+ */
+function edgeCell(side: "lead" | "trail", block: string | null, ws0: string, op: (typeof NEW_EDGE)[number], tier: "exact" | "collapsed") {
+  const ws = side === "trail" ? [...ws0].reverse().join("") : ws0;
+  const [w, w2] = ["Core para here.", "Core para there."];
+  const core = tier === "exact" ? w : "Core  para here.";
+  const page = side === "lead" ? (block ? `${block}\n\n` : "") + `${core}\n\nTail para.\n` : `Head para.\n\n${core}` + (block ? `\n\n${block}\n` : "\n");
+  const at = page.indexOf(core);
+  const [head, tail] = [page.slice(0, at), page.slice(at + core.length)];
+  const old = side === "lead" ? ws + w : w + ws;
+  const neu = op === "keeps" ? (side === "lead" ? ws + w2 : w2 + ws) : op === "drops" ? w2 : side === "lead" ? `${ws}\n${w2}` : `${w2}\n${ws}`;
+  const held = side === "lead" ? head.endsWith(ws) : tail.startsWith(ws);
+  const added = op === "adds a line break to" ? "\n" : "";
+  const asked = !held
+    ? side === "lead" ? head + added + w2 + tail : head + w2 + added + tail
+    : side === "lead" ? head.slice(0, head.length - ws.length) + neu + tail : head + neu + tail.slice(ws.length);
+  const wordsOnly = head + w2 + tail;
+  const lf = resolveDiscussEdit(page, "notes/p.mdx", one(old, neu));
+  for (const cr of [resolveDiscussEdit(toCrlf(page), "notes/p.mdx", one(old, neu)), resolveDiscussEdit(toCrlf(page), "notes/p.mdx", one(toCrlf(old), toCrlf(neu)))]) {
+    expect(outcome(cr)).toBe(outcome(lf));
+    if (lf.ok && cr.ok) expect(cr.content).toBe(toCrlf(lf.content));
+  }
+  if (lf.ok) expect(lf.content).toBe(asked);
+  else {
+    expect(MARKUP_CHANGE_CODES).toContain(lf.code);
+    expect(readerText(asked)).not.toBe(readerText(wordsOnly));
+  }
+}
+
+describe("class check (widening): what precedes or follows the range (frontmatter closer, fence opener/closer, block component opener/closer, list item, table row, heading, plain paragraph, fact-check sentinel, page start/end) × edge white space in the old text (none, a line break, a blank line, spaces, mixed) × what the new text does with it (keeps, drops, adds a line break) × exact or collapsed match × LF/CRLF", () => {
+  for (const [side, list] of [["lead", BEFORE_RANGE], ["trail", AFTER_RANGE]] as const) {
+    for (const [where, block] of list) {
+      for (const [wsName, ws] of EDGE_SPACE) {
+        for (const op of NEW_EDGE) {
+          for (const tier of ["exact", "collapsed"] as const) {
+            test(`${side === "lead" ? "after" : "before"} a ${where}, ${wsName} ${side === "lead" ? "leading" : "trailing"}, the new text ${op} it, ${tier}`, () => edgeCell(side, block, ws, op, tier));
+          }
+        }
+      }
+    }
+  }
+});
+
+describe("class check (widening): the verify pass's findings and surviving mutants", () => {
+  test("finding 1: a blank-line-led old text right after the frontmatter applies and leaves the frontmatter as it was, LF and CRLF", () => {
+    const page = "---\ntitle: x\n---\n\nFirst para here.\n";
+    for (const p of [page, toCrlf(page)]) {
+      const r = planned(resolveDiscussEdit(p, "notes/p.md", one("\n\nFirst para here.", "\n\nFirst para there.")));
+      expect(r.content).toBe(p === page ? "---\ntitle: x\n---\n\nFirst para there.\n" : toCrlf("---\ntitle: x\n---\n\nFirst para there.\n"));
+      expect(r.before).toBe("First para here.");
+    }
+    // Dropping the blank line keeps the frontmatter's own line break; joining onto its closer is a frontmatter change.
+    expect(planned(resolveDiscussEdit(page, "notes/p.md", one("\n\nFirst para here.", "\nFirst para there."))).content).toBe("---\ntitle: x\n---\nFirst para there.\n");
+    for (const p of [page, toCrlf(page)]) expect(refused(resolveDiscussEdit(p, "notes/p.md", one("\n\nFirst  para here.", "First para there."))).code).toBe("new-frontmatter");
+  });
+  test("finding 2: a blank-line-led old text after a closing fence resolves on the CRLF copy as on the LF copy", () => {
+    const page = "# T\n\n```js\ncode\n```\n\nAfter  para.\n";
+    const lf = planned(resolveDiscussEdit(page, "notes/p.md", one("\n\nAfter para.", "\n\nAfter text.")));
+    const cr = planned(resolveDiscussEdit(toCrlf(page), "notes/p.md", one("\n\nAfter para.", "\n\nAfter text.")));
+    expect(lf.content).toBe("# T\n\n```js\ncode\n```\n\nAfter text.\n");
+    expect(cr.content).toBe(toCrlf(lf.content));
+    for (const p of [page, toCrlf(page)]) expect(refused(resolveDiscussEdit(p, "notes/p.md", one("\n\nAfter para.", "After text."))).code).toBe("new-fence");
+  });
+  test("M18: the markup guard reads the range the edit replaces, edge white space included", () => {
+    const callout = "# T\n\nPara  x.\n\n<Callout>\n\nIn.\n\n</Callout>\n";
+    expect(refused(resolveDiscussEdit(callout, "notes/p.mdx", one("Para x.\n\n", "Para y."))).code).toBe("new-markup");
+    const fence = toCrlf("# T\n\nPara  x.\n\n```js\ncode\n```\n");
+    expect(refused(resolveDiscussEdit(fence, "notes/p.md", one("Para x.\n\n", "Para y."))).code).toBe("new-fence");
+  });
+  test("M19 and M20: an exact match's edge white space is not widened over the page's next line break", () => {
+    expect(planned(resolveDiscussEdit("A.\n\nB.\n", "notes/p.md", one("\nB.", "\nC."))).content).toBe("A.\n\nC.\n");
+    expect(planned(resolveDiscussEdit("A.\n\nB.\n", "notes/p.md", one("A.\n", "C.\n"))).content).toBe("C.\n\nB.\n");
+  });
+  test("M13: an edit of leading edge white space the page does not hold is refused as edge-space", () => {
+    expect(refused(resolveDiscussEdit("# T\n\nA.\nB.\n", "notes/p.md", one("\n\nB.", "\nB."))).code).toBe("edge-space");
+  });
+  test("M21: an old text's CRLF edges are read as LF breaks on an LF page", () => {
+    expect(planned(resolveDiscussEdit("# T\n\nFoo  bar.\n\nNext.\n", "notes/p.md", one("Foo bar.\r\n\r\n", "Foo baz.\r\n"))).content).toBe("# T\n\nFoo baz.\nNext.\n");
+  });
+  test("trailing edge white space that takes a fence line's indent is a fence change, not an old text inside the fence", () => {
+    const page = "# T\n\nPara  x.\n\n  ```js\n  code\n  ```\n";
+    for (const p of [page, toCrlf(page)]) expect(refused(resolveDiscussEdit(p, "notes/p.md", one("Para x.\n\n  ", "Para y."))).code).toBe("new-fence");
+    // Kept, the indent stays out of the range.
+    for (const p of [page, toCrlf(page)]) expect(planned(resolveDiscussEdit(p, "notes/p.md", one("Para x.\n\n  ", "Para y.\n\n  "))).content).toBe(p.replace("Para  x.", "Para y."));
+  });
+  test("a white-space-only new text is kept once, not by both edges", () => {
+    expect(planned(resolveDiscussEdit("A.\n\nB.\n\nC.\n", "notes/p.md", one("\nB.\n", "\n"))).content).toBe("A.\n\n\nC.\n");
+  });
+  test("an exact old text that takes the line break after a fact-check sentinel is refused, as its CRLF copy is", () => {
+    const page = "Intro.\n\n<!-- factcheck:start -->\nChecked.\n<!-- factcheck:end -->\n\nNext para.\n";
+    for (const p of [page, toCrlf(page)]) expect(refused(resolveDiscussEdit(p, "notes/p.md", one("\n\nNext para.", "Next text."))).code).toBe("fact-check-block");
+  });
+});
