@@ -271,7 +271,7 @@ describe("preview", () => {
     const { id } = await turnWith(edit('pier <Verdict tone="ok">takes</Verdict> the', "pier serves the"));
     const { status, body } = await preview(id);
     expect(status).toBe(409);
-    expect(body).toMatchObject({ refused: true, code: "inline-component" });
+    expect(body).toMatchObject({ refused: true, code: "component-tag" });
   });
 });
 

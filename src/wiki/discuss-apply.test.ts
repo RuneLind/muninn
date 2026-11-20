@@ -55,7 +55,7 @@ describe("resolveDiscussEdit: refused at preview", () => {
   });
   test("a range holding an inline component tag", () => {
     const r = refused(resolveDiscussEdit(PAGE, "plans/f.mdx", one('stops at <Verdict tone="ok">berth four</Verdict> on', "stops at berth five on")));
-    expect(r.code).toBe("inline-component");
+    expect(r.code).toBe("component-tag");
   });
   test("a range inside a fact wrapper", () => {
     expect(refused(resolveDiscussEdit(PAGE, "plans/f.mdx", one("frontmatter status date", "frontmatter status_date field"))).code).toBe("fact-wrapper");
@@ -122,16 +122,16 @@ describe("resolveDiscussEdit: a range cutting into an inline component tag", () 
   const page = '# P\n\nThe status is <Pill tone="ok">green</Pill> today.\n\nProbe: <Check env="X" /> runs.\n\nA <Pill tone="a > b">quoted</Pill> pill.\n';
   const code = (old: string, neu: string) => refused(resolveDiscussEdit(page, "plans/p.mdx", one(old, neu))).code;
   test("the start of a tag", () => {
-    expect(code('is <Pill tone="o', 'is <Pill tone="bad')).toBe("inline-component");
+    expect(code('is <Pill tone="o', 'is <Pill tone="bad')).toBe("component-tag");
   });
   test("the end of a tag and the prose after it", () => {
-    expect(code('ok">green', 'warn">red')).toBe("inline-component");
+    expect(code('ok">green', 'warn">red')).toBe("component-tag");
   });
   test("the inside of a self-closing tag", () => {
-    expect(code('env="X" /', 'env="Y" /')).toBe("inline-component");
+    expect(code('env="X" /', 'env="Y" /')).toBe("component-tag");
   });
   test("the tail of a tag whose quoted value holds a >", () => {
-    expect(code('b">quoted', 'c">quoted')).toBe("inline-component");
+    expect(code('b">quoted', 'c">quoted')).toBe("component-tag");
   });
   test("prose between the tags applies", () => {
     expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("green", "amber"))).content).toContain('<Pill tone="ok">amber</Pill>');
@@ -213,5 +213,56 @@ describe("resolveDiscussEdit: an edit that changes nothing", () => {
   test("a collapsed match whose new text is the file's own text is refused as no-change", () => {
     const page = "# T\n\nPara one ends.\n\nNext para.\n";
     expect(refused(resolveDiscussEdit(page, "notes/t.md", one("Para  one ends.", "Para one ends."))).code).toBe("no-change");
+  });
+});
+
+describe("resolveDiscussEdit: the page's markup before and after the edit is compared as a whole", () => {
+  // Fix round 2: the markup (frontmatter, fence lines, component tags outside
+  // code, multi-line openers included) is read with markdown-ast's parse on the
+  // page before and after the edit, and must be the same outside the range.
+  test("new text that ends in one backtick in front of the page's own two builds a fence line", () => {
+    const page = '# P\n\nThe ferry leaves at nine. ``x`` is code.\n\nThe status is <Pill tone="ok">green</Pill>.\n';
+    expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine. ", "The ferry leaves at nine.\n\n`"))).code).toBe("new-fence");
+  });
+  test("deleting the opening backtick of a code span makes the tag in it live", () => {
+    const fold = '# P\n\nUse `<Fold title="x">` to fold it.\n';
+    expect(refused(resolveDiscussEdit(fold, "plans/p.mdx", one("Use `", "Use "))).code).toBe("new-markup");
+    const pill = '# P\n\nWrite `<Pill tone="bad">` for red.\n';
+    expect(refused(resolveDiscussEdit(pill, "plans/p.mdx", one("Write `", "Write "))).code).toBe("new-markup");
+  });
+  test("an attribute on the second line of a multi-line opener", () => {
+    const chart = '# P\n\n<Chart kind="bars"\n  value="x">\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n</Chart>\n';
+    expect(refused(resolveDiscussEdit(chart, "plans/p.mdx", one('value="x"', 'value="y"'))).code).toBe("component-tag");
+    const fold = '# P\n\n<Fold\n  title="Old title">\n\nBody text.\n\n</Fold>\n';
+    expect(refused(resolveDiscussEdit(fold, "plans/p.mdx", one('title="Old title"', 'title="New title"'))).code).toBe("component-tag");
+    const pill = '# P\n\nThe status is <Pill\n  tone="ok">green</Pill> today.\n';
+    expect(refused(resolveDiscussEdit(pill, "plans/p.mdx", one('tone="ok"', 'tone="bad"'))).code).toBe("component-tag");
+  });
+  test("prose after an unclosed <Y on the same line applies", () => {
+    const page = "# P\n\nIf x <Y then the ferry leaves at nine.\n";
+    for (const rel of ["plans/p.mdx", "notes/p.md"]) {
+      expect(planned(resolveDiscussEdit(page, rel, one("the ferry leaves at nine.", "the ferry leaves at ten."))).content).toBe("# P\n\nIf x <Y then the ferry leaves at ten.\n");
+    }
+  });
+  test("a name that only starts with Fact, and a Fact tag in a code span, are prose", () => {
+    const page = "# P\n\nThe ferry leaves at nine.\n";
+    const after = (neu: string) => planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", neu))).after;
+    expect(after("The <Factory> leaves.")).toBe("The <Factory> leaves.");
+    expect(after("The <Facts list grows.")).toBe("The <Facts list grows.");
+    expect(after("Quote `<Fact>` here.")).toBe("Quote `<Fact>` here.");
+  });
+  test("new text that starts mid-line with an inline ``` code span is not a fence", () => {
+    const page = "# P\n\nThe ferry leaves at nine.\n";
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("nine.", "```x``` o'clock."))).content).toBe("# P\n\nThe ferry leaves at ```x``` o'clock.\n");
+  });
+  test("new text that keeps a <Placeholder> that is no component applies", () => {
+    const page = "# P\n\nRun implement <SPEC> now.\n";
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("Run implement <SPEC> now.", "Run implement <SPEC> today."))).after).toBe("Run implement <SPEC> today.");
+  });
+  test("a line of 20,000 unclosed <Pill tags resolves in linear time", () => {
+    const page = `# P\n\nThe ferry leaves at nine.\n\n${"<Pill ".repeat(20_000)}\n`;
+    const t0 = performance.now();
+    planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "The ferry leaves at ten.")));
+    expect(performance.now() - t0).toBeLessThan(200);
   });
 });

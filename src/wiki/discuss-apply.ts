@@ -12,15 +12,16 @@
  * as P1's locator does. The new content is spliced into the FILE text, never
  * written from the stripped view, so no wrapper is lost. Refused, each with its
  * own code: a range in the file that touches a fact wrapper (inside it or
- * across its boundary), an old or new text that quotes a `Fact`/`FactCheck`
- * tag, a range that overlaps an inline component tag, and a new text that adds
- * markup (a fence line, frontmatter, or any `<Capitalised` tag outside a code
- * span): the agent's new text is prose, and markup changes go to Claude Code.
+ * across its boundary), an old text that quotes a `Fact`/`FactCheck` tag, and
+ * an edit that touches or changes the page's markup (frontmatter, a fence line,
+ * a known component tag outside code, read with markdown-ast's `markdownMarkup`
+ * on the page before and after the edit): the agent's new text is prose, and
+ * markup changes go to Claude Code.
  * An edit whose result is the page as it is (`no-change`) is refused too.
  */
 
-import { COMPONENT_NAMES } from "../format/component-spec.ts";
-import { componentTagSourceSingleLine, markdownCodeRegions, inProtectedRegion, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
+import { lineCodeSpanRanges } from "../format/code-spans.ts";
+import { markdownMarkup, stripFactWrappersWithMap, type MarkupToken } from "../format/markdown-ast.ts";
 import {
   INTEGRATE_MAX_EDIT_CHARS,
   applyEdits,
@@ -44,7 +45,6 @@ export type DiscussEditRefusalCode =
   | "not-found"
   | "markup"
   | "fact-wrapper"
-  | "inline-component"
   | "new-fence"
   | "new-frontmatter"
   | "new-markup"
@@ -79,17 +79,23 @@ export interface DiscussEditPlan {
 
 const refuse = (code: DiscussEditRefusalCode, reason: string): DiscussEditRefusal => ({ ok: false, code, reason });
 
-/** A `Fact` or `FactCheck` tag (no word boundary: `<FactCheck` is one too). */
-const FACT_TAG_RE = /<\/?Fact/;
+/** A `Fact` or `FactCheck` tag's start. */
+const FACT_TAG_RE = /<\/?Fact(?:Check)?\b/g;
 /** One `Fact` tag, the shape `stripFactWrappers` removes. */
 const FACT_ONE_TAG_RE = /<\/?Fact\b[^>\n]*>/g;
-/** Any known component's tag (opening, closing or self-closing), anywhere on a
- *  line, with the shared single-line shape (a quoted `>` stays inside the tag). */
-const INLINE_COMPONENT_TAG_RE = new RegExp(componentTagSourceSingleLine(COMPONENT_NAMES.filter((n) => n !== "Fact")), "g");
-/** A fenced-code line (in a list or a blockquote too). */
-const FENCE_LINE_RE = /^[ \t>]*(?:`{3,}|~{3,})/m;
-/** Any `<Capitalised` tag, known or not, to its `>` or the end of its line (an unclosed one included). */
-const ANY_TAG_RE = /<\/?[A-Z][A-Za-z0-9]*(?:"[^"\n]*"|[^>"\n])*>?/g;
+
+/** Does the old text quote a `Fact`/`FactCheck` tag outside its own code spans?
+ *  Such an old text can match only a documented tag, never a live wrapper (the
+ *  match runs with the wrappers stripped); this names why it is refused. */
+function quotesFactTag(old: string): boolean {
+  for (const line of old.split("\n")) {
+    const spans = lineCodeSpanRanges(line);
+    for (const m of line.matchAll(FACT_TAG_RE)) {
+      if (!spans.some((r) => m.index! >= r.start && m.index! < r.end)) return true;
+    }
+  }
+  return false;
+}
 
 const ZONE_REFUSAL: Record<ZoneKind, { code: DiscussEditRefusalCode; reason: string }> = {
   frontmatter: { code: "frontmatter", reason: "the old text sits in the page's frontmatter, which the agent may not edit" },
@@ -140,27 +146,45 @@ function wrapperSpans(body: string, map: number[]): { start: number; end: number
   return spans;
 }
 
+const isFactName = (t: MarkupToken) => t.name === "Fact" || t.name === "FactCheck";
+
+/** The refusal for an edit whose range overlaps a piece of the page's markup. */
+function touched(t: MarkupToken): DiscussEditRefusal {
+  if (t.kind === "frontmatter") return refuse(ZONE_REFUSAL.frontmatter.code, ZONE_REFUSAL.frontmatter.reason);
+  if (t.kind === "fence") return refuse(ZONE_REFUSAL.fence.code, "the edit's range touches a fenced-code line, which the agent may not edit");
+  if (isFactName(t)) return refuse("fact-tag", `the edit's range touches a fact tag (${t.text}); a wrapper's verdict is the fact check's to change`);
+  return refuse("component-tag", `the edit's range touches a component tag (${t.text}); the agent may not edit component markup`);
+}
+
+/** The refusal for an edit that changes the page's markup outside its range. */
+function changed(t: MarkupToken): DiscussEditRefusal {
+  if (t.kind === "frontmatter") return refuse("new-frontmatter", "the edit would create or change the page's frontmatter; the agent may not edit it");
+  if (t.kind === "fence") return refuse("new-fence", `the edit would add or change a fenced-code line (${t.text}); the agent's new text may not change markup`);
+  if (isFactName(t)) return refuse("fact-tag", `the edit would add or change a fact tag (${t.text}); a wrapper's verdict is the fact check's to change`);
+  return refuse("new-markup", `the edit would add or change a component tag (${t.text}); markup changes go to Claude Code`);
+}
+
 /**
- * The refusal for a new text that adds markup, or null. Read on the page with
- * the edit made, so a tag the new text completes with the page's own
- * characters counts, and a code span is judged where it lands.
+ * The refusal for an edit that touches or changes the page's markup, or null.
+ * The markup (`markdownMarkup`: frontmatter, fence lines, component tags outside
+ * code) is read on the page before and after the edit: the range may overlap
+ * none of it, and the rest must come out the same, each token shifted by the
+ * edit's change in length when it lies after the range. So a fence line or tag
+ * the new text builds with the page's own characters counts, as does a tag a
+ * removed backtick takes out of a code span; a code span the new text adds
+ * around prose, or a `<Name>` that is no component, is prose.
  */
-function addedMarkup(body: string, start: number, end: number, after: string, isMdx: boolean): DiscussEditRefusal | null {
-  if (FENCE_LINE_RE.test(after)) return refuse("new-fence", "the new text holds a fenced-code line; the agent's new text may not add markup");
-  const next = body.slice(0, start) + after + body.slice(end);
-  const fm = (t: string) => {
-    const z = findExclusionZones(t, isMdx).find((zone) => zone.kind === "frontmatter");
-    return z ? t.slice(z.start, z.end) : null;
-  };
-  if (fm(next) !== fm(body)) return refuse("new-frontmatter", "the new text would create or change the page's frontmatter; the agent may not edit it");
-  const code = markdownCodeRegions(next);
-  const newEnd = start + after.length;
-  for (const m of next.matchAll(ANY_TAG_RE)) {
-    const at = m.index!;
-    if (at >= newEnd) break;
-    if (at + m[0].length > start && !inProtectedRegion(at, code)) {
-      return refuse("new-markup", `the new text adds a component tag (${m[0]}); markup changes go to Claude Code`);
-    }
+function markupChange(body: string, start: number, end: number, after: string): DiscussEditRefusal | null {
+  const was = markdownMarkup(body);
+  const hit = was.find((t) => t.start < end && t.start + t.text.length > start);
+  if (hit) return touched(hit);
+  const now = markdownMarkup(body.slice(0, start) + after + body.slice(end));
+  const delta = after.length - (end - start);
+  for (let i = 0; i < Math.max(was.length, now.length); i++) {
+    const a = was[i];
+    const b = now[i];
+    if (a && b && a.kind === b.kind && a.text === b.text && (a.start >= end ? a.start + delta : a.start) === b.start) continue;
+    return changed((b ?? a)!);
   }
   return null;
 }
@@ -217,8 +241,8 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
   if (edit.old.length > INTEGRATE_MAX_EDIT_CHARS || edit.new.length > INTEGRATE_MAX_EDIT_CHARS) {
     return refuse("too-long", `the edit's text is over ${INTEGRATE_MAX_EDIT_CHARS} characters`);
   }
-  if (FACT_TAG_RE.test(edit.old) || FACT_TAG_RE.test(edit.new)) {
-    return refuse("fact-tag", "the edit quotes a fact wrapper's tag (<Fact>); a wrapper's verdict is the fact check's to change");
+  if (quotesFactTag(edit.old)) {
+    return refuse("fact-tag", "the old text quotes a fact wrapper's tag (<Fact>); a wrapper's verdict is the fact check's to change");
   }
 
   // A BOM is not page text: the frontmatter must start at offset 0 for the zones.
@@ -249,21 +273,11 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
   if (wrapperSpans(body, map).some((w) => fileStart < w.end && fileEnd > w.start)) {
     return refuse("fact-wrapper", "the edit's range is inside a fact wrapper; a wrapper's verdict is the fact check's to change");
   }
-  const code = markdownCodeRegions(body);
-  // Any overlap, not only a whole tag: a range cutting into a tag rewrites its attributes.
-  for (const m of body.matchAll(INLINE_COMPONENT_TAG_RE)) {
-    const at = m.index!;
-    if (at >= fileEnd) break;
-    if (at + m[0].length > fileStart && !inProtectedRegion(at, code)) {
-      return refuse("inline-component", `the edit's range overlaps a component tag (${m[0]}); the agent may not edit component markup`);
-    }
-  }
-
   const before = body.slice(fileStart, fileEnd);
   const after = newTextFor(body, fileStart, before, edit);
   if (after === before) return refuse("no-change", "the edit's new text is what the page already says; there is nothing to apply");
-  const added = addedMarkup(body, fileStart, fileEnd, after, isMdx);
-  if (added) return added;
+  const markup = markupChange(body, fileStart, fileEnd, after);
+  if (markup) return markup;
   const start = bom + fileStart;
   const end = bom + fileEnd;
   return {
