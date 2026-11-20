@@ -424,9 +424,10 @@ const ENTITIES: Record<string, string> = { "&lt;": "<", "&gt;": ">", "&quot;": '
  * table rows (cells joined by ` · `, separator rows dropped), blockquotes and
  * `> [!type]` markers, inline code, `[[target|label]]`, `[label](url)`,
  * `![alt](src)`, emphasis at word boundaries (`__init__` stays). An unclosed
- * `[[` or `[` keeps its text. Five entities are decoded last.
+ * `[[` or `[` keeps its text. Five entities are decoded last. Clipped to
+ * `max` code points (default {@link SNIPPET_MAX}); Discuss's mark passes `Infinity`.
  */
-export function plainSnippet(raw: string): string {
+export function plainSnippet(raw: string, max = SNIPPET_MAX): string {
   let s = raw.replace(/\r\n?/g, "\n");
   s = s.replace(/^\s*tags:[^\n]*(\n|$)/i, "");
   s = s.replace(/^[ \t]*#{1,6}[ \t]+[^\n]*(\n|$)/, "");
@@ -445,7 +446,7 @@ export function plainSnippet(raw: string): string {
   );
   s = s.replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2");
   s = s.replace(/&(?:lt|gt|quot|#39|amp);/g, (e) => ENTITIES[e]!);
-  return clip(flatten(s), SNIPPET_MAX).text;
+  return clip(flatten(s), max).text;
 }
 
 /** claude-usage marks hits `\u0002…\u0003`; turn them into offsets into the

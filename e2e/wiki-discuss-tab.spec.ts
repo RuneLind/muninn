@@ -363,6 +363,64 @@ function revealed(page: Page, text: string, nth = 0) {
 
 const flat = (s: string) => s.replace(/\s+/g, "");
 
+/**
+ * Hold the page's next `/api/wiki/discuss` stream after its first delta: the
+ * fake's three chunks 700 ms apart can end before a test's steps on a slow
+ * runner (CI run 44638214225). `__discussHold.step()` feeds one extra delta
+ * (one repaint) on demand; `release()` lets the held frames through, and the
+ * `done` frame's answer replaces the text the extra deltas added.
+ */
+function holdNextDiscussStream(page: Page): Promise<void> {
+  return page.evaluate(() => {
+    const real = window.fetch.bind(window);
+    let armed = true;
+    window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await real(input, init);
+      if (!armed || String(input) !== "/api/wiki/discuss" || !res.ok || !res.body) return res;
+      armed = false;
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      const upstream = res.body.getReader();
+      let ctl!: ReadableStreamDefaultController<Uint8Array>;
+      let holding = false;
+      let heldOnce = false;
+      let ended = false;
+      let pending = "";
+      const held: Uint8Array[] = [];
+      const send = (bytes: Uint8Array) => (holding ? held.push(bytes) : ctl.enqueue(bytes));
+      const hold = { step: () => ctl.enqueue(enc.encode(`event: delta\ndata: ${JSON.stringify({ text: " (held)" })}\n\n`)), release: () => {
+        holding = false;
+        for (const b of held.splice(0)) ctl.enqueue(b);
+        if (ended) ctl.close();
+      } };
+      (window as unknown as { __discussHold: typeof hold }).__discussHold = hold;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          ctl = c;
+          void (async () => {
+            for (;;) {
+              const chunk = await upstream.read();
+              if (chunk.done) break;
+              pending += dec.decode(chunk.value, { stream: true });
+              let cut: number;
+              while ((cut = pending.indexOf("\n\n")) >= 0) {
+                const frame = pending.slice(0, cut + 2);
+                pending = pending.slice(cut + 2);
+                send(enc.encode(frame));
+                if (!heldOnce && /^event: delta$/m.test(frame)) holding = heldOnce = true;
+              }
+            }
+            if (pending) send(enc.encode(pending));
+            ended = true;
+            if (!holding) ctl.close();
+          })();
+        },
+      });
+      return new Response(body, { status: res.status, headers: res.headers });
+    }) as typeof fetch;
+  });
+}
+
 test.describe("Wiki reader: the Discuss tab", () => {
   test("select, ask here, the answer streams in the tab, the chip scrolls; a follow-up; Continue in Claude Code; a passage gone", async ({ page, context }) => {
     test.setTimeout(180_000);
@@ -624,60 +682,9 @@ test.describe("Wiki reader: the Discuss tab", () => {
     const answer1 = page.locator('.wiki-discuss-turn[data-turn-seq="1"] .wiki-discuss-answer');
     await expect(answer1).toContainText("R2 reads the frontmatter");
 
-    // Turn 2's real stream is held in the page after its first delta: the fake's
-    // three chunks 700 ms apart can end before the steps below on a slow runner
-    // (CI run 44638214225). `step()` feeds one extra delta (one repaint) on demand;
-    // `release()` lets the held frames through, and the `done` frame's answer
-    // replaces the text the extra deltas added.
-    await page.evaluate(() => {
-      const real = window.fetch.bind(window);
-      let armed = true;
-      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const res = await real(input, init);
-        if (!armed || String(input) !== "/api/wiki/discuss" || !res.ok || !res.body) return res;
-        armed = false;
-        const enc = new TextEncoder();
-        const dec = new TextDecoder();
-        const upstream = res.body.getReader();
-        let ctl!: ReadableStreamDefaultController<Uint8Array>;
-        let holding = false;
-        let heldOnce = false;
-        let ended = false;
-        let pending = "";
-        const held: Uint8Array[] = [];
-        const send = (bytes: Uint8Array) => (holding ? held.push(bytes) : ctl.enqueue(bytes));
-        const hold = { step: () => ctl.enqueue(enc.encode(`event: delta\ndata: ${JSON.stringify({ text: " (held)" })}\n\n`)), release: () => {
-          holding = false;
-          for (const b of held.splice(0)) ctl.enqueue(b);
-          if (ended) ctl.close();
-        } };
-        (window as unknown as { __turn2Hold: typeof hold }).__turn2Hold = hold;
-        const body = new ReadableStream<Uint8Array>({
-          start(c) {
-            ctl = c;
-            void (async () => {
-              for (;;) {
-                const chunk = await upstream.read();
-                if (chunk.done) break;
-                pending += dec.decode(chunk.value, { stream: true });
-                let cut: number;
-                while ((cut = pending.indexOf("\n\n")) >= 0) {
-                  const frame = pending.slice(0, cut + 2);
-                  pending = pending.slice(cut + 2);
-                  send(enc.encode(frame));
-                  if (!heldOnce && /^event: delta$/m.test(frame)) holding = heldOnce = true;
-                }
-              }
-              if (pending) send(enc.encode(pending));
-              ended = true;
-              if (!holding) ctl.close();
-            })();
-          },
-        });
-        return new Response(body, { status: res.status, headers: res.headers });
-      }) as typeof fetch;
-    });
-    const turn2Step = () => page.evaluate(() => (window as unknown as { __turn2Hold: { step(): void } }).__turn2Hold.step());
+    // Turn 2's real stream is held in the page after its first delta.
+    await holdNextDiscussStream(page);
+    const turn2Step = () => page.evaluate(() => (window as unknown as { __discussHold: { step(): void } }).__discussHold.step());
     const turn2Running = (why: string) => expect(turn2, `turn 2 still streams ${why}`).toHaveAttribute("data-turn-state", "running", { timeout: 1_000 });
 
     // Turn 2 from the box (the question kept from the refusals): accepted, the box clears.
@@ -743,7 +750,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
         }),
       )
       .toContain("Nothing here.");
-    await page.evaluate(() => (window as unknown as { __turn2Hold: { release(): void } }).__turn2Hold.release());
+    await page.evaluate(() => (window as unknown as { __discussHold: { release(): void } }).__discussHold.release());
     await expect(turn2).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
 
     // Turn 3: a new draft typed while the turn starts is not cleared when it is accepted.
@@ -795,9 +802,10 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await panel.locator("textarea.wiki-handoff-q").fill("What is here?");
+    // The stream is held after its first delta, so the turn still runs when the press is released.
+    await holdNextDiscussStream(page);
     await panel.locator("[data-handoff=ask-here]").click();
     const turn = page.locator(".wiki-discuss-turn").first();
-    // The first chunk is in: two more deltas and the end are still to come.
     await expect(page.locator('.wiki-discuss-turn[data-turn-state="running"] .wiki-discuss-answer')).toContainText("R2 reads the frontmatter", { timeout: 90_000 });
     await page.evaluate(() => (globalThis as unknown as { CSS: { highlights?: Map<string, unknown> } }).CSS.highlights?.clear());
     const chip = turn.locator("[data-discuss-chip]");
@@ -807,6 +815,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
     const before = await turnHtml();
     await page.mouse.move(px, py);
     await page.mouse.down();
+    await page.evaluate(() => (window as unknown as { __discussHold: { step(): void } }).__discussHold.step());
     await expect.poll(turnHtml, { timeout: 30_000 }).not.toBe(before);
     const stateAtRelease = await turn.getAttribute("data-turn-state");
     await page.mouse.up();
@@ -819,6 +828,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
         }),
       )
       .toContain("Nothing here.");
+    await page.evaluate(() => (window as unknown as { __discussHold: { release(): void } }).__discussHold.release());
     await expect(turn).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
   });
 

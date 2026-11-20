@@ -103,6 +103,8 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // «Remove N checked» on a lane and its preview's Remove: the same route's list form.
   "[data-step-done-all]",
   "[data-step-done-all-confirm]",
+  // Discuss P4's Apply: a page write the route refuses on a read-only instance and root.
+  "[data-discuss-apply]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");
@@ -148,6 +150,10 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "#wikiDiscussAskBtn",
   '[data-handoff="ask-here"]',
   "[data-discuss-continue]",
+  // P4's «Change the wording»: it fills the box for a turn the route refuses here.
+  "[data-discuss-reword]",
+  // P4's «Preview again» / «Check again»: a preview request to the apply route.
+  "[data-discuss-repreview]",
   // «Walk me through» on a section heading. The reader renders none on a
   // read-only wiki or under the read slice; this is the backstop.
   "[data-walkthrough-btn]",

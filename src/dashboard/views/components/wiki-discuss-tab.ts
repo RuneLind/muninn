@@ -28,6 +28,24 @@
  * the panel's «Ask here», «Continue in Claude Code») are in the read-only
  * egress selectors and the input in the keydown one; the tab and its body are
  * in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
+ *
+ * A turn that ends `done` with a proposed edit (P4) gets a diff card, fetched
+ * from `POST /api/wiki/discuss/apply` by the turn's id while it is the current
+ * turn; a newer turn retires it. The text the edit replaces is painted with
+ * the CSS highlight {@link DISCUSS_EDIT_MARK_HIGHLIGHT} (no element added, so
+ * the text nodes the chips' anchors hold stay as rendered; a closed Fold
+ * around it is opened) while the edit is offered. Apply sends the
+ * preview's two hashes back and renders the page again, keeping the tab and
+ * moving the reader to the applied note and the changed passage. A transient
+ * refusal (another writer, uncommitted changes, a Gardener card, a server
+ * error) keeps Apply; `stale`/`changed` and a failed preview offer «Preview
+ * again» (fresh hashes); a lost Apply answer previews the turn again to learn
+ * whether it wrote, never claiming it did not; «Change the wording» puts
+ * its prompt ahead of any draft in the follow-up box (the reader sends it,
+ * and the turn carries the discussion with this edit); Discard drops the
+ * card in this tab only. Apply
+ * is in the read-only write selectors, «Change the wording» in the egress
+ * ones, and both in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -38,6 +56,19 @@ import { WIKI_READONLY_INPUT_PLACEHOLDER, wikiReadonlyWikiFlag } from "./wiki-re
 import {
   anchorRange,
   applyDiscussFrame,
+  DISCUSS_REWORD_PROMPT,
+  appliedEditTarget,
+  editMarkHolds,
+  editMarkTarget,
+  editMarkWords,
+  openFoldsAround,
+  rewordDraft,
+  currentTurn,
+  applyAnswerLost,
+  editAfterApplyRefusal,
+  editAfterLostApply,
+  editAfterPreviewFailure,
+  readEditPreview,
   discussionLive,
   discussRefusalMessage,
   findPassage,
@@ -46,6 +77,7 @@ import {
   patchDiscussTurns,
   streamClosed,
   type DiscussAnchor,
+  type DiscussEditPreview,
   type DiscussPassage,
   type DiscussTurnView,
   type DiscussionView,
@@ -56,6 +88,10 @@ import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB } fr
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
+const APPLY_PATH = "/api/wiki/discuss/apply";
+/** The CSS highlight (`::highlight(…)`) on the text the current turn's proposed edit would replace. */
+export const DISCUSS_EDIT_MARK_HIGHLIGHT = "wiki-discuss-edit-mark";
+export { DISCUSS_REWORD_PROMPT };
 
 export interface DiscussTabDeps {
   /** The served wiki's registry name. */
@@ -64,6 +100,8 @@ export interface DiscussTabDeps {
   relPath(): string | null;
   /** The shell's tab switch (`switchConnTab`). */
   switchTab(tab: string): void;
+  /** Fetch and render the open page again, after an Apply wrote it. */
+  reload?(): void;
 }
 
 let deps: DiscussTabDeps | null = null;
@@ -76,6 +114,10 @@ let turnSeq = 0;
  *  its boundaries, held weakly so a re-rendered article is not kept alive,
  *  and the text it covered as rendered. */
 const anchors = new Map<string, DiscussAnchor>();
+/** The edit mark now: for which turn's preview (turn key and preview hash),
+ *  in which article, over which range (null: not found there) and the words
+ *  that range covered when it was found. */
+let editMark: { want: string; article: Element; range: Range | null; words: string } | null = null;
 /** The page the box's draft was typed on. */
 let draftPage = "";
 /** What the box held when it sent a turn, and on which page: the box is
@@ -94,6 +136,13 @@ let pressTop = 0;
 /** The press began at the bottom and the pane was not scrolled meanwhile: the
  *  next paint scrolls to the bottom though the stream grew past the margin. */
 let followAfterPress = false;
+/** An Apply wrote this page while the tab was shown, and the page is rendered
+ *  again: that render keeps the tab, then shows the reader the applied card and
+ *  the changed passage. Cleared by the render, or by leaving the page. */
+let afterApply: { page: string; key: string } | null = null;
+/** Each preview request's number, per turn key: an older answer arriving late
+ *  never replaces a newer preview's hashes. */
+const previewSeq = new Map<string, number>();
 
 const keyOf = (wiki: string, relPath: string) => `${wiki}\n${relPath}`;
 
@@ -129,15 +178,53 @@ export function setDiscussAgentEnabled(on: boolean): void {
   const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
   if (tab) tab.hidden = !enabled;
   const body = document.getElementById(DISCUSS_BODY_ID);
-  if (!enabled && tab?.classList.contains("active")) deps?.switchTab("conn");
   // A draft belongs to its page: another page starts with an empty box.
   const page = deps ? `${deps.wiki()}\n${deps.relPath() ?? ""}` : "";
+  if (afterApply && afterApply.page !== page) afterApply = null;
+  if (!enabled && tab?.classList.contains("active")) {
+    // A page render turns the tab off first and on again once its payload is
+    // read, in the same task; after an Apply that off must not leave the tab.
+    // A render that never turns it on (a failed load) leaves it then.
+    if (afterApply) {
+      queueMicrotask(() => {
+        if (enabled) return;
+        afterApply = null;
+        if (tab.classList.contains("active")) deps?.switchTab("conn");
+      });
+    } else deps?.switchTab("conn");
+  }
   if (page !== draftPage) {
     draftPage = page;
     const input = body?.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
     if (input) input.value = "";
   }
   paint();
+  // The render's later enhancements (the ref links) replace text nodes the
+  // mark's range may sit in: the mark is checked again once they have run.
+  if (enabled) afterRender(() => syncEditMark(here()));
+  if (enabled && afterApply) {
+    const shown = afterApply;
+    afterApply = null;
+    // After the rest of the render (its enhancements and its scroll to the top).
+    afterRender(() => revealApplied(shown.key));
+  }
+}
+
+function afterRender(run: () => void): void {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
+/** After an Apply's render: the changed passage scrolled into view in the
+ *  article, and focus on the applied card's note. */
+function revealApplied(key: string): void {
+  const t = turnByKey(key);
+  const p = t?.edit?.state === "applied" ? t.edit.preview : null;
+  if (!p) return;
+  const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
+  const found = article && p.after.trim() ? appliedEditTarget(article, p) : null;
+  if (article && found) revealRange(article, found.range, found.block);
+  document.querySelector<HTMLElement>(`#${DISCUSS_BODY_ID} [data-turn-key="${CSS.escape(key)}"] .wiki-discuss-edit-done`)?.focus();
 }
 
 /** Is this wiki read-only right now? Read at every send, independent of
@@ -193,6 +280,7 @@ function paint(): void {
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (!pressing) followAfterPress = false;
   }
+  syncEditMark(d);
   const live = !!d && discussionLive(d);
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
   const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
@@ -281,6 +369,148 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
   }
   streamClosed(turn);
   schedulePaint();
+  if (turn.state === "done" && turn.proposedEdit && turn.turnId && currentTurn(d) === turn) void previewEdit(turn);
+}
+
+/** Fetch the current turn's edit preview from its stored turn id: when the
+ *  turn ends, and again from «Preview again» (the hashes it answers replace
+ *  the card's; an answer to an older request is dropped). */
+async function previewEdit(t: DiscussTurnView): Promise<void> {
+  if (!t.turnId) return;
+  const seq = (previewSeq.get(t.key) ?? 0) + 1;
+  previewSeq.set(t.key, seq);
+  t.edit = { state: "loading", preview: null, message: null };
+  schedulePaint();
+  const r = await postApply({ turnId: t.turnId, preview: true });
+  if (previewSeq.get(t.key) !== seq || t.edit?.state !== "loading") return;
+  const preview = r.ok ? readEditPreview(r.body) : null;
+  t.edit = preview ? { state: "ready", preview, message: null } : editAfterPreviewFailure(r.status, r.body);
+  schedulePaint();
+}
+
+/** «Preview again» / «Check again» on a card that holds no Apply. */
+function retryEdit(key: string): void {
+  const d = here();
+  const t = turnByKey(key);
+  const e = t?.edit;
+  if (!d || !t || !e?.retry || (e.state !== "refused" && e.state !== "failed") || currentTurn(d) !== t || discussSendBlocked()) return;
+  if (e.retry === "lost") void settleLostApply(d, t, e.preview ?? null);
+  else void previewEdit(t);
+}
+
+/** Apply's answer was lost: preview the same turn again to learn whether it
+ *  wrote ({@link editAfterLostApply}); `shown` is the preview Apply sent. */
+async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: DiscussEditPreview | null): Promise<void> {
+  const preview = shown ?? lostPreview.get(t.key) ?? null;
+  if (!t.turnId || !preview) return;
+  lostPreview.set(t.key, preview);
+  t.edit = { state: "applying", preview, message: "Apply's answer did not arrive: checking whether it wrote…" };
+  paint();
+  const r = await postApply({ turnId: t.turnId, preview: true });
+  const out = editAfterLostApply(preview, r);
+  t.edit = out.edit;
+  if (out.edit.retry !== "lost") lostPreview.delete(t.key);
+  finishApply(d, t, out.reload);
+}
+
+/** The preview a lost Apply sent, kept while «Check again» is offered. */
+const lostPreview = new Map<string, DiscussEditPreview>();
+
+/** Paint the card; render the page again when it reads as written, keeping
+ *  the reader on the tab when it is the one shown. */
+function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean): void {
+  paint();
+  if (!reload || !deps || deps.relPath() !== d.relPath) return;
+  const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
+  if (tab?.classList.contains("active")) afterApply = { page: `${deps.wiki()}\n${d.relPath}`, key: t.key };
+  deps.reload?.();
+}
+
+async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
+  try {
+    const res = await fetch(APPLY_PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    return { ok: res.ok, status: res.status, body: data };
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
+}
+
+/** Apply: the previewed edit, by turn id and the two hashes the preview gave. */
+async function applyEdit(key: string): Promise<void> {
+  const d = here();
+  const t = turnByKey(key);
+  if (!d || !t?.turnId || t.edit?.state !== "ready" || !t.edit.preview || currentTurn(d) !== t || discussSendBlocked()) return;
+  const preview = t.edit.preview;
+  t.edit = { state: "applying", preview, message: null };
+  paint();
+  const r = await postApply({ turnId: t.turnId, baseHash: preview.baseHash, previewHash: preview.previewHash });
+  if (r.ok && r.body?.ok === true) {
+    const uncommitted = r.body.uncommitted === true;
+    t.edit = {
+      state: "applied",
+      preview,
+      message: r.body.committed === true ? "Applied to the page, with a log.md entry and a commit." : uncommitted ? "Applied to the page, but the commit failed: the page now has changes no commit holds." : "Applied to the page, with a log.md entry; it was not committed here.",
+    };
+    // The page on screen is the one written: render it again.
+    finishApply(d, t, true);
+    return;
+  }
+  // No answer, a success whose body did not arrive whole, or a gateway's 5xx:
+  // the request may have written, so ask the route rather than claim either way.
+  if (applyAnswerLost(r)) {
+    await settleLostApply(d, t, preview);
+    return;
+  }
+  t.edit = editAfterApplyRefusal(preview, r.status, r.body);
+  paint();
+}
+
+/** «Change the wording»: the follow-up box asks for another wording, ahead of
+ *  any draft the reader had typed; the reader sends it. */
+function rewordEdit(key: string): void {
+  const t = turnByKey(key);
+  const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
+  if (!t || !input || discussSendBlocked()) return;
+  input.value = rewordDraft(input.value);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function discardEdit(key: string): void {
+  const t = turnByKey(key);
+  if (!t?.edit || t.edit.state === "applying" || t.edit.state === "applied") return;
+  t.edit = { state: "discarded", preview: null, message: null };
+  paint();
+}
+
+/** Paint the text the current turn's ready edit would replace (opening a
+ *  closed Fold around it); take the paint off on any other state, turn or
+ *  page. A target found, or not found, in this article is not searched again
+ *  while its range still covers the words it was found on; one a later text
+ *  node replacement broke is found again, and its Folds are left as the
+ *  reader has them (a Fold the reader closed stays closed). */
+function syncEditMark(d: DiscussionView | null): void {
+  const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
+  const cur = d ? currentTurn(d) : null;
+  const p = cur?.edit?.state === "ready" || cur?.edit?.state === "applying" ? cur.edit.preview : null;
+  const want = p && cur ? `${cur.key}\n${p.previewHash}` : "";
+  const same = !!editMark && !!article && editMark.want === want && editMark.article === article;
+  if (same && (!editMark!.range || editMarkHolds(article!, editMark!.range, editMark!.words))) return;
+  editMark = null;
+  const found = p && article ? editMarkTarget(article, p) : null;
+  if (p && article) editMark = { want, article, range: found?.range ?? null, words: found ? editMarkWords(found.range) : "" };
+  if (found && article && !same) openFoldsAround(article, found.node);
+  paintEditMark(found?.range ?? null);
+}
+
+/** The edit mark through the CSS Custom Highlight API; without it, no mark. */
+function paintEditMark(range: Range | null): void {
+  const registry = (globalThis as unknown as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+  const Highlight = (globalThis as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+  if (!registry || !Highlight) return;
+  if (range) registry.set(DISCUSS_EDIT_MARK_HIGHLIGHT, new Highlight(range));
+  else registry.delete(DISCUSS_EDIT_MARK_HIGHLIGHT);
 }
 
 function turnByKey(key: string): DiscussTurnView | null {
@@ -379,7 +609,27 @@ export function initDiscussTab(d: DiscussTabDeps): void {
       return;
     }
     const cont = t.closest<HTMLElement>("[data-discuss-continue]");
-    if (cont) void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+    if (cont) {
+      void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+      return;
+    }
+    const apply = t.closest<HTMLElement>("[data-discuss-apply]");
+    if (apply) {
+      void applyEdit(apply.dataset.discussApply ?? "");
+      return;
+    }
+    const reword = t.closest<HTMLElement>("[data-discuss-reword]");
+    if (reword) {
+      rewordEdit(reword.dataset.discussReword ?? "");
+      return;
+    }
+    const retry = t.closest<HTMLElement>("[data-discuss-repreview]");
+    if (retry) {
+      retryEdit(retry.dataset.discussRepreview ?? "");
+      return;
+    }
+    const discard = t.closest<HTMLElement>("[data-discuss-discard]");
+    if (discard) discardEdit(discard.dataset.discussDiscard ?? "");
   });
   document.addEventListener("pointerdown", (e) => {
     const body = document.getElementById(DISCUSS_BODY_ID);

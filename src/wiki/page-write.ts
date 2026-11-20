@@ -107,6 +107,12 @@ export interface PageWriteCommonOptions {
    * Optional; the Stale check's Apply declines a page with uncommitted edits.
    */
   proceed?: () => Promise<boolean>;
+  /**
+   * Runs INSIDE the critical section, after steps 2–5, with their outcome and
+   * before the locks release: undo what `proceed` claimed when nothing was
+   * written, before another writer can enter. A throw is logged, never fatal.
+   */
+  settle?: (outcome: PageWriteOutcome) => Promise<void>;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
   now: () => number;
@@ -261,6 +267,12 @@ export function defaultPageWriteIo(root: string): Pick<
  */
 export const PAGE_GONE_REASON = "target file no longer exists";
 
+/** Step 1's rule alone: would {@link writeWikiPage} write `relPath` under
+ *  `wikiDir`? False for `index.md`, `log.md`, `CLAUDE.md`, a non-.md/.mdx page. */
+export function pageWriteConfined(wikiDir: string, relPath: string): boolean {
+  return isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath });
+}
+
 /**
  * Run one page write through the shared sequence above. Returns the outcome; the
  * caller maps it to an HTTP status (written→200, noop→200-with-0-applied,
@@ -300,9 +312,7 @@ export async function writeWikiPage(
   //    `existingRelPath: relPath` selects the exists-page confinement branch
   //    (relative, `..`-free, .md/.mdx, not a reserved infra basename, inside
   //    root); domain/kind are unused there.
-  if (
-    !isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath })
-  ) {
+  if (!pageWriteConfined(wikiDir, relPath)) {
     return { outcome: "error", reason: `path confinement failed for "${relPath}"` };
   }
 
@@ -334,7 +344,15 @@ export async function writeWikiPage(
         return { outcome: "locked", reason: lock.reason };
       }
       try {
-        return await writeSection();
+        const outcome = await writeSection();
+        if (opts.settle) {
+          try {
+            await opts.settle(outcome);
+          } catch (err) {
+            log.warn("Wiki page write: settle failed for {path}: {error}", { kind: opts.logKind, path: relPath, error: errMsg(err) });
+          }
+        }
+        return outcome;
       } finally {
         lock.lock?.release();
       }

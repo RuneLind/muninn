@@ -22,6 +22,8 @@ import {
 } from "./wiki-discuss-state.ts";
 import * as discussState from "./wiki-discuss-state.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
+import { formatWebHtml } from "../../../web/web-format.ts";
+import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
@@ -587,5 +589,473 @@ describe("which copy of a repeated passage the chip finds (class check, fix roun
     // One reading: the skip test runs at most once per element.
     expect(calls).toBeLessThanOrEqual(elements);
     expect(ms).toBeLessThan(1000);
+  });
+});
+
+describe("the proposed edit's card (P4)", () => {
+  const previewBody = {
+    ok: true,
+    before: "the date on the Status line.",
+    after: "the Brief's Status line <b>.",
+    beforeCtx: "compares it with ",
+    afterCtx: "\n",
+    fromLine: 21,
+    toLine: 21,
+    note: null,
+    findings: [{ check: "chart-table", message: "holds no table", line: 30 }],
+    pageChangedSinceTurn: false,
+    logEntry: "## [2026-11-20] update | P\n- Discuss: …",
+    baseHash: "b",
+    previewHash: "p",
+    markText: "the date on the Status line.",
+  };
+  const doneWithEdit = (key: string, seq: number) => {
+    const t = newTurn(key, "q", null);
+    applyDiscussFrame(t, "turn", { turnId: `id-${key}`, seq });
+    applyDiscussFrame(t, "done", { answer: "a", proposedEdit: { edits: [{ old: "x", new: "y" }] } });
+    return t;
+  };
+
+  test("a preview body is read; anything else is not one", () => {
+    expect(discussState.readEditPreview(previewBody)).toMatchObject({ before: previewBody.before, after: previewBody.after, findings: previewBody.findings, previewHash: "p" });
+    expect(discussState.readEditPreview({ ok: true, before: "x" })).toBeNull();
+    expect(discussState.readEditPreview(null)).toBeNull();
+  });
+
+  test("ready: the diff escaped, the lines, the findings, and Apply, «Change the wording» and Discard", () => {
+    const t = doneWithEdit("t1", 1);
+    t.edit = { state: "ready", preview: discussState.readEditPreview(previewBody), message: null };
+    const html = discussTurnHtml(t, true);
+    expect(html).toContain("Proposed edit · line 21");
+    expect(html).toContain("<del>the date on the Status line.</del>");
+    expect(html).toContain("<ins>the Brief&#39;s Status line &lt;b&gt;.</ins>");
+    expect(html).toContain("chart-table (line 30): holds no table");
+    for (const attr of ["data-discuss-apply", "data-discuss-reword", "data-discuss-discard"]) expect(html).toContain(`${attr}="t1"`);
+  });
+
+  test("an older turn's edit is not offered once a newer turn follows; the list passes current by seq", () => {
+    const older = doneWithEdit("t1", 1);
+    older.edit = { state: "ready", preview: discussState.readEditPreview(previewBody), message: null };
+    const newer = doneWithEdit("t2", 2);
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [older, newer] };
+    const html = discussTurnsHtml(d);
+    expect(html).toContain("A newer turn follows, so it is no longer offered.");
+    expect(html).not.toContain('data-discuss-apply="t1"');
+    expect(html).toContain("Previewing the proposed edit…");
+  });
+
+  test("refused: the reason and no Apply; discarded: one line; applied: the note and no buttons", () => {
+    const t = doneWithEdit("t1", 1);
+    t.edit = { state: "refused", preview: null, message: discussState.discussEditRefusalMessage(409, { refused: true, code: "fact-wrapper", error: "the edit's range is inside a fact wrapper" }) };
+    let html = discussTurnHtml(t, true);
+    expect(html).toContain("This edit cannot be applied: the edit&#39;s range is inside a fact wrapper.");
+    expect(html).not.toContain("data-discuss-apply");
+    t.edit = { state: "discarded", preview: null, message: null };
+    expect(discussTurnHtml(t, true)).toContain("The proposed edit was discarded.");
+    t.edit = { state: "applied", preview: discussState.readEditPreview(previewBody), message: "Applied." };
+    html = discussTurnHtml(t, false);
+    expect(html).toContain("Applied.");
+    expect(html).not.toContain("<button type=\"button\" class=\"wiki-discuss-apply\"");
+  });
+});
+
+describe("retrying the card after a refusal or a lost answer (fix round 1 batch 4)", () => {
+  const preview = discussState.readEditPreview({
+    ok: true,
+    before: "old words.",
+    after: "new words.",
+    beforeCtx: "",
+    afterCtx: "",
+    fromLine: 3,
+    toLine: 3,
+    note: null,
+    findings: [],
+    pageChangedSinceTurn: false,
+    logEntry: "",
+    baseHash: "b1",
+    previewHash: "p1",
+    markText: "old words.",
+  })!;
+  const turnWith = (edit: discussState.DiscussEditView) => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-t1", seq: 1 });
+    applyDiscussFrame(t, "done", { answer: "a", proposedEdit: { edits: [{ old: "x", new: "y" }] } });
+    t.edit = edit;
+    return discussTurnHtml(t, true);
+  };
+
+  test("a transient Apply refusal keeps the previewed card and its Apply, with the reason", () => {
+    const cases: [number, Record<string, unknown>][] = [
+      [409, { locked: true, error: "A session is writing to this wiki: x. Try again in a moment." }],
+      [409, { dirty: true, error: "The page has uncommitted changes. Commit or discard them, then try again." }],
+      [409, { held: true, error: "A Gardener card holds this page." }],
+      [503, { error: "The Gardener's cards could not be read, so the page's claim is unknown." }],
+      [500, { error: "write failed" }],
+    ];
+    for (const [status, body] of cases) {
+      const e = discussState.editAfterApplyRefusal(preview, status, body);
+      expect(e.state).toBe("ready");
+      expect(e.preview).toBe(preview);
+      expect(e.message).toContain(body.error as string);
+      expect(turnWith(e)).toContain('data-discuss-apply="t1"');
+    }
+  });
+
+  test("stale or changed: the hashes are dropped, no Apply, and «Preview again» instead", () => {
+    for (const body of [{ stale: true, error: "The page changed since the edit was shown. Preview it again." }, { changed: true, error: "What Apply writes changed since the preview. Preview again." }]) {
+      const e = discussState.editAfterApplyRefusal(preview, 409, body);
+      expect(e.state).toBe("refused");
+      expect(e.preview).toBeNull();
+      expect(e.retry).toBe("preview");
+      const html = turnWith(e);
+      expect(html).not.toContain("data-discuss-apply");
+      expect(html).toContain('data-discuss-repreview="t1"');
+      expect(html).toContain(">Preview again</button>");
+      expect(html).not.toContain("Discard this card, or ask again");
+    }
+  });
+
+  test("a permanent Apply refusal stays final: no Apply, no «Preview again»", () => {
+    const cases: [number, Record<string, unknown>][] = [
+      [409, { reason: "superseded", error: "x" }],
+      [409, { reason: "applied", error: "x" }],
+      [409, { reason: "not-done", error: "the turn ended error, not done" }],
+      [409, { refused: true, code: "fact-wrapper", error: "the edit's range is inside a fact wrapper" }],
+      [409, { refused: true, code: "no-change", error: "the edit changes nothing" }],
+      [403, { readonly: true, error: "This wiki is read-only here." }],
+    ];
+    for (const [status, body] of cases) {
+      const e = discussState.editAfterApplyRefusal(preview, status, body);
+      expect(e.state).toBe("refused");
+      expect(e.retry ?? null).toBeNull();
+      const html = turnWith(e);
+      expect(html).not.toContain("data-discuss-apply");
+      expect(html).not.toContain("data-discuss-repreview");
+    }
+  });
+
+  test("a failed preview offers «Preview again» when it was transient, and nothing when it was final", () => {
+    for (const [status, body] of [[0, null], [503, { error: "the rules file cannot be read", reason: "rules-unreadable" }], [500, null]] as [number, Record<string, unknown> | null][]) {
+      const e = discussState.editAfterPreviewFailure(status, body);
+      expect(e.retry).toBe("preview");
+      expect(turnWith(e)).toContain('data-discuss-repreview="t1"');
+    }
+    for (const body of [{ reason: "superseded", error: "x" }, { refused: true, code: "ambiguous", error: "the old text is on the page twice" }]) {
+      const e = discussState.editAfterPreviewFailure(409, body);
+      expect(e.state).toBe("refused");
+      expect(turnWith(e)).not.toContain("data-discuss-repreview");
+    }
+  });
+
+  test("a lost Apply answer never claims nothing was written: the re-preview decides", () => {
+    // The turn now reads as applied: the write landed; show it and render the page again.
+    const applied = discussState.editAfterLostApply(preview, { ok: false, status: 409, body: { reason: "applied", error: "this edit is already applied" } });
+    expect(applied.edit.state).toBe("applied");
+    expect(applied.reload).toBe(true);
+    // Still offered: the outcome is unknown, Apply is offered with the fresh hashes.
+    const fresh = { ...preview, baseHash: "b2", previewHash: "p2" };
+    const again = discussState.editAfterLostApply(preview, { ok: true, status: 200, body: { ...fresh, ok: true } });
+    expect(again.edit.state).toBe("ready");
+    expect(again.edit.preview?.baseHash).toBe("b2");
+    expect(again.edit.message).toContain("unknown");
+    // The server does not answer at all: unknown, and a way to find out.
+    const down = discussState.editAfterLostApply(preview, { ok: false, status: 0, body: null });
+    expect(down.edit.message).toContain("unknown");
+    expect(down.edit.retry).toBe("lost");
+    expect(down.edit.preview).toBeNull();
+    for (const r of [applied, again, down]) expect(r.edit.message ?? "").not.toContain("nothing was written");
+  });
+
+  test("a lost Apply answer re-renders the page only when the edit reads as applied (fix round 2 batch 4)", () => {
+    // Still offered: nothing reads as written, so the article and its scroll stay.
+    const fresh = { ...preview, baseHash: "b2", previewHash: "p2" };
+    expect(discussState.editAfterLostApply(preview, { ok: true, status: 200, body: { ...fresh, ok: true } }).reload).toBe(false);
+    expect(discussState.editAfterLostApply(preview, { ok: false, status: 409, body: { reason: "applied", error: "x" } }).reload).toBe(true);
+  });
+
+  test("a re-preview refusal after a lost Apply answer leaves the article as it is (fix round 2 batch 4)", () => {
+    // A refusal from the re-preview (the old text gone, another turn, a read-only wiki): nothing of this edit written either.
+    for (const [status, body] of [
+      [409, { refused: true, code: "not-found", error: "the old text is not in the page as it is now" }],
+      [409, { reason: "superseded", error: "a newer turn exists" }],
+      [403, { readonly: true, error: "This wiki is read-only here." }],
+    ] as [number, Record<string, unknown>][]) {
+      const out = discussState.editAfterLostApply(preview, { ok: false, status, body });
+      expect(out.edit.state).toBe("refused");
+      expect(out.reload).toBe(false);
+    }
+  });
+
+  test("a 500 the route marks final (the turn stays claimed) offers no Apply (fix round 2 batch 3)", () => {
+    const body = { error: "write failed; the turn is still marked applied, so it cannot be applied again", final: true };
+    const e = discussState.editAfterApplyRefusal(preview, 500, body);
+    expect(e.state).toBe("refused");
+    expect(e.retry ?? null).toBeNull();
+    expect(turnWith(e)).not.toContain("data-discuss-apply");
+    expect(discussState.editAfterPreviewFailure(500, body).retry ?? null).toBeNull();
+  });
+
+  test("an answer that is not the route's is a lost answer; the route's own JSON 5xx is a refusal (fix round 2 batch 3)", () => {
+    const lost: [boolean, number, Record<string, unknown> | null][] = [
+      [false, 0, null],
+      [true, 200, null], // a success whose body did not arrive
+      [false, 502, null], // a proxy's HTML page
+      [false, 504, null],
+      [false, 503, null],
+      [false, 502, { message: "Bad Gateway" }],
+    ];
+    for (const [ok, status, body] of lost) expect(discussState.applyAnswerLost({ ok, status, body })).toBe(true);
+    const refused: [number, Record<string, unknown>][] = [
+      [500, { error: "write failed" }],
+      [503, { error: "The Gardener's cards could not be read, so the page's claim is unknown." }],
+      [503, { error: "the rules file cannot be read", reason: "rules-unreadable" }],
+      [409, { error: "x", stale: true }],
+      [403, { error: "This wiki is read-only here.", readonly: true }],
+    ];
+    for (const [status, body] of refused) expect(discussState.applyAnswerLost({ ok: false, status, body })).toBe(false);
+    // The re-preview after a lost answer gets a gateway page too: still unknown, nothing rendered again.
+    const gw = discussState.editAfterLostApply(preview, { ok: false, status: 502, body: null });
+    expect(gw.edit.state).toBe("failed");
+    expect(gw.edit.retry).toBe("lost");
+    expect(gw.reload).toBe(false);
+  });
+
+  test("the applied note can take focus, so the tab can move the reader to it", () => {
+    expect(turnWith({ state: "applied", preview, message: "Applied." })).toMatch(/<div class="wiki-discuss-edit-done" role="status" tabindex="-1">Applied\.<\/div>/);
+  });
+});
+
+describe("the article mark on the text a proposed edit replaces", () => {
+  const MD = [
+    "# Ferry plan",
+    "",
+    "## Status of the plan",
+    "",
+    "A plain paragraph says the ferry leaves at nine every day.",
+    "",
+    "[The timetable](https://example.invalid/t) lists every crossing of the week.",
+    "",
+    "- Intro: the Status line is checked.",
+    "",
+    "The rules follow.",
+    "",
+    "- R1: the berth list is current.",
+    "- R2: the **Status** line is checked.",
+    "",
+    "- **R3, behind.** The check compares the date.",
+    "",
+    '<Fold title="The berths">',
+    "",
+    "The north pier takes the morning ferry.",
+    "",
+    "The south pier takes the evening ferry.",
+    "",
+    "</Fold>",
+    "",
+  ].join("\n");
+  /** The page as `formatWebHtml` renders it, in a happy-dom article. */
+  const rendered = () => article(formatWebHtml(MD));
+  /** A preview of replacing `before` (as written in MD), its context read from MD as the route reads it. */
+  const previewOf = (before: string, markText = "") => {
+    const at = MD.indexOf(before);
+    if (at === -1 || MD.indexOf(before, at + 1) !== -1) throw new Error(`not once in MD: ${before}`);
+    return { before, beforeCtx: MD.slice(Math.max(0, at - 120), at), afterCtx: MD.slice(at + before.length, at + before.length + 120), markText };
+  };
+  /** The range the mark paints for that preview: its text, and the element holding its start. */
+  const markIn = (a: Element, before: string, markText = "") => {
+    const found = discussState.editMarkTarget(a, previewOf(before, markText));
+    expect(found).not.toBeNull();
+    return { range: found!.range, text: found!.range.toString(), node: found!.node, at: found!.range.startContainer.parentElement! };
+  };
+
+  test("a plain paragraph (no <p>): exactly that paragraph's text, not the article", () => {
+    const a = rendered();
+    const r = markIn(a, "A plain paragraph says the ferry leaves at nine every day.", "A plain paragraph says the ferry leaves at nine every day.");
+    expect(r.text).toBe("A plain paragraph says the ferry leaves at nine every day.");
+  });
+  test("an edit that starts with a link: the link's text and the rest of the sentence", () => {
+    const a = rendered();
+    const r = markIn(a, "[The timetable](https://example.invalid/t) lists every crossing of the week.");
+    expect(r.text).toBe("The timetable lists every crossing of the week.");
+    expect(r.at.tagName).toBe("A");
+  });
+  test("an edit that starts inside bold: the whole replaced text, not only the bold run", () => {
+    const a = rendered();
+    const r = markIn(a, "**R3, behind.** The check compares the date.");
+    expect(r.text).toBe("R3, behind. The check compares the date.");
+  });
+  test("inside a closed Fold: only that paragraph, and the fold is opened", () => {
+    const a = rendered();
+    const fold = a.querySelector("details")!;
+    expect(fold.hasAttribute("open")).toBe(false);
+    const r = markIn(a, "The north pier takes the morning ferry.");
+    expect(r.text).toBe("The north pier takes the morning ferry.");
+    expect(discussState.openFoldsAround(a, r.node)).toEqual([fold]);
+    expect(fold.hasAttribute("open")).toBe(true);
+  });
+  test("text on the page twice: the copy the edit's context names, not the first", () => {
+    const a = rendered();
+    // The rendered words «the Status line is checked.» are in the intro bullet first.
+    const r = markIn(a, "the **Status** line is checked.", "the Status line is checked.");
+    expect(r.text).toBe("the Status line is checked.");
+    expect(r.at.closest("li")!.textContent).toContain("R2:");
+  });
+  test("a heading edit: the route's markText is empty, the heading is still found", () => {
+    const a = rendered();
+    const r = markIn(a, "## Status of the plan", "");
+    expect(r.text).toBe("Status of the plan");
+    expect(r.at.tagName).toMatch(/^H\d$/);
+  });
+  test("finding the target changes nothing in the article (the chips' anchors hold its text nodes)", () => {
+    const a = rendered();
+    const nodes = (el: Element) => {
+      const w = el.ownerDocument.createTreeWalker(el, 4);
+      const out: Node[] = [];
+      while (w.nextNode()) out.push(w.currentNode);
+      return out;
+    };
+    const html = a.innerHTML;
+    const before = nodes(a);
+    for (const b of ["A plain paragraph says the ferry leaves at nine every day.", "the **Status** line is checked.", "**R3, behind.** The check compares the date."]) {
+      expect(discussState.editMarkTarget(a, previewOf(b))).not.toBeNull();
+    }
+    expect(a.innerHTML).toBe(html);
+    const after = nodes(a);
+    expect(after.length).toBe(before.length);
+    expect(after.every((n, k) => n === before[k])).toBe(true);
+  });
+  test("an edit across two bullets: one range over both items' text", () => {
+    const a = article(formatWebHtml("- First item here.\n- Second item there.\n"));
+    const found = discussState.editMarkTarget(a, { before: "First item here.\n- Second item there.", beforeCtx: "", afterCtx: "", markText: "" });
+    expect(found!.range.toString().replace(/\s+/g, "")).toBe("Firstitemhere.Seconditemthere.");
+  });
+  test("after Apply, new text the page also shows above the edit: the edited copy, by the edit's surroundings (fix round 2 batch 4)", () => {
+    const md = ["Summer: the last berth closes at dusk.", "", ...Array.from({ length: 20 }, (_, k) => `Filler ${k} about the harbour.\n`), "Winter: the last berth closes at dusk.", "", "The end."].join("\n");
+    const a = article(formatWebHtml(md));
+    const at = md.indexOf("the last berth closes at dusk.", md.indexOf("Winter"));
+    const after = "the last berth closes at dusk.";
+    const found = discussState.appliedEditTarget(a, { after, beforeCtx: md.slice(Math.max(0, at - 120), at), afterCtx: md.slice(at + after.length, at + after.length + 120) });
+    expect(found!.range.toString()).toBe(after);
+    // The words just before the found copy: the Winter line's, not the Summer line's.
+    const lead = a.ownerDocument.createRange();
+    lead.setStart(a, 0);
+    lead.setEnd(found!.range.startContainer, found!.range.startOffset);
+    expect(lead.toString().trimEnd().endsWith("Winter:")).toBe(true);
+  });
+  test("after Apply, new text with inline markdown: found by its rendered words (fix round 2 batch 4)", () => {
+    const md = "First paragraph.\n\nThe last berth closes at `dusk` on **weekdays** and [the ferry](https://example.invalid/f) waits.\n\nLast paragraph.\n";
+    const a = article(formatWebHtml(md));
+    const after = "The last berth closes at `dusk` on **weekdays** and [the ferry](https://example.invalid/f) waits.";
+    const found = discussState.appliedEditTarget(a, { after, beforeCtx: "First paragraph.\n\n", afterCtx: "\n\nLast paragraph.\n" });
+    expect(found!.range.toString().replace(/\s+/g, " ")).toBe("The last berth closes at dusk on weekdays and the ferry waits.");
+  });
+  test("a 2,000-paragraph page: the target is found in well under a frame budget per paragraph", () => {
+    const paras = Array.from({ length: 2000 }, (_, k) => `Paragraph ${k} of the long page says something about crossing ${k}.`);
+    const a = article(formatWebHtml(paras.join("\n\n")));
+    const t0 = performance.now();
+    const found = discussState.editMarkTarget(a, { before: paras[1990]!, beforeCtx: "", afterCtx: "", markText: "" });
+    const ms = performance.now() - t0;
+    expect(found!.range.toString()).toBe(paras[1990]!);
+    expect(ms).toBeLessThan(250);
+  });
+});
+
+describe("the mark's words read from markdown, and a range a later enhancement broke (fix round 2 batch 5)", () => {
+  /** The words with white space collapsed: the mark compares without it. */
+  const words = (md: string) => discussState.markdownWords(md).replace(/\s+/g, " ").trim();
+  /** The edit's target in an article rendered from `md`, `before` written once in it. */
+  const target = (md: string, before: string, markText = "") => {
+    const at = md.indexOf(before);
+    const a = article(formatWebHtml(md));
+    const found = discussState.editMarkTarget(a, { before, beforeCtx: md.slice(Math.max(0, at - 120), at), afterCtx: md.slice(at + before.length, at + before.length + 120), markText });
+    return { a, found };
+  };
+  const spaced = (r: Range | undefined) => (r?.toString() ?? "").replace(/\s+/g, " ").trim();
+
+  test("code spans are literal: markup inside them stays, so a paragraph with two `*` in code is marked whole", () => {
+    const before = "Run `rm *.tmp` then `ls *.md` to list the berth files.";
+    expect(words(before)).toBe("Run rm *.tmp then ls *.md to list the berth files.");
+    expect(words("Use `**bold**` and `<Fold>` and `[[a|b]]` as written.")).toBe("Use **bold** and <Fold> and [[a|b]] as written.");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("Run rm *.tmp then ls *.md to list the berth files.");
+  });
+  test("an autolink reads as its URL, as the reader renders it", () => {
+    const before = "See <https://example.com/x> for the timetable.";
+    expect(words(before)).toBe("See https://example.com/x for the timetable.");
+    expect(words("See <https://example.com/x|the timetable> here.")).toBe("See the timetable here.");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("See https://example.com/x for the timetable.");
+  });
+  test("a fenced block's lines are kept as written: a `# ` or `- ` inside it is not a heading or bullet", () => {
+    const before = "```\n# start the ferry\n- check the berth\n```";
+    expect(words(before)).toBe("# start the ferry - check the berth");
+    // The fence closes: a heading after it is read as a heading again.
+    expect(words("~~~~\n# kept\n~~~\n~~~~\n# Heading after")).toBe("# kept ~~~ Heading after");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("# start the ferry - check the berth");
+  });
+  test("a 300-character passage starting with a code span is marked whole, not its first 200 characters", () => {
+    const before = "`<Fold>` " + Array.from({ length: 30 }, (_, k) => `holds berth ${k}`).join(", ") + ".";
+    const plain = before.replace(/`/g, "");
+    expect(plain.length).toBeGreaterThan(300);
+    // The route's markText as the route now computes it (never clipped).
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before, plainSnippet(before, Infinity));
+    expect(spaced(found?.range)).toBe(plain);
+  });
+  test("after Apply, new text with markup inside a code span: revealed by its rendered words", () => {
+    const md = "First paragraph.\n\nRun `rm *.tmp` then `ls *.md` on **every** berth.\n\nLast paragraph.\n";
+    const a = article(formatWebHtml(md));
+    const found = discussState.appliedEditTarget(a, { after: "Run `rm *.tmp` then `ls *.md` on **every** berth.", beforeCtx: "First paragraph.\n\n", afterCtx: "\n\nLast paragraph.\n" });
+    expect(spaced(found?.range)).toBe("Run rm *.tmp then ls *.md on every berth.");
+  });
+  test("block markers: table pipes and separator rows, fences, quotes and callouts, headings, bullets and checkboxes", () => {
+    expect(words("| Berth | Ferry |\n|---|:---:|\n| North | Morning |")).toBe("Berth Ferry North Morning");
+    expect(words("~~~\nkept\n~~~")).toBe("kept");
+    expect(words("> [!note] Heads up\n> the pier is closed.")).toBe("Heads up the pier is closed.");
+    expect(words("> > Nested quote.")).toBe("Nested quote.");
+    expect(words("## The berths\n- [ ] Check it\n1. First")).toBe("The berths Check it First");
+  });
+  test("inline: tags out, wiki links and links by label, images by alt, bold, strike and single emphasis out, snake_case kept", () => {
+    expect(words('The check reads <Fact v="ok" n="1">the status date</Fact> only.')).toBe("The check reads the status date only.");
+    expect(words("See [[plans/ferry|the ferry plan]] and [[berths]].")).toBe("See the ferry plan and berths.");
+    expect(words("A [timetable](https://example.invalid/t) and ![the map](m.png).")).toBe("A timetable and the map.");
+    expect(words("It is **due** and ~~late~~, *really* _soon_, in status_date.")).toBe("It is due and late, really soon, in status_date.");
+  });
+  test("nested closed Folds: both are opened around the marked text", () => {
+    const a = article("<details><summary>Outer</summary><details><summary>Inner</summary>The inner berth.</details></details>");
+    const [outer, inner] = Array.from(a.querySelectorAll("details"));
+    const node = inner!.lastChild!;
+    expect(discussState.openFoldsAround(a, node)).toEqual([inner!, outer!]);
+    expect(outer!.hasAttribute("open") && inner!.hasAttribute("open")).toBe(true);
+  });
+  test("a mark's range holds while its words stand; a text node replaced under it (the ref links' replaceWith) breaks it (happy-dom leaves the range in the detached node; Chromium collapses it, the e2e's case)", () => {
+    const md = 'First.\n\nThe "Brief" section names the owner.\n\nLast.\n';
+    const { a, found } = target(md, 'The "Brief" section names the owner.');
+    const range = found!.range;
+    const w = discussState.editMarkWords(range);
+    expect(discussState.editMarkHolds(a, range, w)).toBe(true);
+    const node = range.startContainer as Text;
+    node.replaceWith(a.ownerDocument.createTextNode(node.data));
+    expect(discussState.editMarkHolds(a, range, w)).toBe(false);
+    // Found again in the article as it now stands, the same words.
+    const again = discussState.editMarkTarget(a, { before: 'The "Brief" section names the owner.', beforeCtx: "", afterCtx: "", markText: "" })!;
+    expect(discussState.editMarkWords(again.range)).toBe(w);
+    expect(discussState.editMarkHolds(a, again.range, w)).toBe(true);
+  });
+});
+
+describe("«Change the wording» and the reader's draft", () => {
+  test("an empty box gets the prompt; a draft is kept after it; the prompt is not added twice", () => {
+    const P = discussState.DISCUSS_REWORD_PROMPT;
+    expect(discussState.rewordDraft("")).toBe(P);
+    expect(discussState.rewordDraft("   ")).toBe(P);
+    expect(discussState.rewordDraft("shorter, please")).toBe(`${P}shorter, please`);
+    expect(discussState.rewordDraft(`${P}shorter`)).toBe(`${P}shorter`);
+  });
+  test("the prompt with its trailing space deleted, or the box indented, is not added twice (fix round 2 batch 5)", () => {
+    const P = discussState.DISCUSS_REWORD_PROMPT;
+    expect(discussState.rewordDraft(P.trimEnd())).toBe(P.trimEnd());
+    expect(discussState.rewordDraft(`${P.trimEnd()}shorter`)).toBe(`${P.trimEnd()}shorter`);
+    expect(discussState.rewordDraft(`  ${P}shorter`)).toBe(`  ${P}shorter`);
   });
 });

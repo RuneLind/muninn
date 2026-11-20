@@ -50,10 +50,140 @@ export interface DiscussTurnView {
   message: string | null;
   /** The answer carries a proposed edit (P4 previews and applies it). */
   proposedEdit: boolean;
+  /** The proposed edit's preview and Apply (P4), once the tab asked for them. */
+  edit: DiscussEditView | null;
   /** «Continue in Claude Code»: where its request stands. */
   handover: { state: "busy" | "done" | "failed"; note: string; prompt?: string } | null;
   /** The chip found no such passage in the page as it is now. */
   passageGone: boolean;
+}
+
+/** What `POST /api/wiki/discuss/apply` previewed: the diff and what Apply must send back. */
+export interface DiscussEditPreview {
+  before: string;
+  after: string;
+  beforeCtx: string;
+  afterCtx: string;
+  fromLine: number;
+  toLine: number;
+  note: string | null;
+  findings: { check: string; message: string; line?: number }[];
+  pageChangedSinceTurn: boolean;
+  logEntry: string;
+  baseHash: string;
+  previewHash: string;
+  /** The old text as the reader shows it, to find and mark its block. */
+  markText: string;
+}
+
+/** Where the proposed edit stands in the tab. `refused`: the preview or
+ *  Apply answered why it cannot apply; `failed`: the request itself failed. */
+export type DiscussEditState = "loading" | "ready" | "refused" | "applying" | "applied" | "discarded" | "failed";
+
+export interface DiscussEditView {
+  state: DiscussEditState;
+  preview: DiscussEditPreview | null;
+  message: string | null;
+  /** The card's way on when it holds no Apply: `preview` previews the same
+   *  turn again (fresh hashes); `lost` asks again whether a lost Apply wrote. */
+  retry?: "preview" | "lost" | null;
+}
+
+/** A refusal that may pass on its own: no answer, a server error the route
+ *  did not mark `final`, another writer (`locked`), uncommitted changes
+ *  (`dirty`) or a Gardener card (`held`). */
+function transientEditRefusal(status: number, body: Record<string, unknown> | null): boolean {
+  if (body?.final === true) return false;
+  return status === 0 || status >= 500 || body?.locked === true || body?.dirty === true || body?.held === true;
+}
+
+/** An answer that is not the route's: no answer, a 2xx without its body, or a
+ *  5xx without the route's JSON `error` (a proxy's 502/504 page). The request
+ *  may have reached the route and written, so it is a lost answer, not a refusal. */
+export function applyAnswerLost(r: { ok: boolean; status: number; body: Record<string, unknown> | null }): boolean {
+  return r.status === 0 || r.ok || (r.status >= 500 && typeof r.body?.error !== "string");
+}
+
+/** The card after Apply answered a refusal (`status` ≠ 0). A transient one
+ *  keeps the preview and its Apply: the route checks both hashes again, so a
+ *  page changed meanwhile answers `stale` and writes nothing. `stale` and
+ *  `changed` drop the hashes and offer «Preview again»; the rest are final. */
+export function editAfterApplyRefusal(preview: DiscussEditPreview, status: number, body: Record<string, unknown> | null): DiscussEditView {
+  const message = discussEditRefusalMessage(status, body);
+  if (body?.stale === true || body?.changed === true) return { state: "refused", preview: null, message, retry: "preview" };
+  if (transientEditRefusal(status, body)) return { state: "ready", preview, message };
+  return { state: "refused", preview, message };
+}
+
+/** The card after a preview gave none: «Preview again» when it may pass, else final. */
+export function editAfterPreviewFailure(status: number, body: Record<string, unknown> | null): DiscussEditView {
+  if (status === 0) return { state: "failed", preview: null, message: "The preview could not be fetched: the server did not answer.", retry: "preview" };
+  return { state: "refused", preview: null, message: discussEditRefusalMessage(status, body), retry: transientEditRefusal(status, body) ? "preview" : null };
+}
+
+/** Words for an Apply whose answer was found written after it was lost. */
+export const LOST_APPLY_APPLIED = "Applied to the page. Apply's answer was lost, so whether log.md and the commit followed is not shown here.";
+
+/**
+ * The card after Apply's answer was lost (the request may have written), from
+ * a fresh preview of the same turn (`r`). The turn reads as applied: it is,
+ * and the page is rendered again. Still offered: the outcome is unknown, and
+ * Apply is offered with the fresh hashes (a write that landed meanwhile makes
+ * it answer `stale` or `applied`). No answer again: unknown, with a way to ask.
+ * Only the applied reading renders the page again: on the others nothing
+ * reads as written, so the article keeps its scroll, as after a refusal.
+ */
+export function editAfterLostApply(preview: DiscussEditPreview, r: { ok: boolean; status: number; body: Record<string, unknown> | null }): { edit: DiscussEditView; reload: boolean } {
+  const lost = "Apply's answer did not arrive, so whether it wrote is unknown";
+  if (r.body?.reason === "applied") return { edit: { state: "applied", preview, message: LOST_APPLY_APPLIED }, reload: true };
+  const fresh = r.ok ? readEditPreview(r.body) : null;
+  if (fresh) return { edit: { state: "ready", preview: fresh, message: `${lost}; the turn does not read as applied now. Apply again to write it.` }, reload: false };
+  if (applyAnswerLost(r)) return { edit: { state: "failed", preview: null, message: `${lost}, and the server does not answer now. Check again to find out.`, retry: "lost" }, reload: false };
+  return { edit: { state: "refused", preview: null, message: `${lost}. ${discussEditRefusalMessage(r.status, r.body)}`, retry: transientEditRefusal(r.status, r.body) ? "lost" : null }, reload: false };
+}
+
+/** A preview body as the route answers it, or null when it is not one. */
+export function readEditPreview(body: Record<string, unknown> | null): DiscussEditPreview | null {
+  if (!body || body.ok !== true || typeof body.before !== "string" || typeof body.after !== "string" || typeof body.baseHash !== "string" || typeof body.previewHash !== "string") return null;
+  const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string) : "");
+  const num = (k: string) => (typeof body[k] === "number" ? (body[k] as number) : 0);
+  const findings = Array.isArray(body.findings)
+    ? (body.findings as Record<string, unknown>[]).filter((f) => f && typeof f.message === "string").map((f) => ({ check: String(f.check ?? ""), message: f.message as string, ...(typeof f.line === "number" ? { line: f.line } : {}) }))
+    : [];
+  return {
+    before: body.before,
+    after: body.after,
+    beforeCtx: str("beforeCtx"),
+    afterCtx: str("afterCtx"),
+    fromLine: num("fromLine"),
+    toLine: num("toLine"),
+    note: typeof body.note === "string" ? body.note : null,
+    findings,
+    pageChangedSinceTurn: body.pageChangedSinceTurn === true,
+    logEntry: str("logEntry"),
+    baseHash: body.baseHash,
+    previewHash: body.previewHash,
+    markText: str("markText"),
+  };
+}
+
+/** Readable words for a refusal the apply route answered (`status`, the parsed body or null). */
+export function discussEditRefusalMessage(status: number, body: Record<string, unknown> | null): string {
+  const error = typeof body?.error === "string" ? body.error : "";
+  if (body?.readonly === true) return `This wiki is read-only here: nothing is written. ${error}`.trim();
+  if (body?.refused === true) return `This edit cannot be applied: ${error}.`;
+  if (body?.stale === true || body?.changed === true) return error;
+  if (body?.dirty === true || body?.held === true || body?.locked === true) return error;
+  switch (body?.reason) {
+    case "superseded":
+      return "A newer turn of this discussion follows, so this edit is no longer offered.";
+    case "applied":
+      return "This edit is already applied.";
+    case "not-done":
+    case "no-agent":
+      return error;
+  }
+  return error ? `${error} (${status}).` : `The edit could not be applied (${status}).`;
 }
 
 export interface DiscussionView {
@@ -65,7 +195,7 @@ export interface DiscussionView {
 }
 
 export function newTurn(key: string, question: string, passage: DiscussPassage | null): DiscussTurnView {
-  return { key, turnId: null, seq: null, passage, question, text: "", state: "sending", phase: null, tools: [], message: null, proposedEdit: false, handover: null, passageGone: false };
+  return { key, turnId: null, seq: null, passage, question, text: "", state: "sending", phase: null, tools: [], message: null, proposedEdit: false, edit: null, handover: null, passageGone: false };
 }
 
 /** A turn that may still change: the tab sends no second turn meanwhile. */
@@ -197,8 +327,64 @@ function chipText(s: string): string {
   return flat.length <= CHIP_MAX ? flat : `${flat.slice(0, CHIP_MAX - 1)}…`;
 }
 
-/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key. */
-export function discussTurnHtml(t: DiscussTurnView): string {
+function lineSpan(p: DiscussEditPreview): string {
+  return p.fromLine === p.toLine ? `line ${p.fromLine}` : `lines ${p.fromLine}–${p.toLine}`;
+}
+
+/**
+ * The proposed edit's card (P4). Only the current turn's edit is offered: an
+ * older turn's says a newer turn follows. The diff shows the file's text in
+ * the range struck and what replaces it, with the page around it; then the
+ * lint findings the edit adds, and Apply, «Change the wording» and Discard.
+ */
+export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
+  const key = esc(t.key);
+  const e = t.edit;
+  if (!current && e?.state !== "applied") {
+    return `<div class="wiki-discuss-edit-note">This answer proposed an edit. A newer turn follows, so it is no longer offered.</div>`;
+  }
+  if (!e || e.state === "loading") return `<div class="wiki-discuss-edit" data-edit-state="loading"><div class="wiki-discuss-status"><span class="spinner"></span><span>Previewing the proposed edit…</span></div></div>`;
+  if (e.state === "discarded") return `<div class="wiki-discuss-edit-note" data-edit-state="discarded">The proposed edit was discarded.</div>`;
+  const parts: string[] = [`<div class="wiki-discuss-edit" data-edit-state="${e.state}">`];
+  const p = e.preview;
+  parts.push(`<div class="wiki-discuss-edit-head">Proposed edit${p ? ` · ${esc(lineSpan(p))}` : ""}</div>`);
+  if (p && e.state !== "refused") {
+    if (p.note) parts.push(`<div class="wiki-discuss-edit-why">${esc(p.note)}</div>`);
+    parts.push(
+      `<div class="wiki-discuss-diff">` +
+        `<div class="wiki-discuss-diff-old"><span class="wiki-discuss-diff-ctx">${esc(p.beforeCtx)}</span><del>${esc(p.before)}</del><span class="wiki-discuss-diff-ctx">${esc(p.afterCtx)}</span></div>` +
+        `<div class="wiki-discuss-diff-new"><span class="wiki-discuss-diff-ctx">${esc(p.beforeCtx)}</span><ins>${esc(p.after)}</ins><span class="wiki-discuss-diff-ctx">${esc(p.afterCtx)}</span></div>` +
+        `</div>`,
+    );
+    if (p.findings.length) {
+      parts.push(
+        `<div class="wiki-discuss-edit-lint">The edit adds ${p.findings.length === 1 ? "a lint finding" : `${p.findings.length} lint findings`}:<ul>` +
+          p.findings.map((f) => `<li>${esc(f.check)}${f.line ? ` (line ${f.line})` : ""}: ${esc(f.message)}</li>`).join("") +
+          `</ul></div>`,
+      );
+    }
+    if (p.pageChangedSinceTurn && e.state === "ready") parts.push(`<div class="wiki-discuss-edit-why">The page changed since this turn; the old text is still there exactly once, and the diff is against the page as it is now.</div>`);
+  }
+  // The applied note takes focus after the page renders again (`tabindex="-1"`).
+  if (e.message) parts.push(e.state === "applied" ? `<div class="wiki-discuss-edit-done" role="status" tabindex="-1">${esc(e.message)}</div>` : `<div class="wiki-discuss-error" role="alert">${esc(e.message)}</div>`);
+  if (e.state !== "applied") {
+    const busy = e.state === "applying" ? " disabled" : "";
+    parts.push(
+      `<div class="wiki-discuss-actions">` +
+        (e.state === "ready" || e.state === "applying" ? `<button type="button" class="wiki-discuss-apply" data-discuss-apply="${key}"${busy}>${e.state === "applying" ? "Applying…" : "Apply"}</button>` : "") +
+        (e.retry && (e.state === "refused" || e.state === "failed") ? `<button type="button" class="wiki-discuss-apply" data-discuss-repreview="${key}">${e.retry === "lost" ? "Check again" : "Preview again"}</button>` : "") +
+        `<button type="button" class="wiki-discuss-continue" data-discuss-reword="${key}"${busy}>Change the wording</button>` +
+        `<button type="button" class="wiki-discuss-continue" data-discuss-discard="${key}"${busy}>Discard</button>` +
+        `</div>`,
+    );
+  }
+  parts.push(`</div>`);
+  return parts.join("");
+}
+
+/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
+ *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
+export function discussTurnHtml(t: DiscussTurnView, current = true): string {
   const key = esc(t.key);
   const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
   if (t.passage) {
@@ -215,7 +401,7 @@ export function discussTurnHtml(t: DiscussTurnView): string {
   }
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${renderStreamingBody(t.text)}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
-  if (t.proposedEdit) parts.push(`<div class="wiki-discuss-edit-note">This answer proposes an edit to the page. Previewing and applying it is not built yet.</div>`);
+  if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
   if (t.turnId && !turnLive(t) && t.state !== "refused") {
     const h = t.handover;
     parts.push(
@@ -238,7 +424,8 @@ function turnsInOrder(d: DiscussionView): DiscussTurnView[] {
 /** The turns list's markup, oldest first. */
 export function discussTurnsHtml(d: DiscussionView | null): string {
   if (!d || d.turns.length === 0) return HINT_HTML;
-  return turnsInOrder(d).map(discussTurnHtml).join("");
+  const cur = currentTurn(d);
+  return turnsInOrder(d).map((t) => discussTurnHtml(t, t === cur)).join("");
 }
 
 /** The markup each turn element was drawn from. */
@@ -291,8 +478,9 @@ export function patchDiscussTurns(list: HTMLElement, d: DiscussionView | null): 
     else el.remove();
   }
   const tpl = list.ownerDocument.createElement("template");
+  const cur = currentTurn(d);
   turns.forEach((t, i) => {
-    const html = discussTurnHtml(t);
+    const html = discussTurnHtml(t, t === cur);
     let el = have.get(t.key);
     if (!el || drawn.get(el) !== html) {
       tpl.innerHTML = html;
@@ -498,4 +686,131 @@ export function findPassage(article: Element, selection: string, context?: Passa
   const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
   return { node: range.startContainer as Text, range, block };
+}
+
+// ── The article mark on the text a proposed edit replaces ────────────────
+
+/** What «Change the wording» puts in the follow-up box. */
+export const DISCUSS_REWORD_PROMPT = "Propose another wording for that edit, for the same passage: ";
+
+/** The follow-up box after «Change the wording»: the prompt, and behind it
+ *  whatever the reader had typed (a draft is never dropped). A box that
+ *  already starts with the prompt, its trailing space edited or not, is kept. */
+export function rewordDraft(current: string): string {
+  if (!current.trim()) return DISCUSS_REWORD_PROMPT;
+  return current.trimStart().startsWith(DISCUSS_REWORD_PROMPT.trimEnd()) ? current : DISCUSS_REWORD_PROMPT + current;
+}
+
+/** One line's inline markdown as the reader shows it: a code span's text
+ *  literal (markup inside it stays), an autolink as its URL (or its label in
+ *  `<url|label>`), tags out, an image's alt, a wiki link's or link's label,
+ *  bold, strike and single emphasis markers out. */
+function inlineWords(line: string): string {
+  const code: string[] = [];
+  // \u0000 n \u0000 holds code span n while the rest is read; no rule below matches it.
+  const held = line.replace(/(`+)([^`\n]|[^`\n][\s\S]*?[^`\n])\1(?!`)/g, (_m, _t, body: string) => `\u0000${code.push(body) - 1}\u0000`);
+  return held
+    .replace(/<(https?:\/\/[^|>\s]+)\|([^>\n]+)>/g, "$2")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+    .replace(/<\/?[A-Za-z][^>\n]*>/g, "")
+    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/\[\[(?:[^\]|\n]*\|)?([^\]\n]*)\]\]/g, "$1")
+    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/\*\*|~~/g, "")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2")
+    .replace(/\u0000(\d+)\u0000/g, (_m, n: string) => code[Number(n)] ?? "");
+}
+
+/**
+ * Markdown as the reader shows its words, roughly: block markers (headings,
+ * bullets, quotes, callouts, table pipes, fence lines) and tags out, inline
+ * markup read by {@link inlineWords}; a fenced block's lines are kept as
+ * written. Enough to find a passage and score its surroundings, where white
+ * space is ignored; the route's `markText` is the fallback.
+ */
+export function markdownWords(md: string): string {
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const raw of md.replace(/\r\n?/g, "\n").split("\n")) {
+    const open = /^\s*(`{3,}|~{3,})/.exec(raw);
+    if (fence !== null) {
+      if (open && open[1]![0] === fence[0] && open[1]!.length >= fence.length && !raw.trim().slice(open[1]!.length).trim()) fence = null;
+      else out.push(raw);
+      continue;
+    }
+    if (open) {
+      fence = open[1]!;
+      continue;
+    }
+    if (/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(raw)) continue;
+    const l = raw
+      .replace(/^[ \t]*(?:>[ \t]?)+/, "")
+      .replace(/^[ \t]*\[![\w-]+\][+-]?[ \t]*/, "")
+      .replace(/^[ \t]*#{1,6}[ \t]+/, "")
+      .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/, "")
+      .replace(/^\[[ xX]\][ \t]+/, "");
+    // A table row: its cells read one by one, as the reader splits them (a pipe inside a code span too).
+    out.push(/^\s*\|/.test(l) ? l.split("|").map(inlineWords).join(" ") : inlineWords(l));
+  }
+  return out.join("\n");
+}
+
+/** What the mark needs from a preview. */
+export interface EditMarkSource {
+  before: string;
+  beforeCtx: string;
+  afterCtx: string;
+  markText: string;
+}
+
+/** Where the text an edit replaces sits in the rendered article: its words
+ *  read from `before` (so a heading edit, whose `markText` is empty, is
+ *  found), else the route's `markText`; the copy picked by the edit's
+ *  surroundings when the page shows that text more than once. */
+export function editMarkTarget(article: Element, p: EditMarkSource): FoundPassage | null {
+  const context = { before: markdownWords(p.beforeCtx), after: markdownWords(p.afterCtx) };
+  for (const text of [markdownWords(p.before), p.markText]) {
+    if (!text.trim()) continue;
+    const found = findPassage(article, text, context);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Where an applied edit's new text sits in the article rendered again after
+ *  Apply: found as {@link editMarkTarget} finds the old text, by the new
+ *  text's rendered words (its source carries code spans, emphasis and links
+ *  the article does not show), the copy picked by the edit's surroundings,
+ *  which the write left as they were. */
+export function appliedEditTarget(article: Element, p: { after: string; beforeCtx: string; afterCtx: string }): FoundPassage | null {
+  return editMarkTarget(article, { before: p.after, beforeCtx: p.beforeCtx, afterCtx: p.afterCtx, markText: "" });
+}
+
+/** The words a mark's range covers, as {@link findPassage} reads the page
+ *  (white space and reader-only text out): what {@link editMarkHolds} compares. */
+export function editMarkWords(range: Range): string {
+  return compact(renderedPassageText(range));
+}
+
+/** A mark's range still covers the `words` it was found on, in `article`.
+ *  A later enhancement that replaces a text node (the ref links'
+ *  `replaceWith`) breaks it: a browser moves a boundary in the removed node
+ *  onto the parent (the range collapses or covers other words), and a DOM
+ *  that does not update ranges leaves it in the detached node. Either way
+ *  the target is searched again. */
+export function editMarkHolds(article: Element, range: Range, words: string): boolean {
+  return article.contains(range.startContainer) && article.contains(range.endContainer) && editMarkWords(range) === words;
+}
+
+/** Open every closed `<details>` around `node` inside `article` (a `<Fold>`),
+ *  so a highlight on text in it can be seen; the elements opened. */
+export function openFoldsAround(article: Element, node: Node): Element[] {
+  const opened: Element[] = [];
+  for (let d = node.parentElement?.closest("details") ?? null; d && article.contains(d); d = d.parentElement?.closest("details") ?? null) {
+    if (!d.hasAttribute("open")) {
+      d.setAttribute("open", "");
+      opened.push(d);
+    }
+  }
+  return opened;
 }

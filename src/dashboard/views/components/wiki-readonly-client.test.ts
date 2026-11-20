@@ -226,3 +226,23 @@ describe("Discuss's tab (P3): the controls that call the agent", () => {
     for (const sel of ['[data-conntab="discuss"]', "#discussBody"]) expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
   });
 });
+
+describe("Discuss's proposed edit (P4): Apply and «Change the wording»", () => {
+  test("Apply is a write control, «Change the wording» an egress one; a read-only wiki cancels both clicks; the read slice hides both", async () => {
+    const { WIKI_READ_SLICE_HIDDEN_SELECTOR } = await import("./wiki-read-slice.ts");
+    expect(WIKI_READONLY_BLOCKED_SELECTOR.split(",").map((s) => s.trim())).toContain("[data-discuss-apply]");
+    const { doc, reached } = install({ wiki: true });
+    for (const sel of ["[data-discuss-apply]", "[data-discuss-reword]"]) {
+      const click = doc.dispatch("click", new FakeEl([sel]));
+      expect(click.prevented).toBe(true);
+      expect(reached).not.toContain(`click:${sel}`);
+      expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
+    }
+    // «Preview again» / «Check again» post to the apply route: egress, cancelled on a read-only wiki (fix round 2 batch 3).
+    const { WIKI_READONLY_EGRESS_SELECTOR } = await import("./wiki-readonly-client.ts");
+    expect(WIKI_READONLY_EGRESS_SELECTOR.split(",").map((s) => s.trim())).toContain("[data-discuss-repreview]");
+    expect(doc.dispatch("click", new FakeEl(["[data-discuss-repreview]"])).prevented).toBe(true);
+    // Discard writes nothing and calls nothing: it stays usable.
+    expect(doc.dispatch("click", new FakeEl(["[data-discuss-discard]"])).prevented).toBe(false);
+  });
+});

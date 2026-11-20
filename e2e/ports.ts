@@ -425,6 +425,8 @@ export const E2E_PORTS = {
   "wiki-discuss-handoff": 3252,
   // Discuss P3: the Discuss tab against a claude-sdk bot on the fake Messages API; a read-only wiki beside it.
   "wiki-discuss-tab": 3253,
+  // Discuss P4: the proposed edit's diff card and Apply, on a git wiki with no remote.
+  "wiki-discuss-apply": 3254,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

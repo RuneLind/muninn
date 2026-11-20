@@ -58,6 +58,23 @@ export function discussTabStyles(): string {
     }
     .wiki-discuss-continue:hover { border-color: var(--accent); }
     .wiki-discuss-continue:disabled { opacity: 0.5; cursor: progress; }
+    .wiki-discuss-edit { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; border: 1px solid var(--border-secondary); background: var(--bg-surface); }
+    .wiki-discuss-edit-head { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+    .wiki-discuss-edit-why { font-size: 12px; color: var(--text-secondary); }
+    .wiki-discuss-diff { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .wiki-discuss-diff > div { padding: 4px 6px; border-radius: 4px; background: var(--bg-inset); }
+    .wiki-discuss-diff-ctx { color: var(--text-dim); }
+    .wiki-discuss-diff del { color: var(--status-error); text-decoration: line-through; }
+    .wiki-discuss-diff ins { color: var(--status-success); text-decoration: none; font-weight: 600; }
+    .wiki-discuss-edit-lint { font-size: 12px; color: var(--status-warning); }
+    .wiki-discuss-edit-lint ul { margin: 4px 0 0; padding-left: 18px; }
+    .wiki-discuss-edit-done { font-size: 12px; color: var(--status-success); }
+    .wiki-discuss-apply {
+      padding: 5px 11px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+      border: none; background: var(--accent); color: var(--on-accent);
+    }
+    .wiki-discuss-apply:disabled { opacity: 0.5; cursor: progress; }
+    ::highlight(wiki-discuss-edit-mark) { background-color: color-mix(in srgb, var(--accent) 18%, transparent); text-decoration: underline dashed var(--accent); }
     .wiki-discuss-cont-status { font-size: 12px; color: var(--text-secondary); }
     .wiki-discuss-cont-out { width: 100%; box-sizing: border-box; min-height: 8em; font-family: var(--font-mono, monospace); font-size: 12px; border-radius: 6px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary); }
     .wiki-discuss-compose { display: flex; gap: 8px; margin-top: auto; padding-top: 8px; position: sticky; bottom: 0; background: var(--bg-panel); }

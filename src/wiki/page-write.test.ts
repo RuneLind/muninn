@@ -511,3 +511,36 @@ test("an ABSENT log.md is still created by a page write (finding 21 scope guard)
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("settle runs inside the section with its outcome, before a queued writer enters; a throwing settle is only logged", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const order: string[] = [];
+  let seen: string | null = null;
+  const first = writeWikiPage(
+    baseOpts(fs, {
+      transform: () => {
+        order.push("first transform");
+        return null;
+      },
+      settle: async (o) => {
+        seen = o.outcome;
+        await Bun.sleep(20);
+        order.push("settle");
+        throw new Error("boom");
+      },
+    }),
+  );
+  const second = writeWikiPage(
+    baseOpts(fs, {
+      transform: () => {
+        order.push("second transform");
+        return null;
+      },
+    }),
+  );
+  expect((await first).outcome).toBe("noop");
+  expect((await second).outcome).toBe("noop");
+  expect(seen as string | null).toBe("noop");
+  expect(order).toEqual(["first transform", "settle", "second transform"]);
+});

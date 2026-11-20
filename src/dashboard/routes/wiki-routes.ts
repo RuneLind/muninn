@@ -58,6 +58,7 @@ import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
 import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
 import { registerWikiDiscussHandoffRoute } from "./wiki-discuss-handoff.ts";
 import { registerWikiDiscussRoute } from "./wiki-discuss.ts";
+import { registerWikiDiscussApplyRoute } from "./wiki-discuss-apply.ts";
 import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
 import { egressRefusal, readonlyCandidateRoot } from "./wiki-egress.ts";
 import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
@@ -2088,6 +2089,11 @@ export function registerWikiToolRoutes(
   // absolute path, so it is admin-only and dropped on nais with the group.
   registerWikiDiscussHandoffRoute(app, config);
   registerWikiDiscussRoute(app, config);
+  // Discuss P4: the agent's proposed edit, previewed and applied by turn id.
+  registerWikiDiscussApplyRoute(app, config, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
   // The series editor's one write, in the same group for the same reason.
   registerWikiSeriesRoutes(app);
   // The issue board's page, in the same group: it reads one wiki's index.

@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   parseBlocks,
   readerFences,
+  markdownMarkup,
   parseMeterAttrs,
   normalizeMeterTone,
   normalizeFactVerdict,
@@ -1206,5 +1207,38 @@ describe("readerFences", () => {
       { opener: 9, closer: 11, lang: "ts" },
     ]);
     expect(readerFences("```\nx\n```")).toEqual([{ opener: 0, closer: 2, lang: "" }]);
+  });
+});
+
+describe("markdownMarkup", () => {
+  const brief = (body: string) => markdownMarkup(body).map((t) => [t.kind, t.text, t.lead ?? "", t.rest ?? "", t.gap ?? ""].join("|"));
+  test("frontmatter, and fence lines as the reader reads them: backticks with at most 3 spaces, closed", () => {
+    const body = ["---", "title: x", "---", "```ts", "a", "```", "    ```", "b", "    ```", "~~~", "c", "~~~", "```", "open"].join("\n");
+    expect(brief(body)).toEqual(["frontmatter|---\ntitle: x\n---\n|||", "fence|```ts|||", "fence|```|||"]);
+    expect(markdownMarkup(body).map((t) => t.start)).toEqual([0, 17, 25]);
+  });
+  test("tags outside the reader's fences and code spans, inside 4-space ``` lines too", () => {
+    const body = ['Use `<Pill tone="ok">` here.', "```", '<Pill tone="ok">x</Pill>', "```", "    ```", '    <Pill tone="bad">y</Pill>', "    ```"].join("\n");
+    expect(brief(body)).toEqual(["fence|```|||", "fence|```|||", 'tag|<Pill tone="bad">|line|text|line', "tag|</Pill>|text|line|inline"]);
+  });
+  test("where a tag stands: what precedes and follows it on its line, and whether a line break lies since the previous tag", () => {
+    const body = ['<Fold title="x">', "Body.", "</Fold> tail", '- <Callout tone="warn">', 'Words <Pill tone="ok">a', "b</Pill>"].join("\n");
+    expect(brief(body)).toEqual([
+      'tag|<Fold title="x">|line|line|inline',
+      "tag|</Fold>|line|text|line",
+      'tag|<Callout tone="warn">|text|line|line',
+      'tag|<Pill tone="ok">|text|text|line',
+      "tag|</Pill>|text|line|line",
+    ]);
+  });
+  test("a multi-line opener is one token, and CRLF lines keep their CR in a fence line's text", () => {
+    expect(brief('<Fold\n  title="x">\nBody.\n</Fold>')).toEqual(['tag|<Fold\n  title="x">|line|line|inline', "tag|</Fold>|line|line|line"]);
+    expect(brief("```\r\nx\r\n```\r\n")).toEqual(["fence|```\r|||", "fence|```\r|||"]);
+  });
+  test("a line of many tags stays linear", () => {
+    const body = '<Pill tone="ok">a</Pill> '.repeat(40_000);
+    const t0 = performance.now();
+    expect(markdownMarkup(body).length).toBe(80_000);
+    expect(performance.now() - t0).toBeLessThan(500);
   });
 });
