@@ -83,6 +83,61 @@ describe("resolveDiscussEdit: refused at preview", () => {
   });
 });
 
+describe("resolveDiscussEdit: new text may not add markup", () => {
+  // Markup changes go to Claude Code: the agent's new text is prose only.
+  const page = "---\ntitle: P\n---\n\n# P\n\nThe ferry leaves at nine.\n\nThe night ferry is slow.\n";
+  const bare = "The ferry leaves at nine.\n\nThe night ferry is slow.\n";
+  const code = (neu: string, p = page) => refused(resolveDiscussEdit(p, "plans/p.mdx", one("The ferry leaves at nine.", neu))).code;
+  test("a FactCheck tag (no word boundary after Fact)", () => {
+    expect(code('The ferry leaves at nine.\n\n<FactCheck date="2026-11-20" ok="1">✅ checked</FactCheck>')).toBe("fact-tag");
+  });
+  test("a component tag: opening, closing, self-closing, inline", () => {
+    expect(code('The ferry leaves at nine.\n\n<Fold title="x">')).toBe("new-markup");
+    expect(code("The ferry leaves at nine.\n\n</Fold>")).toBe("new-markup");
+    expect(code('The ferry leaves at nine. <Check env="X" />')).toBe("new-markup");
+    expect(code('The ferry leaves at <Pill tone="ok">nine</Pill>.')).toBe("new-markup");
+    expect(code('The ferry leaves at <Verdict tone="bad">nine</Verdict>.')).toBe("new-markup");
+    expect(code('The ferry leaves at nine.\n\n<Chart kind="bars" value="x">\n\nno table\n\n</Chart>')).toBe("new-markup");
+  });
+  test("a tag the new text completes with the page's own characters", () => {
+    const p = "# P\n\nThe route a<b is short.\n";
+    expect(refused(resolveDiscussEdit(p, "plans/p.mdx", one("b is short.", 'Pill tone="ok">x is short.'))).code).toBe("new-markup");
+  });
+  test("a component tag in an inline code span is content", () => {
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "Wrap it in `<Fold>`."))).after).toBe("Wrap it in `<Fold>`.");
+  });
+  test("a fenced-code line", () => {
+    expect(code("The ferry leaves at nine.\n```")).toBe("new-fence");
+    expect(code("The ferry leaves at nine.\n\n~~~\nx\n~~~")).toBe("new-fence");
+  });
+  test("a frontmatter fence that creates frontmatter", () => {
+    expect(code("---\ntitle: x\n---\nThe ferry leaves at nine.", bare)).toBe("new-frontmatter");
+  });
+  test("a thematic break below the frontmatter is prose", () => {
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "The ferry leaves at nine.\n\n---\n\nMore."))).after).toContain("---");
+  });
+});
+
+describe("resolveDiscussEdit: a range cutting into an inline component tag", () => {
+  const page = '# P\n\nThe status is <Pill tone="ok">green</Pill> today.\n\nProbe: <Check env="X" /> runs.\n\nA <Pill tone="a > b">quoted</Pill> pill.\n';
+  const code = (old: string, neu: string) => refused(resolveDiscussEdit(page, "plans/p.mdx", one(old, neu))).code;
+  test("the start of a tag", () => {
+    expect(code('is <Pill tone="o', 'is <Pill tone="bad')).toBe("inline-component");
+  });
+  test("the end of a tag and the prose after it", () => {
+    expect(code('ok">green', 'warn">red')).toBe("inline-component");
+  });
+  test("the inside of a self-closing tag", () => {
+    expect(code('env="X" /', 'env="Y" /')).toBe("inline-component");
+  });
+  test("the tail of a tag whose quoted value holds a >", () => {
+    expect(code('b">quoted', 'c">quoted')).toBe("inline-component");
+  });
+  test("prose between the tags applies", () => {
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("green", "amber"))).content).toContain('<Pill tone="ok">amber</Pill>');
+  });
+});
+
 describe("resolveDiscussEdit: a plan", () => {
   test("splices only the old text's range in the file and leaves every wrapper byte-identical", () => {
     const old = "with the date on the Brief's Status line.";

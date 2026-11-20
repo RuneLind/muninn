@@ -23,10 +23,12 @@
  * cannot apply (its `code` names why) · 409 `changed` the preview hash no longer
  * fits · 409 `held` a Gardener card holds the page (503 when the cards cannot
  * be read) · 409 `locked` another process writes the wiki · 409 `dirty` the page
- * has uncommitted changes · 500 a write error. Then `writeWikiPage` (it takes
- * the per-wiki write queue itself), a `log.md` line of kind `update`, the
- * commit after it, the index rebuilt after the commit, and the turn marked
- * applied. In the `wiki` route group, which `MUNINN_PROFILE=nais` drops.
+ * has uncommitted changes · 409 `applied` another Apply claimed the turn first ·
+ * 500 a write error. Then `writeWikiPage` (it takes the per-wiki write queue
+ * itself), with the turn claimed inside that section before the write (a
+ * conditional update, released again when nothing is written), a `log.md`
+ * line of kind `update`, the commit after it, and the index rebuilt after the
+ * commit. In the `wiki` route group, which `MUNINN_PROFILE=nais` drops.
  */
 
 import path from "node:path";
@@ -34,7 +36,7 @@ import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
-import { getDiscussTurn, listDiscussTurns, markDiscussEditApplied, type DiscussTurn } from "../../db/wiki-discuss-turns.ts";
+import { getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, type DiscussTurn } from "../../db/wiki-discuss-turns.ts";
 import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
@@ -62,7 +64,7 @@ export interface DiscussApplyDeps {
   registry: () => WikiRegistryEntry[];
   isReadonlyRoot: (root: string) => boolean;
   bots: () => BotConfig[];
-  turns: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; markApplied: typeof markDiscussEditApplied };
+  turns: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; markApplied: typeof markDiscussEditApplied; releaseClaim: typeof releaseDiscussEditClaim };
   commit: (root: string, paths: string[], message: string, push: boolean) => Promise<CommitWikiResult>;
   now: () => number;
 }
@@ -72,7 +74,7 @@ export function realDiscussApplyDeps(): DiscussApplyDeps {
     registry: getWikiRegistry,
     isReadonlyRoot: isReadonlyWikiRoot,
     bots: discoverAllBots,
-    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied },
+    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied, releaseClaim: releaseDiscussEditClaim },
     commit: (root, paths, message, push) => commitWikiChange(root, paths, message, { push }),
     now: Date.now,
   };
@@ -215,48 +217,84 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     let refusal: string | null = null;
     let dirty: string | null = null;
     let written: string | null = null;
-    const result = await writeWikiPage({
-      wikiDir: entry.root,
-      relPath: target.relPath,
-      baseHash,
-      staleReason: "The page changed while the edit was applied. Preview it again.",
-      collections: entry.collections ?? [],
-      logKind: DISCUSS_APPLY_LOG_KIND,
-      logTitle: title,
-      logLine: () => logLine,
-      commitMessage: () => discussApplyCommitMessage(turn, target.relPath),
-      now: deps.now,
-      proceed: async () => {
-        const has = await pageHasUncommittedChanges(entry.root, target.relPath);
-        if (has === false) return true;
-        dirty =
-          has === null
-            ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
-            : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier write could not be committed. Commit or discard them, then try again.`;
+    let claimedAt: string | null = null;
+    let takenElsewhere = false;
+    /** Give back the turn's claim when nothing was written; false when that failed (the turn stays marked applied). */
+    const releaseClaim = async (): Promise<boolean> => {
+      if (claimedAt === null) return true;
+      try {
+        if (await deps.turns.releaseClaim(turn.id, claimedAt)) return true;
+      } catch (err) {
+        log.warn("Discuss apply: the turn's claim could not be released: {error}", { error: err instanceof Error ? err.message : String(err), turnId: turn.id });
         return false;
-      },
-      transform: (raw) => {
-        // The CAS passed, so `raw` is the previewed text; resolved again all the same, never from the preview.
-        const again = resolveDiscussEdit(raw, target.relPath, turn.proposedEdit);
-        if (!again.ok) {
-          refusal = again.reason;
-          return null;
-        }
-        written = again.content;
-        return again.content;
-      },
-      readFile: readKeepingBom,
-      writeFile: async (p, content) => {
-        await Bun.write(p, content);
-      },
-      refreshIndex: async () => {
-        await getWikiIndex({ root: entry.root, refresh: true });
-      },
-      reindex: async (collection) => {
-        await postCollectionUpdate(config.knowledgeApiUrl, collection);
-      },
-      commit: (paths, message) => deps.commit(entry.root, paths, message, push),
-    });
+      }
+      log.warn("Discuss apply: the turn's claim was gone when it was released", { turnId: turn.id });
+      return false;
+    };
+    let result: Awaited<ReturnType<typeof writeWikiPage>>;
+    try {
+      result = await writeWikiPage({
+        wikiDir: entry.root,
+        relPath: target.relPath,
+        baseHash,
+        staleReason: "The page changed while the edit was applied. Preview it again.",
+        collections: entry.collections ?? [],
+        logKind: DISCUSS_APPLY_LOG_KIND,
+        logTitle: title,
+        logLine: () => logLine,
+        commitMessage: () => discussApplyCommitMessage(turn, target.relPath),
+        now: deps.now,
+        proceed: async () => {
+          const has = await pageHasUncommittedChanges(entry.root, target.relPath);
+          if (has !== false) {
+            dirty =
+              has === null
+                ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
+                : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier write could not be committed. Commit or discard them, then try again.`;
+            return false;
+          }
+          // Claim the turn before the write, inside the section: an Apply from a
+          // second tab whose fresh preview still resolves (new text holding the
+          // old) finds the turn taken and writes nothing.
+          const claimed = await deps.turns.markApplied(turn.id);
+          const at = claimed?.proposedEdit && typeof claimed.proposedEdit === "object" ? (claimed.proposedEdit as { appliedAt?: unknown }).appliedAt : undefined;
+          if (typeof at !== "string") {
+            takenElsewhere = true;
+            return false;
+          }
+          claimedAt = at;
+          return true;
+        },
+        transform: (raw) => {
+          // The CAS passed, so `raw` is the previewed text; resolved again all the same, never from the preview.
+          const again = resolveDiscussEdit(raw, target.relPath, turn.proposedEdit);
+          if (!again.ok) {
+            refusal = again.reason;
+            return null;
+          }
+          written = again.content;
+          return again.content;
+        },
+        readFile: readKeepingBom,
+        writeFile: async (p, content) => {
+          await Bun.write(p, content);
+        },
+        refreshIndex: async () => {
+          await getWikiIndex({ root: entry.root, refresh: true });
+        },
+        reindex: async (collection) => {
+          await postCollectionUpdate(config.knowledgeApiUrl, collection);
+        },
+        commit: (paths, message) => deps.commit(entry.root, paths, message, push),
+      });
+    } catch (err) {
+      await releaseClaim();
+      throw err;
+    }
+    if (takenElsewhere) return c.json({ error: "this edit is already applied", reason: "applied" }, 409);
+    if (result.outcome !== "written" && !(await releaseClaim())) {
+      return c.json({ error: `${result.outcome === "error" ? result.reason : "nothing was written"}; the turn is still marked applied, so it cannot be applied again` }, 500);
+    }
     if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
     if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
     if (result.outcome === "locked") return c.json({ error: `A session is writing to this wiki: ${result.reason}. Try again in a moment.`, locked: true }, 409);
@@ -266,8 +304,6 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     const committed = result.commit?.committed ?? false;
     const commitReason = result.commit?.reason ?? "error";
     await getWikiIndex({ root: entry.root, refresh: true }).catch(() => null);
-    // The use count's record; the page edit stands whether or not it lands.
-    await deps.turns.markApplied(turn.id).catch((err) => log.warn("Discuss apply: the turn could not be marked applied: {error}", { error: err instanceof Error ? err.message : String(err), turnId: turn.id }));
     log.info("discuss edit applied on {wiki} {relPath}", { wiki: entry.name, relPath: target.relPath, turnId: turn.id, seq: turn.seq, committed });
     return c.json({
       ok: true,

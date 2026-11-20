@@ -12,12 +12,14 @@
  * as P1's locator does. The new content is spliced into the FILE text, never
  * written from the stripped view, so no wrapper is lost. Refused, each with its
  * own code: a range in the file that touches a fact wrapper (inside it or
- * across its boundary), an old or new text that quotes a wrapper tag, and a
- * range that holds an inline component tag.
+ * across its boundary), an old or new text that quotes a `Fact`/`FactCheck`
+ * tag, a range that overlaps an inline component tag, and a new text that adds
+ * markup (a fence line, frontmatter, or any `<Capitalised` tag outside a code
+ * span): the agent's new text is prose, and markup changes go to Claude Code.
  */
 
 import { COMPONENT_NAMES } from "../format/component-spec.ts";
-import { markdownCodeRegions, inProtectedRegion, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
+import { componentTagSourceSingleLine, markdownCodeRegions, inProtectedRegion, stripFactWrappersWithMap } from "../format/markdown-ast.ts";
 import {
   INTEGRATE_MAX_EDIT_CHARS,
   applyEdits,
@@ -41,7 +43,10 @@ export type DiscussEditRefusalCode =
   | "not-found"
   | "markup"
   | "fact-wrapper"
-  | "inline-component";
+  | "inline-component"
+  | "new-fence"
+  | "new-frontmatter"
+  | "new-markup";
 
 export interface DiscussEditRefusal {
   ok: false;
@@ -72,11 +77,17 @@ export interface DiscussEditPlan {
 
 const refuse = (code: DiscussEditRefusalCode, reason: string): DiscussEditRefusal => ({ ok: false, code, reason });
 
-const FACT_TAG_RE = /<\/?Fact\b/;
+/** A `Fact` or `FactCheck` tag (no word boundary: `<FactCheck` is one too). */
+const FACT_TAG_RE = /<\/?Fact/;
 /** One `Fact` tag, the shape `stripFactWrappers` removes. */
 const FACT_ONE_TAG_RE = /<\/?Fact\b[^>\n]*>/g;
-/** Any known component's tag (opening, closing or self-closing), anywhere on a line. */
-const INLINE_COMPONENT_TAG_RE = new RegExp(`</?(?:${COMPONENT_NAMES.filter((n) => n !== "Fact").join("|")})(?=[\\s/>])[^>\\n]*>`, "g");
+/** Any known component's tag (opening, closing or self-closing), anywhere on a
+ *  line, with the shared single-line shape (a quoted `>` stays inside the tag). */
+const INLINE_COMPONENT_TAG_RE = new RegExp(componentTagSourceSingleLine(COMPONENT_NAMES.filter((n) => n !== "Fact")), "g");
+/** A fenced-code line (in a list or a blockquote too). */
+const FENCE_LINE_RE = /^[ \t>]*(?:`{3,}|~{3,})/m;
+/** Any `<Capitalised` tag, known or not, to its `>` or the end of its line (an unclosed one included). */
+const ANY_TAG_RE = /<\/?[A-Z][A-Za-z0-9]*(?:"[^"\n]*"|[^>"\n])*>?/g;
 
 const ZONE_REFUSAL: Record<ZoneKind, { code: DiscussEditRefusalCode; reason: string }> = {
   frontmatter: { code: "frontmatter", reason: "the old text sits in the page's frontmatter, which the agent may not edit" },
@@ -125,6 +136,31 @@ function wrapperSpans(body: string, map: number[]): { start: number; end: number
   }
   for (const o of open) spans.push({ start: o.start, end: o.end });
   return spans;
+}
+
+/**
+ * The refusal for a new text that adds markup, or null. Read on the page with
+ * the edit made, so a tag the new text completes with the page's own
+ * characters counts, and a code span is judged where it lands.
+ */
+function addedMarkup(body: string, start: number, end: number, after: string, isMdx: boolean): DiscussEditRefusal | null {
+  if (FENCE_LINE_RE.test(after)) return refuse("new-fence", "the new text holds a fenced-code line; the agent's new text may not add markup");
+  const next = body.slice(0, start) + after + body.slice(end);
+  const fm = (t: string) => {
+    const z = findExclusionZones(t, isMdx).find((zone) => zone.kind === "frontmatter");
+    return z ? t.slice(z.start, z.end) : null;
+  };
+  if (fm(next) !== fm(body)) return refuse("new-frontmatter", "the new text would create or change the page's frontmatter; the agent may not edit it");
+  const code = markdownCodeRegions(next);
+  const newEnd = start + after.length;
+  for (const m of next.matchAll(ANY_TAG_RE)) {
+    const at = m.index!;
+    if (at >= newEnd) break;
+    if (at + m[0].length > start && !inProtectedRegion(at, code)) {
+      return refuse("new-markup", `the new text adds a component tag (${m[0]}); markup changes go to Claude Code`);
+    }
+  }
+  return null;
 }
 
 function lineAt(text: string, offset: number): number {
@@ -190,15 +226,20 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
     return refuse("fact-wrapper", "the edit's range is inside a fact wrapper; a wrapper's verdict is the fact check's to change");
   }
   const code = markdownCodeRegions(body);
-  for (const m of body.slice(fileStart, fileEnd).matchAll(INLINE_COMPONENT_TAG_RE)) {
-    if (!inProtectedRegion(fileStart + m.index!, code)) {
-      return refuse("inline-component", `the edit's range holds a component tag (${m[0]}); the agent may not edit component markup`);
+  // Any overlap, not only a whole tag: a range cutting into a tag rewrites its attributes.
+  for (const m of body.matchAll(INLINE_COMPONENT_TAG_RE)) {
+    const at = m.index!;
+    if (at >= fileEnd) break;
+    if (at + m[0].length > fileStart && !inProtectedRegion(at, code)) {
+      return refuse("inline-component", `the edit's range overlaps a component tag (${m[0]}); the agent may not edit component markup`);
     }
   }
 
   const before = body.slice(fileStart, fileEnd);
   // A page written with CRLF keeps CRLF in the replaced text.
   const after = body.includes("\r\n") ? edit.new.replace(/\r?\n/g, "\r\n") : edit.new;
+  const added = addedMarkup(body, fileStart, fileEnd, after, isMdx);
+  if (added) return added;
   const start = bom + fileStart;
   const end = bom + fileEnd;
   return {

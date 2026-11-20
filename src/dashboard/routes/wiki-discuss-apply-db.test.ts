@@ -9,6 +9,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { chmodSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,7 +22,7 @@ import { testTempDir } from "../../test/temp-dir.ts";
 import { commitWikiChange, type CommitWikiResult } from "../../wiki/commit.ts";
 import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gardener/stale-proposals.ts";
 import type { LivePageHolder } from "../../db/wiki-proposals.ts";
-import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, startDiscussTurn } from "../../db/wiki-discuss-turns.ts";
+import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, startDiscussTurn } from "../../db/wiki-discuss-turns.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { WIKI_AGENT_RULES_FILE } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
@@ -66,6 +67,8 @@ let noAgentRoot = "";
 let app: Hono;
 let guardRefusal: Response | null = null;
 let commitResult: CommitWikiResult | null = null;
+/** Runs after the commit, before Apply answers (a second tab's click while the push and the index rebuild run). */
+let onCommit: (() => Promise<void>) | null = null;
 let role = "admin";
 const NOW = Date.parse("2026-11-20T12:00:00+01:00");
 
@@ -141,8 +144,14 @@ beforeAll(async () => {
     registry: () => registry,
     isReadonlyRoot: (r) => r === `${root}-ro`,
     bots: () => [],
-    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied },
-    commit: async (r, paths, message) => commitResult ?? (await commitWikiChange(r, paths, message, { push: false })),
+    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied, releaseClaim: releaseDiscussEditClaim },
+    commit: async (r, paths, message) => {
+      const result = commitResult ?? (await commitWikiChange(r, paths, message, { push: false }));
+      const hook = onCommit;
+      onCommit = null;
+      if (hook) await hook();
+      return result;
+    },
     now: () => NOW,
   });
   app = new Hono();
@@ -156,6 +165,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   guardRefusal = null;
   commitResult = null;
+  onCommit = null;
   role = "admin";
   __setStaleProposalStoreForTest(null);
   git("reset", "-q", "--hard");
@@ -185,11 +195,12 @@ describe("preview", () => {
     expect(commits()).toBe(before);
   });
 
-  test("names the lint findings the edit adds", async () => {
-    // A <Chart> with no table is check 17's finding; the findings the page already has are not repeated.
+  test("refuses new text that adds a component (markup changes go to Claude Code)", async () => {
     const { id } = await turnWith(edit("The north pier takes the morning ferry.", 'The north pier takes the morning ferry.\n\n<Chart kind="bars" value="x">\n\nno table\n\n</Chart>'));
-    const { body } = await preview(id);
-    expect(body.findings).toEqual([{ check: "chart-table", message: '<Chart kind="bars"> holds no pipe table; it renders as its table', line: 11 }]);
+    const { status, body } = await preview(id);
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ refused: true, code: "new-markup" });
+    expect(await pageText()).toBe(PAGE);
   });
 
   const refusals: [string, ReturnType<typeof edit>, string][] = [
@@ -306,6 +317,65 @@ describe("apply", () => {
     expect((await post({ ...p, previewHash: "x" })).status).toBe(409);
     expect((await post({ turnId: id, baseHash: p.baseHash })).status).toBe(400);
     expect(await pageText()).toBe(PAGE);
+  });
+
+  test("an edit whose new text still holds its old text is written once, even when a second tab applies it during the commit", async () => {
+    const neu = `${OLD} It is checked daily.`;
+    const { id } = await turnWith(edit(OLD, neu));
+    const before = commits();
+    const entries = async () => (await logText()).match(/^## \[/gm)?.length ?? 0;
+    const logBefore = await entries();
+    let second: { preview: number; apply: number | null } | null = null;
+    onCommit = async () => {
+      // The page now holds the new text, which still holds the old text exactly once.
+      const p = await preview(id);
+      let apply: number | null = null;
+      if (p.status === 200) apply = (await post({ turnId: id, baseHash: p.body.baseHash, previewHash: p.body.previewHash })).status;
+      second = { preview: p.status, apply };
+    };
+    const res = await post(await previewed(id));
+    expect(res.status).toBe(200);
+    expect(second).not.toBeNull();
+    expect(second!.apply === 200).toBe(false);
+    expect(await pageText()).toBe(PAGE.replace(OLD, neu));
+    expect(await entries()).toBe(logBefore + 1);
+    expect(commits()).toBe(before + 1);
+    expect((await getDiscussTurn(id))!.editAppliedAt).not.toBeNull();
+  });
+
+  test("a turn claimed by another Apply after this one\x27s checks: 409 applied, nothing written", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const before = commits();
+    __setStaleProposalStoreForTest({
+      ...dbStaleProposalStore,
+      liveHolders: async () => {
+        await markDiscussEditApplied(id);
+        return [];
+      },
+    });
+    const res = await post(p);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ reason: "applied" });
+    expect(await pageText()).toBe(PAGE);
+    expect(commits()).toBe(before);
+  });
+
+  test("a write that fails leaves the turn un-applied, so it can be applied again", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const file = path.join(root, REL);
+    chmodSync(file, 0o444);
+    try {
+      const res = await post(p);
+      expect(res.status).toBe(500);
+    } finally {
+      chmodSync(file, 0o644);
+    }
+    expect(await pageText()).toBe(PAGE);
+    expect((await getDiscussTurn(id))!.editAppliedAt).toBeNull();
+    expect((await post(await previewed(id))).status).toBe(200);
+    expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
   });
 
   test("a failed commit says the page is left uncommitted", async () => {

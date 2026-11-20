@@ -247,7 +247,9 @@ export async function markDiscussTurnHandedOver(id: string): Promise<DiscussTurn
   return row ? mapRow(row) : null;
 }
 
-/** The turn's proposed edit was applied to the page (P4's Apply). Recorded in
+/** The turn's proposed edit is claimed for the page (P4's Apply, inside the
+ *  wiki's write section, before the write: the conditional update is what
+ *  lets one turn's edit be written at most once). Recorded in
  *  the edit itself, as `proposed_edit.appliedAt` (no column of its own: the
  *  use count reads it beside `handed_over_at`), the first time only. Returns
  *  the turn, or null when there is no such turn or it carries no edit. */
@@ -258,4 +260,15 @@ export async function markDiscussEditApplied(id: string): Promise<DiscussTurn | 
     WHERE id = ${id} AND proposed_edit IS NOT NULL AND jsonb_typeof(proposed_edit) = 'object' AND NOT (proposed_edit ? 'appliedAt')
     RETURNING *`;
   return row ? mapRow(row) : null;
+}
+
+/** Undo {@link markDiscussEditApplied} when the write it claimed the turn for
+ *  did not happen. Only the claim stamped `appliedAt` is removed, so a later
+ *  claim is never undone. True when the claim was released. */
+export async function releaseDiscussEditClaim(id: string, appliedAt: string): Promise<boolean> {
+  const rows = await getDb()`
+    UPDATE wiki_discuss_turns SET proposed_edit = proposed_edit - 'appliedAt'
+    WHERE id = ${id} AND jsonb_typeof(proposed_edit) = 'object' AND proposed_edit->>'appliedAt' = ${appliedAt}
+    RETURNING id`;
+  return rows.length > 0;
 }
