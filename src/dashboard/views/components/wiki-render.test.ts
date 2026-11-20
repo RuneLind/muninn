@@ -204,7 +204,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // context menu or a blur): 907,528 (308,790 gzipped), so the pin moves to 907,700.
 // Its fix round 3 (the copies scored on one reading of the article, sliced per copy): 908,038
 // (308,995 gzipped), so the pin moves to 908,200.
-const WIKI_CLIENT_MAX_BYTES = 908_200;
+// 2026-11-20, Discuss P4 (the proposed edit's diff card, Apply, «Change the wording», Discard and the
+// block mark): 914,963 (310,964 gzipped), so the pin moves to 915,100.
+const WIKI_CLIENT_MAX_BYTES = 915_100;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

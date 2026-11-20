@@ -33,7 +33,7 @@ import { cpSync, existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 import { e2eEnv } from "../e2e/e2e-env.ts";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
 
@@ -90,7 +90,7 @@ console.log(`git remote in the copy prints nothing`);
 
 // 3. The database.
 const dbUrl = TEST_DATABASE_URL;
-const sql = postgres(dbUrl, { max: 1, onnotice: () => {} });
+const { sql } = openPostgres(dbUrl, { max: 1, onnotice: () => {} });
 try {
   const [row] = await sql`SELECT to_regclass('public.wiki_discuss_turns') IS NOT NULL AS ok`;
   if (!row?.ok) fail(`${new URL(dbUrl).pathname.slice(1)} has no wiki_discuss_turns; run bun run db:setup:test`);

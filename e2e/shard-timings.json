@@ -54,6 +54,7 @@
     "wiki-diagram.spec.ts": 13.7,
     "wiki-discuss-handoff.spec.ts": 10,
     "wiki-discuss-tab.spec.ts": 55.9,
+    "wiki-discuss-apply.spec.ts": 4.8,
     "wiki-effort-page.spec.ts": 15,
     "wiki-embed.spec.ts": 2.4,
     "wiki-factcheck-reader.spec.ts": 3.3,
