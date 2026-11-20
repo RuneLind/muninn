@@ -13,15 +13,16 @@
  * written from the stripped view, so no wrapper is lost. Refused, each with its
  * own code: a range in the file that touches a fact wrapper (inside it or
  * across its boundary), an old text that quotes a `Fact`/`FactCheck` tag, and
- * an edit that touches or changes the page's markup (frontmatter, a fence line,
- * a known component tag outside code, read with markdown-ast's `markdownMarkup`
- * on the page before and after the edit): the agent's new text is prose, and
- * markup changes go to Claude Code.
+ * an edit that touches or changes the page's markup (frontmatter, a fence line
+ * the reader renders, a known component tag outside code and where it stands,
+ * a fact-check sentinel; {@link pageMarkup} on the page before and after the
+ * edit): the agent's new text is prose, and markup changes go to Claude Code.
  * An edit whose result is the page as it is (`no-change`) is refused too.
  */
 
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
 import { markdownMarkup, stripFactWrappersWithMap, type MarkupToken } from "../format/markdown-ast.ts";
+import { FACTCHECK_SENTINEL_END, FACTCHECK_SENTINEL_START } from "./factcheck-context.ts";
 import {
   INTEGRATE_MAX_EDIT_CHARS,
   applyEdits,
@@ -148,43 +149,73 @@ function wrapperSpans(body: string, map: number[]): { start: number; end: number
 
 const isFactName = (t: MarkupToken) => t.name === "Fact" || t.name === "FactCheck";
 
+const SENTINEL_RE = new RegExp(`${FACTCHECK_SENTINEL_START}|${FACTCHECK_SENTINEL_END}`, "g");
+
+/**
+ * The page's markup as the guard compares it: `markdownMarkup` (frontmatter,
+ * the fence lines the reader renders, component tags outside code with where
+ * each stands) and every fact-check sentinel, in code too: the reader drops a
+ * sentinel line, but `findExclusionZones` reads a pair as a fact-check block,
+ * which is the fact check's to write.
+ */
+export function pageMarkup(body: string): MarkupToken[] {
+  const out = markdownMarkup(body);
+  const fm = out[0]?.kind === "frontmatter" ? out[0].text.length : 0;
+  SENTINEL_RE.lastIndex = fm;
+  for (let m = SENTINEL_RE.exec(body); m !== null; m = SENTINEL_RE.exec(body)) out.push({ kind: "sentinel", start: m.index, text: m[0] });
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/** Same token: kind, text, where it stands, and offset (`b`'s, with `a` shifted). */
+const sameToken = (a: MarkupToken, b: MarkupToken, at: number) =>
+  a.kind === b.kind && a.text === b.text && a.lead === b.lead && a.rest === b.rest && a.gap === b.gap && at === b.start;
+
 /** The refusal for an edit whose range overlaps a piece of the page's markup. */
 function touched(t: MarkupToken): DiscussEditRefusal {
   if (t.kind === "frontmatter") return refuse(ZONE_REFUSAL.frontmatter.code, ZONE_REFUSAL.frontmatter.reason);
   if (t.kind === "fence") return refuse(ZONE_REFUSAL.fence.code, "the edit's range touches a fenced-code line, which the agent may not edit");
+  if (t.kind === "sentinel") return refuse(ZONE_REFUSAL.sentinel.code, "the edit's range touches a fact-check sentinel, which the agent may not edit");
   if (isFactName(t)) return refuse("fact-tag", `the edit's range touches a fact tag (${t.text}); a wrapper's verdict is the fact check's to change`);
   return refuse("component-tag", `the edit's range touches a component tag (${t.text}); the agent may not edit component markup`);
 }
 
-/** The refusal for an edit that changes the page's markup outside its range. */
-function changed(t: MarkupToken): DiscussEditRefusal {
+/** The refusal for an edit that changes the page's markup outside its range;
+ *  `moved`: the same tag at its place, standing differently (its line, a line break). */
+function changed(t: MarkupToken, moved: boolean): DiscussEditRefusal {
   if (t.kind === "frontmatter") return refuse("new-frontmatter", "the edit would create or change the page's frontmatter; the agent may not edit it");
   if (t.kind === "fence") return refuse("new-fence", `the edit would add or change a fenced-code line (${t.text}); the agent's new text may not change markup`);
-  if (isFactName(t)) return refuse("fact-tag", `the edit would add or change a fact tag (${t.text}); a wrapper's verdict is the fact check's to change`);
-  return refuse("new-markup", `the edit would add or change a component tag (${t.text}); markup changes go to Claude Code`);
+  if (t.kind === "sentinel") return refuse(ZONE_REFUSAL.sentinel.code, "the edit would add or remove a fact-check sentinel; the fact-check block is the fact check's to write");
+  const what = moved ? `change where a ${isFactName(t) ? "fact" : "component"} tag stands (${t.text}: its line or a line break next to it)` : `add or change a ${isFactName(t) ? "fact" : "component"} tag (${t.text})`;
+  if (isFactName(t)) return refuse("fact-tag", `the edit would ${what}; a wrapper's verdict is the fact check's to change`);
+  return refuse("new-markup", `the edit would ${what}; markup changes go to Claude Code`);
 }
 
 /**
  * The refusal for an edit that touches or changes the page's markup, or null.
- * The markup (`markdownMarkup`: frontmatter, fence lines, component tags outside
- * code) is read on the page before and after the edit: the range may overlap
- * none of it, and the rest must come out the same, each token shifted by the
- * edit's change in length when it lies after the range. So a fence line or tag
- * the new text builds with the page's own characters counts, as does a tag a
- * removed backtick takes out of a code span; a code span the new text adds
- * around prose, or a `<Name>` that is no component, is prose.
+ * The markup ({@link pageMarkup}) is read on the page before and after the
+ * edit: the range may overlap none of it, and the rest must come out the same,
+ * where each tag stands included, each token shifted by the edit's change in
+ * length when it lies after the range. So a fence line or tag the new text
+ * builds with the page's own characters counts, as does a tag a removed
+ * backtick takes out of a code span, a line the new text joins onto a block
+ * tag, a list marker in front of one, and a line break inside an inline
+ * component; a code span the new text adds around prose, or a `<Name>` that is
+ * no component, is prose.
  */
 function markupChange(body: string, start: number, end: number, after: string): DiscussEditRefusal | null {
-  const was = markdownMarkup(body);
+  const was = pageMarkup(body);
   const hit = was.find((t) => t.start < end && t.start + t.text.length > start);
   if (hit) return touched(hit);
-  const now = markdownMarkup(body.slice(0, start) + after + body.slice(end));
+  const now = pageMarkup(body.slice(0, start) + after + body.slice(end));
   const delta = after.length - (end - start);
   for (let i = 0; i < Math.max(was.length, now.length); i++) {
     const a = was[i];
     const b = now[i];
-    if (a && b && a.kind === b.kind && a.text === b.text && (a.start >= end ? a.start + delta : a.start) === b.start) continue;
-    return changed((b ?? a)!);
+    const at = a && (a.start >= end ? a.start + delta : a.start);
+    if (a && b && sameToken(a, b, at!)) continue;
+    if (a && b && a.kind === b.kind && a.text === b.text && at === b.start) return changed(b, true);
+    // Named by the first token that differs in the edited page: a token the edit removed or a new one.
+    return changed(b && (!a || b.start < at!) ? b : a!, false);
   }
   return null;
 }

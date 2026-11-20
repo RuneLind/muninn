@@ -4,9 +4,18 @@
  * inline component tag, inside a fact wrapper, across a wrapper's boundary, a
  * quoted wrapper tag, a double match) and a splice that leaves every wrapper
  * byte-identical. Invented pages only.
+ *
+ * The class check (fix round 3) at the end holds the guard to the reader: an
+ * oracle renders each generated page with the reader's own `renderWikiHtml`
+ * and compares what it renders live with the guard's tokens, and each
+ * generated edit the guard lets through must leave the reader's markup
+ * skeleton as it was.
  */
 import { describe, expect, test } from "bun:test";
-import { resolveDiscussEdit, type DiscussEditPlan, type DiscussEditRefusal } from "./discuss-apply.ts";
+import { COMPONENT_NAMES } from "../format/component-spec.ts";
+import { markdownMarkup } from "../format/markdown-ast.ts";
+import { pageMarkup, resolveDiscussEdit, type DiscussEditPlan, type DiscussEditRefusal } from "./discuss-apply.ts";
+import { renderWikiHtml } from "./render.ts";
 
 const one = (old: string, neu: string) => ({ edits: [{ claimIndex: 0, verdict: "", old, new: neu, reason: "" }], dropped: [], overLimit: false });
 
@@ -107,8 +116,11 @@ describe("resolveDiscussEdit: new text may not add markup", () => {
     expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "Wrap it in `<Fold>`."))).after).toBe("Wrap it in `<Fold>`.");
   });
   test("a fenced-code line", () => {
-    expect(code("The ferry leaves at nine.\n```")).toBe("new-fence");
-    expect(code("The ferry leaves at nine.\n\n~~~\nx\n~~~")).toBe("new-fence");
+    expect(code("The ferry leaves at nine.\n\n```\nx\n```")).toBe("new-fence");
+  });
+  test("a line the reader shows as text is prose: a lone ``` and a ~~~ pair (class check, fix round 3)", () => {
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "The ferry leaves at nine.\n```"))).after).toBe("The ferry leaves at nine.\n```");
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "The ferry leaves at nine.\n\n~~~\nx\n~~~"))).after).toContain("~~~");
   });
   test("a frontmatter fence that creates frontmatter", () => {
     expect(code("---\ntitle: x\n---\nThe ferry leaves at nine.", bare)).toBe("new-frontmatter");
@@ -221,8 +233,11 @@ describe("resolveDiscussEdit: the page's markup before and after the edit is com
   // code, multi-line openers included) is read with markdown-ast's parse on the
   // page before and after the edit, and must be the same outside the range.
   test("new text that ends in one backtick in front of the page's own two builds a fence line", () => {
-    const page = '# P\n\nThe ferry leaves at nine. ``x`` is code.\n\nThe status is <Pill tone="ok">green</Pill>.\n';
+    const page = '# P\n\nThe ferry leaves at nine. ``\ncode\n```\n\nThe status is <Pill tone="ok">green</Pill>.\n';
     expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine. ", "The ferry leaves at nine.\n\n`"))).code).toBe("new-fence");
+    // A backtick in the info string refuses the opener, in the reader too: prose.
+    const inline = '# P\n\nThe ferry leaves at nine. ``x`` is code.\n';
+    expect(planned(resolveDiscussEdit(inline, "plans/p.mdx", one("The ferry leaves at nine. ", "The ferry leaves at nine.\n\n`"))).after).toBe("The ferry leaves at nine.\n\n`");
   });
   test("deleting the opening backtick of a code span makes the tag in it live", () => {
     const fold = '# P\n\nUse `<Fold title="x">` to fold it.\n';
@@ -264,5 +279,305 @@ describe("resolveDiscussEdit: the page's markup before and after the edit is com
     const t0 = performance.now();
     planned(resolveDiscussEdit(page, "plans/p.mdx", one("The ferry leaves at nine.", "The ferry leaves at ten.")));
     expect(performance.now() - t0).toBeLessThan(200);
+  });
+});
+
+// ── Class check (fix round 3): the guard against the reader ─────────────────
+
+const render = (md: string) => renderWikiHtml(md, () => undefined, { today: "2026-11-20" });
+const TAG_START_RE = new RegExp(`</?(${COMPONENT_NAMES.join("|")})\\b`, "g");
+const escapedTags = (html: string, name: string) => (html.match(new RegExp(`&lt;/?${name}\\b`, "g")) ?? []).length;
+
+/** Each tag in `body` from `from` on, and whether the reader renders it live:
+ *  dropping its `<` takes one escaped `&lt;Name` out of the render iff the
+ *  reader printed it as text. */
+function readerTags(body: string, from: number): { start: number; live: boolean }[] {
+  const base = render(body);
+  const out: { start: number; live: boolean }[] = [];
+  TAG_START_RE.lastIndex = from;
+  for (let m = TAG_START_RE.exec(body); m !== null; m = TAG_START_RE.exec(body)) {
+    const without = render(body.slice(0, m.index) + body.slice(m.index + 1));
+    out.push({ start: m.index, live: escapedTags(without, m[1]!) >= escapedTags(base, m[1]!) });
+  }
+  return out;
+}
+
+/** Per line, whether the reader shows it as fenced code (null: not probed). A
+ *  word appended to each line that is neither fence-like nor a tag line lands
+ *  inside a `<pre>` (or a `<Diff>`'s row) iff the line is code. */
+function readerCodeLines(body: string, from: number): (boolean | null)[] {
+  const lines = body.split("\n");
+  let off = 0;
+  const probed = lines.map((l) => {
+    const at = off;
+    off += l.length + 1;
+    return at >= from && l.trim() !== "" && !/^\s*(?:>\s*)*(?:[-*+]\s+|\d+[.)]\s+)?(?:`{3,}|~{3,})/.test(l) && !l.trim().startsWith("<");
+  });
+  const html = render(lines.map((l, i) => (probed[i] ? `${l} ZQ${i}QZ` : l)).join("\n"));
+  return probed.map((p, i) => {
+    if (!p) return null;
+    const at = html.indexOf(`ZQ${i}QZ`);
+    // A `<Diff>` renders its fence as `diff-line` rows, escaped, with no `<pre>`.
+    return at < 0 ? null : html.lastIndexOf("<pre", at) > html.lastIndexOf("</pre>", at) || html.lastIndexOf('<div class="diff-line', at) > html.lastIndexOf("</div>", at);
+  });
+}
+
+/**
+ * Where the reader and the guard disagree on one page, the kinds that would let
+ * an edit through: a tag the reader renders live with no token, a line the
+ * guard reads as fenced code that the reader shows as prose (its tags would be
+ * hidden) or the reverse, and a fact-check sentinel with no token. A token the
+ * reader prints as text is not listed: its `lead`, `rest` and `gap` are
+ * compared too, so an edit that makes it live changes the token.
+ */
+function parityGaps(body: string): string[] {
+  const toks = pageMarkup(body);
+  const from = toks[0]?.kind === "frontmatter" ? toks[0].text.length : 0;
+  const gaps: string[] = [];
+  const tagAt = new Set(toks.filter((t) => t.kind === "tag").map((t) => t.start));
+  for (const r of readerTags(body, from)) if (r.live && !tagAt.has(r.start)) gaps.push(`live tag, no token: ${body.slice(r.start, r.start + 30)}`);
+  const lines = body.split("\n");
+  const fenceLine = toks.filter((t) => t.kind === "fence").map((t) => body.slice(0, t.start).split("\n").length - 1);
+  const guardCode = lines.map((_, i) => {
+    for (let k = 0; k < fenceLine.length; k += 2) if (i >= fenceLine[k]! && i <= (fenceLine[k + 1] ?? lines.length)) return true;
+    return false;
+  });
+  readerCodeLines(body, from).forEach((code, i) => {
+    if (code !== null && code !== guardCode[i]) gaps.push(`${code ? "reader code, guard prose" : "guard code, reader prose"}: ${lines[i]}`);
+  });
+  const sentinelAt = new Set(toks.filter((t) => t.kind === "sentinel").map((t) => t.start));
+  for (const m of body.matchAll(/<!-- factcheck:(?:start|end) -->/g)) if (!sentinelAt.has(m.index!)) gaps.push(`sentinel, no token: ${m[0]}`);
+  return gaps;
+}
+
+/** The reader's markup skeleton: every start tag that is a `pre` or carries a
+ *  class (plain markdown — p, li, strong, a code span — carries none). */
+const skeleton = (html: string) =>
+  [...html.matchAll(/<([a-z][a-z0-9]*)\b([^>]*)>/g)].flatMap((m) => {
+    const cls = /\bclass="([^"]*)"/.exec(m[2]!)?.[1];
+    return m[1] === "pre" || cls !== undefined ? [`${m[1]}.${cls ?? ""}`] : [];
+  });
+
+const FENCE_INDENTS: [string, string][] = [["0 spaces", ""], ["1 space", " "], ["2 spaces", "  "], ["3 spaces", "   "], ["4 spaces", "    "], ["a tab", "\t"]];
+const FENCE_MARKERS: [string, string][] = [["backticks", "```"], ["tildes", "~~~"]];
+const FENCE_CONTAINERS: [string, string, string][] = [["no container", "", ""], ["a blockquote", "> ", "> "], ["a list item", "- ", "  "]];
+
+describe("class check: guard vs reader on fences — indent (0-3 spaces, 4 spaces, a tab) × marker (backticks, tildes) × closed or unclosed × container (none, blockquote, list item)", () => {
+  for (const [ik, ind] of FENCE_INDENTS)
+    for (const [mk, m] of FENCE_MARKERS)
+      for (const closed of [true, false])
+        for (const [ck, first, rest] of FENCE_CONTAINERS) {
+          test(`${ik}, ${mk}, ${closed ? "closed" : "unclosed"}, ${ck}`, () => {
+            const lines = ["Intro words here.", "", `${first}${ind}${m}`, `${rest}${ind}Body <Pill tone="ok">alpha</Pill> and <Fact v="ok" n="1">beta</Fact> text.`];
+            if (closed) lines.push(`${rest}${ind}${m}`);
+            lines.push("", 'Outro <Pill tone="ok">gamma</Pill> words.', "");
+            expect(parityGaps(lines.join("\n"))).toEqual([]);
+          });
+        }
+});
+
+test("class check: a fence inside a <Diff> component (its rows, not a <pre>)", () => {
+  expect(parityGaps('Intro.\n\n<Diff>\n\n```diff\n ## Head <Pill tone="ok">x</Pill>\n-- a\n```\n\n</Diff>\n')).toEqual([]);
+});
+
+describe("class check: guard vs reader on inline code spans — opening run (1-3 backticks) × closing run (1-3 backticks)", () => {
+  for (const open of [1, 2, 3])
+    for (const close of [1, 2, 3])
+      test(`${open} then ${close}`, () => {
+        expect(parityGaps(`Lead ${"`".repeat(open)}<Pill tone="ok">x</Pill>${"`".repeat(close)} tail <Fact v="ok" n="1">y</Fact> end.\n`)).toEqual([]);
+      });
+});
+
+const TAG_KINDS: [string, (rest: string) => string[]][] = [
+  ["multi-line block", (r) => [`<Callout tone="warn">${r}`, "Body words.", "</Callout>"]],
+  ["multi-line Fold", (r) => [`<Fold title="x">${r}`, "", "Body words.", "", "</Fold>"]],
+  ["single-line block", (r) => [`<Callout tone="warn">gamma</Callout>${r}`]],
+  ["inline Pill", (r) => [`<Pill tone="ok">gamma</Pill>${r}`]],
+  ["self-closing", (r) => [`<Pill tone="ok" />${r}`]],
+  ["multi-line opener", (r) => ["<Fold", `  title="x">${r}`, "Body words.", "</Fold>"]],
+  ["inline Fact", (r) => [`<Fact v="ok" n="1">gamma</Fact>${r}`]],
+  ["block Fact", (r) => [`<Fact v="ok" n="1">${r}`, "Body words.", "</Fact>"]],
+];
+const TAG_LEADS: [string, string][] = [["line start", ""], ["indented", "  "], ["after prose", "Words "], ["after a list marker", "- "], ["after an ordered marker", "1. "], ["after a quote marker", "> "]];
+const TAG_PREVS: [string, string[]][] = [["a blank line", ["Prev words.", ""]], ["a prose line", ["Prev words."]], ["a list item", ["- prev item"]], ["a heading", ["## Prev"]], ["page start", []]];
+const TAG_RESTS: [string, string][] = [["nothing", ""], ["prose", " trailing words"]];
+
+/** The edits around a tag cell that move it (the line before joined onto it, a
+ *  list marker before it, prose after its last line, a line break inside it,
+ *  its body joined onto its closer), each the guard lets through that changes
+ *  the reader's skeleton. */
+function contextEditLeaks(page: string, prev: string[]): string[] {
+  const edits: [string, string, string][] = [];
+  const last = prev.filter((l) => l !== "").at(-1);
+  if (last) {
+    const sep = prev.at(-1) === "" ? "\n\n" : "\n";
+    edits.push(["line before joined", last + sep, `${last} `], ["list marker before", last + sep, `${last}${sep}- `]);
+  }
+  edits.push(["prose after", "\n\nAfter words.", " more\n\nAfter words."], ["line break inside", "gamma", "gam\nma"], ["body onto closer", "Body words.\n", "Body words. "]);
+  const before = JSON.stringify(skeleton(render(page)));
+  const leaks: string[] = [];
+  for (const [name, old, neu] of edits) {
+    if (page.indexOf(old) < 0 || page.indexOf(old) !== page.lastIndexOf(old)) continue;
+    const r = resolveDiscussEdit(page, "plans/p.mdx", one(old, neu));
+    if (r.ok && JSON.stringify(skeleton(render(r.content))) !== before) leaks.push(name);
+  }
+  return leaks;
+}
+
+describe("class check: guard vs reader on tags — kind × what precedes it on its line × the line before × what follows the opener; each cell also takes the edits that move the tag", () => {
+  for (const [kk, kind] of TAG_KINDS)
+    for (const [lk, lead] of TAG_LEADS)
+      for (const [pk, prev] of TAG_PREVS)
+        for (const [rk, rest] of TAG_RESTS)
+          test(`${kk}, ${lk}, after ${pk}, followed by ${rk}`, () => {
+            const body = kind(rest);
+            body[0] = lead + body[0];
+            const page = [...prev, ...body, "", "After words.", ""].join("\n");
+            expect(parityGaps(page)).toEqual([]);
+            expect(contextEditLeaks(page, prev)).toEqual([]);
+          });
+});
+
+describe("class check: guard vs reader on fact-check sentinels — a pair, in a fence, inline", () => {
+  test.each([
+    ["a pair", "Intro.\n\n<!-- factcheck:start -->\n## Fact check\nText.\n<!-- factcheck:end -->\n\nAfter.\n"],
+    ["in a fence", "Intro.\n\n```\n<!-- factcheck:start -->\n```\n\nAfter.\n"],
+    ["inline", "Intro <!-- factcheck:start --> mid.\n"],
+  ])("%s", (_name, page) => {
+    expect(parityGaps(page)).toEqual([]);
+  });
+});
+
+const CC_PAGE = [
+  "---",
+  "title: T",
+  "---",
+  "",
+  "Para one alpha bravo.",
+  "",
+  '<Fold title="x">',
+  "",
+  "Inside charlie delta.",
+  "",
+  "</Fold>",
+  "",
+  'Before echo <Pill tone="ok">foxtrot golf</Pill> after hotel.',
+  "",
+  'Claim <Fact v="ok" n="1">india juliet</Fact> kilo.',
+  "",
+  '<Callout tone="warn">',
+  "Callout lima mike.",
+  "</Callout>",
+  "",
+  "    ```",
+  "    november oscar papa",
+  "    ```",
+  "",
+  "```ts",
+  "quebec romeo",
+  "```",
+  "sierra tango.",
+  "",
+  'Zeta <Pill tone="ok">xray</Pill> yankee.',
+  "",
+  'Note: <Callout tone="ok">',
+  "Literal whiskey body.",
+  "</Callout>",
+  "",
+  "    ```",
+  "    dahlia elm",
+  "    ```",
+  "",
+  "Fennel <!-- factcheck:begin --> ginger.",
+  "",
+].join("\n");
+
+/** [cell, old, new, the guard's outcome]. `ok` cells must leave the reader's skeleton as it was. */
+const EDIT_CELLS: [string, string, string, string][] = [
+  ["prose word", "alpha bravo", "alpha bravos", "ok"],
+  ["prose inside a Fold body", "charlie delta", "charlie deltas", "ok"],
+  ["prose inside a Pill", "foxtrot golf", "foxtrot golfs", "ok"],
+  ["prose inside a Callout", "lima mike", "lima mikes", "ok"],
+  ["prose between 4-space ``` lines (the reader's prose)", "november oscar", "november oscars", "ok"],
+  ["prose after a fence closer", "sierra tango", "sierra tangos", "ok"],
+  ["a blank line before a block opener dropped", "bravo.\n\n", "bravo.\n", "ok"],
+  ["a heading line before a block opener", "bravo.\n\n", "bravo.\n# H\n", "ok"],
+  ["a list item line before a block opener", "bravo.\n\n", "bravo.\n- item\n", "ok"],
+  ["an indent before a block opener", "bravo.\n\n", "bravo.\n\n    ", "ok"],
+  ["a code span around a Pill's text", "foxtrot golf", "`foxtrot golf`", "ok"],
+  ["a ~~~ pair (the reader's prose)", "alpha bravo.", "alpha\n~~~\nbravo.\n~~~", "ok"],
+  ["a 4-space ``` pair (the reader's prose)", "alpha bravo.", "alpha\n    ```\nbravo.\n    ```", "ok"],
+  ["a literal opener's prose changed", "Note: ", "Notes: ", "ok"],
+  ["the line before a block opener joined onto it", "bravo.\n\n", "bravo. ", "new-markup"],
+  ["a list marker before a block opener", "bravo.\n\n", "bravo.\n\n- ", "new-markup"],
+  ["a quote marker before a block opener", "bravo.\n\n", "bravo.\n\n> ", "new-markup"],
+  ["prose after a block opener on its line", "\n\nInside charlie", " extra\n\nInside charlie", "new-markup"],
+  ["prose before a block closer on its line", "delta.\n\n", "delta.\n\nwords ", "new-markup"],
+  ["prose after a block closer on its line", "\n\nBefore echo", " extra\n\nBefore echo", "new-markup"],
+  ["a Callout's body joined onto its closer", "lima mike.\n", "lima mike. ", "new-markup"],
+  ["a blank line inside a Pill", "foxtrot golf", "foxtrot\n\ngolf", "new-markup"],
+  ["a line break inside a Pill", "foxtrot golf", "foxtrot\ngolf", "new-markup"],
+  ["a heading inside a Pill", "foxtrot golf", "foxtrot\n# golf", "new-markup"],
+  ["a literal opener made live: its prose moved off its line", "Note: ", "Note:\n", "new-markup"],
+  ["a new Pill in prose", "alpha bravo", 'alpha <Pill tone="bad">bravo</Pill>', "new-markup"],
+  ["a new Fact in prose", "alpha bravo", 'alpha <Fact v="ok" n="2">bravo</Fact>', "fact-tag"],
+  ["a new Fact between 4-space ``` lines", "november oscar", '<Fact v="ok" n="1">november</Fact> oscar', "fact-tag"],
+  ["a new Pill between 4-space ``` lines", "november oscar", '<Pill tone="bad">november</Pill> oscar', "new-markup"],
+  ["a new Fold block between 4-space ``` lines", "november oscar papa", 'november\n<Fold title="y">\nbody\n</Fold>\noscar papa', "new-markup"],
+  ["a fence closer turned into ```ts", "\nsierra", "ts\nsierra", "new-fence"],
+  ["a fence closer lengthened", "\nsierra", "`\nsierra", "new-fence"],
+  ["a new fence the reader renders", "alpha bravo.", "alpha\n```\nbravo.\n```", "new-fence"],
+  ["a 4-space ``` line made 3-space, its closer still 4 (unclosed: prose)", "    ```\n    dahlia", "   ```\n    dahlia", "ok"],
+  ["a fact-check sentinel built from the page's characters", "factcheck:begin", "factcheck:start", "fact-check-block"],
+];
+
+describe("class check: an edit the guard lets through leaves the reader's markup skeleton as it was — prose, block context (line joined, list or quote marker, prose beside a tag), line breaks inside an inline pair, new tags and fences inside and outside the reader's fences, sentinels", () => {
+  test.each(EDIT_CELLS)("%s", (_cell, old, neu, want) => {
+    const r = resolveDiscussEdit(CC_PAGE, "plans/p.mdx", one(old, neu));
+    expect(r.ok ? "ok" : r.code).toBe(want);
+    if (r.ok) expect(skeleton(render(r.content))).toEqual(skeleton(render(CC_PAGE)));
+  });
+});
+
+describe("class check: the verify pass's findings, on their own pages", () => {
+  test("finding 1: a live Fact between two 4-space ``` lines is refused (mimir plans/muninn-nested-claude-md-trim.mdx shape)", () => {
+    const page = "# P\n\nRun this:\n\n    ```\n    rg --files | tail -n +5 | rg -v '^ '\n    ```\n\nDone.\n";
+    expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("| tail -n +5 | rg -v '^ '", "| tail -n +5 | <Fact v=\"ok\" n=\"1\">rg -v '^ '</Fact>"))).code).toBe("fact-tag");
+  });
+  test("finding 2: a Pill between tab-indented ``` lines, and a tone changed on a Pill below an indented ``` line", () => {
+    const tab = "# P\n\n\t```\n\tThe ferry leaves at nine.\n\t```\n";
+    expect(refused(resolveDiscussEdit(tab, "plans/p.mdx", one("leaves at nine", 'leaves at <Pill tone="bad">nine</Pill>'))).code).toBe("new-markup");
+    const below = '# P\n\n    ```\nThe status is <Pill tone="ok">green</Pill>.\n';
+    expect(refused(resolveDiscussEdit(below, "plans/p.mdx", one('tone="ok"', 'tone="bad"'))).code).toBe("component-tag");
+  });
+  test("finding 3: joining the line before a <Fold> opener into it, and a list marker before <Callout>", () => {
+    const fold = '# P\n\nThe ferry leaves at nine.\n\n<Fold title="x">\n\nBody.\n\n</Fold>\n';
+    const joined = refused(resolveDiscussEdit(fold, "plans/p.mdx", one("nine.\n\n", "ten. ")));
+    expect(joined.code).toBe("new-markup");
+    expect(joined.reason).toContain("change where a component tag stands");
+    const callout = '# P\n\nThe ferry leaves at nine.\n\n<Callout tone="warn">\nBody.\n</Callout>\n';
+    expect(refused(resolveDiscussEdit(callout, "plans/p.mdx", one("nine.\n\n", "nine.\n\n- "))).code).toBe("new-markup");
+  });
+  test("finding 4: a fact-check sentinel the edit builds from the page's characters", () => {
+    const page = "# P\n\n<!-- factcheck:begin -->\n\nThe ferry leaves at nine.\n";
+    expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("factcheck:begin", "factcheck:start"))).code).toBe("fact-check-block");
+  });
+  test("M4 and M11: a fence closer's text is compared, not only its place", () => {
+    const page = "# P\n\n```\nx\n```\nThe ferry leaves at nine.\n";
+    expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("\nThe ferry", "`\nThe ferry"))).code).toBe("new-fence");
+    expect(refused(resolveDiscussEdit(page, "plans/p.mdx", one("\nThe ferry", "ts\nThe ferry"))).code).toBe("new-fence");
+  });
+  test("M5 and M6: the old text's Fact rule reads code spans and a word boundary", () => {
+    const page = "# P\n\nQuote `<Fact>` here. The <Factory> stands.\n";
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("Quote `<Fact>` here.", "Quote `<Fact>` there."))).after).toBe("Quote `<Fact>` there.");
+    expect(planned(resolveDiscussEdit(page, "plans/p.mdx", one("The <Factory> stands.", "The <Factory> stood."))).after).toBe("The <Factory> stood.");
+  });
+});
+
+describe("class check: pageMarkup adds the sentinels to markdownMarkup", () => {
+  test("a sentinel is a token in code too, and the rest is markdownMarkup's", () => {
+    const body = "Intro.\n\n<!-- factcheck:start -->\nx\n<!-- factcheck:end -->\n\n`<!-- factcheck:end -->`\n";
+    expect(pageMarkup(body).filter((t) => t.kind === "sentinel").map((t) => t.start)).toEqual([8, 35, 60]);
+    expect(pageMarkup(body).filter((t) => t.kind !== "sentinel")).toEqual(markdownMarkup(body));
   });
 });

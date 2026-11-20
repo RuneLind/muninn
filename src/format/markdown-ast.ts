@@ -612,54 +612,6 @@ function factProtectedRegions(body: string): ProtectedRegion[] {
  * the frontmatter block the caller has already claimed.
  */
 export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
-  return scanCodeRegions(body, from, null);
-}
-
-/** One piece of a page's markup, as {@link markdownMarkup} reads it. */
-export interface MarkupToken {
-  kind: "frontmatter" | "fence" | "tag";
-  start: number;
-  /** The token's source: the whole frontmatter block, one fence line, or one tag (a multi-line opener whole). */
-  text: string;
-  /** A tag's component name. */
-  name?: string;
-}
-
-/** Any known component's tag in the parser's own attribute grammar
- *  ({@link COMPONENT_OPEN_RE}, `INLINE_COMPONENT_RE`): double-quoted values and
- *  white space between them, line breaks included, so a multi-line opener is
- *  one token. A failed match stops at the first character the grammar rejects,
- *  except an open quote, which runs to the next `"`. */
-const MARKUP_TAG_SOURCE = `</?(${COMPONENT_NAMES.join("|")})\\b(?:\\s+[A-Za-z][\\w-]*="[^"]*")*\\s*/?>`;
-
-/**
- * The page's markup, in source order: the frontmatter block, every fence line
- * (opener and closer, as {@link markdownCodeRegions} reads fences) and every
- * known component tag outside frontmatter and code. Two texts with the same
- * tokens at the same offsets have the same markup; the Discuss Apply guard
- * (`src/wiki/discuss-apply.ts`) compares a page before and after an edit this
- * way. Linear in the body's length.
- */
-export function markdownMarkup(body: string): MarkupToken[] {
-  const out: MarkupToken[] = [];
-  const fm = FRONTMATTER_BLOCK_RE.exec(body);
-  const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
-  if (fm && fmEnd > 0) out.push({ kind: "frontmatter", start: 0, text: fm[0] });
-  const code = scanCodeRegions(body, fmEnd, out).sort((a, b) => a.start - b.start);
-  let r = 0;
-  const re = new RegExp(MARKUP_TAG_SOURCE, "g");
-  re.lastIndex = fmEnd;
-  for (let m = re.exec(body); m !== null; m = re.exec(body)) {
-    const at = m.index;
-    while (r < code.length && code[r]!.end <= at) r++;
-    if (r < code.length && code[r]!.start <= at) continue;
-    out.push({ kind: "tag", start: at, text: m[0], name: m[1]! });
-  }
-  return out.sort((a, b) => a.start - b.start);
-}
-
-/** {@link markdownCodeRegions}' scan; `fenceLines`, when given, also receives each fence line. */
-function scanCodeRegions(body: string, from: number, fenceLines: MarkupToken[] | null): ProtectedRegion[] {
   const regions: ProtectedRegion[] = [];
   let offset = 0;
   let fenceStart = -1;
@@ -674,14 +626,12 @@ function scanCodeRegions(body: string, from: number, fenceLines: MarkupToken[] |
       const run = m[1]!;
       const marker = run[0]!;
       if (fenceStart < 0) {
-        fenceLines?.push({ kind: "fence", start: lineStart, text: line });
         fenceStart = lineStart;
         fenceMarker = marker;
         fenceRun = run.length;
         continue;
       }
       if (marker === fenceMarker && run.length >= fenceRun) {
-        fenceLines?.push({ kind: "fence", start: lineStart, text: line });
         regions.push({ start: fenceStart, end: lineStart + line.length });
         fenceStart = -1;
         fenceMarker = "";
@@ -695,6 +645,107 @@ function scanCodeRegions(body: string, from: number, fenceLines: MarkupToken[] |
   }
   if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
   return regions;
+}
+
+/** One piece of a page's markup, as {@link markdownMarkup} reads it. */
+export interface MarkupToken {
+  kind: "frontmatter" | "fence" | "tag" | "sentinel";
+  start: number;
+  /** The token's source: the whole frontmatter block, one fence line, or one tag (a multi-line opener whole). */
+  text: string;
+  /** A tag's component name. */
+  name?: string;
+  /**
+   * Where a tag stands, which decides whether the reader renders it: `lead` is
+   * `line` when only white space is before it on its line (a block tag must
+   * start its line: a list or quote marker or prose there leaves it literal),
+   * `rest` is `line` when only white space follows it (a multi-line opener
+   * owns its line), and `gap` is `inline` when no line break lies between the
+   * previous tag (or the frontmatter) and this one, else `line` (an inline
+   * component's tags must share a line; a blank line before a block tag
+   * changes nothing the reader renders). Frontmatter and fence lines carry
+   * none: the whole line is their text.
+   */
+  lead?: "line" | "text";
+  rest?: "line" | "text";
+  gap?: "inline" | "line";
+}
+
+/** Any known component's tag in the parser's own attribute grammar
+ *  ({@link COMPONENT_OPEN_RE}, `INLINE_COMPONENT_RE`): double-quoted values and
+ *  white space between them, line breaks included, so a multi-line opener is
+ *  one token. A failed match stops at the first character the grammar rejects,
+ *  except an open quote, which runs to the next `"`. */
+const MARKUP_TAG_SOURCE = `</?(${COMPONENT_NAMES.join("|")})\\b(?:\\s+[A-Za-z][\\w-]*="[^"]*")*\\s*/?>`;
+
+/**
+ * The page's markup, in source order, read as the reader renders it: the
+ * frontmatter block, every fence line the reader renders ({@link readerFences}:
+ * backticks, at most 3 spaces of indent, an opener with no closer stays prose)
+ * and every known component tag outside frontmatter, those fences and inline
+ * code spans, each with where it stands (`lead`, `rest`, `gap`). Two texts with
+ * the same tokens at the same offsets have the same markup; the Discuss Apply
+ * guard (`src/wiki/discuss-apply.ts`) compares a page before and after an edit
+ * this way. A tag the reader prints as text (a multi-line opener, a tag after a
+ * list marker) is still a token, so an edit that makes it live changes a token.
+ * Linear in the body's length.
+ */
+export function markdownMarkup(body: string): MarkupToken[] {
+  const out: MarkupToken[] = [];
+  const fm = FRONTMATTER_BLOCK_RE.exec(body);
+  const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
+  if (fm && fmEnd > 0) out.push({ kind: "frontmatter", start: 0, text: fm[0] });
+  const lines = body.slice(fmEnd).split("\n");
+  const lineStart: number[] = [];
+  let off = fmEnd;
+  for (const l of lines) {
+    lineStart.push(off);
+    off += l.length + 1;
+  }
+  const code: ProtectedRegion[] = [];
+  const fenced = new Array<boolean>(lines.length).fill(false);
+  for (const f of readerFences(lines.join("\n"))) {
+    for (const k of [f.opener, f.closer]) out.push({ kind: "fence", start: lineStart[k]!, text: lines[k]! });
+    for (let k = f.opener; k <= f.closer; k++) fenced[k] = true;
+    code.push({ start: lineStart[f.opener]!, end: lineStart[f.closer]! + lines[f.closer]!.length });
+  }
+  lines.forEach((l, k) => {
+    if (!fenced[k]) pushInlineCodeSpans(l, lineStart[k]!, code);
+  });
+  code.sort((a, b) => a.start - b.start);
+  let r = 0;
+  let prevEnd = fmEnd;
+  // One forward cursor (tags come in order), so a line of many tags stays linear:
+  // the last line break and the last non-space character before it.
+  let scan = fmEnd;
+  let lastNl = fmEnd - 1;
+  let lastInk = -1;
+  const restRe = /[^\S\n]*(?:\n|$)/y;
+  const re = new RegExp(MARKUP_TAG_SOURCE, "g");
+  re.lastIndex = fmEnd;
+  for (let m = re.exec(body); m !== null; m = re.exec(body)) {
+    const at = m.index;
+    while (r < code.length && code[r]!.end <= at) r++;
+    if (r < code.length && code[r]!.start <= at) continue;
+    for (; scan < at; scan++) {
+      const c = body[scan]!;
+      if (c === "\n") lastNl = scan;
+      else if (!/\s/.test(c)) lastInk = scan;
+    }
+    const end = at + m[0].length;
+    restRe.lastIndex = end;
+    out.push({
+      kind: "tag",
+      start: at,
+      text: m[0],
+      name: m[1]!,
+      lead: lastInk <= lastNl ? "line" : "text",
+      rest: restRe.test(body) ? "line" : "text",
+      gap: lastNl >= prevEnd ? "line" : "inline",
+    });
+    prevEnd = end;
+  }
+  return out.sort((a, b) => a.start - b.start);
 }
 
 /** Whether this offset falls inside any of the regions {@link markdownCodeRegions} returned. */
