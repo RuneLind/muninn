@@ -16,7 +16,8 @@
  * the discuss route accepts) instead of the decision triage's list. Refusals,
  * in order: 403 role not admin · 415 not JSON · 403 `readonly` the instance ·
  * 400 body · 404 unknown turn · 404 the turn's wiki is not configured here ·
- * 403 `readonly` a read-only root · 404 `no-agent` · 409 `not-done` the turn
+ * 403 `readonly` a read-only root · 404 `no-agent` (422 `rules-too-large`,
+ * 503 `rules-unreadable` as the discuss route answers) · 409 `not-done` the turn
  * did not end done · 409 `superseded` a newer turn of the discussion exists ·
  * 409 `applied` already applied · 404 no page · 409 unreadable · 409 `stale`
  * the page changed since the preview's base hash · 409 `refused` the edit
@@ -53,6 +54,7 @@ import { plainSnippet } from "../../wiki/find-everywhere.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
+import { wikiAgentRulesRefusal } from "./wiki-discuss.ts";
 
 const log = getLog("dashboard", "wiki-discuss-apply");
 
@@ -105,9 +107,10 @@ export function discussApplyCommitMessage(turn: Pick<DiscussTurn, "seq">, relPat
   return `[discuss] Apply the wiki agent's edit (turn ${turn.seq}): ${relPath}`;
 }
 
-/** The findings `checkPageText` raises on `after` and not on `before`, counted per check and message (lines move with the edit). */
+/** The findings `checkPageText` raises on `after` and not on `before`, counted per check and message with
+ *  its line numbers taken out (`Unclosed [[ on line 7 …`): an edit above a finding moves it, not adds it. */
 export function findingsAdded(before: readonly LintFinding[], after: readonly LintFinding[]): LintFinding[] {
-  const key = (f: LintFinding) => `${f.check}\u0000${f.message}`;
+  const key = (f: LintFinding) => `${f.check}\u0000${f.message.replace(/\bline \d+\b/g, "line #")}`;
   const left = new Map<string, number>();
   for (const f of before) left.set(key(f), (left.get(key(f)) ?? 0) + 1);
   const added: LintFinding[] = [];
@@ -155,9 +158,10 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     const egress = guards.egressRefusal(c, entry);
     if (egress) return egress;
     // Apply's scope: the wikis that have the agent, as the discuss route reads them.
-    if ((await readWikiAgentRules(path.resolve(entry.root))).state !== "ok") {
-      return c.json({ error: "this wiki has no wiki agent (no .wiki-agent.md the agent accepts at its root)", reason: "no-agent" }, 404);
-    }
+    const rules = await readWikiAgentRules(path.resolve(entry.root));
+    const rulesRefused = wikiAgentRulesRefusal(rules);
+    if (rulesRefused) return c.json(rulesRefused.body, rulesRefused.status);
+    if (rules.state !== "ok") return c.json({ error: "this wiki has no wiki agent (no .wiki-agent.md the agent accepts at its root)", reason: "no-agent" }, 404);
     if (turn.endState !== "done") return c.json({ error: `the turn ended ${turn.endState}, not done; only a finished turn's edit applies`, reason: "not-done" }, 409);
     // The newest turn of the discussion (highest seq) is the current one; an older turn's edit is not offered.
     const newest = (await deps.turns.list(turn.discussionId)).reduce((m, t) => Math.max(m, t.seq), turn.seq);

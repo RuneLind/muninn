@@ -88,6 +88,7 @@ import {
   reposInReach,
   type AgentReach,
   type PackRepo,
+  type RulesRead,
 } from "../../wiki/discuss-agent.ts";
 import { parseRepoRoots, realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "../../wiki/plan-card.ts";
@@ -132,6 +133,15 @@ export class DiscussTurnTimeout extends Error {
     super(`the model call ran past ${ms} ms`);
     this.name = "DiscussTurnTimeout";
   }
+}
+
+/** The refusal for a `.wiki-agent.md` that exists but the agent does not accept (422 too large, 503 unreadable or not a file); null for `ok` and `absent`, which each caller answers itself. Shared with Apply. */
+export function wikiAgentRulesRefusal(rules: RulesRead): { status: 422 | 503; body: { error: string; reason: "rules-too-large" | "rules-unreadable" } } | null {
+  if (rules.state === "ok" || rules.state === "absent") return null;
+  if (rules.state === "too-large") {
+    return { status: 422, body: { error: `the wiki's .wiki-agent.md is ${rules.bytes} bytes, over the ${WIKI_AGENT_RULES_MAX_BYTES}-byte bound`, reason: "rules-too-large" } };
+  }
+  return { status: 503, body: { error: "the wiki's .wiki-agent.md cannot be read", reason: "rules-unreadable" } };
 }
 
 /** A read-and-search turn whose snapshot does not hold the page the row was
@@ -445,10 +455,10 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     if (rules.state === "absent") {
       return c.json({ error: "this wiki has no wiki agent (no .wiki-agent.md at its root); Discuss keeps its chat thread here", reason: "no-agent" }, 404);
     }
-    if (rules.state === "too-large") {
-      return c.json({ error: `the wiki's .wiki-agent.md is ${rules.bytes} bytes, over the ${WIKI_AGENT_RULES_MAX_BYTES}-byte bound`, reason: "rules-too-large" }, 422);
+    if (rules.state !== "ok") {
+      const refused = wikiAgentRulesRefusal(rules)!;
+      return c.json(refused.body, refused.status);
     }
-    if (rules.state !== "ok") return c.json({ error: "the wiki's .wiki-agent.md cannot be read", reason: "rules-unreadable" }, 503);
 
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);

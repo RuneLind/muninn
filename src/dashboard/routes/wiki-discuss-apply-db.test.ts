@@ -24,7 +24,7 @@ import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gard
 import type { LivePageHolder } from "../../db/wiki-proposals.ts";
 import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, startDiscussTurn } from "../../db/wiki-discuss-turns.ts";
 import { sha256 } from "../../utils/date-hash.ts";
-import { WIKI_AGENT_RULES_FILE } from "../../wiki/discuss-agent.ts";
+import { WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import { registerWikiDiscussApplyRoute, WIKI_DISCUSS_APPLY_PATH, type DiscussApplyDeps } from "./wiki-discuss-apply.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
@@ -196,6 +196,25 @@ describe("preview", () => {
     expect(body.findings).toEqual([]);
     expect(await pageText()).toBe(PAGE);
     expect(commits()).toBe(before);
+  });
+
+  test("findings: a finding the edit only moves to another line is not added; one the new text brings is", async () => {
+    const page = PAGE.replace("# Ferry plan\n", "# Ferry plan\n\nIntro.\n\nSee [[broken link here\n");
+    await resetPage(page);
+    const shifted = await turnWith(edit("Intro.", "Intro.\n\nMore."));
+    const moved = await preview(shifted.id);
+    expect(moved.status).toBe(200);
+    expect(moved.body.findings).toEqual([]);
+    const added = await turnWith(edit(OLD, `${NEW} See [[open link`));
+    const brought = await preview(added.id);
+    expect(brought.status).toBe(200);
+    expect(brought.body.findings).toEqual([expect.objectContaining({ check: "index-truncation", message: expect.stringContaining("([[open link)") })]);
+    // The same text as the finding already on the page, a second time: one more finding, so it is added.
+    const twice = await turnWith(edit("Intro.", "Intro.\n\nSee [[broken link here"));
+    const again = await preview(twice.id);
+    expect(again.status).toBe(200);
+    expect(again.body.findings).toEqual([expect.objectContaining({ check: "index-truncation", message: expect.stringContaining("([[broken link here)") })]);
+    expect(await pageText()).toBe(page);
   });
 
   test("refuses new text that adds a component (markup changes go to Claude Code)", async () => {
@@ -437,6 +456,24 @@ describe("the turn and the wiki", () => {
     role = "admin";
     const notJson = await app.request(WIKI_DISCUSS_APPLY_PATH, { method: "POST", body: "x" });
     expect(notJson.status).toBe(415);
+    expect(await pageText()).toBe(PAGE);
+  });
+
+  test("a .wiki-agent.md over the bound: 422 rules-too-large; one that cannot be read: 503 rules-unreadable (as the discuss route answers)", async () => {
+    const rules = path.join(root, WIKI_AGENT_RULES_FILE);
+    const kept = await Bun.file(rules).text();
+    try {
+      await Bun.write(rules, "x".repeat(WIKI_AGENT_RULES_MAX_BYTES + 1));
+      const big = await turnWith(edit(OLD, NEW));
+      expect(await preview(big.id)).toMatchObject({ status: 422, body: { reason: "rules-too-large", error: `the wiki's .wiki-agent.md is ${WIKI_AGENT_RULES_MAX_BYTES + 1} bytes, over the ${WIKI_AGENT_RULES_MAX_BYTES}-byte bound` } });
+      await Bun.write(rules, kept);
+      chmodSync(rules, 0o000);
+      const locked = await turnWith(edit(OLD, NEW));
+      expect(await preview(locked.id)).toMatchObject({ status: 503, body: { reason: "rules-unreadable", error: "the wiki's .wiki-agent.md cannot be read" } });
+    } finally {
+      chmodSync(rules, 0o644);
+      await Bun.write(rules, kept);
+    }
     expect(await pageText()).toBe(PAGE);
   });
 });

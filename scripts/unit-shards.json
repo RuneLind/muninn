@@ -154,6 +154,7 @@
       "scripts/wiki-stale.test.ts",
       "scripts/component-reference.test.ts",
       "scripts/wiki-export-html.test.ts",
+      "scripts/discuss-apply-scratch.test.ts",
       "src/summaries/",
       "src/format/",
       "src/plans/",

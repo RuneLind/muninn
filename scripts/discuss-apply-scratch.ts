@@ -7,11 +7,14 @@
  *     [--bot jarvis] [--into <dir>] [--port <n>] [--keep-env NAME,NAME] [--check]
  *
  * In order, stopping at the first failure:
- *  1. copies `--src` (its `.git` included, so uncommitted pages come along as
- *     they are) into `--into`, default a new temp dir;
- *  2. removes every remote of the copy and checks that `git remote` prints
- *     nothing: the wiki has no owning bot, and Apply on a wiki no bot owns
- *     pushes by default, so an empty `git remote` is the only guard;
+ *  1. clones `--src` (`git clone --no-hardlinks`, so a linked worktree gives a
+ *     repository of its own, not one sharing the source's config, objects and
+ *     HEAD) into `--into`, default a new temp dir. The clone holds committed
+ *     state only: commit a page's edits in `--src` first, or they are not in it;
+ *  2. checks the copy's git dir is its own, removes every remote of the copy and
+ *     checks that `git remote` prints nothing: the wiki has no owning bot, and
+ *     Apply on a wiki no bot owns pushes by default, so an empty `git remote` is
+ *     the only guard (`scratchCopy`, `scripts/discuss-apply-scratch-copy.ts`);
  *  3. checks that the `_test` database (`MUNINN_TEST_DATABASE_URL`, else
  *     `muninn_test`) holds P2b's `wiki_discuss_turns`; run
  *     `bun run db:setup:test` first when it does not;
@@ -29,13 +32,14 @@
  * turn, and runs until Ctrl-C. `--check` stops the muninn once it answers.
  */
 import { createServer } from "node:net";
-import { cpSync, existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { openPostgres } from "../db/postgres-connection.ts";
 import { e2eEnv } from "../e2e/e2e-env.ts";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
+import { scratchCopy } from "./discuss-apply-scratch-copy.ts";
 
 const { values } = parseArgs({
   options: {
@@ -54,12 +58,6 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-function git(dir: string, ...args: string[]): string {
-  const r = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" });
-  if (r.exitCode !== 0) fail(`git ${args.join(" ")} in ${dir}: ${r.stderr.toString().trim()}`);
-  return r.stdout.toString();
-}
-
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -76,17 +74,14 @@ const src = path.resolve(values.src);
 if (!existsSync(path.join(src, ".git"))) fail(`${src} is not the root of a git work tree`);
 const repoRoot = path.resolve(import.meta.dir, "..");
 
-// 1. The copy.
+// 1-2. The copy, a clone of its own with no remote.
 const dest = values.into ? path.resolve(values.into) : path.join(mkdtempSync(path.join(tmpdir(), "discuss-apply-")), values.name);
-if (existsSync(dest)) fail(`${dest} exists already; name a new directory`);
-cpSync(src, dest, { recursive: true, verbatimSymlinks: true });
-console.log(`copied ${src} → ${dest}`);
-
-// 2. No remote.
-for (const remote of git(dest, "remote").split("\n").map((r) => r.trim()).filter(Boolean)) git(dest, "remote", "remove", remote);
-const remotes = git(dest, "remote");
-if (remotes.trim() !== "") fail(`git remote still prints ${JSON.stringify(remotes)}; refusing to start (Apply would push)`);
-console.log(`git remote in the copy prints nothing`);
+try {
+  scratchCopy(src, dest);
+} catch (err) {
+  fail((err as Error).message);
+}
+console.log(`cloned ${src} → ${dest} (committed state only); git remote in the copy prints nothing`);
 
 // 3. The database.
 const dbUrl = TEST_DATABASE_URL;
