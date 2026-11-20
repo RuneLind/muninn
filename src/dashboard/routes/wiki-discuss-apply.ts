@@ -27,7 +27,7 @@
  * has uncommitted changes · 409 `applied` another Apply claimed the turn first ·
  * 500 a write error. Then `writeWikiPage` (it takes the per-wiki write queue
  * itself), with the turn claimed inside that section before the write (a
- * conditional update, released again when nothing is written), a `log.md`
+ * conditional update, released again inside that section when nothing is written), a `log.md`
  * line of kind `update`, the commit after it, and the index rebuilt after the
  * commit. In the `wiki` route group, which `MUNINN_PROFILE=nais` drops.
  */
@@ -229,7 +229,10 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     const releaseClaim = async (): Promise<boolean> => {
       if (claimedAt === null) return true;
       try {
-        if (await deps.turns.releaseClaim(turn.id, claimedAt)) return true;
+        if (await deps.turns.releaseClaim(turn.id, claimedAt)) {
+          claimedAt = null;
+          return true;
+        }
       } catch (err) {
         log.warn("Discuss apply: the turn's claim could not be released: {error}", { error: err instanceof Error ? err.message : String(err), turnId: turn.id });
         return false;
@@ -237,6 +240,7 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
       log.warn("Discuss apply: the turn's claim was gone when it was released", { turnId: turn.id });
       return false;
     };
+    let released = true;
     let result: Awaited<ReturnType<typeof writeWikiPage>>;
     try {
       result = await writeWikiPage({
@@ -281,6 +285,10 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
           written = again.content;
           return again.content;
         },
+        // Inside the section: a second Apply entering it after this one finds the claim given back, never a false `applied`.
+        settle: async (outcome) => {
+          if (outcome.outcome !== "written") released = await releaseClaim();
+        },
         readFile: readKeepingBom,
         writeFile: async (p, content) => {
           await Bun.write(p, content);
@@ -298,7 +306,7 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
       throw err;
     }
     if (takenElsewhere) return c.json({ error: "this edit is already applied", reason: "applied" }, 409);
-    if (result.outcome !== "written" && !(await releaseClaim())) {
+    if (result.outcome !== "written" && !(released && (await releaseClaim()))) {
       return c.json({ error: `${result.outcome === "error" ? result.reason : "nothing was written"}; the turn is still marked applied, so it cannot be applied again` }, 500);
     }
     if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);

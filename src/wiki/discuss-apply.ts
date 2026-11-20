@@ -17,7 +17,8 @@
  * the reader renders, a known component tag outside code and where it stands,
  * a fact-check sentinel; {@link pageMarkup} on the page before and after the
  * edit): the agent's new text is prose, and markup changes go to Claude Code.
- * An edit whose result is the page as it is (`no-change`) is refused too.
+ * An edit whose result is the page as it is (`no-change`), or that changes
+ * only edge white space the page does not hold (`edge-space`), is refused too.
  */
 
 import { lineCodeSpanRanges } from "../format/code-spans.ts";
@@ -49,7 +50,8 @@ export type DiscussEditRefusalCode =
   | "new-fence"
   | "new-frontmatter"
   | "new-markup"
-  | "no-change";
+  | "no-change"
+  | "edge-space";
 
 export interface DiscussEditRefusal {
   ok: false;
@@ -230,12 +232,41 @@ function lineAt(text: string, offset: number): number {
 const lead = (t: string) => t.match(/^\s*/)![0].replace(/\r\n/g, "\n").length;
 const trail = (t: string) => t.match(/\s*$/)![0].replace(/\r\n/g, "\n").length;
 
+/** The old text's leading or trailing white space, CRLF read as LF. */
+const edgeSpace = (t: string, side: "lead" | "trail") => t.replace(/\r\n/g, "\n").match(side === "lead" ? /^\s*/ : /\s*$/)![0];
+
+/**
+ * How many file characters next to the range spell `ws` (CRLF read as one
+ * line break), walking back from `at` (`lead`) or forward from it (`trail`);
+ * 0 when they spell something else.
+ */
+function spelledBy(body: string, at: number, ws: string, side: "lead" | "trail"): number {
+  let out = "";
+  let i = at;
+  while (out.length < ws.length) {
+    if (side === "lead") {
+      if (i <= 0) return 0;
+      const crlf = body[i - 1] === "\n" && body[i - 2] === "\r";
+      out = (crlf ? "\n" : body[i - 1]) + out;
+      i -= crlf ? 2 : 1;
+    } else {
+      if (i >= body.length) return 0;
+      const crlf = body[i] === "\r" && body[i + 1] === "\n";
+      out += crlf ? "\n" : body[i];
+      i += crlf ? 2 : 1;
+    }
+  }
+  return out === ws ? Math.abs(i - at) : 0;
+}
+
 /**
  * The text that replaces `before` (the file's range). On the collapsed tier the
- * range holds none of the old text's edge white space, so as much of the new
- * text's edge white space is dropped: only the words change, and a break the
- * new text adds beyond the old one's stays. Line breaks take the ending of the
- * line the range sits on (the first one at or after it, else the last before).
+ * range is widened first over the old text's edge white space where the page
+ * holds it (CRLF read as LF), so a CRLF page takes an edit as an LF page does;
+ * edge white space the page does not hold is dropped from the new text as much
+ * as from the old: only the words change, and a break the new text adds beyond
+ * the old one's stays. Line breaks take the ending of the line the range sits
+ * on (the first one at or after it, else the last before).
  */
 function newTextFor(body: string, fileStart: number, before: string, edit: IntegrateEdit): string {
   let neu = edit.new.replace(/\r\n/g, "\n");
@@ -301,16 +332,27 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
   const fileEnd = map[e - 1]! + 1;
   // A removed tag inside the range makes it longer in the file than in the stripped view.
   if (fileEnd - fileStart !== e - s) return refuse("fact-wrapper", "the edit's range crosses a fact wrapper's tag; a wrapper's verdict is the fact check's to change");
-  if (wrapperSpans(body, map).some((w) => fileStart < w.end && fileEnd > w.start)) {
+  let [from, to] = [fileStart, fileEnd];
+  // The collapsed tier matched words only: take in the edge white space the old text spells, where the page holds it.
+  if (lead(body.slice(from, to)) < lead(edit.old)) from -= spelledBy(body, from, edgeSpace(edit.old, "lead"), "lead");
+  if (trail(body.slice(from, to)) < trail(edit.old)) to += spelledBy(body, to, edgeSpace(edit.old, "trail"), "trail");
+  // An exact old text starting with a line break can match the LF half of a CRLF pair: the range takes the CR too.
+  if (body[from] === "\n" && body[from - 1] === "\r") from -= 1;
+  if (wrapperSpans(body, map).some((w) => from < w.end && to > w.start)) {
     return refuse("fact-wrapper", "the edit's range is inside a fact wrapper; a wrapper's verdict is the fact check's to change");
   }
-  const before = body.slice(fileStart, fileEnd);
-  const after = newTextFor(body, fileStart, before, edit);
-  if (after === before) return refuse("no-change", "the edit's new text is what the page already says; there is nothing to apply");
-  const markup = markupChange(body, fileStart, fileEnd, after);
+  const before = body.slice(from, to);
+  const after = newTextFor(body, from, before, edit);
+  if (after === before) {
+    if (edgeSpace(edit.old, "lead") !== edgeSpace(edit.new, "lead") || edgeSpace(edit.old, "trail") !== edgeSpace(edit.new, "trail")) {
+      return refuse("edge-space", "the edit changes only white space at the old text's edges, and the page does not hold that white space where the old text matched (the match ignored it); edit the page in Claude Code");
+    }
+    return refuse("no-change", "the edit's new text is what the page already says; there is nothing to apply");
+  }
+  const markup = markupChange(body, from, to, after);
   if (markup) return markup;
-  const start = bom + fileStart;
-  const end = bom + fileEnd;
+  const start = bom + from;
+  const end = bom + to;
   return {
     ok: true,
     edit,

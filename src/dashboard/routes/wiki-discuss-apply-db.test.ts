@@ -22,7 +22,7 @@ import { testTempDir } from "../../test/temp-dir.ts";
 import { commitWikiChange, type CommitWikiResult } from "../../wiki/commit.ts";
 import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gardener/stale-proposals.ts";
 import type { LivePageHolder } from "../../db/wiki-proposals.ts";
-import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, startDiscussTurn } from "../../db/wiki-discuss-turns.ts";
+import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, startDiscussTurn, type DiscussTurn } from "../../db/wiki-discuss-turns.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
@@ -70,6 +70,12 @@ let commitResult: CommitWikiResult | null = null;
 /** Runs after the commit, before Apply answers (a second tab's click while the push and the index rebuild run). */
 let onCommit: (() => Promise<void>) | null = null;
 let role = "admin";
+/** Runs when Apply gives its claim back, before the release itself. */
+let onRelease: (() => Promise<void>) | null = null;
+/** The release's answer instead of the database's, when set. */
+let releaseAnswer: boolean | null = null;
+/** The next turn read answers this row: a second tab whose checks ran before the first Apply claimed the turn. */
+let staleTurnRead: DiscussTurn | null = null;
 const NOW = Date.parse("2026-11-20T12:00:00+01:00");
 
 const gitIn = (dir: string, ...args: string[]) =>
@@ -147,7 +153,21 @@ beforeAll(async () => {
     registry: () => registry,
     isReadonlyRoot: (r) => r === `${root}-ro`,
     bots: () => [],
-    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied, releaseClaim: releaseDiscussEditClaim },
+    turns: {
+      get: async (id) => {
+        const stale = staleTurnRead;
+        staleTurnRead = null;
+        return stale ?? getDiscussTurn(id);
+      },
+      list: listDiscussTurns,
+      markApplied: markDiscussEditApplied,
+      releaseClaim: async (id, at) => {
+        const hook = onRelease;
+        onRelease = null;
+        if (hook) await hook();
+        return releaseAnswer ?? releaseDiscussEditClaim(id, at);
+      },
+    },
     commit: async (r, paths, message) => {
       const result = commitResult ?? (await commitWikiChange(r, paths, message, { push: false }));
       const hook = onCommit;
@@ -169,6 +189,9 @@ beforeEach(async () => {
   guardRefusal = null;
   commitResult = null;
   onCommit = null;
+  onRelease = null;
+  releaseAnswer = null;
+  staleTurnRead = null;
   role = "admin";
   __setStaleProposalStoreForTest(null);
   git("reset", "-q", "--hard");
@@ -260,6 +283,10 @@ describe("preview", () => {
     const { status, body } = await preview(id);
     expect(status).toBe(409);
     expect(body).toMatchObject({ refused: true, code: "no-change" });
+    // Apply itself, with the page's hash: preview hands out no preview hash for a refused edit.
+    const res = await post({ turnId: id, baseHash: sha256(PAGE), previewHash: "none" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ refused: true, code: "no-change" });
     expect(await pageText()).toBe(PAGE);
     expect(await logText()).toBe("");
     expect(commits()).toBe(before);
@@ -414,6 +441,9 @@ describe("apply", () => {
     try {
       const res = await post(p);
       expect(res.status).toBe(500);
+      const { error } = (await res.json()) as { error: string };
+      expect(error).toContain("write failed");
+      expect(error).not.toContain("still marked applied");
     } finally {
       chmodSync(file, 0o644);
     }
@@ -421,6 +451,49 @@ describe("apply", () => {
     expect((await getDiscussTurn(id))!.editAppliedAt).toBeNull();
     expect((await post(await previewed(id))).status).toBe(200);
     expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
+  });
+
+  test("a failed write gives the claim back inside the write section: a second Apply waiting on the section is not told the edit is applied", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const unclaimed = (await getDiscussTurn(id))!;
+    const file = path.join(root, REL);
+    let second: Promise<Response> | null = null;
+    onRelease = async () => {
+      chmodSync(file, 0o644);
+      staleTurnRead = unclaimed;
+      second = Promise.resolve(post(p));
+      // With the section already free, the second Apply runs to its end here; inside the section it waits for this one.
+      await Promise.race([second, Bun.sleep(1000)]);
+    };
+    chmodSync(file, 0o444);
+    try {
+      expect((await post(p)).status).toBe(500);
+    } finally {
+      chmodSync(file, 0o644);
+    }
+    expect(second).not.toBeNull();
+    const res = await second!;
+    expect(await res.json()).not.toMatchObject({ reason: "applied" });
+    expect(res.status).toBe(200);
+    expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
+  });
+
+  test("a claim that cannot be given back after a failed write: 500 that says the turn is still marked applied", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    releaseAnswer = false;
+    const file = path.join(root, REL);
+    chmodSync(file, 0o444);
+    try {
+      const res = await post(p);
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { error: string }).error).toContain("the turn is still marked applied");
+    } finally {
+      chmodSync(file, 0o644);
+    }
+    expect(await pageText()).toBe(PAGE);
+    expect((await getDiscussTurn(id))!.editAppliedAt).not.toBeNull();
   });
 
   test("a failed commit says the page is left uncommitted", async () => {

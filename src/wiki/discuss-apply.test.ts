@@ -218,6 +218,41 @@ describe("resolveDiscussEdit: the line ending comes from the replaced range's li
   });
 });
 
+describe("resolveDiscussEdit: line endings and edge white space (fix round 2 batch 2)", () => {
+  test("an exact old text starting with a line break on a CRLF page takes the CR too: no stray CR", () => {
+    const p = planned(resolveDiscussEdit("# T\r\n\r\nA.\r\nB.\r\n", "notes/t.md", one("\nB.", "\nC.")));
+    expect(p.content).toBe("# T\r\n\r\nA.\r\nC.\r\n");
+  });
+  test("a blank line removed on a CRLF page is removed as on an LF page", () => {
+    const crlf = planned(resolveDiscussEdit("# T\r\n\r\nA.\r\n\r\nB.\r\n", "notes/t.md", one("A.\n\n", "A.\n")));
+    expect(crlf.content).toBe("# T\r\n\r\nA.\r\nB.\r\n");
+    const lf = planned(resolveDiscussEdit("# T\n\nA.\n\nB.\n", "notes/t.md", one("A.\n\n", "A.\n")));
+    expect(lf.content).toBe("# T\n\nA.\nB.\n");
+    const before = planned(resolveDiscussEdit("# T\r\n\r\nA.\r\n\r\nB.\r\n", "notes/t.md", one("\n\nB.", "\nB.")));
+    expect(before.content).toBe("# T\r\n\r\nA.\r\nB.\r\n");
+  });
+  test("an edit of edge white space the page does not hold is refused as edge-space, not no-change", () => {
+    const r = refused(resolveDiscussEdit("# T\n\nA.\nB.\n", "notes/t.md", one("A.\n\n", "A.\n")));
+    expect(r.code).toBe("edge-space");
+    expect(r.reason).not.toContain("already says");
+  });
+  test("a CRLF range at the end of a file with no final line break takes CRLF from the line before", () => {
+    const p = planned(resolveDiscussEdit("# T\r\n\r\nLast line", "notes/t.md", one("Last line", "Last\nline two")));
+    expect(p.content).toBe("# T\r\n\r\nLast\r\nline two");
+  });
+  test("edge white space the page does not hold is cut from the new text no further than the new text has it", () => {
+    expect(planned(resolveDiscussEdit("# T\nFoo bar.\n", "notes/t.md", one("\n\nFoo  bar.", "Foo baz."))).content).toBe("# T\nFoo baz.\n");
+    expect(planned(resolveDiscussEdit("# T\n\nFoo bar.\nX\n", "notes/t.md", one("Foo  bar.\n\n", "Foo baz."))).content).toBe("# T\n\nFoo baz.\nX\n");
+  });
+  test("white-space-only new text is written as given", () => {
+    expect(planned(resolveDiscussEdit("# T\n\nFoo  bar. Next.\n", "notes/t.md", one("Foo bar.\n", "\n"))).content).toBe("# T\n\n\n Next.\n");
+  });
+  test("an old text with CRLF edges counts each CRLF as one line break: a break the new text adds beyond them stays", () => {
+    expect(planned(resolveDiscussEdit("# T\n\nFoo  bar.\n\nNext.\n", "notes/t.md", one("Foo bar.\r\n\r\n", "Foo baz.\n\n\n"))).content).toBe("# T\n\nFoo baz.\n\n\nNext.\n");
+    expect(planned(resolveDiscussEdit("# T\n\nNext.\n\nFoo  bar.\n", "notes/t.md", one("\r\n\r\nFoo bar.", "\n\n\nFoo baz."))).content).toBe("# T\n\nNext.\n\n\nFoo baz.\n");
+  });
+});
+
 describe("resolveDiscussEdit: an edit that changes nothing", () => {
   test("new text equal to old text is refused as no-change", () => {
     expect(refused(resolveDiscussEdit(PAGE, "plans/f.mdx", one("The north pier takes the morning ferry.", "The north pier takes the morning ferry."))).code).toBe("no-change");

@@ -107,6 +107,12 @@ export interface PageWriteCommonOptions {
    * Optional; the Stale check's Apply declines a page with uncommitted edits.
    */
   proceed?: () => Promise<boolean>;
+  /**
+   * Runs INSIDE the critical section, after steps 2–5, with their outcome and
+   * before the locks release: undo what `proceed` claimed when nothing was
+   * written, before another writer can enter. A throw is logged, never fatal.
+   */
+  settle?: (outcome: PageWriteOutcome) => Promise<void>;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
   now: () => number;
@@ -334,7 +340,15 @@ export async function writeWikiPage(
         return { outcome: "locked", reason: lock.reason };
       }
       try {
-        return await writeSection();
+        const outcome = await writeSection();
+        if (opts.settle) {
+          try {
+            await opts.settle(outcome);
+          } catch (err) {
+            log.warn("Wiki page write: settle failed for {path}: {error}", { kind: opts.logKind, path: relPath, error: errMsg(err) });
+          }
+        }
+        return outcome;
       } finally {
         lock.lock?.release();
       }
