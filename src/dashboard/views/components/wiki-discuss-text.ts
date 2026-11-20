@@ -202,6 +202,41 @@ export function discussTextParts(root: Element): string[] {
     .map((u) => u.text);
 }
 
+/** The whole article read once as the context reads it, for scoring many
+ *  places against a turn's `before`/`after` by slicing one string. */
+export interface DiscussReading {
+  /** {@link discussText} of the article. */
+  text: string;
+  /** Where a text node's character offset falls in `text`. A node the reading
+   *  leaves out maps to where it would stand, so the text before and after it
+   *  are what {@link discussContext} reads around a range starting or ending
+   *  there. Null for a node outside the article. */
+  at(node: Text, offset: number): number | null;
+}
+
+export function discussReading(article: Element): DiscussReading {
+  const place = new Map<Node, { from: number; usable: boolean; length: number }>();
+  const parts: string[] = [];
+  let length = 0;
+  for (const u of readingUnits(article)) {
+    const usable = !u.skipped && !u.hidden;
+    if (u.node) place.set(u.node, { from: length, usable, length: u.text.length });
+    if (usable) {
+      parts.push(u.text);
+      length += u.text.length;
+    }
+  }
+  const text = parts.join("");
+  return {
+    text,
+    at(node, offset) {
+      const p = place.get(node);
+      if (!p) return null;
+      return p.usable ? p.from + Math.max(0, Math.min(offset, p.length)) : p.from;
+    },
+  };
+}
+
 /** Text nodes under `root` in document order. */
 function domTexts(root: Node): Text[] {
   const out: Text[] = [];

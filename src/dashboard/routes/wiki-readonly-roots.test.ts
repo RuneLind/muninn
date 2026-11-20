@@ -718,13 +718,14 @@ describe("WIKI_READONLY_ROOTS — client guard", () => {
     expect(wikiReadonlyKeyActivates("Escape")).toBe(false);
   });
 
-  test("the two Enter-submitting inputs are in the selector AND the disable list", () => {
+  test("the Enter-submitting inputs are in the selector AND the disable list", () => {
     // The selector is what survives the follow-up bar's re-render; `disabled` is
-    // what makes the box look like what it is. Both halves, both inputs.
+    // what makes the box look like what it is. Both halves, every input
+    // (Discuss P3 added the Discuss tab's box).
     for (const id of WIKI_READONLY_DISABLED_INPUTS) {
       expect(WIKI_READONLY_EGRESS_SELECTOR).toContain(id);
     }
-    expect(WIKI_READONLY_DISABLED_INPUTS).toEqual(["#wikiAskInput", "#wikiFollowupInput"]);
+    expect(WIKI_READONLY_DISABLED_INPUTS).toEqual(["#wikiAskInput", "#wikiFollowupInput", "#wikiDiscussInput"]);
     // And they are NOT on the instance list — the mini serves Ask happily.
     expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain("#wikiAskInput");
   });

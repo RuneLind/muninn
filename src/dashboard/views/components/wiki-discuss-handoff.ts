@@ -26,12 +26,20 @@
  * The ids stay out of the read-only egress and blocked selectors
  * (no model call, no write, like Copy path) and are in
  * `WIKI_READ_SLICE_HIDDEN_SELECTOR`: the pod drops the route.
+ *
+ * On a wiki with a wiki agent (P3, the payload's `reader.discussAgent`) the
+ * same controls and panel show whether or not the wiki sets `discuss.handoff`,
+ * and the panel has «Ask here», which sends the passage and the question to
+ * Discuss's tab (`wiki-discuss-tab.ts`). Copy prompt shows only with the
+ * handoff; ⌘/Ctrl+Enter copies where it shows and asks here otherwise. «Ask
+ * here» calls the agent, so it is in the read-only egress selector.
  */
 
 import { copyText } from "./copy-path.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
 import { DISCUSS_TEXT_HIDDEN, discussContext, touchesPeek, type DiscussContext } from "./wiki-discuss-text.ts";
 import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX, HANDOFF_SELECTION_MIN } from "../../../wiki/discuss-bounds.ts";
+import { askInDiscuss, discussAgentOn, discussSendBlocked, setDiscussAgentEnabled } from "./wiki-discuss-tab.ts";
 
 export const DISCUSS_HANDOFF_SEL_BTN_ID = "wikiDiscussHandoffBtn";
 export const DISCUSS_HANDOFF_PAGE_BTN_ID = "wikiDiscussHandoffPageBtn";
@@ -58,7 +66,10 @@ interface Captured extends DiscussContext {
 }
 
 let deps: DiscussHandoffDeps | null = null;
+/** The panel and its controls show: the handoff, the agent, or both. */
 let enabled = false;
+/** Copy prompt: the wiki sets `discuss.handoff` (P1). */
+let handoffOn = false;
 /** What the open panel asks about: a passage, or the whole page (null). */
 let asking: { relPath: string; passage: Captured | null; opener: HTMLElement | null } | null = null;
 let inFlight = false;
@@ -68,12 +79,16 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-/** The selection-gated control, rendered hidden. */
-export function discussHandoffSelBtnHtml(): string {
-  return `<button class="wiki-bc-handoff" id="${DISCUSS_HANDOFF_SEL_BTN_ID}" type="button" style="display:none" title="Copy a prompt for Claude Code about this passage">⌘ Ask Claude Code</button>`;
+/** The selection-gated control, rendered hidden. Without the handoff (an
+ *  agent-only wiki) it asks the wiki agent. */
+export function discussHandoffSelBtnHtml(handoff = true): string {
+  return handoff
+    ? `<button class="wiki-bc-handoff" id="${DISCUSS_HANDOFF_SEL_BTN_ID}" type="button" style="display:none" title="Copy a prompt for Claude Code about this passage">⌘ Ask Claude Code</button>`
+    : `<button class="wiki-bc-handoff" id="${DISCUSS_HANDOFF_SEL_BTN_ID}" type="button" style="display:none" title="Ask the wiki agent about this passage">💬 Ask about this</button>`;
 }
 
-/** The whole-page control. */
+/** The whole-page control: only with the handoff (the agent's whole-page
+ *  question is the Discuss tab's own box). */
 export function discussHandoffPageBtnHtml(): string {
   return `<button class="wiki-bc-handoff wiki-bc-handoff-page" id="${DISCUSS_HANDOFF_PAGE_BTN_ID}" type="button" title="Copy a prompt for Claude Code about this page">⌘ Ask Claude Code</button>`;
 }
@@ -86,26 +101,29 @@ function mountControls(): void {
   if (!bc) return;
   if (!document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)) {
     const at = document.getElementById("wikiFactcheckBtn");
-    if (at) at.insertAdjacentHTML("afterend", discussHandoffSelBtnHtml());
+    if (at) at.insertAdjacentHTML("afterend", discussHandoffSelBtnHtml(handoffOn));
   }
-  if (!document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)) {
+  if (handoffOn && !document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)) {
     const at = document.getElementById("wikiFactcheckArticleBtn");
     if (at) at.insertAdjacentHTML("afterend", discussHandoffPageBtnHtml());
     else bc.insertAdjacentHTML("beforeend", discussHandoffPageBtnHtml());
   }
 }
 
-/** Per page render: whether the page's wiki offers the handoff. Closes a panel
- *  left open on the previous page. */
-export function setDiscussHandoffEnabled(on: boolean): void {
-  enabled = on;
+/** Per page render: whether the page's wiki offers the handoff (`on`) and
+ *  the wiki agent (`agent`, P3: passed on to the Discuss tab, which keeps it
+ *  off on a read-only wiki). Closes a panel left open on the previous page. */
+export function setDiscussHandoffEnabled(on: boolean, agent = false): void {
+  setDiscussAgentEnabled(agent);
+  handoffOn = on;
+  enabled = on || discussAgentOn();
   closePanel(false);
-  if (on) {
+  // Rebuilt per page: the controls' words follow which half the wiki offers.
+  document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)?.remove();
+  document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)?.remove();
+  if (enabled) {
     mountControls();
     showSelBtn();
-  } else {
-    document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)?.remove();
-    document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)?.remove();
   }
 }
 
@@ -181,7 +199,8 @@ function panel(): HTMLElement {
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      void copyPrompt();
+      if (handoffOn) void copyPrompt();
+      else askHere();
     }
   });
   return el;
@@ -231,11 +250,15 @@ export function openDiscussHandoff(passage: boolean, opener: HTMLElement | null 
   const quote = asking.passage
     ? `<blockquote class="wiki-handoff-quote">${esc(sel.length > PANEL_QUOTE_MAX ? sel.slice(0, PANEL_QUOTE_MAX - 1) + "…" : sel)}</blockquote>`
     : `<p class="wiki-handoff-quote wiki-handoff-whole">About the whole page</p>`;
+  const agent = discussAgentOn();
+  el.setAttribute("aria-label", handoffOn ? "Ask Claude Code" : "Ask the wiki agent");
   el.innerHTML =
-    `<div class="wiki-handoff-head"><span>Ask Claude Code</span><button type="button" class="wiki-handoff-close" data-handoff="close" aria-label="Close">×</button></div>` +
+    `<div class="wiki-handoff-head"><span>${handoffOn ? "Ask Claude Code" : "Ask the wiki agent"}</span><button type="button" class="wiki-handoff-close" data-handoff="close" aria-label="Close">×</button></div>` +
     quote +
     `<textarea class="wiki-handoff-q" rows="3" maxlength="${HANDOFF_QUESTION_MAX}" placeholder="Your question" aria-label="Your question"></textarea>` +
-    `<div class="wiki-handoff-row"><button type="button" class="wiki-handoff-copy" data-handoff="copy">Copy prompt</button>` +
+    `<div class="wiki-handoff-row">` +
+    (agent ? `<button type="button" class="wiki-handoff-copy wiki-handoff-askhere" data-handoff="ask-here" title="Ask the wiki agent here, in the Discuss tab">Ask here</button>` : "") +
+    (handoffOn ? `<button type="button" class="wiki-handoff-copy${agent ? " wiki-handoff-second" : ""}" data-handoff="copy">Copy prompt</button>` : "") +
     `<span class="wiki-handoff-status" role="status" aria-live="polite"></span></div>` +
     `<textarea class="wiki-handoff-out" readonly hidden aria-label="The prompt"></textarea>`;
   inFlight = false;
@@ -249,15 +272,45 @@ function onPanelClick(e: Event): void {
   if (!t) return;
   if (t.dataset.handoff === "close") closePanel(true);
   else if (t.dataset.handoff === "copy") void copyPrompt();
+  else if (t.dataset.handoff === "ask-here") askHere();
+}
+
+/** «Ask here» (P3): the panel's passage and question go to the Discuss tab,
+ *  and the panel closes. A turn of this page's discussion still running
+ *  keeps the panel open with a note. */
+function askHere(): void {
+  const el = document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
+  const now = asking;
+  if (!el || !now || !discussAgentOn()) return;
+  const status = el.querySelector<HTMLElement>(".wiki-handoff-status")!;
+  // ⌘/Ctrl+Enter reaches here from the question box, which no read-only
+  // selector covers: check at the send, not only through the agent flag.
+  if (discussSendBlocked()) {
+    status.textContent = "This wiki is read-only: nothing on it is sent to a model.";
+    return;
+  }
+  const question = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value.trim();
+  if (!question) {
+    status.textContent = "Type a question first.";
+    return;
+  }
+  const p = now.passage;
+  const passage = p ? { selection: p.selection, before: p.before, after: p.after, atStart: p.atStart, atEnd: p.atEnd, heading: p.heading, ...(p.edge ? { edge: p.edge } : {}) } : null;
+  if (!askInDiscuss(question, passage, p?.range ?? null)) {
+    status.textContent = "This page's discussion has a turn still running: ask when it has ended.";
+    return;
+  }
+  closePanel(false);
 }
 
 async function copyPrompt(): Promise<void> {
   const el = document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
   const now = asking;
-  if (!el || !now || !deps || inFlight) return;
+  if (!el || !now || !deps || inFlight || !handoffOn) return;
   const status = el.querySelector<HTMLElement>(".wiki-handoff-status")!;
   const out = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-out")!;
-  const copyBtn = el.querySelector<HTMLButtonElement>(".wiki-handoff-copy")!;
+  // Its own button: «Ask here» shares the class and comes first.
+  const copyBtn = el.querySelector<HTMLButtonElement>('[data-handoff="copy"]')!;
   const question = el.querySelector<HTMLTextAreaElement>(".wiki-handoff-q")!.value.trim();
   if (!question) {
     status.textContent = "Type a question first.";
@@ -378,6 +431,7 @@ export function discussHandoffStyles(): string {
       background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent);
     }
     .wiki-handoff-copy:disabled { opacity: 0.6; cursor: progress; }
+    .wiki-handoff-second { background: transparent; color: var(--text-primary); border-color: var(--border-secondary); }
     .wiki-handoff-status { color: var(--text-secondary); font-size: 12px; }
   `;
 }

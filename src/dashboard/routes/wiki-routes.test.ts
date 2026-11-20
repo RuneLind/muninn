@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, symlink } from "node:fs/promises";
+import { rm, mkdir, symlink, chmod } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,6 +35,7 @@ import {
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
 import { countFactWrappers, stripFactWrappers } from "../../format/markdown-ast.ts";
 import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integrate-edits.ts";
+import { WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -417,6 +418,7 @@ describe("GET /api/wiki/html", () => {
       roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
       // The wiki's `.wiki-reader.json` sets no `discuss` block.
       discussHandoff: false,
+      discussAgent: false,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
@@ -523,6 +525,56 @@ describe("GET /api/wiki/html", () => {
     } finally {
       __setReadonlyWikiRootsForTest(undefined);
       await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+      __resetWikiCacheForTest();
+    }
+  });
+
+  // Discuss P3: the tab's flag is the rules file at the wiki root, the tool
+  // half registered and an admin viewer — all four cases of file × role.
+  test("/api/wiki/page discussAgent: a .wiki-agent.md and an admin viewer, where the route is", async () => {
+    await Bun.write(path.join(root, "concepts/Agent Page.mdx"), "---\ntitle: Agent Page\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const flag = async (role: "admin" | "user", profile: "default" | "nais" = "default") => {
+      const a = new Hono();
+      a.use(async (c, next) => {
+        c.set("role" as never, role as never);
+        await next();
+      });
+      registerWikiRoutes(a, { profile } as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Agent Page.mdx"));
+      return ((await res.json()) as { reader: { discussAgent: boolean } }).reader.discussAgent;
+    };
+    const rules = path.join(root, ".wiki-agent.md");
+    try {
+      expect(await flag("admin")).toBe(false);
+      expect(await flag("user")).toBe(false);
+      await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
+      expect(await flag("admin")).toBe(true);
+      expect(await flag("user")).toBe(false);
+      // A rules file the discuss route refuses (422/503) is no agent: the tab
+      // would show while every ask fails.
+      await Bun.write(rules, "x".repeat(WIKI_AGENT_RULES_MAX_BYTES + 1));
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await Bun.write(path.join(root, "agent-rules-target.md"), "# Rules\n");
+      await symlink(path.join(root, "agent-rules-target.md"), rules);
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
+      await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
+      // Root reads a mode-000 file, so the unreadable case needs a plain user.
+      await chmod(rules, 0o000);
+      if (process.getuid?.() !== 0) expect(await flag("admin")).toBe(false);
+      await chmod(rules, 0o644);
+      expect(await flag("admin")).toBe(true);
+      // The read slice registers no discuss route.
+      __setReadonlyWikiRootsForTest([root]);
+      expect(await flag("admin", "nais")).toBe(false);
+    } finally {
+      __setReadonlyWikiRootsForTest(undefined);
+      await chmod(rules, 0o644).catch(() => {});
+      await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
       __resetWikiCacheForTest();
     }
   });

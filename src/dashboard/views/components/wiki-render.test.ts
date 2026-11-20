@@ -187,7 +187,24 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // ref title): 888,713 (302,638 gzipped), so the pin moves to 888,900.
 // Its fix round 1 batch 1 (a body-less Verdict, a resolved Callout's row, an AnnotatedCode's file name
 // skipped): 889,003 (302,696 gzipped), so the pin moves to 889,200.
-const WIKI_CLIENT_MAX_BYTES = 889_200;
+// 2026-11-19, Discuss P3's tab (wiki-discuss-tab.ts, wiki-discuss-state.ts, «Ask here» in the panel):
+// 901,059 (306,466 gzipped), so the pin moves to 901,200.
+// Its fix round 1 batch 2 (the chip reveals the passage's own range, the copy the reader selected,
+// a DecisionLog selection by its rendered text): 903,750 (307,511 gzipped), so the pin moves to 903,900.
+// Its fix round 1 batch 3 (the box kept until the turn is accepted, finished turns left alone while one
+// streams, no follow-scroll while a press is held in the tab): 904,965 (307,983 gzipped), so the pin
+// moves to 905,100.
+// Its fix round 1 batch 4 (a paint keeps the read-only placeholder, the two rules-file refusals' words):
+// 905,430 (308,160 gzipped), so the pin moves to 905,600.
+// Its fix round 2 batch 1 (the chip's reveal event from an element at the passage, every scroller
+// on both axes brought to it): 906,477 (308,465 gzipped), so the pin moves to 906,600.
+// Its fix round 2 batch 2 (copies scored on the context's own reading, the kept selection held weakly,
+// a streaming turn patched part by part): 907,204 (308,700 gzipped), so the pin moves to 907,400.
+// Its fix round 2 batch 3 (following resumes after a press that began at the bottom; a press ended by a
+// context menu or a blur): 907,528 (308,790 gzipped), so the pin moves to 907,700.
+// Its fix round 3 (the copies scored on one reading of the article, sliced per copy): 908,038
+// (308,995 gzipped), so the pin moves to 908,200.
+const WIKI_CLIENT_MAX_BYTES = 908_200;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

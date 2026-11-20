@@ -386,6 +386,7 @@ import {
 } from "./wiki-series-controller.ts";
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
+import { initDiscussTab } from "./wiki-discuss-tab.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -1524,7 +1525,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       if (data.meta) placeRetiredBanner(data.meta);
       renderConnections(data);
       // «Ask Claude Code» for the whole page; an explainer's selection is in its iframe.
-      setDiscussHandoffEnabled(data.reader?.discussHandoff === true);
+      setDiscussHandoffEnabled(data.reader?.discussHandoff === true, data.reader?.discussAgent === true);
       // The same gate as a markdown page: an explainer with inferred keys has
       // provenance too. Its head rendered before this payload, so the strip is
       // inserted when the block lands (`placeProvStrip`), with no placeholder.
@@ -1730,8 +1731,9 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // queries, cases) and the `line refs` toggle, all counted off the
       // rendered article. No-op on a page with none of them.
       const reader = data.reader;
-      // Discuss P1: «Ask Claude Code» where the wiki opts in, for an admin.
-      setDiscussHandoffEnabled(reader?.discussHandoff === true);
+      // Discuss P1: «Ask Claude Code» where the wiki opts in, for an admin;
+      // P3: the Discuss tab where the wiki has an agent.
+      setDiscussHandoffEnabled(reader?.discussHandoff === true, reader?.discussAgent === true);
       const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
@@ -2815,6 +2817,7 @@ export function boot(): { dispose(): void } {
   initWikiVisuals();
   initRailResize();
   initDiscussHandoff({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath });
+  initDiscussTab({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath, switchTab: (tab) => switchConnTab(tab) });
   initPaneToggles();
   // The one-time cleanup that ships with the removal of `Recently opened`: the
   // `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,

@@ -162,7 +162,42 @@ export interface FakeMessagesApi {
   stop(): void;
 }
 
-export function startFakeMessagesApi(): FakeMessagesApi {
+/**
+ * What a request outside a probe loop is answered with. By default one text
+ * block, `PAGE-SUMMARY: fetched.`, in one burst. `reply` sends `chunks` as
+ * separate text deltas `delayMs` apart on a streamed request (joined on a
+ * plain one), so a client can be seen rendering a stream before it ends
+ * (Discuss P3's e2e spec).
+ */
+export interface FakeMessagesApiOptions {
+  reply?: { chunks: string[]; delayMs: number };
+}
+
+/** A streamed text answer, one `content_block_delta` per chunk, `delayMs` apart. */
+function slowTextStream(chunks: string[], delayMs: number): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  const id = `msg_${Math.random().toString(36).slice(2, 10)}`;
+  return new ReadableStream({
+    async start(controller) {
+      const send = (event: string, data: unknown) => controller.enqueue(enc.encode(sse(event, data)));
+      send("message_start", {
+        type: "message_start",
+        message: { id, type: "message", role: "assistant", model: "claude-fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } },
+      });
+      send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      for (const text of chunks) {
+        await Bun.sleep(delayMs);
+        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+      }
+      send("content_block_stop", { type: "content_block_stop", index: 0 });
+      send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } });
+      send("message_stop", { type: "message_stop" });
+      controller.close();
+    },
+  });
+}
+
+export function startFakeMessagesApi(opts: FakeMessagesApiOptions = {}): FakeMessagesApi {
   let turns: ScriptedToolUse[][] = [[]];
   let planned: Array<{ id: string; name: string }> = [];
   const requests: Array<{ path: string; body: any }> = [];
@@ -210,6 +245,13 @@ export function startFakeMessagesApi(): FakeMessagesApi {
         } else {
           blocks = [{ type: "text", text: "PROBE-DONE" }];
         }
+      } else if (opts.reply) {
+        if (body.stream) {
+          return new Response(slowTextStream(opts.reply.chunks, opts.reply.delayMs), {
+            headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+          });
+        }
+        blocks = [{ type: "text", text: opts.reply.chunks.join("") }];
       } else {
         blocks = [{ type: "text", text: "PAGE-SUMMARY: fetched." }];
       }

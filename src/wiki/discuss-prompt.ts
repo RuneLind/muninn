@@ -115,3 +115,76 @@ export function buildHandoff(input: PackInput & { question: string }): { pack: C
   const pack = buildContextPack(input);
   return { pack, prompt: renderHandoffPrompt(pack, input.question) };
 }
+
+/** One turn of a discussion, as the continue prompt carries it. */
+export interface ContinueTurn {
+  seq: number;
+  selection: string | null;
+  /** The turn row's stored location (`{found, fromLine, toLine}`), or null. */
+  location: unknown;
+  question: string;
+  answer: string;
+  endState: string;
+  /** The live page's hash differs from the turn's `page_hash` (or the page is
+   *  gone): the stored lines name the page as it was, so they are left out. */
+  pageChanged: boolean;
+}
+
+/** The continue prompt's bound: two handoff prompts, since it carries answers. */
+export const CONTINUE_PROMPT_MAX = 2 * HANDOFF_PROMPT_MAX;
+/** Each answer is cut here before the whole is fitted. */
+const CONTINUE_ANSWER_MAX = 3000;
+
+function turnWhere(location: unknown, pageChanged: boolean): string {
+  if (pageChanged) return "lines not given: the page has changed since this turn";
+  const loc = location as { found?: unknown; fromLine?: unknown; toLine?: unknown } | null;
+  if (!loc || typeof loc.fromLine !== "number" || typeof loc.toLine !== "number") return "not placed";
+  const lines = linesLabel(loc.fromLine, loc.toLine);
+  return loc.found === "exact" ? lines : `not placed exactly; in the section at ${lines}`;
+}
+
+function cut(text: string, max: number): string {
+  const t = text.trim();
+  return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}… [cut]`;
+}
+
+/**
+ * «Continue in Claude Code» (P3): the prompt that takes a Discuss discussion
+ * on to Claude Code, up to and including the turn handed over. The page path,
+ * then each turn's passage, question and answer, oldest first. When the whole
+ * is over {@link CONTINUE_PROMPT_MAX}, the oldest turns' answers go first, then
+ * the oldest turns; the handed-over turn always stays. Pure.
+ */
+export function renderContinuePrompt(input: { path: string; turns: ContinueTurn[] }): string {
+  const head = [
+    "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+    "",
+    `Page: ${input.path}`,
+    "",
+  ];
+  const tail = ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
+  const block = (t: ContinueTurn, withAnswer: boolean): string[] => [
+    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : " (about the whole page):"}`,
+    ...(t.selection ? [`> ${clampLine(t.selection, 1500)}`] : []),
+    `Question: ${clampLine(t.question, HANDOFF_QUESTION_MAX)}`,
+    withAnswer
+      ? `Answer${t.endState === "done" ? "" : ` (the turn ended ${t.endState})`}:\n${cut(t.answer, CONTINUE_ANSWER_MAX) || "(none)"}`
+      : "Answer: (left out to fit)",
+    "",
+  ];
+  const turns = [...input.turns].sort((a, b) => a.seq - b.seq);
+  let from = 0;
+  let answersFrom = 0;
+  const build = () =>
+    [...head, ...turns.slice(from).flatMap((t, k) => block(t, from + k >= answersFrom)), ...tail].join("\n").replace(/\n{3,}/g, "\n\n");
+  let out = build();
+  while (out.length > CONTINUE_PROMPT_MAX && answersFrom < turns.length - 1) {
+    answersFrom++;
+    out = build();
+  }
+  while (out.length > CONTINUE_PROMPT_MAX && from < turns.length - 1) {
+    from++;
+    out = build();
+  }
+  return out.length > CONTINUE_PROMPT_MAX ? out.slice(0, CONTINUE_PROMPT_MAX - 1) + "…" : out;
+}

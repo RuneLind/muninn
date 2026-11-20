@@ -372,6 +372,12 @@ export interface ReaderPayload {
    *  half), the wiki sets `discuss.handoff` and the viewer is admin, since the
    *  route answers an absolute path. */
   discussHandoff: boolean;
+  /** Discuss's tab (P3): the wiki has a wiki agent the route accepts (a
+   *  `.wiki-agent.md` at its root that `readWikiAgentRules` reads as `ok`),
+   *  the discuss route is registered (the tool half) and the viewer is admin.
+   *  The route's rules refusals (404 `no-agent`, 422, 503) stay, for a file
+   *  changed after the page loaded. */
+  discussAgent: boolean;
 }
 
 export interface ViewerRoles {
@@ -391,6 +397,9 @@ export function readerPayload(
   /** Whether the handoff route is registered here (the tool half: not under
    *  the read slice, which drops the `wiki` group). */
   handoffRoute = false,
+  /** Whether the wiki root holds a `.wiki-agent.md` the discuss route
+   *  accepts (`readWikiAgentRules` state `ok`), computed by the caller. */
+  agentRules = false,
 ): ReaderPayload {
   const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
   return {
@@ -401,6 +410,8 @@ export function readerPayload(
     agentLens,
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
     discussHandoff: handoffRoute && readerConfig?.discuss?.handoff === true && viewer.admin,
+    // The discuss route sits in the same tool half as the handoff's.
+    discussAgent: handoffRoute && agentRules && viewer.admin,
   };
 }
 

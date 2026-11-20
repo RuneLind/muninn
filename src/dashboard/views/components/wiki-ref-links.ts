@@ -26,7 +26,7 @@
  *   the article, so the next page render takes them away.
  */
 
-import { HASH_FLASH_CLASS, revealHashTarget } from "./wiki-hash-target.ts";
+import { HASH_FLASH_CLASS, RANGE_FLASH_HIGHLIGHT, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
 import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
@@ -889,6 +889,7 @@ export function refLinksCss(): string {
       100% { background-color: transparent; }
     }
     @media (prefers-reduced-motion: reduce) { .wiki-article .${HASH_FLASH_CLASS} { animation: none; } }
+    ::highlight(${RANGE_FLASH_HIGHLIGHT}) { background-color: color-mix(in srgb, var(--accent) 28%, transparent); }
     .${BACK_CLASS}:hover, .${BACK_CLASS}:focus-visible { background: var(--bg-surface); }
   `;
 }

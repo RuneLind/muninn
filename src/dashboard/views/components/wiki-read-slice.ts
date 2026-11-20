@@ -65,6 +65,10 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   "#wikiDiscussHandoffBtn",
   "#wikiDiscussHandoffPageBtn",
   "#wikiDiscussHandoffPanel",
+  // Discuss P3's tab and its body: `POST /api/wiki/discuss` and
+  // `/api/wiki/discuss/continue` are in the dropped `wiki` group.
+  '[data-conntab="discuss"]',
+  "#discussBody",
   // Stamp on a provenance ghost row: `POST /api/wiki/provenance/stamp`.
   "[data-prov-stamp]",
   // The start view's Your work, What's new (digest) and Index (index-coverage, reindex)

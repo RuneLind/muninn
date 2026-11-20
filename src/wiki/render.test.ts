@@ -551,6 +551,7 @@ describe("readerPayload (the lens switch's page inputs)", () => {
       agentLens: false,
       roles: { keys: [], viewer: [], preview: false },
       discussHandoff: false,
+      discussAgent: false,
     });
     expect(readerPayload("kode", cfg({ defaultLens: "all" }), inst).defaultLens).toBe("all");
     expect(readerPayload(undefined, null, undefined)).toEqual({
@@ -560,6 +561,7 @@ describe("readerPayload (the lens switch's page inputs)", () => {
       agentLens: false,
       roles: { keys: [], viewer: [], preview: false },
       discussHandoff: false,
+      discussAgent: false,
     });
   });
 

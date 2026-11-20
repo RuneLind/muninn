@@ -237,4 +237,11 @@ describe("the reader config key and the page payload", () => {
     expect(readerPayload("w", cfg(false), undefined, admin, false, true).discussHandoff).toBe(false);
     expect(readerPayload("w", null, undefined, admin, false, true).discussHandoff).toBe(false);
   });
+  test("P3: the tab's flag needs the rules file, the route registered and an admin; not discuss.handoff", () => {
+    const admin = { roles: [], admin: true };
+    expect(readerPayload("w", null, undefined, admin, false, true, true).discussAgent).toBe(true);
+    expect(readerPayload("w", null, undefined, admin, false, true, false).discussAgent).toBe(false);
+    expect(readerPayload("w", null, undefined, admin, false, false, true).discussAgent).toBe(false);
+    expect(readerPayload("w", null, undefined, { roles: [], admin: false }, false, true, true).discussAgent).toBe(false);
+  });
 });
