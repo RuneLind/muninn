@@ -757,13 +757,32 @@ describe("retrying the card after a refusal or a lost answer (fix round 1 batch 
     expect(again.edit.state).toBe("ready");
     expect(again.edit.preview?.baseHash).toBe("b2");
     expect(again.edit.message).toContain("unknown");
-    expect(again.reload).toBe(true);
     // The server does not answer at all: unknown, and a way to find out.
     const down = discussState.editAfterLostApply(preview, { ok: false, status: 0, body: null });
     expect(down.edit.message).toContain("unknown");
     expect(down.edit.retry).toBe("lost");
     expect(down.edit.preview).toBeNull();
     for (const r of [applied, again, down]) expect(r.edit.message ?? "").not.toContain("nothing was written");
+  });
+
+  test("a lost Apply answer re-renders the page only when the edit reads as applied (fix round 2 batch 4)", () => {
+    // Still offered: nothing reads as written, so the article and its scroll stay.
+    const fresh = { ...preview, baseHash: "b2", previewHash: "p2" };
+    expect(discussState.editAfterLostApply(preview, { ok: true, status: 200, body: { ...fresh, ok: true } }).reload).toBe(false);
+    expect(discussState.editAfterLostApply(preview, { ok: false, status: 409, body: { reason: "applied", error: "x" } }).reload).toBe(true);
+  });
+
+  test("a re-preview refusal after a lost Apply answer leaves the article as it is (fix round 2 batch 4)", () => {
+    // A refusal from the re-preview (the old text gone, another turn, a read-only wiki): nothing of this edit written either.
+    for (const [status, body] of [
+      [409, { refused: true, code: "not-found", error: "the old text is not in the page as it is now" }],
+      [409, { reason: "superseded", error: "a newer turn exists" }],
+      [403, { readonly: true, error: "This wiki is read-only here." }],
+    ] as [number, Record<string, unknown>][]) {
+      const out = discussState.editAfterLostApply(preview, { ok: false, status, body });
+      expect(out.edit.state).toBe("refused");
+      expect(out.reload).toBe(false);
+    }
   });
 
   test("a 500 the route marks final (the turn stays claimed) offers no Apply (fix round 2 batch 3)", () => {
@@ -908,6 +927,26 @@ describe("the article mark on the text a proposed edit replaces", () => {
     const a = article(formatWebHtml("- First item here.\n- Second item there.\n"));
     const found = discussState.editMarkTarget(a, { before: "First item here.\n- Second item there.", beforeCtx: "", afterCtx: "", markText: "" });
     expect(found!.range.toString().replace(/\s+/g, "")).toBe("Firstitemhere.Seconditemthere.");
+  });
+  test("after Apply, new text the page also shows above the edit: the edited copy, by the edit's surroundings (fix round 2 batch 4)", () => {
+    const md = ["Summer: the last berth closes at dusk.", "", ...Array.from({ length: 20 }, (_, k) => `Filler ${k} about the harbour.\n`), "Winter: the last berth closes at dusk.", "", "The end."].join("\n");
+    const a = article(formatWebHtml(md));
+    const at = md.indexOf("the last berth closes at dusk.", md.indexOf("Winter"));
+    const after = "the last berth closes at dusk.";
+    const found = discussState.appliedEditTarget(a, { after, beforeCtx: md.slice(Math.max(0, at - 120), at), afterCtx: md.slice(at + after.length, at + after.length + 120) });
+    expect(found!.range.toString()).toBe(after);
+    // The words just before the found copy: the Winter line's, not the Summer line's.
+    const lead = a.ownerDocument.createRange();
+    lead.setStart(a, 0);
+    lead.setEnd(found!.range.startContainer, found!.range.startOffset);
+    expect(lead.toString().trimEnd().endsWith("Winter:")).toBe(true);
+  });
+  test("after Apply, new text with inline markdown: found by its rendered words (fix round 2 batch 4)", () => {
+    const md = "First paragraph.\n\nThe last berth closes at `dusk` on **weekdays** and [the ferry](https://example.invalid/f) waits.\n\nLast paragraph.\n";
+    const a = article(formatWebHtml(md));
+    const after = "The last berth closes at `dusk` on **weekdays** and [the ferry](https://example.invalid/f) waits.";
+    const found = discussState.appliedEditTarget(a, { after, beforeCtx: "First paragraph.\n\n", afterCtx: "\n\nLast paragraph.\n" });
+    expect(found!.range.toString().replace(/\s+/g, " ")).toBe("The last berth closes at dusk on weekdays and the ferry waits.");
   });
   test("a 2,000-paragraph page: the target is found in well under a frame budget per paragraph", () => {
     const paras = Array.from({ length: 2000 }, (_, k) => `Paragraph ${k} of the long page says something about crossing ${k}.`);

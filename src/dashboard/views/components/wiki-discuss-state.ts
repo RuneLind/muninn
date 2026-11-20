@@ -130,14 +130,16 @@ export const LOST_APPLY_APPLIED = "Applied to the page. Apply's answer was lost,
  * and the page is rendered again. Still offered: the outcome is unknown, and
  * Apply is offered with the fresh hashes (a write that landed meanwhile makes
  * it answer `stale` or `applied`). No answer again: unknown, with a way to ask.
+ * Only the applied reading renders the page again: on the others nothing
+ * reads as written, so the article keeps its scroll, as after a refusal.
  */
 export function editAfterLostApply(preview: DiscussEditPreview, r: { ok: boolean; status: number; body: Record<string, unknown> | null }): { edit: DiscussEditView; reload: boolean } {
   const lost = "Apply's answer did not arrive, so whether it wrote is unknown";
   if (r.body?.reason === "applied") return { edit: { state: "applied", preview, message: LOST_APPLY_APPLIED }, reload: true };
   const fresh = r.ok ? readEditPreview(r.body) : null;
-  if (fresh) return { edit: { state: "ready", preview: fresh, message: `${lost}; the turn does not read as applied now. Apply again to write it.` }, reload: true };
+  if (fresh) return { edit: { state: "ready", preview: fresh, message: `${lost}; the turn does not read as applied now. Apply again to write it.` }, reload: false };
   if (applyAnswerLost(r)) return { edit: { state: "failed", preview: null, message: `${lost}, and the server does not answer now. Check again to find out.`, retry: "lost" }, reload: false };
-  return { edit: { state: "refused", preview: null, message: `${lost}. ${discussEditRefusalMessage(r.status, r.body)}`, retry: transientEditRefusal(r.status, r.body) ? "lost" : null }, reload: true };
+  return { edit: { state: "refused", preview: null, message: `${lost}. ${discussEditRefusalMessage(r.status, r.body)}`, retry: transientEditRefusal(r.status, r.body) ? "lost" : null }, reload: false };
 }
 
 /** A preview body as the route answers it, or null when it is not one. */
@@ -747,6 +749,15 @@ export function editMarkTarget(article: Element, p: EditMarkSource): FoundPassag
     if (found) return found;
   }
   return null;
+}
+
+/** Where an applied edit's new text sits in the article rendered again after
+ *  Apply: found as {@link editMarkTarget} finds the old text, by the new
+ *  text's rendered words (its source carries code spans, emphasis and links
+ *  the article does not show), the copy picked by the edit's surroundings,
+ *  which the write left as they were. */
+export function appliedEditTarget(article: Element, p: { after: string; beforeCtx: string; afterCtx: string }): FoundPassage | null {
+  return editMarkTarget(article, { before: p.after, beforeCtx: p.beforeCtx, afterCtx: p.afterCtx, markText: "" });
 }
 
 /** Open every closed `<details>` around `node` inside `article` (a `<Fold>`),

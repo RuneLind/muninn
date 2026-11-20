@@ -468,3 +468,86 @@ test("a preview the server did not answer offers «Preview again»", async ({ pa
   await failed.locator("[data-discuss-repreview]").click();
   await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"] [data-discuss-apply]')).toBeEnabled();
 });
+
+/** Whether the first text node in the article pane holding `words` sits inside the pane's visible box. */
+function wordsInView(page: Page, words: string) {
+  return page.evaluate((w) => {
+    const wrap = document.getElementById("articleWrap")!;
+    const walker = document.createTreeWalker(wrap, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const at = n.textContent!.indexOf(w);
+      if (at === -1) continue;
+      const range = document.createRange();
+      range.setStart(n, at);
+      range.setEnd(n, at + w.length);
+      const r = range.getBoundingClientRect();
+      const box = wrap.getBoundingClientRect();
+      return r.top >= box.top && r.bottom <= box.bottom;
+    }
+    return false;
+  }, words);
+}
+
+const FILLER = Array.from({ length: 80 }, (_, i) => `Filler paragraph ${i + 1} about the harbour timetable.\n`).join("\n");
+
+test("new text the page also shows above the edit: after Apply the edited copy is the one in view (fix round 2 batch 4)", async ({ page }) => {
+  // «the last berth closes at dusk.» is the Summer line near the top before the edit, and the Winter line's after it.
+  const long = PAGE.replace("## Crossings", "Summer: the last berth closes at dusk.\n\n## Crossings") + "\n" + FILLER + "\nWinter: the last berth closes at noon.\n";
+  await resetPage(long);
+  await askWithEdit(page, edit("the last berth closes at noon.", "the last berth closes at dusk."));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("Winter: the last berth closes at dusk.");
+  await expect.poll(() => wordsInView(page, "Winter: the last berth closes at dusk.")).toBe(true);
+  expect(await wordsInView(page, "Summer: the last berth closes at dusk.")).toBe(false);
+});
+
+test("new text with inline markdown far down the page: after Apply the changed line is in view (fix round 2 batch 4)", async ({ page }) => {
+  const tail = "The last berth closes at noon on weekdays.";
+  await resetPage(PAGE + "\n" + FILLER + "\n" + tail + "\n");
+  await askWithEdit(page, edit(tail, "The last berth closes at `dusk` on **weekdays**."));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  await expect(page.locator("#articleWrap .wiki-article code")).toContainText(["dusk"]);
+  // «on weekdays.» is the rendered text node after the bold run's end: the line's last words.
+  await expect.poll(() => wordsInView(page, "The last berth closes at ")).toBe(true);
+  expect(await page.locator("#articleWrap").evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+});
+
+test("Apply's answer lost and the server did not write: the article is not rendered again and keeps its scroll (fix round 2 batch 4)", async ({ page }) => {
+  await resetPage(PAGE + "\n" + FILLER + "\nThe last berth closes at noon.\n");
+  await askWithEdit(page, edit(OLD, NEW));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  // The request never reaches the server; the re-preview does.
+  await page.route("**/api/wiki/discuss/apply", async (route) => {
+    if (route.request().postData()?.includes("baseHash")) await route.abort();
+    else await route.continue();
+  });
+  const wrap = page.locator("#articleWrap");
+  await wrap.evaluate((el) => {
+    el.scrollTop = 600;
+    (el.querySelector(".wiki-article") as unknown as { __kept?: boolean }).__kept = true;
+  });
+  const scrolled = await wrap.evaluate((el) => el.scrollTop);
+  expect(scrolled).toBeGreaterThan(0);
+  let pageFetches = 0;
+  page.on("request", (req) => {
+    if (/\/api\/wiki\/page\?/.test(req.url())) pageFetches++;
+  });
+  await card.locator("[data-discuss-apply]").click();
+  const again = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(again).toContainText("whether it wrote is unknown");
+  // Give a reload (if one were sent) its turn to land.
+  await page.waitForTimeout(500);
+  expect(pageFetches).toBe(0);
+  expect(await wrap.evaluate((el) => (el.querySelector(".wiki-article") as unknown as { __kept?: boolean }).__kept === true)).toBe(true);
+  expect(await wrap.evaluate((el) => el.scrollTop)).toBe(scrolled);
+  expect(await pageText()).toBe(PAGE + "\n" + FILLER + "\nThe last berth closes at noon.\n");
+});

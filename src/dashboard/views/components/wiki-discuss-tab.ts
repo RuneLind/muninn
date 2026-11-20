@@ -57,6 +57,7 @@ import {
   anchorRange,
   applyDiscussFrame,
   DISCUSS_REWORD_PROMPT,
+  appliedEditTarget,
   editMarkTarget,
   openFoldsAround,
   rewordDraft,
@@ -212,7 +213,7 @@ function revealApplied(key: string): void {
   const p = t?.edit?.state === "applied" ? t.edit.preview : null;
   if (!p) return;
   const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
-  const found = article && p.after.trim() ? findPassage(article, p.after) : null;
+  const found = article && p.after.trim() ? appliedEditTarget(article, p) : null;
   if (article && found) revealRange(article, found.range, found.block);
   document.querySelector<HTMLElement>(`#${DISCUSS_BODY_ID} [data-turn-key="${CSS.escape(key)}"] .wiki-discuss-edit-done`)?.focus();
 }
@@ -406,8 +407,8 @@ async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: Dis
 /** The preview a lost Apply sent, kept while «Check again» is offered. */
 const lostPreview = new Map<string, DiscussEditPreview>();
 
-/** Paint the card; render the page again when it was written (or may have
- *  been), keeping the reader on the tab when it is the one shown. */
+/** Paint the card; render the page again when it reads as written, keeping
+ *  the reader on the tab when it is the one shown. */
 function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean): void {
   paint();
   if (!reload || !deps || deps.relPath() !== d.relPath) return;
