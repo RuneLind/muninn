@@ -199,8 +199,8 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
         fromLine: plan.fromLine,
         toLine: plan.toLine,
         tier: plan.tier,
-        // The old text as the reader shows it (markup out, at most 200 characters), for the tab's mark.
-        markText: plainSnippet(plan.before).replace(/…$/, ""),
+        // The old text as the reader shows it (markup out, never clipped), the tab's fallback for its mark.
+        markText: plainSnippet(plan.before, Infinity),
         note: noteOf(turn.proposedEdit),
         findings: await addedFindings(entry.root, target, index.readerConfig?.roleKeys ?? [], current, plan.content),
         // The turn's hash is of the page as the discuss route read it, a leading BOM dropped.

@@ -214,7 +214,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // (312,340 gzipped), so the pin moves to 919,300.
 // Its fix round 2 batch 4 (the reveal after Apply found by the new text's words and the edit's context):
 // 919,203 -> 919,300 (312,373 gzipped), so the pin moves to 919,400.
-const WIKI_CLIENT_MAX_BYTES = 919_400;
+// Its fix round 2 batch 5 (markdownWords reads code spans, autolinks and fences; a mark broken by a
+// later text-node replacement is found again): 920,001 (312,613 gzipped), so the pin moves to 920,100.
+const WIKI_CLIENT_MAX_BYTES = 920_100;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

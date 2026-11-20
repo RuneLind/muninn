@@ -69,6 +69,8 @@ const PAGE = [
   "- R1: the berth list is current.",
   "- R2: the **Status** line is checked.",
   "",
+  'The "Brief" section names the owner of the night route.',
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -291,6 +293,57 @@ test("a plain paragraph (no block element around it) is marked, exactly its text
   await expect(page.locator("#articleWrap .wiki-article")).toContainText("Nothing here.");
   await expect.poll(() => markTexts(page)).toEqual([]);
   expect(await pageText()).toBe(PAGE);
+});
+
+test("a paragraph holding a quoted section title: back on the page, the mark covers the paragraph again (fix round 2 batch 5)", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  const para = 'The "Brief" section names the owner of the night route.';
+  await askWithEdit(page, edit(para, 'The "Brief" section names the night route\'s owner.'));
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  // The ref links turn «"Brief"» into a link: the text node the mark sat in is replaced.
+  await expect(page.locator("#articleWrap .wiki-article a").filter({ hasText: "Brief" })).toHaveCount(1);
+  await expect.poll(() => markTexts(page)).toEqual([para]);
+  await page.locator(`#wikiList [data-relpath="${OTHER_REL}"]`).first().click();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("Nothing here.");
+  await expect.poll(() => markTexts(page)).toEqual([]);
+  await page.locator(`#wikiList [data-relpath="${REL}"]`).first().click();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("names the owner of the night route.");
+  await expect.poll(() => markTexts(page)).toEqual([para]);
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("the mark is searched once per preview and article; a range broken later is found again, and a Fold the reader closed stays closed (fix round 2 batch 5)", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  const para = "The north pier takes the morning ferry.";
+  await askWithEdit(page, edit(para, "The south pier takes the morning ferry."));
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  await expect.poll(() => markTexts(page)).toEqual([para]);
+  const fold = page.locator("#articleWrap .wiki-article details.fold");
+  await expect(fold).toHaveAttribute("open", "");
+  /** The highlight's first range is the one kept in the page as `__mark`. */
+  const sameRange = () =>
+    page.evaluate(() => {
+      const w = window as unknown as { __mark?: Range; CSS: { highlights: Map<string, Set<Range>> } };
+      const now = [...(w.CSS.highlights.get("wiki-discuss-edit-mark") ?? [])][0];
+      if (!w.__mark) w.__mark = now;
+      return now === w.__mark;
+    });
+  expect(await sameRange()).toBe(true);
+  // The reader closes the Fold; a paint follows (the breadcrumb's 💬 Discuss).
+  await fold.locator("summary").first().click();
+  await expect(fold).not.toHaveAttribute("open", "");
+  await page.locator("#wikiDiscussBtn").click();
+  await expect(fold).not.toHaveAttribute("open", "");
+  // Not searched again: the highlight holds the same range object.
+  expect(await sameRange()).toBe(true);
+  // A later enhancement replaces the text node the mark sits in; the next paint finds it again, the Fold left closed.
+  await page.evaluate(() => {
+    const n = (window as unknown as { __mark: Range }).__mark.startContainer as Text;
+    n.replaceWith(document.createTextNode(n.data));
+  });
+  await page.locator("#wikiDiscussBtn").click();
+  await expect.poll(() => markTexts(page)).toEqual([para]);
+  await expect(fold).not.toHaveAttribute("open", "");
 });
 
 test("a heading edit marks the heading's text", async ({ page }) => {

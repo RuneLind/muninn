@@ -58,7 +58,9 @@ import {
   applyDiscussFrame,
   DISCUSS_REWORD_PROMPT,
   appliedEditTarget,
+  editMarkHolds,
   editMarkTarget,
+  editMarkWords,
   openFoldsAround,
   rewordDraft,
   currentTurn,
@@ -113,8 +115,9 @@ let turnSeq = 0;
  *  and the text it covered as rendered. */
 const anchors = new Map<string, DiscussAnchor>();
 /** The edit mark now: for which turn's preview (turn key and preview hash),
- *  in which article, over which range (null: not found there). */
-let editMark: { want: string; article: Element; range: Range | null } | null = null;
+ *  in which article, over which range (null: not found there) and the words
+ *  that range covered when it was found. */
+let editMark: { want: string; article: Element; range: Range | null; words: string } | null = null;
 /** The page the box's draft was typed on. */
 let draftPage = "";
 /** What the box held when it sent a turn, and on which page: the box is
@@ -196,14 +199,20 @@ export function setDiscussAgentEnabled(on: boolean): void {
     if (input) input.value = "";
   }
   paint();
+  // The render's later enhancements (the ref links) replace text nodes the
+  // mark's range may sit in: the mark is checked again once they have run.
+  if (enabled) afterRender(() => syncEditMark(here()));
   if (enabled && afterApply) {
     const shown = afterApply;
     afterApply = null;
     // After the rest of the render (its enhancements and its scroll to the top).
-    const run = () => revealApplied(shown.key);
-    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
-    else setTimeout(run, 0);
+    afterRender(() => revealApplied(shown.key));
   }
+}
+
+function afterRender(run: () => void): void {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 0);
 }
 
 /** After an Apply's render: the changed passage scrolled into view in the
@@ -477,17 +486,21 @@ function discardEdit(key: string): void {
 
 /** Paint the text the current turn's ready edit would replace (opening a
  *  closed Fold around it); take the paint off on any other state, turn or
- *  page. A target found, or not found, in this article is not searched again. */
+ *  page. A target found, or not found, in this article is not searched again
+ *  while its range still covers the words it was found on; one a later text
+ *  node replacement broke is found again, and its Folds are left as the
+ *  reader has them (a Fold the reader closed stays closed). */
 function syncEditMark(d: DiscussionView | null): void {
   const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
   const cur = d ? currentTurn(d) : null;
   const p = cur?.edit?.state === "ready" || cur?.edit?.state === "applying" ? cur.edit.preview : null;
   const want = p && cur ? `${cur.key}\n${p.previewHash}` : "";
-  if (editMark && article && editMark.want === want && editMark.article === article && (!editMark.range || article.contains(editMark.range.startContainer))) return;
+  const same = !!editMark && !!article && editMark.want === want && editMark.article === article;
+  if (same && (!editMark!.range || editMarkHolds(article!, editMark!.range, editMark!.words))) return;
   editMark = null;
   const found = p && article ? editMarkTarget(article, p) : null;
-  if (p && article) editMark = { want, article, range: found?.range ?? null };
-  if (found && article) openFoldsAround(article, found.node);
+  if (p && article) editMark = { want, article, range: found?.range ?? null, words: found ? editMarkWords(found.range) : "" };
+  if (found && article && !same) openFoldsAround(article, found.node);
   paintEditMark(found?.range ?? null);
 }
 

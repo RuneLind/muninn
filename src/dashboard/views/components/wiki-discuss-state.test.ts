@@ -23,6 +23,7 @@ import {
 import * as discussState from "./wiki-discuss-state.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
+import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
@@ -959,6 +960,90 @@ describe("the article mark on the text a proposed edit replaces", () => {
   });
 });
 
+describe("the mark's words read from markdown, and a range a later enhancement broke (fix round 2 batch 5)", () => {
+  /** The words with white space collapsed: the mark compares without it. */
+  const words = (md: string) => discussState.markdownWords(md).replace(/\s+/g, " ").trim();
+  /** The edit's target in an article rendered from `md`, `before` written once in it. */
+  const target = (md: string, before: string, markText = "") => {
+    const at = md.indexOf(before);
+    const a = article(formatWebHtml(md));
+    const found = discussState.editMarkTarget(a, { before, beforeCtx: md.slice(Math.max(0, at - 120), at), afterCtx: md.slice(at + before.length, at + before.length + 120), markText });
+    return { a, found };
+  };
+  const spaced = (r: Range | undefined) => (r?.toString() ?? "").replace(/\s+/g, " ").trim();
+
+  test("code spans are literal: markup inside them stays, so a paragraph with two `*` in code is marked whole", () => {
+    const before = "Run `rm *.tmp` then `ls *.md` to list the berth files.";
+    expect(words(before)).toBe("Run rm *.tmp then ls *.md to list the berth files.");
+    expect(words("Use `**bold**` and `<Fold>` and `[[a|b]]` as written.")).toBe("Use **bold** and <Fold> and [[a|b]] as written.");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("Run rm *.tmp then ls *.md to list the berth files.");
+  });
+  test("an autolink reads as its URL, as the reader renders it", () => {
+    const before = "See <https://example.com/x> for the timetable.";
+    expect(words(before)).toBe("See https://example.com/x for the timetable.");
+    expect(words("See <https://example.com/x|the timetable> here.")).toBe("See the timetable here.");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("See https://example.com/x for the timetable.");
+  });
+  test("a fenced block's lines are kept as written: a `# ` or `- ` inside it is not a heading or bullet", () => {
+    const before = "```\n# start the ferry\n- check the berth\n```";
+    expect(words(before)).toBe("# start the ferry - check the berth");
+    // The fence closes: a heading after it is read as a heading again.
+    expect(words("~~~~\n# kept\n~~~\n~~~~\n# Heading after")).toBe("# kept ~~~ Heading after");
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before);
+    expect(spaced(found?.range)).toBe("# start the ferry - check the berth");
+  });
+  test("a 300-character passage starting with a code span is marked whole, not its first 200 characters", () => {
+    const before = "`<Fold>` " + Array.from({ length: 30 }, (_, k) => `holds berth ${k}`).join(", ") + ".";
+    const plain = before.replace(/`/g, "");
+    expect(plain.length).toBeGreaterThan(300);
+    // The route's markText as the route now computes it (never clipped).
+    const { found } = target(`First.\n\n${before}\n\nLast.\n`, before, plainSnippet(before, Infinity));
+    expect(spaced(found?.range)).toBe(plain);
+  });
+  test("after Apply, new text with markup inside a code span: revealed by its rendered words", () => {
+    const md = "First paragraph.\n\nRun `rm *.tmp` then `ls *.md` on **every** berth.\n\nLast paragraph.\n";
+    const a = article(formatWebHtml(md));
+    const found = discussState.appliedEditTarget(a, { after: "Run `rm *.tmp` then `ls *.md` on **every** berth.", beforeCtx: "First paragraph.\n\n", afterCtx: "\n\nLast paragraph.\n" });
+    expect(spaced(found?.range)).toBe("Run rm *.tmp then ls *.md on every berth.");
+  });
+  test("block markers: table pipes and separator rows, fences, quotes and callouts, headings, bullets and checkboxes", () => {
+    expect(words("| Berth | Ferry |\n|---|:---:|\n| North | Morning |")).toBe("Berth Ferry North Morning");
+    expect(words("~~~\nkept\n~~~")).toBe("kept");
+    expect(words("> [!note] Heads up\n> the pier is closed.")).toBe("Heads up the pier is closed.");
+    expect(words("> > Nested quote.")).toBe("Nested quote.");
+    expect(words("## The berths\n- [ ] Check it\n1. First")).toBe("The berths Check it First");
+  });
+  test("inline: tags out, wiki links and links by label, images by alt, bold, strike and single emphasis out, snake_case kept", () => {
+    expect(words('The check reads <Fact v="ok" n="1">the status date</Fact> only.')).toBe("The check reads the status date only.");
+    expect(words("See [[plans/ferry|the ferry plan]] and [[berths]].")).toBe("See the ferry plan and berths.");
+    expect(words("A [timetable](https://example.invalid/t) and ![the map](m.png).")).toBe("A timetable and the map.");
+    expect(words("It is **due** and ~~late~~, *really* _soon_, in status_date.")).toBe("It is due and late, really soon, in status_date.");
+  });
+  test("nested closed Folds: both are opened around the marked text", () => {
+    const a = article("<details><summary>Outer</summary><details><summary>Inner</summary>The inner berth.</details></details>");
+    const [outer, inner] = Array.from(a.querySelectorAll("details"));
+    const node = inner!.lastChild!;
+    expect(discussState.openFoldsAround(a, node)).toEqual([inner!, outer!]);
+    expect(outer!.hasAttribute("open") && inner!.hasAttribute("open")).toBe(true);
+  });
+  test("a mark's range holds while its words stand; a text node replaced under it (the ref links' replaceWith) breaks it (happy-dom leaves the range in the detached node; Chromium collapses it, the e2e's case)", () => {
+    const md = 'First.\n\nThe "Brief" section names the owner.\n\nLast.\n';
+    const { a, found } = target(md, 'The "Brief" section names the owner.');
+    const range = found!.range;
+    const w = discussState.editMarkWords(range);
+    expect(discussState.editMarkHolds(a, range, w)).toBe(true);
+    const node = range.startContainer as Text;
+    node.replaceWith(a.ownerDocument.createTextNode(node.data));
+    expect(discussState.editMarkHolds(a, range, w)).toBe(false);
+    // Found again in the article as it now stands, the same words.
+    const again = discussState.editMarkTarget(a, { before: 'The "Brief" section names the owner.', beforeCtx: "", afterCtx: "", markText: "" })!;
+    expect(discussState.editMarkWords(again.range)).toBe(w);
+    expect(discussState.editMarkHolds(a, again.range, w)).toBe(true);
+  });
+});
+
 describe("«Change the wording» and the reader's draft", () => {
   test("an empty box gets the prompt; a draft is kept after it; the prompt is not added twice", () => {
     const P = discussState.DISCUSS_REWORD_PROMPT;
@@ -966,5 +1051,11 @@ describe("«Change the wording» and the reader's draft", () => {
     expect(discussState.rewordDraft("   ")).toBe(P);
     expect(discussState.rewordDraft("shorter, please")).toBe(`${P}shorter, please`);
     expect(discussState.rewordDraft(`${P}shorter`)).toBe(`${P}shorter`);
+  });
+  test("the prompt with its trailing space deleted, or the box indented, is not added twice (fix round 2 batch 5)", () => {
+    const P = discussState.DISCUSS_REWORD_PROMPT;
+    expect(discussState.rewordDraft(P.trimEnd())).toBe(P.trimEnd());
+    expect(discussState.rewordDraft(`${P.trimEnd()}shorter`)).toBe(`${P.trimEnd()}shorter`);
+    expect(discussState.rewordDraft(`  ${P}shorter`)).toBe(`  ${P}shorter`);
   });
 });

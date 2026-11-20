@@ -221,6 +221,16 @@ describe("preview", () => {
     expect(commits()).toBe(before);
   });
 
+  test("markText: the whole old text as the reader shows it, never clipped at the snippet's 200 characters (fix round 2 batch 5)", async () => {
+    const long = "The `<Fold>` tag " + Array.from({ length: 30 }, (_, k) => `holds berth ${k}`).join(", ") + ".";
+    expect(long.length).toBeGreaterThan(300);
+    await resetPage(`${PAGE}\n${long}\n`);
+    const { id } = await turnWith(edit(long, "The berths are listed below."));
+    const { status, body } = await preview(id);
+    expect(status).toBe(200);
+    expect(body.markText).toBe(long.replace(/`/g, ""));
+  });
+
   test("findings: a finding the edit only moves to another line is not added; one the new text brings is", async () => {
     const page = PAGE.replace("# Ferry plan\n", "# Ferry plan\n\nIntro.\n\nSee [[broken link here\n");
     await resetPage(page);

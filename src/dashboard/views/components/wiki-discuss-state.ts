@@ -694,39 +694,65 @@ export function findPassage(article: Element, selection: string, context?: Passa
 export const DISCUSS_REWORD_PROMPT = "Propose another wording for that edit, for the same passage: ";
 
 /** The follow-up box after «Change the wording»: the prompt, and behind it
- *  whatever the reader had typed (a draft is never dropped). */
+ *  whatever the reader had typed (a draft is never dropped). A box that
+ *  already starts with the prompt, its trailing space edited or not, is kept. */
 export function rewordDraft(current: string): string {
   if (!current.trim()) return DISCUSS_REWORD_PROMPT;
-  return current.startsWith(DISCUSS_REWORD_PROMPT) ? current : DISCUSS_REWORD_PROMPT + current;
+  return current.trimStart().startsWith(DISCUSS_REWORD_PROMPT.trimEnd()) ? current : DISCUSS_REWORD_PROMPT + current;
 }
 
-/**
- * Markdown as the reader shows its words, roughly: block markers (headings,
- * bullets, quotes, table pipes, fences), tags and inline markup out, a link's
- * label kept. Enough to find a passage and score its surroundings, where
- * white space is ignored; the route's `markText` is the fallback.
- */
-export function markdownWords(md: string): string {
-  return md
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .filter((l) => !/^\s*(?:```|~~~)/.test(l) && !/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(l))
-    .map((l) =>
-      l
-        .replace(/^[ \t]*(?:>[ \t]?)+/, "")
-        .replace(/^[ \t]*\[![\w-]+\][+-]?[ \t]*/, "")
-        .replace(/^[ \t]*#{1,6}[ \t]+/, "")
-        .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/, "")
-        .replace(/^\[[ xX]\][ \t]+/, "")
-        .replace(/\|/g, " "),
-    )
-    .join("\n")
+/** One line's inline markdown as the reader shows it: a code span's text
+ *  literal (markup inside it stays), an autolink as its URL (or its label in
+ *  `<url|label>`), tags out, an image's alt, a wiki link's or link's label,
+ *  bold, strike and single emphasis markers out. */
+function inlineWords(line: string): string {
+  const code: string[] = [];
+  // \u0000 n \u0000 holds code span n while the rest is read; no rule below matches it.
+  const held = line.replace(/(`+)([^`\n]|[^`\n][\s\S]*?[^`\n])\1(?!`)/g, (_m, _t, body: string) => `\u0000${code.push(body) - 1}\u0000`);
+  return held
+    .replace(/<(https?:\/\/[^|>\s]+)\|([^>\n]+)>/g, "$2")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
     .replace(/<\/?[A-Za-z][^>\n]*>/g, "")
     .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
     .replace(/\[\[(?:[^\]|\n]*\|)?([^\]\n]*)\]\]/g, "$1")
     .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
-    .replace(/\*\*|~~|`/g, "")
-    .replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2");
+    .replace(/\*\*|~~/g, "")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2")
+    .replace(/\u0000(\d+)\u0000/g, (_m, n: string) => code[Number(n)] ?? "");
+}
+
+/**
+ * Markdown as the reader shows its words, roughly: block markers (headings,
+ * bullets, quotes, callouts, table pipes, fence lines) and tags out, inline
+ * markup read by {@link inlineWords}; a fenced block's lines are kept as
+ * written. Enough to find a passage and score its surroundings, where white
+ * space is ignored; the route's `markText` is the fallback.
+ */
+export function markdownWords(md: string): string {
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const raw of md.replace(/\r\n?/g, "\n").split("\n")) {
+    const open = /^\s*(`{3,}|~{3,})/.exec(raw);
+    if (fence !== null) {
+      if (open && open[1]![0] === fence[0] && open[1]!.length >= fence.length && !raw.trim().slice(open[1]!.length).trim()) fence = null;
+      else out.push(raw);
+      continue;
+    }
+    if (open) {
+      fence = open[1]!;
+      continue;
+    }
+    if (/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(raw)) continue;
+    const l = raw
+      .replace(/^[ \t]*(?:>[ \t]?)+/, "")
+      .replace(/^[ \t]*\[![\w-]+\][+-]?[ \t]*/, "")
+      .replace(/^[ \t]*#{1,6}[ \t]+/, "")
+      .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/, "")
+      .replace(/^\[[ xX]\][ \t]+/, "");
+    // A table row: its cells read one by one, as the reader splits them (a pipe inside a code span too).
+    out.push(/^\s*\|/.test(l) ? l.split("|").map(inlineWords).join(" ") : inlineWords(l));
+  }
+  return out.join("\n");
 }
 
 /** What the mark needs from a preview. */
@@ -758,6 +784,22 @@ export function editMarkTarget(article: Element, p: EditMarkSource): FoundPassag
  *  which the write left as they were. */
 export function appliedEditTarget(article: Element, p: { after: string; beforeCtx: string; afterCtx: string }): FoundPassage | null {
   return editMarkTarget(article, { before: p.after, beforeCtx: p.beforeCtx, afterCtx: p.afterCtx, markText: "" });
+}
+
+/** The words a mark's range covers, as {@link findPassage} reads the page
+ *  (white space and reader-only text out): what {@link editMarkHolds} compares. */
+export function editMarkWords(range: Range): string {
+  return compact(renderedPassageText(range));
+}
+
+/** A mark's range still covers the `words` it was found on, in `article`.
+ *  A later enhancement that replaces a text node (the ref links'
+ *  `replaceWith`) breaks it: a browser moves a boundary in the removed node
+ *  onto the parent (the range collapses or covers other words), and a DOM
+ *  that does not update ranges leaves it in the detached node. Either way
+ *  the target is searched again. */
+export function editMarkHolds(article: Element, range: Range, words: string): boolean {
+  return article.contains(range.startContainer) && article.contains(range.endContainer) && editMarkWords(range) === words;
 }
 
 /** Open every closed `<details>` around `node` inside `article` (a `<Fold>`),
