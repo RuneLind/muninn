@@ -238,6 +238,10 @@ describe("Discuss's proposed edit (P4): Apply and «Change the wording»", () =>
       expect(reached).not.toContain(`click:${sel}`);
       expect(WIKI_READ_SLICE_HIDDEN_SELECTOR.split(",")).toContain(sel);
     }
+    // «Preview again» / «Check again» post to the apply route: egress, cancelled on a read-only wiki (fix round 2 batch 3).
+    const { WIKI_READONLY_EGRESS_SELECTOR } = await import("./wiki-readonly-client.ts");
+    expect(WIKI_READONLY_EGRESS_SELECTOR.split(",").map((s) => s.trim())).toContain("[data-discuss-repreview]");
+    expect(doc.dispatch("click", new FakeEl(["[data-discuss-repreview]"])).prevented).toBe(true);
     // Discard writes nothing and calls nothing: it stays usable.
     expect(doc.dispatch("click", new FakeEl(["[data-discuss-discard]"])).prevented).toBe(false);
   });

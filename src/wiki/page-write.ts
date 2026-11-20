@@ -267,6 +267,12 @@ export function defaultPageWriteIo(root: string): Pick<
  */
 export const PAGE_GONE_REASON = "target file no longer exists";
 
+/** Step 1's rule alone: would {@link writeWikiPage} write `relPath` under
+ *  `wikiDir`? False for `index.md`, `log.md`, `CLAUDE.md`, a non-.md/.mdx page. */
+export function pageWriteConfined(wikiDir: string, relPath: string): boolean {
+  return isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath });
+}
+
 /**
  * Run one page write through the shared sequence above. Returns the outcome; the
  * caller maps it to an HTTP status (written→200, noop→200-with-0-applied,
@@ -306,9 +312,7 @@ export async function writeWikiPage(
   //    `existingRelPath: relPath` selects the exists-page confinement branch
   //    (relative, `..`-free, .md/.mdx, not a reserved infra basename, inside
   //    root); domain/kind are unused there.
-  if (
-    !isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath })
-  ) {
+  if (!pageWriteConfined(wikiDir, relPath)) {
     return { outcome: "error", reason: `path confinement failed for "${relPath}"` };
   }
 

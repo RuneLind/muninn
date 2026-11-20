@@ -766,6 +766,40 @@ describe("retrying the card after a refusal or a lost answer (fix round 1 batch 
     for (const r of [applied, again, down]) expect(r.edit.message ?? "").not.toContain("nothing was written");
   });
 
+  test("a 500 the route marks final (the turn stays claimed) offers no Apply (fix round 2 batch 3)", () => {
+    const body = { error: "write failed; the turn is still marked applied, so it cannot be applied again", final: true };
+    const e = discussState.editAfterApplyRefusal(preview, 500, body);
+    expect(e.state).toBe("refused");
+    expect(e.retry ?? null).toBeNull();
+    expect(turnWith(e)).not.toContain("data-discuss-apply");
+    expect(discussState.editAfterPreviewFailure(500, body).retry ?? null).toBeNull();
+  });
+
+  test("an answer that is not the route's is a lost answer; the route's own JSON 5xx is a refusal (fix round 2 batch 3)", () => {
+    const lost: [boolean, number, Record<string, unknown> | null][] = [
+      [false, 0, null],
+      [true, 200, null], // a success whose body did not arrive
+      [false, 502, null], // a proxy's HTML page
+      [false, 504, null],
+      [false, 503, null],
+      [false, 502, { message: "Bad Gateway" }],
+    ];
+    for (const [ok, status, body] of lost) expect(discussState.applyAnswerLost({ ok, status, body })).toBe(true);
+    const refused: [number, Record<string, unknown>][] = [
+      [500, { error: "write failed" }],
+      [503, { error: "The Gardener's cards could not be read, so the page's claim is unknown." }],
+      [503, { error: "the rules file cannot be read", reason: "rules-unreadable" }],
+      [409, { error: "x", stale: true }],
+      [403, { error: "This wiki is read-only here.", readonly: true }],
+    ];
+    for (const [status, body] of refused) expect(discussState.applyAnswerLost({ ok: false, status, body })).toBe(false);
+    // The re-preview after a lost answer gets a gateway page too: still unknown, nothing rendered again.
+    const gw = discussState.editAfterLostApply(preview, { ok: false, status: 502, body: null });
+    expect(gw.edit.state).toBe("failed");
+    expect(gw.edit.retry).toBe("lost");
+    expect(gw.reload).toBe(false);
+  });
+
   test("the applied note can take focus, so the tab can move the reader to it", () => {
     expect(turnWith({ state: "applied", preview, message: "Applied." })).toMatch(/<div class="wiki-discuss-edit-done" role="status" tabindex="-1">Applied\.<\/div>/);
   });

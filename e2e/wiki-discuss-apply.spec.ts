@@ -425,6 +425,24 @@ test("Apply's answer lost after the write: the card finds out, shows it applied 
   expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
 });
 
+test("a gateway's 502 after the write landed is a lost answer: the card finds out, shows it applied and renders the page again (fix round 2 batch 3)", async ({ page }) => {
+  await askWithEdit(page, edit(OLD, NEW));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  // The request reaches the server and writes; a proxy answers with its own HTML page.
+  await page.route("**/api/wiki/discuss/apply", async (route) => {
+    if (route.request().postData()?.includes("baseHash")) {
+      await route.fetch();
+      await route.fulfill({ status: 502, headers: { "content-type": "text/html" }, body: "<html><body><h1>502 Bad Gateway</h1></body></html>" });
+    } else await route.continue();
+  });
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="applied"]')).toBeVisible();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("not with any date in the frontmatter.");
+  await expect(page.locator(".wiki-discuss-edit")).not.toContainText("could not be applied");
+  expect(await pageText()).toBe(PAGE.replace(OLD, NEW));
+});
+
 test("a transient refusal (uncommitted changes) keeps Apply: committed, the same card applies", async ({ page }) => {
   await askWithEdit(page, edit(OLD, NEW));
   const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');

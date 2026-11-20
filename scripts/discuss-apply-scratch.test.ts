@@ -7,10 +7,11 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { onDefaultBranch } from "../src/wiki/commit.ts";
 import { testTempDir } from "../src/test/temp-dir.ts";
 import { scratchCopy } from "./discuss-apply-scratch-copy.ts";
 
@@ -49,14 +50,43 @@ describe("scratchCopy", () => {
     expect(git(dest, "remote")).toBe("");
     expect(statSync(path.join(dest, ".git")).isDirectory()).toBe(true);
     expect(realpathSync(git(dest, "rev-parse", "--path-format=absolute", "--git-common-dir"))).toBe(realpathSync(path.join(dest, ".git")));
-    // The worktree's branch and its committed page come along.
-    expect(git(dest, "branch", "--show-current")).toBe("side");
+    // The worktree's committed page comes along.
     expect(existsSync(path.join(dest, "s.md"))).toBe(true);
     // A commit in the copy lands in the copy only.
     const sideHead = git(main, "rev-parse", "side");
     git(dest, "commit", "-q", "--allow-empty", "-m", "applied");
     expect(git(main, "rev-parse", "side")).toBe(sideHead);
     expect(git(worktree, "rev-parse", "HEAD")).toBe(sideHead);
+  });
+
+  test("from a worktree on a feature branch: the copy is on its default branch at the worktree's commit, so Apply commits there (fix round 2 batch 3)", async () => {
+    const dest = path.join(dir, "copy-of-w-default");
+    scratchCopy(worktree, dest, ENV);
+    expect(git(dest, "branch", "--show-current")).toBe("main");
+    expect(git(dest, "rev-parse", "HEAD")).toBe(git(worktree, "rev-parse", "HEAD"));
+    expect(await onDefaultBranch(dest)).toBe(true);
+  });
+
+  test("shares no object with the source: no alternates, no hard link (fix round 2 batch 3)", () => {
+    const dest = path.join(dir, "copy-no-links");
+    scratchCopy(main, dest, ENV);
+    expect(existsSync(path.join(dest, ".git", "objects", "info", "alternates"))).toBe(false);
+    const files = (readdirSync(path.join(dest, ".git", "objects"), { recursive: true }) as string[]).map((f) => path.join(dest, ".git", "objects", f)).filter((f) => statSync(f).isFile());
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) expect(statSync(f).nlink).toBe(1);
+  });
+
+  test("a GIT_DIR in the environment: refused before any remote is removed, and no half-made copy is left (fix round 2 batch 3)", async () => {
+    const victim = path.join(dir, "victim");
+    git(dir, "init", "-q", "-b", "main", victim);
+    await Bun.write(path.join(victim, "v.md"), "v\n");
+    git(victim, "add", "-A");
+    git(victim, "commit", "-q", "-m", "v");
+    git(victim, "remote", "add", "origin", "https://example.invalid/victim.git");
+    const dest = path.join(dir, "copy-under-git-dir");
+    expect(() => scratchCopy(main, dest, { ...ENV, GIT_DIR: path.join(victim, ".git") })).toThrow(/git dir is/);
+    expect(git(victim, "remote")).toBe("origin");
+    expect(existsSync(dest)).toBe(false);
   });
 
   test("from a main checkout: the source keeps its remote, the copy has none", () => {

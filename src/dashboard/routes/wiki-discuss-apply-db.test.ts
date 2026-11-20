@@ -103,10 +103,10 @@ const commits = () => Number(git("rev-list", "--count", "HEAD").trim());
 const edit = (old: string, neu: string) => ({ edits: [{ claimIndex: 0, verdict: "", old, new: neu, reason: "" }], dropped: [], overLimit: false });
 
 /** A finished turn on `wiki`'s page carrying `proposedEdit`; its id. */
-async function turnWith(proposedEdit: unknown, opts: { wiki?: string; discussionId?: string; endState?: "done" | "error" } = {}): Promise<{ id: string; discussionId: string }> {
+async function turnWith(proposedEdit: unknown, opts: { wiki?: string; discussionId?: string; endState?: "done" | "error"; relPath?: string } = {}): Promise<{ id: string; discussionId: string }> {
   const discussionId = opts.discussionId ?? crypto.randomUUID();
   const t = await startDiscussTurn(
-    { discussionId, wiki: opts.wiki ?? WIKI, relPath: REL, pageHash: sha256(await pageText()), selection: null, question: "Is R2 right?", location: null, botName: "b", connector: "claude-sdk", model: null, surface: {} },
+    { discussionId, wiki: opts.wiki ?? WIKI, relPath: opts.relPath ?? REL, pageHash: sha256(await pageText()), selection: null, question: "Is R2 right?", location: null, botName: "b", connector: "claude-sdk", model: null, surface: {} },
     { staleRunningMs: 60_000 },
   );
   await finishDiscussTurn(t.id, { endState: opts.endState ?? "done", answer: "It reads the Status line.", proposedEdit });
@@ -265,6 +265,29 @@ describe("preview", () => {
       expect(await pageText()).toBe(PAGE);
     });
   }
+
+  test("a page the write refuses (index.md): preview and Apply answer 409 refused not-writable, nothing written (fix round 2 batch 3)", async () => {
+    const indexText = "---\ntitle: Index\n---\n\n# Index\n\nThe ferry plan is here.\n";
+    await Bun.write(path.join(root, "index.md"), indexText);
+    git("add", "-A");
+    git("commit", "-q", "-m", "index");
+    __resetWikiCacheForTest();
+    try {
+      const { id } = await turnWith(edit("The ferry plan is here.", "The ferry plan lives here."), { relPath: "index.md" });
+      const { status, body } = await preview(id);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ refused: true, code: "not-writable" });
+      const res = await post({ turnId: id, baseHash: sha256(indexText), previewHash: "x" });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ refused: true, code: "not-writable" });
+      expect(await Bun.file(path.join(root, "index.md")).text()).toBe(indexText);
+      expect((await getDiscussTurn(id))!.editAppliedAt).toBeNull();
+    } finally {
+      git("rm", "-q", "index.md");
+      git("commit", "-q", "-m", "drop index");
+      __resetWikiCacheForTest();
+    }
+  });
 
   test("a page with a BOM, unchanged since the turn, is not reported as changed", async () => {
     await resetPage(`\uFEFF${PAGE}`);
@@ -488,7 +511,10 @@ describe("apply", () => {
     try {
       const res = await post(p);
       expect(res.status).toBe(500);
-      expect(((await res.json()) as { error: string }).error).toContain("the turn is still marked applied");
+      const body = (await res.json()) as { error: string; final?: boolean };
+      expect(body.error).toContain("the turn is still marked applied");
+      // Applying again cannot pass: the client reads `final` and offers no Apply (fix round 2 batch 3).
+      expect(body.final).toBe(true);
     } finally {
       chmodSync(file, 0o644);
     }

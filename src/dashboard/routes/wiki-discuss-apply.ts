@@ -19,13 +19,14 @@
  * 403 `readonly` a read-only root · 404 `no-agent` (422 `rules-too-large`,
  * 503 `rules-unreadable` as the discuss route answers) · 409 `not-done` the turn
  * did not end done · 409 `superseded` a newer turn of the discussion exists ·
- * 409 `applied` already applied · 404 no page · 409 unreadable · 409 `stale`
+ * 409 `applied` already applied · 404 no page · 409 `refused` (`code`
+ * `not-writable`) a page `writeWikiPage` refuses · 409 unreadable · 409 `stale`
  * the page changed since the preview's base hash · 409 `refused` the edit
  * cannot apply (its `code` names why) · 409 `changed` the preview hash no longer
  * fits · 409 `held` a Gardener card holds the page (503 when the cards cannot
  * be read) · 409 `locked` another process writes the wiki · 409 `dirty` the page
  * has uncommitted changes · 409 `applied` another Apply claimed the turn first ·
- * 500 a write error. Then `writeWikiPage` (it takes the per-wiki write queue
+ * 500 a write error (`final: true` when the turn stays claimed). Then `writeWikiPage` (it takes the per-wiki write queue
  * itself), with the turn claimed inside that section before the write (a
  * conditional update, released again inside that section when nothing is written), a `log.md`
  * line of kind `update`, the commit after it, and the index rebuilt after the
@@ -44,7 +45,7 @@ import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
 import { resolveDiscussEdit, type DiscussEditPlan } from "../../wiki/discuss-apply.ts";
 import { commitWikiChange, pageHasUncommittedChanges, type CommitWikiResult } from "../../wiki/commit.ts";
 import { checkPageText, pageTextFiles, type LintFinding } from "../../wiki/lint.ts";
-import { writeWikiPage } from "../../wiki/page-write.ts";
+import { pageWriteConfined, writeWikiPage } from "../../wiki/page-write.ts";
 import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
@@ -172,6 +173,8 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     if (!index) return c.json({ error: "wiki directory not found" }, 503);
     const target = index.resolveRelPath(turn.relPath);
     if (!target) return c.json({ error: `no page ${turn.relPath}` }, 404);
+    // A page the write refuses (index.md, log.md, CLAUDE.md, .html) is refused here, so no preview offers Apply on it.
+    if (!pageWriteConfined(entry.root, target.relPath)) return c.json({ error: `${target.relPath} is not a page Apply writes`, refused: true, code: "not-writable" }, 409);
     const absPath = path.join(entry.root, target.relPath);
     const current = await readKeepingBom(absPath);
     if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
@@ -307,7 +310,7 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     }
     if (takenElsewhere) return c.json({ error: "this edit is already applied", reason: "applied" }, 409);
     if (result.outcome !== "written" && !(released && (await releaseClaim()))) {
-      return c.json({ error: `${result.outcome === "error" ? result.reason : "nothing was written"}; the turn is still marked applied, so it cannot be applied again` }, 500);
+      return c.json({ error: `${result.outcome === "error" ? result.reason : "nothing was written"}; the turn is still marked applied, so it cannot be applied again`, final: true }, 500);
     }
     if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
     if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);

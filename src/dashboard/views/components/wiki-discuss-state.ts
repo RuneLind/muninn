@@ -89,10 +89,19 @@ export interface DiscussEditView {
   retry?: "preview" | "lost" | null;
 }
 
-/** A refusal that may pass on its own: no answer, a server error, another
- *  writer (`locked`), uncommitted changes (`dirty`) or a Gardener card (`held`). */
+/** A refusal that may pass on its own: no answer, a server error the route
+ *  did not mark `final`, another writer (`locked`), uncommitted changes
+ *  (`dirty`) or a Gardener card (`held`). */
 function transientEditRefusal(status: number, body: Record<string, unknown> | null): boolean {
+  if (body?.final === true) return false;
   return status === 0 || status >= 500 || body?.locked === true || body?.dirty === true || body?.held === true;
+}
+
+/** An answer that is not the route's: no answer, a 2xx without its body, or a
+ *  5xx without the route's JSON `error` (a proxy's 502/504 page). The request
+ *  may have reached the route and written, so it is a lost answer, not a refusal. */
+export function applyAnswerLost(r: { ok: boolean; status: number; body: Record<string, unknown> | null }): boolean {
+  return r.status === 0 || r.ok || (r.status >= 500 && typeof r.body?.error !== "string");
 }
 
 /** The card after Apply answered a refusal (`status` ≠ 0). A transient one
@@ -127,7 +136,7 @@ export function editAfterLostApply(preview: DiscussEditPreview, r: { ok: boolean
   if (r.body?.reason === "applied") return { edit: { state: "applied", preview, message: LOST_APPLY_APPLIED }, reload: true };
   const fresh = r.ok ? readEditPreview(r.body) : null;
   if (fresh) return { edit: { state: "ready", preview: fresh, message: `${lost}; the turn does not read as applied now. Apply again to write it.` }, reload: true };
-  if (r.status === 0) return { edit: { state: "failed", preview: null, message: `${lost}, and the server does not answer now. Check again to find out.`, retry: "lost" }, reload: false };
+  if (applyAnswerLost(r)) return { edit: { state: "failed", preview: null, message: `${lost}, and the server does not answer now. Check again to find out.`, retry: "lost" }, reload: false };
   return { edit: { state: "refused", preview: null, message: `${lost}. ${discussEditRefusalMessage(r.status, r.body)}`, retry: transientEditRefusal(r.status, r.body) ? "lost" : null }, reload: true };
 }
 

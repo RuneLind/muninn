@@ -152,6 +152,8 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "[data-discuss-continue]",
   // P4's «Change the wording»: it fills the box for a turn the route refuses here.
   "[data-discuss-reword]",
+  // P4's «Preview again» / «Check again»: a preview request to the apply route.
+  "[data-discuss-repreview]",
   // «Walk me through» on a section heading. The reader renders none on a
   // read-only wiki or under the read slice; this is the backstop.
   "[data-walkthrough-btn]",

@@ -61,6 +61,7 @@ import {
   openFoldsAround,
   rewordDraft,
   currentTurn,
+  applyAnswerLost,
   editAfterApplyRefusal,
   editAfterLostApply,
   editAfterPreviewFailure,
@@ -445,9 +446,9 @@ async function applyEdit(key: string): Promise<void> {
     finishApply(d, t, true);
     return;
   }
-  // No answer, or a success whose body did not arrive whole: the request may
-  // have written, so ask the route rather than claim either way.
-  if (r.status === 0 || r.ok) {
+  // No answer, a success whose body did not arrive whole, or a gateway's 5xx:
+  // the request may have written, so ask the route rather than claim either way.
+  if (applyAnswerLost(r)) {
     await settleLostApply(d, t, preview);
     return;
   }
