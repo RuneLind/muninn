@@ -688,7 +688,8 @@ const MARKUP_TAG_SOURCE = `</?(${COMPONENT_NAMES.join("|")})\\b(?:\\s+[A-Za-z][\
  * guard (`src/wiki/discuss-apply.ts`) compares a page before and after an edit
  * this way. A tag the reader prints as text (a multi-line opener, a tag after a
  * list marker) is still a token, so an edit that makes it live changes a token.
- * Linear in the body's length.
+ * Linear in the body's length, apart from `readerFences`, whose
+ * `extractFences` keeps a quadratic residual.
  */
 export function markdownMarkup(body: string): MarkupToken[] {
   const out: MarkupToken[] = [];

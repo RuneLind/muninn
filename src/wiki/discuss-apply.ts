@@ -157,7 +157,8 @@ const SENTINEL_RE = new RegExp(`${FACTCHECK_SENTINEL_START}|${FACTCHECK_SENTINEL
  * The page's markup as the guard compares it: `markdownMarkup` (frontmatter,
  * the fence lines the reader renders, component tags outside code with where
  * each stands) and every fact-check sentinel, in code too: the reader drops a
- * sentinel line, but `findExclusionZones` reads a pair as a fact-check block,
+ * live sentinel block's lines (an inline sentinel renders as text), but
+ * `findExclusionZones` reads a pair as a fact-check block,
  * which is the fact check's to write.
  */
 export function pageMarkup(body: string): MarkupToken[] {
