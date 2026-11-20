@@ -28,6 +28,16 @@
  * the panel's «Ask here», «Continue in Claude Code») are in the read-only
  * egress selectors and the input in the keydown one; the tab and its body are
  * in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
+ *
+ * A turn that ends `done` with a proposed edit (P4) gets a diff card, fetched
+ * from `POST /api/wiki/discuss/apply` by the turn's id while it is the current
+ * turn; a newer turn retires it. The card's block in the article is marked
+ * ({@link DISCUSS_EDIT_MARK_CLASS}) while the edit is offered. Apply sends the
+ * preview's two hashes back and renders the page again; «Change the wording»
+ * fills the follow-up box (the reader sends it, and the turn carries the
+ * discussion with this edit); Discard drops the card in this tab only. Apply
+ * is in the read-only write selectors, «Change the wording» in the egress
+ * ones, and both in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -38,6 +48,9 @@ import { WIKI_READONLY_INPUT_PLACEHOLDER, wikiReadonlyWikiFlag } from "./wiki-re
 import {
   anchorRange,
   applyDiscussFrame,
+  currentTurn,
+  discussEditRefusalMessage,
+  readEditPreview,
   discussionLive,
   discussRefusalMessage,
   findPassage,
@@ -56,6 +69,11 @@ import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB } fr
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
+const APPLY_PATH = "/api/wiki/discuss/apply";
+/** The class on the article block the current turn's proposed edit would change. */
+export const DISCUSS_EDIT_MARK_CLASS = "wiki-discuss-edit-mark";
+/** What «Change the wording» puts in the follow-up box. */
+export const DISCUSS_REWORD_PROMPT = "Propose another wording for that edit, for the same passage: ";
 
 export interface DiscussTabDeps {
   /** The served wiki's registry name. */
@@ -64,6 +82,8 @@ export interface DiscussTabDeps {
   relPath(): string | null;
   /** The shell's tab switch (`switchConnTab`). */
   switchTab(tab: string): void;
+  /** Fetch and render the open page again, after an Apply wrote it. */
+  reload?(): void;
 }
 
 let deps: DiscussTabDeps | null = null;
@@ -193,6 +213,7 @@ function paint(): void {
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (!pressing) followAfterPress = false;
   }
+  syncEditMark(d);
   const live = !!d && discussionLive(d);
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
   const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
@@ -281,6 +302,90 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
   }
   streamClosed(turn);
   schedulePaint();
+  if (turn.state === "done" && turn.proposedEdit && turn.turnId && currentTurn(d) === turn) void previewEdit(turn);
+}
+
+/** Fetch the current turn's edit preview from its stored turn id. */
+async function previewEdit(t: DiscussTurnView): Promise<void> {
+  if (!t.turnId) return;
+  t.edit = { state: "loading", preview: null, message: null };
+  schedulePaint();
+  const r = await postApply({ turnId: t.turnId, preview: true });
+  const preview = r.ok ? readEditPreview(r.body) : null;
+  t.edit = preview ? { state: "ready", preview, message: null } : { state: r.status === 0 ? "failed" : "refused", preview: null, message: r.status === 0 ? "The preview could not be fetched: the server did not answer." : discussEditRefusalMessage(r.status, r.body) };
+  schedulePaint();
+}
+
+async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
+  try {
+    const res = await fetch(APPLY_PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    return { ok: res.ok, status: res.status, body: data };
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
+}
+
+/** Apply: the previewed edit, by turn id and the two hashes the preview gave. */
+async function applyEdit(key: string): Promise<void> {
+  const d = here();
+  const t = turnByKey(key);
+  if (!d || !t?.turnId || t.edit?.state !== "ready" || !t.edit.preview || currentTurn(d) !== t || discussSendBlocked()) return;
+  const preview = t.edit.preview;
+  t.edit = { state: "applying", preview, message: null };
+  paint();
+  const r = await postApply({ turnId: t.turnId, baseHash: preview.baseHash, previewHash: preview.previewHash });
+  if (r.ok && r.body?.ok === true) {
+    const uncommitted = r.body.uncommitted === true;
+    t.edit = {
+      state: "applied",
+      preview,
+      message: r.body.committed === true ? "Applied to the page, with a log.md entry and a commit." : uncommitted ? "Applied to the page, but the commit failed: the page now has changes no commit holds." : "Applied to the page, with a log.md entry; it was not committed here.",
+    };
+    paint();
+    // The page on screen is the one written: render it again.
+    if (deps?.relPath() === d.relPath) deps?.reload?.();
+    return;
+  }
+  t.edit = { state: r.status === 0 ? "ready" : "refused", preview, message: r.status === 0 ? "Apply could not reach the server; nothing was written." : discussEditRefusalMessage(r.status, r.body) };
+  paint();
+}
+
+/** «Change the wording»: the follow-up box asks for another wording; the reader sends it. */
+function rewordEdit(key: string): void {
+  const t = turnByKey(key);
+  const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
+  if (!t || !input || discussSendBlocked()) return;
+  input.value = DISCUSS_REWORD_PROMPT;
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function discardEdit(key: string): void {
+  const t = turnByKey(key);
+  if (!t?.edit || t.edit.state === "applying" || t.edit.state === "applied") return;
+  t.edit = { state: "discarded", preview: null, message: null };
+  paint();
+}
+
+/** Mark the article block the current turn's ready edit would change; clear any other mark. */
+function syncEditMark(d: DiscussionView | null): void {
+  const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
+  const cur = d ? currentTurn(d) : null;
+  const want = cur?.edit?.state === "ready" || cur?.edit?.state === "applying" ? cur.edit.preview?.markText ?? "" : "";
+  const marked = Array.from(document.querySelectorAll<HTMLElement>(`.${DISCUSS_EDIT_MARK_CLASS}`));
+  if (!want || !article) {
+    for (const el of marked) el.classList.remove(DISCUSS_EDIT_MARK_CLASS);
+    return;
+  }
+  if (marked.length === 1 && article.contains(marked[0]!) && marked[0]!.dataset.discussMark === want) return;
+  for (const el of marked) el.classList.remove(DISCUSS_EDIT_MARK_CLASS);
+  const found = findPassage(article, want);
+  const block = (found ? (found.block ?? found.node.parentElement) : null) as HTMLElement | null;
+  if (block && block !== article) {
+    block.classList.add(DISCUSS_EDIT_MARK_CLASS);
+    block.dataset.discussMark = want;
+  }
 }
 
 function turnByKey(key: string): DiscussTurnView | null {
@@ -379,7 +484,22 @@ export function initDiscussTab(d: DiscussTabDeps): void {
       return;
     }
     const cont = t.closest<HTMLElement>("[data-discuss-continue]");
-    if (cont) void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+    if (cont) {
+      void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+      return;
+    }
+    const apply = t.closest<HTMLElement>("[data-discuss-apply]");
+    if (apply) {
+      void applyEdit(apply.dataset.discussApply ?? "");
+      return;
+    }
+    const reword = t.closest<HTMLElement>("[data-discuss-reword]");
+    if (reword) {
+      rewordEdit(reword.dataset.discussReword ?? "");
+      return;
+    }
+    const discard = t.closest<HTMLElement>("[data-discuss-discard]");
+    if (discard) discardEdit(discard.dataset.discussDiscard ?? "");
   });
   document.addEventListener("pointerdown", (e) => {
     const body = document.getElementById(DISCUSS_BODY_ID);

@@ -75,6 +75,8 @@ export interface DiscussTurn {
   finishedAt: number | null;
   /** When the reader took the turn on to Claude Code (migration 091); null until then. */
   handedOverAt: number | null;
+  /** When the turn's proposed edit was applied to the page (P4: `proposed_edit.appliedAt`); null until then. */
+  editAppliedAt: number | null;
 }
 
 /** The discussion already has a live turn: a `running` row whose heartbeat
@@ -118,7 +120,16 @@ function mapRow(r: Record<string, unknown>): DiscussTurn {
     heartbeatAt: new Date((r.heartbeat_at ?? r.created_at) as string).getTime(),
     finishedAt: r.finished_at ? new Date(r.finished_at as string).getTime() : null,
     handedOverAt: r.handed_over_at ? new Date(r.handed_over_at as string).getTime() : null,
+    editAppliedAt: appliedAtOf(r.proposed_edit),
   };
+}
+
+/** `proposed_edit.appliedAt` as epoch ms, or null. */
+function appliedAtOf(edit: unknown): number | null {
+  const at = edit && typeof edit === "object" ? (edit as { appliedAt?: unknown }).appliedAt : undefined;
+  if (typeof at !== "string") return null;
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 const ABANDONED_ERROR = "the turn's process stopped before it ended (no heartbeat)";
@@ -232,6 +243,19 @@ export async function markDiscussTurnHandedOver(id: string): Promise<DiscussTurn
   const [row] = await getDb()`
     UPDATE wiki_discuss_turns SET handed_over_at = COALESCE(handed_over_at, now())
     WHERE id = ${id}
+    RETURNING *`;
+  return row ? mapRow(row) : null;
+}
+
+/** The turn's proposed edit was applied to the page (P4's Apply). Recorded in
+ *  the edit itself, as `proposed_edit.appliedAt` (no column of its own: the
+ *  use count reads it beside `handed_over_at`), the first time only. Returns
+ *  the turn, or null when there is no such turn or it carries no edit. */
+export async function markDiscussEditApplied(id: string): Promise<DiscussTurn | null> {
+  const [row] = await getDb()`
+    UPDATE wiki_discuss_turns
+    SET proposed_edit = proposed_edit || jsonb_build_object('appliedAt', to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+    WHERE id = ${id} AND proposed_edit IS NOT NULL AND jsonb_typeof(proposed_edit) = 'object' AND NOT (proposed_edit ? 'appliedAt')
     RETURNING *`;
   return row ? mapRow(row) : null;
 }

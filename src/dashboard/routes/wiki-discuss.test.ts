@@ -96,6 +96,7 @@ class MemStore implements DiscussStore {
       heartbeatAt: Date.now(),
       finishedAt: null,
       handedOverAt: null,
+      editAppliedAt: null,
     };
     this.rows.push(row);
     return { id: row.id, seq };

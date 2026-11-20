@@ -50,10 +50,84 @@ export interface DiscussTurnView {
   message: string | null;
   /** The answer carries a proposed edit (P4 previews and applies it). */
   proposedEdit: boolean;
+  /** The proposed edit's preview and Apply (P4), once the tab asked for them. */
+  edit: DiscussEditView | null;
   /** «Continue in Claude Code»: where its request stands. */
   handover: { state: "busy" | "done" | "failed"; note: string; prompt?: string } | null;
   /** The chip found no such passage in the page as it is now. */
   passageGone: boolean;
+}
+
+/** What `POST /api/wiki/discuss/apply` previewed: the diff and what Apply must send back. */
+export interface DiscussEditPreview {
+  before: string;
+  after: string;
+  beforeCtx: string;
+  afterCtx: string;
+  fromLine: number;
+  toLine: number;
+  note: string | null;
+  findings: { check: string; message: string; line?: number }[];
+  pageChangedSinceTurn: boolean;
+  logEntry: string;
+  baseHash: string;
+  previewHash: string;
+  /** The old text as the reader shows it, to find and mark its block. */
+  markText: string;
+}
+
+/** Where the proposed edit stands in the tab. `refused`: the preview or
+ *  Apply answered why it cannot apply; `failed`: the request itself failed. */
+export type DiscussEditState = "loading" | "ready" | "refused" | "applying" | "applied" | "discarded" | "failed";
+
+export interface DiscussEditView {
+  state: DiscussEditState;
+  preview: DiscussEditPreview | null;
+  message: string | null;
+}
+
+/** A preview body as the route answers it, or null when it is not one. */
+export function readEditPreview(body: Record<string, unknown> | null): DiscussEditPreview | null {
+  if (!body || body.ok !== true || typeof body.before !== "string" || typeof body.after !== "string" || typeof body.baseHash !== "string" || typeof body.previewHash !== "string") return null;
+  const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string) : "");
+  const num = (k: string) => (typeof body[k] === "number" ? (body[k] as number) : 0);
+  const findings = Array.isArray(body.findings)
+    ? (body.findings as Record<string, unknown>[]).filter((f) => f && typeof f.message === "string").map((f) => ({ check: String(f.check ?? ""), message: f.message as string, ...(typeof f.line === "number" ? { line: f.line } : {}) }))
+    : [];
+  return {
+    before: body.before,
+    after: body.after,
+    beforeCtx: str("beforeCtx"),
+    afterCtx: str("afterCtx"),
+    fromLine: num("fromLine"),
+    toLine: num("toLine"),
+    note: typeof body.note === "string" ? body.note : null,
+    findings,
+    pageChangedSinceTurn: body.pageChangedSinceTurn === true,
+    logEntry: str("logEntry"),
+    baseHash: body.baseHash,
+    previewHash: body.previewHash,
+    markText: str("markText"),
+  };
+}
+
+/** Readable words for a refusal the apply route answered (`status`, the parsed body or null). */
+export function discussEditRefusalMessage(status: number, body: Record<string, unknown> | null): string {
+  const error = typeof body?.error === "string" ? body.error : "";
+  if (body?.readonly === true) return `This wiki is read-only here: nothing is written. ${error}`.trim();
+  if (body?.refused === true) return `This edit cannot be applied: ${error}.`;
+  if (body?.stale === true || body?.changed === true) return `${error} Discard this card, or ask again for a fresh edit.`;
+  if (body?.dirty === true || body?.held === true || body?.locked === true) return error;
+  switch (body?.reason) {
+    case "superseded":
+      return "A newer turn of this discussion follows, so this edit is no longer offered.";
+    case "applied":
+      return "This edit is already applied.";
+    case "not-done":
+    case "no-agent":
+      return error;
+  }
+  return error ? `${error} (${status}).` : `The edit could not be applied (${status}).`;
 }
 
 export interface DiscussionView {
@@ -65,7 +139,7 @@ export interface DiscussionView {
 }
 
 export function newTurn(key: string, question: string, passage: DiscussPassage | null): DiscussTurnView {
-  return { key, turnId: null, seq: null, passage, question, text: "", state: "sending", phase: null, tools: [], message: null, proposedEdit: false, handover: null, passageGone: false };
+  return { key, turnId: null, seq: null, passage, question, text: "", state: "sending", phase: null, tools: [], message: null, proposedEdit: false, edit: null, handover: null, passageGone: false };
 }
 
 /** A turn that may still change: the tab sends no second turn meanwhile. */
@@ -197,8 +271,62 @@ function chipText(s: string): string {
   return flat.length <= CHIP_MAX ? flat : `${flat.slice(0, CHIP_MAX - 1)}…`;
 }
 
-/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key. */
-export function discussTurnHtml(t: DiscussTurnView): string {
+function lineSpan(p: DiscussEditPreview): string {
+  return p.fromLine === p.toLine ? `line ${p.fromLine}` : `lines ${p.fromLine}–${p.toLine}`;
+}
+
+/**
+ * The proposed edit's card (P4). Only the current turn's edit is offered: an
+ * older turn's says a newer turn follows. The diff shows the file's text in
+ * the range struck and what replaces it, with the page around it; then the
+ * lint findings the edit adds, and Apply, «Change the wording» and Discard.
+ */
+export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
+  const key = esc(t.key);
+  const e = t.edit;
+  if (!current && e?.state !== "applied") {
+    return `<div class="wiki-discuss-edit-note">This answer proposed an edit. A newer turn follows, so it is no longer offered.</div>`;
+  }
+  if (!e || e.state === "loading") return `<div class="wiki-discuss-edit" data-edit-state="loading"><div class="wiki-discuss-status"><span class="spinner"></span><span>Previewing the proposed edit…</span></div></div>`;
+  if (e.state === "discarded") return `<div class="wiki-discuss-edit-note" data-edit-state="discarded">The proposed edit was discarded.</div>`;
+  const parts: string[] = [`<div class="wiki-discuss-edit" data-edit-state="${e.state}">`];
+  const p = e.preview;
+  parts.push(`<div class="wiki-discuss-edit-head">Proposed edit${p ? ` · ${esc(lineSpan(p))}` : ""}</div>`);
+  if (p && e.state !== "refused") {
+    if (p.note) parts.push(`<div class="wiki-discuss-edit-why">${esc(p.note)}</div>`);
+    parts.push(
+      `<div class="wiki-discuss-diff">` +
+        `<div class="wiki-discuss-diff-old"><span class="wiki-discuss-diff-ctx">${esc(p.beforeCtx)}</span><del>${esc(p.before)}</del><span class="wiki-discuss-diff-ctx">${esc(p.afterCtx)}</span></div>` +
+        `<div class="wiki-discuss-diff-new"><span class="wiki-discuss-diff-ctx">${esc(p.beforeCtx)}</span><ins>${esc(p.after)}</ins><span class="wiki-discuss-diff-ctx">${esc(p.afterCtx)}</span></div>` +
+        `</div>`,
+    );
+    if (p.findings.length) {
+      parts.push(
+        `<div class="wiki-discuss-edit-lint">The edit adds ${p.findings.length === 1 ? "a lint finding" : `${p.findings.length} lint findings`}:<ul>` +
+          p.findings.map((f) => `<li>${esc(f.check)}${f.line ? ` (line ${f.line})` : ""}: ${esc(f.message)}</li>`).join("") +
+          `</ul></div>`,
+      );
+    }
+    if (p.pageChangedSinceTurn && e.state === "ready") parts.push(`<div class="wiki-discuss-edit-why">The page changed since this turn; the old text is still there exactly once, and the diff is against the page as it is now.</div>`);
+  }
+  if (e.message) parts.push(`<div class="${e.state === "applied" ? "wiki-discuss-edit-done" : "wiki-discuss-error"}" role="${e.state === "applied" ? "status" : "alert"}">${esc(e.message)}</div>`);
+  if (e.state !== "applied") {
+    const busy = e.state === "applying" ? " disabled" : "";
+    parts.push(
+      `<div class="wiki-discuss-actions">` +
+        (e.state === "ready" || e.state === "applying" ? `<button type="button" class="wiki-discuss-apply" data-discuss-apply="${key}"${busy}>${e.state === "applying" ? "Applying…" : "Apply"}</button>` : "") +
+        `<button type="button" class="wiki-discuss-continue" data-discuss-reword="${key}"${busy}>Change the wording</button>` +
+        `<button type="button" class="wiki-discuss-continue" data-discuss-discard="${key}"${busy}>Discard</button>` +
+        `</div>`,
+    );
+  }
+  parts.push(`</div>`);
+  return parts.join("");
+}
+
+/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
+ *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
+export function discussTurnHtml(t: DiscussTurnView, current = true): string {
   const key = esc(t.key);
   const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
   if (t.passage) {
@@ -215,7 +343,7 @@ export function discussTurnHtml(t: DiscussTurnView): string {
   }
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${renderStreamingBody(t.text)}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
-  if (t.proposedEdit) parts.push(`<div class="wiki-discuss-edit-note">This answer proposes an edit to the page. Previewing and applying it is not built yet.</div>`);
+  if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
   if (t.turnId && !turnLive(t) && t.state !== "refused") {
     const h = t.handover;
     parts.push(
@@ -238,7 +366,8 @@ function turnsInOrder(d: DiscussionView): DiscussTurnView[] {
 /** The turns list's markup, oldest first. */
 export function discussTurnsHtml(d: DiscussionView | null): string {
   if (!d || d.turns.length === 0) return HINT_HTML;
-  return turnsInOrder(d).map(discussTurnHtml).join("");
+  const cur = currentTurn(d);
+  return turnsInOrder(d).map((t) => discussTurnHtml(t, t === cur)).join("");
 }
 
 /** The markup each turn element was drawn from. */
@@ -291,8 +420,9 @@ export function patchDiscussTurns(list: HTMLElement, d: DiscussionView | null): 
     else el.remove();
   }
   const tpl = list.ownerDocument.createElement("template");
+  const cur = currentTurn(d);
   turns.forEach((t, i) => {
-    const html = discussTurnHtml(t);
+    const html = discussTurnHtml(t, t === cur);
     let el = have.get(t.key);
     if (!el || drawn.get(el) !== html) {
       tpl.innerHTML = html;

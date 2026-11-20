@@ -88,6 +88,7 @@ describe("the live chain", () => {
       "src/dashboard/routes/wiki-gardener-drift-db.test.ts",
       "src/dashboard/routes/wiki-gardener-factcheck-db.test.ts",
       "src/dashboard/routes/wiki-discuss-db.test.ts",
+      "src/dashboard/routes/wiki-discuss-apply-db.test.ts",
       "src/bot/handler.test.ts",
       "src/bot/middleware.test.ts",
       "watchers",

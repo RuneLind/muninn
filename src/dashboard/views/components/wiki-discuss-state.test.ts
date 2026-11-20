@@ -589,3 +589,70 @@ describe("which copy of a repeated passage the chip finds (class check, fix roun
     expect(ms).toBeLessThan(1000);
   });
 });
+
+describe("the proposed edit's card (P4)", () => {
+  const previewBody = {
+    ok: true,
+    before: "the date on the Status line.",
+    after: "the Brief's Status line <b>.",
+    beforeCtx: "compares it with ",
+    afterCtx: "\n",
+    fromLine: 21,
+    toLine: 21,
+    note: null,
+    findings: [{ check: "chart-table", message: "holds no table", line: 30 }],
+    pageChangedSinceTurn: false,
+    logEntry: "## [2026-11-20] update | P\n- Discuss: …",
+    baseHash: "b",
+    previewHash: "p",
+    markText: "the date on the Status line.",
+  };
+  const doneWithEdit = (key: string, seq: number) => {
+    const t = newTurn(key, "q", null);
+    applyDiscussFrame(t, "turn", { turnId: `id-${key}`, seq });
+    applyDiscussFrame(t, "done", { answer: "a", proposedEdit: { edits: [{ old: "x", new: "y" }] } });
+    return t;
+  };
+
+  test("a preview body is read; anything else is not one", () => {
+    expect(discussState.readEditPreview(previewBody)).toMatchObject({ before: previewBody.before, after: previewBody.after, findings: previewBody.findings, previewHash: "p" });
+    expect(discussState.readEditPreview({ ok: true, before: "x" })).toBeNull();
+    expect(discussState.readEditPreview(null)).toBeNull();
+  });
+
+  test("ready: the diff escaped, the lines, the findings, and Apply, «Change the wording» and Discard", () => {
+    const t = doneWithEdit("t1", 1);
+    t.edit = { state: "ready", preview: discussState.readEditPreview(previewBody), message: null };
+    const html = discussTurnHtml(t, true);
+    expect(html).toContain("Proposed edit · line 21");
+    expect(html).toContain("<del>the date on the Status line.</del>");
+    expect(html).toContain("<ins>the Brief&#39;s Status line &lt;b&gt;.</ins>");
+    expect(html).toContain("chart-table (line 30): holds no table");
+    for (const attr of ["data-discuss-apply", "data-discuss-reword", "data-discuss-discard"]) expect(html).toContain(`${attr}="t1"`);
+  });
+
+  test("an older turn's edit is not offered once a newer turn follows; the list passes current by seq", () => {
+    const older = doneWithEdit("t1", 1);
+    older.edit = { state: "ready", preview: discussState.readEditPreview(previewBody), message: null };
+    const newer = doneWithEdit("t2", 2);
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "d", turns: [older, newer] };
+    const html = discussTurnsHtml(d);
+    expect(html).toContain("A newer turn follows, so it is no longer offered.");
+    expect(html).not.toContain('data-discuss-apply="t1"');
+    expect(html).toContain("Previewing the proposed edit…");
+  });
+
+  test("refused: the reason and no Apply; discarded: one line; applied: the note and no buttons", () => {
+    const t = doneWithEdit("t1", 1);
+    t.edit = { state: "refused", preview: null, message: discussState.discussEditRefusalMessage(409, { refused: true, code: "fact-wrapper", error: "the edit's range is inside a fact wrapper" }) };
+    let html = discussTurnHtml(t, true);
+    expect(html).toContain("This edit cannot be applied: the edit&#39;s range is inside a fact wrapper.");
+    expect(html).not.toContain("data-discuss-apply");
+    t.edit = { state: "discarded", preview: null, message: null };
+    expect(discussTurnHtml(t, true)).toContain("The proposed edit was discarded.");
+    t.edit = { state: "applied", preview: discussState.readEditPreview(previewBody), message: "Applied." };
+    html = discussTurnHtml(t, false);
+    expect(html).toContain("Applied.");
+    expect(html).not.toContain("<button type=\"button\" class=\"wiki-discuss-apply\"");
+  });
+});

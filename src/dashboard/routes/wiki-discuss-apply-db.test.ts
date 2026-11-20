@@ -1,0 +1,346 @@
+/**
+ * `POST /api/wiki/discuss/apply` against the REAL test database (the turn
+ * rows and the Gardener-held check read it) and a temp git wiki with no
+ * remote: the preview writes nothing; Apply writes the edit's range only,
+ * keeps every fact wrapper, adds one `log.md` entry of kind `update` and one
+ * commit, and marks the turn applied; and every refusal Done's sequence has,
+ * plus the turn's own (not done, superseded, applied, no agent), leaves the
+ * page as it was. Invented pages only.
+ */
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Hono } from "hono";
+import { setupTestDb } from "../../test/setup-db.ts";
+import type { Config } from "../../config.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { testTempDir } from "../../test/temp-dir.ts";
+import { commitWikiChange, type CommitWikiResult } from "../../wiki/commit.ts";
+import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gardener/stale-proposals.ts";
+import type { LivePageHolder } from "../../db/wiki-proposals.ts";
+import { finishDiscussTurn, getDiscussTurn, listDiscussTurns, markDiscussEditApplied, startDiscussTurn } from "../../db/wiki-discuss-turns.ts";
+import { sha256 } from "../../utils/date-hash.ts";
+import { WIKI_AGENT_RULES_FILE } from "../../wiki/discuss-agent.ts";
+import type { WikiRegistryEntry } from "../../wiki/registry.ts";
+import { registerWikiDiscussApplyRoute, WIKI_DISCUSS_APPLY_PATH, type DiscussApplyDeps } from "./wiki-discuss-apply.ts";
+import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
+
+setupTestDb();
+
+const WIKI = "discuss-apply-wiki";
+const NOAGENT = "discuss-apply-noagent";
+const RO = "discuss-apply-ro";
+const REL = "plans/ferry.mdx";
+const PAGE = [
+  "---",
+  "title: Ferry plan",
+  "---",
+  "",
+  "# Ferry plan",
+  "",
+  '<Fold title="The berths">',
+  "",
+  "The north pier takes the morning ferry.",
+  "",
+  "</Fold>",
+  "",
+  'The check reads <Fact v="ok" n="1">the frontmatter status date</Fact> and nothing else.',
+  "",
+  '<Fact v="warn" n="2">',
+  "The ferry runs every hour on Sundays.",
+  "</Fact>",
+  "",
+  "The harbour opens at six. The harbour opens at six.",
+  "",
+  "- **R2, behind.** The check compares the frontmatter `status_date` with the date on the Brief's Status line.",
+  "",
+].join("\n");
+const OLD = "with the date on the Brief's Status line.";
+const NEW = "with the Brief's Status line, not with any date in the frontmatter.";
+
+let root = "";
+let noAgentRoot = "";
+let app: Hono;
+let guardRefusal: Response | null = null;
+let commitResult: CommitWikiResult | null = null;
+let role = "admin";
+const NOW = Date.parse("2026-11-20T12:00:00+01:00");
+
+const gitIn = (dir: string, ...args: string[]) =>
+  execFileSync("git", ["-C", dir, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" },
+  });
+const git = (...args: string[]) => gitIn(root, ...args);
+
+async function resetPage(text = PAGE): Promise<void> {
+  await Bun.write(path.join(root, REL), text);
+  git("add", "-A");
+  try {
+    git("commit", "-q", "-m", "fixture");
+  } catch {
+    /* nothing changed */
+  }
+  __resetWikiCacheForTest();
+}
+
+const pageText = () => Bun.file(path.join(root, REL)).text();
+const logText = () => Bun.file(path.join(root, "log.md")).text().catch(() => "");
+const commits = () => Number(git("rev-list", "--count", "HEAD").trim());
+
+const edit = (old: string, neu: string) => ({ edits: [{ claimIndex: 0, verdict: "", old, new: neu, reason: "" }], dropped: [], overLimit: false });
+
+/** A finished turn on `wiki`'s page carrying `proposedEdit`; its id. */
+async function turnWith(proposedEdit: unknown, opts: { wiki?: string; discussionId?: string; endState?: "done" | "error" } = {}): Promise<{ id: string; discussionId: string }> {
+  const discussionId = opts.discussionId ?? crypto.randomUUID();
+  const t = await startDiscussTurn(
+    { discussionId, wiki: opts.wiki ?? WIKI, relPath: REL, pageHash: sha256(await pageText()), selection: null, question: "Is R2 right?", location: null, botName: "b", connector: "claude-sdk", model: null, surface: {} },
+    { staleRunningMs: 60_000 },
+  );
+  await finishDiscussTurn(t.id, { endState: opts.endState ?? "done", answer: "It reads the Status line.", proposedEdit });
+  return { id: t.id, discussionId };
+}
+
+const post = (body: Record<string, unknown>) =>
+  app.request(WIKI_DISCUSS_APPLY_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+async function preview(turnId: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await post({ turnId, preview: true });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+async function previewed(turnId: string): Promise<Record<string, unknown>> {
+  const { status, body } = await preview(turnId);
+  expect(status).toBe(200);
+  return { turnId, baseHash: body.baseHash, previewHash: body.previewHash };
+}
+
+beforeAll(async () => {
+  root = await testTempDir(path.join(tmpdir(), "muninn-discuss-apply-"));
+  noAgentRoot = `${root}-noagent`;
+  for (const dir of [root, noAgentRoot]) {
+    await Bun.write(path.join(dir, REL), PAGE);
+    gitIn(dir, "init", "-q", "-b", "main");
+  }
+  await Bun.write(path.join(root, WIKI_AGENT_RULES_FILE), "# Rules\n\nPropose one edit.\n");
+  await resetPage();
+  gitIn(noAgentRoot, "add", "-A");
+  gitIn(noAgentRoot, "commit", "-q", "-m", "fixture");
+  const registry: WikiRegistryEntry[] = [
+    { name: WIKI, root, source: "extra" },
+    { name: NOAGENT, root: noAgentRoot, source: "extra" },
+    { name: RO, root: `${root}-ro`, source: "extra" },
+  ];
+  __setWikiRegistryForTest(registry);
+  const config = { dashboardPort: 3010, profile: "default", knowledgeApiUrl: "http://127.0.0.1:9" } as unknown as Config;
+  const guards: DecisionCloseGuards = { readonlyRefusal: () => guardRefusal, egressRefusal: () => null };
+  const deps = (): DiscussApplyDeps => ({
+    registry: () => registry,
+    isReadonlyRoot: (r) => r === `${root}-ro`,
+    bots: () => [],
+    turns: { get: getDiscussTurn, list: listDiscussTurns, markApplied: markDiscussEditApplied },
+    commit: async (r, paths, message) => commitResult ?? (await commitWikiChange(r, paths, message, { push: false })),
+    now: () => NOW,
+  });
+  app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("role" as never, role as never);
+    await next();
+  });
+  registerWikiDiscussApplyRoute(app, config, guards, deps);
+});
+
+beforeEach(async () => {
+  guardRefusal = null;
+  commitResult = null;
+  role = "admin";
+  __setStaleProposalStoreForTest(null);
+  git("reset", "-q", "--hard");
+  await resetPage();
+});
+
+afterAll(async () => {
+  __setStaleProposalStoreForTest(null);
+  __resetWikiRegistryForTest();
+  __resetWikiCacheForTest();
+  await rm(noAgentRoot, { recursive: true, force: true });
+});
+
+const wrappers = (s: string) => s.match(/<\/?Fact\b[^>\n]*>[^\n]*/g) ?? [];
+
+describe("preview", () => {
+  test("answers the diff, the lines, the hashes and the log entry, and writes nothing", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const before = commits();
+    const { status, body } = await preview(id);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, preview: true, relPath: REL, title: "Ferry plan", before: OLD, after: NEW, fromLine: 21, toLine: 21, tier: "exact", pageChangedSinceTurn: false, baseHash: sha256(PAGE) });
+    expect(typeof body.previewHash).toBe("string");
+    expect(body.logEntry).toBe(`## [2026-11-20] update | Ferry plan\n- Discuss: applied the wiki agent's edit (turn 1 of discussion ${(await getDiscussTurn(id))!.discussionId.slice(0, 8)}): "${OLD}" → "${NEW}"`);
+    expect(body.findings).toEqual([]);
+    expect(await pageText()).toBe(PAGE);
+    expect(commits()).toBe(before);
+  });
+
+  test("names the lint findings the edit adds", async () => {
+    // A <Chart> with no table is check 17's finding; the findings the page already has are not repeated.
+    const { id } = await turnWith(edit("The north pier takes the morning ferry.", 'The north pier takes the morning ferry.\n\n<Chart kind="bars" value="x">\n\nno table\n\n</Chart>'));
+    const { body } = await preview(id);
+    expect(body.findings).toEqual([{ check: "chart-table", message: '<Chart kind="bars"> holds no pipe table; it renders as its table', line: 11 }]);
+  });
+
+  const refusals: [string, ReturnType<typeof edit>, string][] = [
+    ["old text in the frontmatter", edit("title: Ferry plan", "title: Boat plan"), "frontmatter"],
+    ["old text on a block component's tag line", edit('<Fold title="The berths">', '<Fold title="Berths">'), "component-tag"],
+    ["a range inside an inline fact wrapper", edit("frontmatter status date", "status_date field"), "fact-wrapper"],
+    ["a range inside a block fact wrapper", edit("every hour on Sundays", "every second hour on Sundays"), "fact-wrapper"],
+    ["a range across a wrapper's boundary", edit("The check reads the frontmatter", "It reads the frontmatter"), "fact-wrapper"],
+    ["old text that matches twice", edit("The harbour opens at six.", "The harbour opens at seven."), "ambiguous"],
+  ];
+  for (const [name, e, code] of refusals) {
+    test(`refuses ${name}, and writes nothing`, async () => {
+      const { id } = await turnWith(e);
+      const { status, body } = await preview(id);
+      expect(status).toBe(409);
+      expect(body).toMatchObject({ refused: true, code });
+      expect(await pageText()).toBe(PAGE);
+    });
+  }
+
+  test("refuses a range holding an inline component tag", async () => {
+    await resetPage(PAGE.replace("The north pier takes", 'The north pier <Verdict tone="ok">takes</Verdict>'));
+    const { id } = await turnWith(edit('pier <Verdict tone="ok">takes</Verdict> the', "pier serves the"));
+    const { status, body } = await preview(id);
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ refused: true, code: "inline-component" });
+  });
+});
+
+describe("apply", () => {
+  test("writes the range only, keeps every fact wrapper, one log entry, one commit, and marks the turn applied", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const before = commits();
+    const res = await post(await previewed(id));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, page: REL, committed: true });
+    const text = await pageText();
+    expect(text).toBe(PAGE.replace(OLD, NEW));
+    expect(wrappers(text)).toEqual(wrappers(PAGE));
+    expect(commits()).toBe(before + 1);
+    expect(git("log", "-1", "--format=%s").trim()).toBe(`[discuss] Apply the wiki agent's edit (turn 1): ${REL}`);
+    expect(git("status", "--porcelain")).toBe("");
+    const log = await logText();
+    expect(log.match(/^## \[/gm)?.length).toBe(1);
+    expect(log).toContain("## [2026-11-20] update | Ferry plan\n- Discuss: applied the wiki agent's edit");
+    expect((await getDiscussTurn(id))!.editAppliedAt).not.toBeNull();
+    // A second Apply of the same turn is refused.
+    expect((await preview(id)).body).toMatchObject({ reason: "applied" });
+  });
+
+  test("a concurrent edit between preview and apply: 409 stale, nothing written", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const edited = PAGE.replace("The north pier", "The south pier");
+    await resetPage(edited);
+    const res = await post(p);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The page changed since the edit was shown. Preview it again.", stale: true });
+    expect(await pageText()).toBe(edited);
+  });
+
+  test("a page that changes after the route's own compare is refused by the write's compare", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const edited = PAGE.replace("The north pier", "The south pier");
+    __setStaleProposalStoreForTest({
+      ...dbStaleProposalStore,
+      liveHolders: async () => {
+        await Bun.write(path.join(root, REL), edited);
+        git("commit", "-q", "-am", "an edit from elsewhere");
+        return [];
+      },
+    });
+    const res = await post(p);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The page changed while the edit was applied. Preview it again.", stale: true });
+    expect(await pageText()).toBe(edited);
+  });
+
+  test("a page a Gardener card holds: 409 held, nothing written; unreadable cards: 503", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    const holder: LivePageHolder = { id: "00000000-0000-4000-8000-000000000001", groupKey: "stale:2026-11-20", topicKey: "t", targetPath: REL, kind: "stale-check", status: "draft" };
+    __setStaleProposalStoreForTest({ ...dbStaleProposalStore, liveHolders: async () => [holder] });
+    const res = await post(p);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ held: true });
+    expect(await pageText()).toBe(PAGE);
+    __setStaleProposalStoreForTest({
+      ...dbStaleProposalStore,
+      liveHolders: async () => {
+        throw new Error("down");
+      },
+    });
+    expect((await post(p)).status).toBe(503);
+    expect(await pageText()).toBe(PAGE);
+  });
+
+  test("a page with uncommitted changes: 409 dirty, nothing written", async () => {
+    const dirty = `${PAGE}\nA hand edit.\n`;
+    await Bun.write(path.join(root, REL), dirty);
+    __resetWikiCacheForTest();
+    const { id } = await turnWith(edit(OLD, NEW));
+    const res = await post(await previewed(id));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ dirty: true });
+    expect(await pageText()).toBe(dirty);
+    expect((await getDiscussTurn(id))!.editAppliedAt).toBeNull();
+  });
+
+  test("a preview hash that no longer fits: 409 changed; missing hashes: 400", async () => {
+    const { id } = await turnWith(edit(OLD, NEW));
+    const p = await previewed(id);
+    expect((await post({ ...p, previewHash: "x" })).status).toBe(409);
+    expect((await post({ turnId: id, baseHash: p.baseHash })).status).toBe(400);
+    expect(await pageText()).toBe(PAGE);
+  });
+
+  test("a failed commit says the page is left uncommitted", async () => {
+    commitResult = { committed: false, reason: "error" };
+    const { id } = await turnWith(edit(OLD, NEW));
+    const body = (await (await post(await previewed(id))).json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, committed: false, commitReason: "error", uncommitted: true });
+  });
+});
+
+describe("the turn and the wiki", () => {
+  test("only the newest turn of a discussion applies; a turn that did not end done does not", async () => {
+    const first = await turnWith(edit(OLD, NEW));
+    await turnWith(edit("The north pier", "The south pier"), { discussionId: first.discussionId });
+    expect((await preview(first.id))).toMatchObject({ status: 409, body: { reason: "superseded" } });
+    const failed = await turnWith(edit(OLD, NEW), { endState: "error" });
+    expect((await preview(failed.id))).toMatchObject({ status: 409, body: { reason: "not-done" } });
+  });
+
+  test("a wiki without the agent: 404; a read-only root and a read-only instance: 403; an unknown turn: 404; a viewer: 403", async () => {
+    const noAgent = await turnWith(edit(OLD, NEW), { wiki: NOAGENT });
+    expect((await preview(noAgent.id))).toMatchObject({ status: 404, body: { reason: "no-agent" } });
+    const ro = await turnWith(edit(OLD, NEW), { wiki: RO });
+    expect((await preview(ro.id))).toMatchObject({ status: 403, body: { readonly: true } });
+    const { id } = await turnWith(edit(OLD, NEW));
+    guardRefusal = new Response(JSON.stringify({ error: "readonly", readonly: true }), { status: 403 });
+    expect((await post({ turnId: id, preview: true })).status).toBe(403);
+    guardRefusal = null;
+    expect((await preview(crypto.randomUUID())).status).toBe(404);
+    expect((await post({ turnId: "nope", preview: true })).status).toBe(400);
+    role = "viewer";
+    expect((await post({ turnId: id, preview: true })).status).toBe(403);
+    role = "admin";
+    const notJson = await app.request(WIKI_DISCUSS_APPLY_PATH, { method: "POST", body: "x" });
+    expect(notJson.status).toBe(415);
+    expect(await pageText()).toBe(PAGE);
+  });
+});

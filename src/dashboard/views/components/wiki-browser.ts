@@ -2817,7 +2817,7 @@ export function boot(): { dispose(): void } {
   initWikiVisuals();
   initRailResize();
   initDiscussHandoff({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath });
-  initDiscussTab({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath, switchTab: (tab) => switchConnTab(tab) });
+  initDiscussTab({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath, switchTab: (tab) => switchConnTab(tab), reload: () => reloadPageInPlace(currentRelPath ?? undefined) });
   initPaneToggles();
   // The one-time cleanup that ships with the removal of `Recently opened`: the
   // `muninn.wiki.recents.v1:*` keys a reader already carries are dropped here,
