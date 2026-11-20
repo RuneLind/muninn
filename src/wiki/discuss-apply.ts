@@ -16,6 +16,7 @@
  * tag, a range that overlaps an inline component tag, and a new text that adds
  * markup (a fence line, frontmatter, or any `<Capitalised` tag outside a code
  * span): the agent's new text is prose, and markup changes go to Claude Code.
+ * An edit whose result is the page as it is (`no-change`) is refused too.
  */
 
 import { COMPONENT_NAMES } from "../format/component-spec.ts";
@@ -46,7 +47,8 @@ export type DiscussEditRefusalCode =
   | "inline-component"
   | "new-fence"
   | "new-frontmatter"
-  | "new-markup";
+  | "new-markup"
+  | "no-change";
 
 export interface DiscussEditRefusal {
   ok: false;
@@ -169,6 +171,28 @@ function lineAt(text: string, offset: number): number {
   return n;
 }
 
+/** Leading and trailing white space, with CRLF read as one line break. */
+const lead = (t: string) => t.match(/^\s*/)![0].replace(/\r\n/g, "\n").length;
+const trail = (t: string) => t.match(/\s*$/)![0].replace(/\r\n/g, "\n").length;
+
+/**
+ * The text that replaces `before` (the file's range). On the collapsed tier the
+ * range holds none of the old text's edge white space, so as much of the new
+ * text's edge white space is dropped: only the words change, and a break the
+ * new text adds beyond the old one's stays. Line breaks take the ending of the
+ * line the range sits on (the first one at or after it, else the last before).
+ */
+function newTextFor(body: string, fileStart: number, before: string, edit: IntegrateEdit): string {
+  let neu = edit.new.replace(/\r\n/g, "\n");
+  if (neu.trim()) {
+    const cutLead = Math.min(Math.max(0, lead(edit.old) - lead(before)), lead(neu));
+    const cutTrail = Math.min(Math.max(0, trail(edit.old) - trail(before)), trail(neu));
+    neu = neu.slice(cutLead, neu.length - cutTrail);
+  }
+  const nl = body.indexOf("\n", fileStart) !== -1 ? body.indexOf("\n", fileStart) : body.lastIndexOf("\n", fileStart);
+  return nl > 0 && body[nl - 1] === "\r" ? neu.replace(/\n/g, "\r\n") : neu;
+}
+
 /** The edits a stored `proposed_edit` holds, read again as `parseEditList` reads an answer. */
 function storedEdits(proposed: unknown): { edits: IntegrateEdit[]; dropped: string[] } | null {
   if (!proposed || typeof proposed !== "object" || !Array.isArray((proposed as { edits?: unknown }).edits)) return null;
@@ -236,8 +260,8 @@ export function resolveDiscussEdit(raw: string, relPath: string, proposed: unkno
   }
 
   const before = body.slice(fileStart, fileEnd);
-  // A page written with CRLF keeps CRLF in the replaced text.
-  const after = body.includes("\r\n") ? edit.new.replace(/\r?\n/g, "\r\n") : edit.new;
+  const after = newTextFor(body, fileStart, before, edit);
+  if (after === before) return refuse("no-change", "the edit's new text is what the page already says; there is nothing to apply");
   const added = addedMarkup(body, fileStart, fileEnd, after, isMdx);
   if (added) return added;
   const start = bom + fileStart;

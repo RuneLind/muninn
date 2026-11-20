@@ -196,7 +196,8 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
         markText: plainSnippet(plan.before).replace(/…$/, ""),
         note: noteOf(turn.proposedEdit),
         findings: await addedFindings(entry.root, target, index.readerConfig?.roleKeys ?? [], current, plan.content),
-        pageChangedSinceTurn: currentHash !== turn.pageHash,
+        // The turn's hash is of the page as the discuss route read it, a leading BOM dropped.
+        pageChangedSinceTurn: sha256(current.replace(/^\uFEFF/, "")) !== turn.pageHash,
         logEntry: `## [${todayOslo(deps.now())}] ${DISCUSS_APPLY_LOG_KIND} | ${title}\n- ${logLine}`,
         logNote: LOG_PROMISE,
         baseHash: currentHash,
@@ -214,7 +215,8 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     const owningBot = entry.source === "bot" ? deps.bots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase()) : undefined;
     // A wiki no bot owns pushes by default, as Done does.
     const push = owningBot?.wikiAutoCommit?.push ?? true;
-    let refusal: string | null = null;
+    type Refusal = { reason: string; code: string };
+    let refusal: Refusal | null = null;
     let dirty: string | null = null;
     let written: string | null = null;
     let claimedAt: string | null = null;
@@ -269,7 +271,7 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
           // The CAS passed, so `raw` is the previewed text; resolved again all the same, never from the preview.
           const again = resolveDiscussEdit(raw, target.relPath, turn.proposedEdit);
           if (!again.ok) {
-            refusal = again.reason;
+            refusal = { reason: again.reason, code: again.code };
             return null;
           }
           written = again.content;
@@ -299,7 +301,9 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
     if (result.outcome === "locked") return c.json({ error: `A session is writing to this wiki: ${result.reason}. Try again in a moment.`, locked: true }, 409);
     if (dirty) return c.json({ error: dirty, dirty: true }, 409);
-    if (refusal) return c.json({ error: refusal, refused: true }, 409);
+    // Set inside `transform`, a closure tsc does not follow.
+    const refused = refusal as Refusal | null;
+    if (refused) return c.json({ error: refused.reason, refused: true, code: refused.code }, 409);
     if (result.outcome !== "written" || written === null) return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
     const committed = result.commit?.committed ?? false;
     const commitReason = result.commit?.reason ?? "error";

@@ -127,6 +127,9 @@ beforeAll(async () => {
   for (const dir of [root, noAgentRoot]) {
     await Bun.write(path.join(dir, REL), PAGE);
     gitIn(dir, "init", "-q", "-b", "main");
+    // The route's own commit runs without this file's env: a repo-local identity for a runner with no global one.
+    gitIn(dir, "config", "user.name", "t");
+    gitIn(dir, "config", "user.email", "t@example.invalid");
   }
   await Bun.write(path.join(root, WIKI_AGENT_RULES_FILE), "# Rules\n\nPropose one edit.\n");
   await resetPage();
@@ -220,6 +223,29 @@ describe("preview", () => {
       expect(await pageText()).toBe(PAGE);
     });
   }
+
+  test("a page with a BOM, unchanged since the turn, is not reported as changed", async () => {
+    await resetPage(`\uFEFF${PAGE}`);
+    const { id } = await turnWith(edit(OLD, NEW));
+    const { status, body } = await preview(id);
+    expect(status).toBe(200);
+    expect(body.pageChangedSinceTurn).toBe(false);
+    // The base hash is still of the file as read, BOM kept: the write's CAS reads it the same way.
+    expect(body.baseHash).toBe(sha256(`\uFEFF${PAGE}`));
+  });
+
+  test("refuses an edit that changes nothing (no-change), writes nothing, and leaves the turn unclaimed", async () => {
+    const same = "The north pier takes the morning ferry.";
+    const { id } = await turnWith(edit(same, same));
+    const before = commits();
+    const { status, body } = await preview(id);
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ refused: true, code: "no-change" });
+    expect(await pageText()).toBe(PAGE);
+    expect(await logText()).toBe("");
+    expect(commits()).toBe(before);
+    expect((await getDiscussTurn(id))!.editAppliedAt).toBeNull();
+  });
 
   test("refuses a range holding an inline component tag", async () => {
     await resetPage(PAGE.replace("The north pier takes", 'The north pier <Verdict tone="ok">takes</Verdict>'));

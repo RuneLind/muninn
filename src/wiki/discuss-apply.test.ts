@@ -172,3 +172,46 @@ describe("resolveDiscussEdit: a plan", () => {
     expect(p.content).toBe("# P\n\nWrap a long list in `<Fold>` to fold it.\n");
   });
 });
+
+describe("resolveDiscussEdit: the collapsed tier adds no white space the range does not hold", () => {
+  test("a CRLF page: an old text ending in a line break matches without it, and the new text's break is not added", () => {
+    const crlf = "# T\r\n\r\nThis paragraph starts on line one\r\nand then continues on line two.\r\n\r\nSecond paragraph.\r\n";
+    const p = planned(resolveDiscussEdit(crlf, "notes/t.md", one("This paragraph starts on line one\nand then continues on line two.\n", "This paragraph starts on line one\nand then goes on to line two.\n")));
+    expect(p.tier).toBe("collapsed");
+    expect(p.content).toBe("# T\r\n\r\nThis paragraph starts on line one\r\nand then goes on to line two.\r\n\r\nSecond paragraph.\r\n");
+  });
+  test("an LF page with collapsed white space", () => {
+    const page = "# T\n\nPara one ends.\n\nNext para.\n";
+    const p = planned(resolveDiscussEdit(page, "notes/t.md", one("Para  one ends.\n", "Para one stops.\n")));
+    expect(p.tier).toBe("collapsed");
+    expect(p.content).toBe("# T\n\nPara one stops.\n\nNext para.\n");
+  });
+  test("leading white space the range does not hold is not added either", () => {
+    const page = "# T\n\nPara one ends.\n\nNext para.\n";
+    const p = planned(resolveDiscussEdit(page, "notes/t.md", one("\nPara  one ends.", "\nPara one stops.")));
+    expect(p.content).toBe("# T\n\nPara one stops.\n\nNext para.\n");
+  });
+});
+
+describe("resolveDiscussEdit: the line ending comes from the replaced range's line", () => {
+  test("an LF line on a page that also has CRLF lines keeps LF", () => {
+    const page = "# T\r\n\r\nAlpha.\nBeta.\n";
+    const p = planned(resolveDiscussEdit(page, "notes/t.md", one("Alpha.", "Alpha one.\nAlpha two.")));
+    expect(p.content).toBe("# T\r\n\r\nAlpha one.\nAlpha two.\nBeta.\n");
+  });
+  test("a CRLF line on a mixed page takes CRLF", () => {
+    const page = "# T\n\nAlpha.\r\nBeta.\n";
+    const p = planned(resolveDiscussEdit(page, "notes/t.md", one("Alpha.", "Alpha one.\nAlpha two.")));
+    expect(p.content).toBe("# T\n\nAlpha one.\r\nAlpha two.\r\nBeta.\n");
+  });
+});
+
+describe("resolveDiscussEdit: an edit that changes nothing", () => {
+  test("new text equal to old text is refused as no-change", () => {
+    expect(refused(resolveDiscussEdit(PAGE, "plans/f.mdx", one("The north pier takes the morning ferry.", "The north pier takes the morning ferry."))).code).toBe("no-change");
+  });
+  test("a collapsed match whose new text is the file's own text is refused as no-change", () => {
+    const page = "# T\n\nPara one ends.\n\nNext para.\n";
+    expect(refused(resolveDiscussEdit(page, "notes/t.md", one("Para  one ends.", "Para one ends."))).code).toBe("no-change");
+  });
+});
