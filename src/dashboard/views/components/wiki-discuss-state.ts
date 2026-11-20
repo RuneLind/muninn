@@ -676,3 +676,79 @@ export function findPassage(article: Element, selection: string, context?: Passa
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
   return { node: range.startContainer as Text, range, block };
 }
+
+// ── The article mark on the text a proposed edit replaces ────────────────
+
+/** What «Change the wording» puts in the follow-up box. */
+export const DISCUSS_REWORD_PROMPT = "Propose another wording for that edit, for the same passage: ";
+
+/** The follow-up box after «Change the wording»: the prompt, and behind it
+ *  whatever the reader had typed (a draft is never dropped). */
+export function rewordDraft(current: string): string {
+  if (!current.trim()) return DISCUSS_REWORD_PROMPT;
+  return current.startsWith(DISCUSS_REWORD_PROMPT) ? current : DISCUSS_REWORD_PROMPT + current;
+}
+
+/**
+ * Markdown as the reader shows its words, roughly: block markers (headings,
+ * bullets, quotes, table pipes, fences), tags and inline markup out, a link's
+ * label kept. Enough to find a passage and score its surroundings, where
+ * white space is ignored; the route's `markText` is the fallback.
+ */
+export function markdownWords(md: string): string {
+  return md
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((l) => !/^\s*(?:```|~~~)/.test(l) && !/^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(l))
+    .map((l) =>
+      l
+        .replace(/^[ \t]*(?:>[ \t]?)+/, "")
+        .replace(/^[ \t]*\[![\w-]+\][+-]?[ \t]*/, "")
+        .replace(/^[ \t]*#{1,6}[ \t]+/, "")
+        .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/, "")
+        .replace(/^\[[ xX]\][ \t]+/, "")
+        .replace(/\|/g, " "),
+    )
+    .join("\n")
+    .replace(/<\/?[A-Za-z][^>\n]*>/g, "")
+    .replace(/!\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/\[\[(?:[^\]|\n]*\|)?([^\]\n]*)\]\]/g, "$1")
+    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/\*\*|~~|`/g, "")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+?)[*_](?=[^\w*]|$)/g, "$1$2");
+}
+
+/** What the mark needs from a preview. */
+export interface EditMarkSource {
+  before: string;
+  beforeCtx: string;
+  afterCtx: string;
+  markText: string;
+}
+
+/** Where the text an edit replaces sits in the rendered article: its words
+ *  read from `before` (so a heading edit, whose `markText` is empty, is
+ *  found), else the route's `markText`; the copy picked by the edit's
+ *  surroundings when the page shows that text more than once. */
+export function editMarkTarget(article: Element, p: EditMarkSource): FoundPassage | null {
+  const context = { before: markdownWords(p.beforeCtx), after: markdownWords(p.afterCtx) };
+  for (const text of [markdownWords(p.before), p.markText]) {
+    if (!text.trim()) continue;
+    const found = findPassage(article, text, context);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Open every closed `<details>` around `node` inside `article` (a `<Fold>`),
+ *  so a highlight on text in it can be seen; the elements opened. */
+export function openFoldsAround(article: Element, node: Node): Element[] {
+  const opened: Element[] = [];
+  for (let d = node.parentElement?.closest("details") ?? null; d && article.contains(d); d = d.parentElement?.closest("details") ?? null) {
+    if (!d.hasAttribute("open")) {
+      d.setAttribute("open", "");
+      opened.push(d);
+    }
+  }
+  return opened;
+}

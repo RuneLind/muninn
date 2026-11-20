@@ -4,7 +4,8 @@
  *
  * What the unit tests cannot reach: the chain from a turn that ends with an
  * edit, through the tab's preview request by turn id, the card and its mark on
- * the article block, to Apply's write on disk, its `log.md` entry, its commit
+ * the replaced text (a CSS highlight; no element is added to the article), to
+ * Apply's write on disk, its `log.md` entry, its commit
  * and the page rendered again; and the card's refusals as a reader sees them.
  *
  * The turn itself is not run: its row is inserted into the test database with
@@ -57,6 +58,17 @@ const PAGE = [
   "",
   "</Fold>",
   "",
+  "## Crossings",
+  "",
+  "A plain paragraph says the ferry leaves at nine every day.",
+  "",
+  "- Intro: the Status line is checked.",
+  "",
+  "The rules follow.",
+  "",
+  "- R1: the berth list is current.",
+  "- R2: the **Status** line is checked.",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -72,7 +84,32 @@ function git(...args: string[]): string {
   return r.stdout;
 }
 
+const OTHER_REL = "notes/other.md";
 const pageText = () => readFile(path.join(root, REL), "utf8");
+
+/**
+ * The edit mark as the page shows it: the text of each range in the
+ * `wiki-discuss-edit-mark` CSS highlight, or (where no highlight is set) of
+ * each element carrying that class; the list item the first one starts in;
+ * and how many `<mark>` or classed elements the article holds.
+ */
+function editMark(page: Page) {
+  return page.evaluate(() => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-discuss-edit-mark");
+    const ranges = hl ? [...hl] : [];
+    const els = Array.from(article.querySelectorAll(".wiki-discuss-edit-mark"));
+    const texts = ranges.length ? ranges.map((r) => r.toString()) : els.map((e) => e.textContent ?? "");
+    const start = ranges.length ? ranges[0]!.startContainer.parentElement : (els[0] ?? null);
+    return {
+      texts,
+      inArticle: ranges.every((r) => article.contains(r.startContainer)),
+      li: start?.closest("li")?.textContent ?? null,
+      elements: article.querySelectorAll("mark, .wiki-discuss-edit-mark").length,
+    };
+  });
+}
+const markTexts = async (page: Page) => (await editMark(page)).texts;
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 /** The page as written here, committed; the wiki has no remote. */
@@ -121,6 +158,8 @@ test.beforeAll(async () => {
   scratch = await mkdtemp(path.join(tmpdir(), "muninn-e2e-discuss-apply-"));
   root = path.join(scratch, "wiki");
   await mkdir(path.join(root, "plans"), { recursive: true });
+  await mkdir(path.join(root, "notes"), { recursive: true });
+  await writeFile(path.join(root, OTHER_REL), "---\ntitle: Other\n---\n\n# Other\n\nNothing here.\n", "utf8");
   // A throwaway bot: muninn boots only with one. Its connector is never called (the turn is stubbed).
   await mkdir(path.join(scratch, "bots", "applybot"), { recursive: true });
   await writeFile(path.join(scratch, "bots", "applybot", "CLAUDE.md"), "# e2e apply bot\n\nCreated by e2e/wiki-discuss-apply.spec.ts.\n");
@@ -189,9 +228,8 @@ test("the card shows the diff and marks the bullet; Apply writes the range only,
   await expect(card.locator("del")).toHaveText(OLD);
   await expect(card.locator("ins")).toHaveText(NEW);
   await expect(card.locator(".wiki-discuss-edit-head")).toHaveText("Proposed edit · line 9");
-  const mark = page.locator("#articleWrap .wiki-article .wiki-discuss-edit-mark");
-  await expect(mark).toHaveCount(1);
-  await expect(mark).toContainText("R2, behind.");
+  // The mark is on the replaced words, not on the whole bullet.
+  await expect.poll(() => markTexts(page)).toEqual([OLD]);
 
   await card.locator("[data-discuss-apply]").click();
   await expect(page.locator("#articleWrap .wiki-article")).toContainText("not with any date in the frontmatter.");
@@ -201,7 +239,7 @@ test("the card shows the diff and marks the bullet; Apply writes the range only,
   await expect(applied).toBeVisible();
   await expect(applied).toContainText("Applied to the page, with a log.md entry and a commit.");
   await expect(applied.locator(".wiki-discuss-edit-done")).toBeFocused();
-  await expect(mark).toHaveCount(0);
+  await expect.poll(() => markTexts(page)).toEqual([]);
 
   const text = await pageText();
   expect(text).toBe(PAGE.replace(OLD, NEW));
@@ -214,19 +252,92 @@ test("the card shows the diff and marks the bullet; Apply writes the range only,
   expect(git("remote").trim()).toBe("");
 });
 
-test("«Change the wording» fills the follow-up box; Discard drops the card and the mark; nothing is written", async ({ page }) => {
+test("«Change the wording» fills the follow-up box; the mark opens its Fold; Discard drops the card and the mark; nothing is written", async ({ page }) => {
   expect(git("remote").trim()).toBe("");
   await askWithEdit(page, edit("The north pier takes the morning ferry.", "The south pier takes the morning ferry."));
   const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
   await expect(card).toBeVisible();
-  await expect(page.locator("#articleWrap .wiki-article .wiki-discuss-edit-mark")).toContainText("The north pier");
+  await expect.poll(() => markTexts(page)).toEqual(["The north pier takes the morning ferry."]);
+  // The edit is inside a closed Fold: the mark opens it, so the reader sees it.
+  await expect(page.locator("#articleWrap .wiki-article details.fold")).toHaveAttribute("open", "");
   await card.locator("[data-discuss-reword]").click();
   await expect(page.locator("#wikiDiscussInput")).toHaveValue("Propose another wording for that edit, for the same passage: ");
   await expect(page.locator("#wikiDiscussInput")).toBeFocused();
   await card.locator("[data-discuss-discard]").click();
   await expect(page.locator('[data-edit-state="discarded"]')).toHaveText("The proposed edit was discarded.");
-  await expect(page.locator(".wiki-discuss-edit-mark")).toHaveCount(0);
+  await expect.poll(() => markTexts(page)).toEqual([]);
   expect(await pageText()).toBe(PAGE);
+});
+
+test("«Change the wording» keeps a half-typed follow-up behind the prompt", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  await askWithEdit(page, edit(OLD, NEW));
+  const card = page.locator('.wiki-discuss-edit[data-edit-state="ready"]');
+  await expect(card).toBeVisible();
+  await page.locator("#wikiDiscussInput").fill("and keep it short");
+  await card.locator("[data-discuss-reword]").click();
+  await expect(page.locator("#wikiDiscussInput")).toHaveValue("Propose another wording for that edit, for the same passage: and keep it short");
+  await expect(page.locator("#wikiDiscussInput")).toBeFocused();
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("a plain paragraph (no block element around it) is marked, exactly its text; moving to another page takes the mark off", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  const para = "A plain paragraph says the ferry leaves at nine every day.";
+  await askWithEdit(page, edit(para, "A plain paragraph says the ferry leaves at ten every day."));
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  await expect.poll(() => markTexts(page)).toEqual([para]);
+  await page.locator(`#wikiList [data-relpath="${OTHER_REL}"]`).first().click();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("Nothing here.");
+  await expect.poll(() => markTexts(page)).toEqual([]);
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("a heading edit marks the heading's text", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  await askWithEdit(page, edit("## Crossings", "## Ferry crossings"));
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  await expect.poll(() => markTexts(page)).toEqual(["Crossings"]);
+});
+
+test("the mark adds no element and leaves the article's text nodes as rendered (P3's passage anchors hold them)", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  const proposedEdit = edit(OLD, NEW);
+  const turnId = await insertTurn(proposedEdit);
+  await stubTurn(page, turnId, proposedEdit);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL)}`);
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("The night route is unchanged.");
+  // Every text node of the article as rendered, kept in the page.
+  await page.evaluate(() => {
+    const w = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
+    const nodes: [Text, string][] = [];
+    for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) nodes.push([n, n.data]);
+    (window as unknown as { __rendered: [Text, string][] }).__rendered = nodes;
+  });
+  await page.locator('[data-conntab="discuss"]').click();
+  await page.locator("#wikiDiscussInput").fill("Is R2 right?");
+  await page.locator("#wikiDiscussAskBtn").click();
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  await expect.poll(() => markTexts(page)).toEqual([OLD]);
+  const same = await page.evaluate(() => {
+    const w = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
+    const now: Text[] = [];
+    for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) now.push(n);
+    const was = (window as unknown as { __rendered: [Text, string][] }).__rendered;
+    return { count: [was.length, now.length], identical: was.every(([n, d], k) => now[k] === n && n.data === d) };
+  });
+  expect(same.count[1]).toBe(same.count[0]);
+  expect(same.identical).toBe(true);
+  expect((await editMark(page)).elements).toBe(0);
+});
+
+test("text the page shows twice: the mark lands on the copy the edit replaces", async ({ page }) => {
+  expect(git("remote").trim()).toBe("");
+  // «the Status line is checked.» reads the same in the intro bullet and in R2; the edit is R2's.
+  await askWithEdit(page, edit("the **Status** line is checked.", "the **Status** line is read."));
+  await expect(page.locator('.wiki-discuss-edit[data-edit-state="ready"]')).toBeVisible();
+  await expect.poll(() => markTexts(page)).toEqual(["the Status line is checked."]);
+  expect((await editMark(page)).li).toContain("R2:");
 });
 
 test("an edit inside a fact wrapper is refused on the card, with no Apply", async ({ page }) => {

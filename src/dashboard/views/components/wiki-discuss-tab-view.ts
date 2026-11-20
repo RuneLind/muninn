@@ -74,7 +74,7 @@ export function discussTabStyles(): string {
       border: none; background: var(--accent); color: var(--on-accent);
     }
     .wiki-discuss-apply:disabled { opacity: 0.5; cursor: progress; }
-    .wiki-article .wiki-discuss-edit-mark { outline: 2px dashed var(--accent); outline-offset: 3px; border-radius: 3px; }
+    ::highlight(wiki-discuss-edit-mark) { background-color: color-mix(in srgb, var(--accent) 18%, transparent); text-decoration: underline dashed var(--accent); }
     .wiki-discuss-cont-status { font-size: 12px; color: var(--text-secondary); }
     .wiki-discuss-cont-out { width: 100%; box-sizing: border-box; min-height: 8em; font-family: var(--font-mono, monospace); font-size: 12px; border-radius: 6px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary); }
     .wiki-discuss-compose { display: flex; gap: 8px; margin-top: auto; padding-top: 8px; position: sticky; bottom: 0; background: var(--bg-panel); }

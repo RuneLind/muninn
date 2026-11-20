@@ -22,6 +22,7 @@ import {
 } from "./wiki-discuss-state.ts";
 import * as discussState from "./wiki-discuss-state.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
+import { formatWebHtml } from "../../../web/web-format.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
@@ -767,5 +768,130 @@ describe("retrying the card after a refusal or a lost answer (fix round 1 batch 
 
   test("the applied note can take focus, so the tab can move the reader to it", () => {
     expect(turnWith({ state: "applied", preview, message: "Applied." })).toMatch(/<div class="wiki-discuss-edit-done" role="status" tabindex="-1">Applied\.<\/div>/);
+  });
+});
+
+describe("the article mark on the text a proposed edit replaces", () => {
+  const MD = [
+    "# Ferry plan",
+    "",
+    "## Status of the plan",
+    "",
+    "A plain paragraph says the ferry leaves at nine every day.",
+    "",
+    "[The timetable](https://example.invalid/t) lists every crossing of the week.",
+    "",
+    "- Intro: the Status line is checked.",
+    "",
+    "The rules follow.",
+    "",
+    "- R1: the berth list is current.",
+    "- R2: the **Status** line is checked.",
+    "",
+    "- **R3, behind.** The check compares the date.",
+    "",
+    '<Fold title="The berths">',
+    "",
+    "The north pier takes the morning ferry.",
+    "",
+    "The south pier takes the evening ferry.",
+    "",
+    "</Fold>",
+    "",
+  ].join("\n");
+  /** The page as `formatWebHtml` renders it, in a happy-dom article. */
+  const rendered = () => article(formatWebHtml(MD));
+  /** A preview of replacing `before` (as written in MD), its context read from MD as the route reads it. */
+  const previewOf = (before: string, markText = "") => {
+    const at = MD.indexOf(before);
+    if (at === -1 || MD.indexOf(before, at + 1) !== -1) throw new Error(`not once in MD: ${before}`);
+    return { before, beforeCtx: MD.slice(Math.max(0, at - 120), at), afterCtx: MD.slice(at + before.length, at + before.length + 120), markText };
+  };
+  /** The range the mark paints for that preview: its text, and the element holding its start. */
+  const markIn = (a: Element, before: string, markText = "") => {
+    const found = discussState.editMarkTarget(a, previewOf(before, markText));
+    expect(found).not.toBeNull();
+    return { range: found!.range, text: found!.range.toString(), node: found!.node, at: found!.range.startContainer.parentElement! };
+  };
+
+  test("a plain paragraph (no <p>): exactly that paragraph's text, not the article", () => {
+    const a = rendered();
+    const r = markIn(a, "A plain paragraph says the ferry leaves at nine every day.", "A plain paragraph says the ferry leaves at nine every day.");
+    expect(r.text).toBe("A plain paragraph says the ferry leaves at nine every day.");
+  });
+  test("an edit that starts with a link: the link's text and the rest of the sentence", () => {
+    const a = rendered();
+    const r = markIn(a, "[The timetable](https://example.invalid/t) lists every crossing of the week.");
+    expect(r.text).toBe("The timetable lists every crossing of the week.");
+    expect(r.at.tagName).toBe("A");
+  });
+  test("an edit that starts inside bold: the whole replaced text, not only the bold run", () => {
+    const a = rendered();
+    const r = markIn(a, "**R3, behind.** The check compares the date.");
+    expect(r.text).toBe("R3, behind. The check compares the date.");
+  });
+  test("inside a closed Fold: only that paragraph, and the fold is opened", () => {
+    const a = rendered();
+    const fold = a.querySelector("details")!;
+    expect(fold.hasAttribute("open")).toBe(false);
+    const r = markIn(a, "The north pier takes the morning ferry.");
+    expect(r.text).toBe("The north pier takes the morning ferry.");
+    expect(discussState.openFoldsAround(a, r.node)).toEqual([fold]);
+    expect(fold.hasAttribute("open")).toBe(true);
+  });
+  test("text on the page twice: the copy the edit's context names, not the first", () => {
+    const a = rendered();
+    // The rendered words «the Status line is checked.» are in the intro bullet first.
+    const r = markIn(a, "the **Status** line is checked.", "the Status line is checked.");
+    expect(r.text).toBe("the Status line is checked.");
+    expect(r.at.closest("li")!.textContent).toContain("R2:");
+  });
+  test("a heading edit: the route's markText is empty, the heading is still found", () => {
+    const a = rendered();
+    const r = markIn(a, "## Status of the plan", "");
+    expect(r.text).toBe("Status of the plan");
+    expect(r.at.tagName).toMatch(/^H\d$/);
+  });
+  test("finding the target changes nothing in the article (the chips' anchors hold its text nodes)", () => {
+    const a = rendered();
+    const nodes = (el: Element) => {
+      const w = el.ownerDocument.createTreeWalker(el, 4);
+      const out: Node[] = [];
+      while (w.nextNode()) out.push(w.currentNode);
+      return out;
+    };
+    const html = a.innerHTML;
+    const before = nodes(a);
+    for (const b of ["A plain paragraph says the ferry leaves at nine every day.", "the **Status** line is checked.", "**R3, behind.** The check compares the date."]) {
+      expect(discussState.editMarkTarget(a, previewOf(b))).not.toBeNull();
+    }
+    expect(a.innerHTML).toBe(html);
+    const after = nodes(a);
+    expect(after.length).toBe(before.length);
+    expect(after.every((n, k) => n === before[k])).toBe(true);
+  });
+  test("an edit across two bullets: one range over both items' text", () => {
+    const a = article(formatWebHtml("- First item here.\n- Second item there.\n"));
+    const found = discussState.editMarkTarget(a, { before: "First item here.\n- Second item there.", beforeCtx: "", afterCtx: "", markText: "" });
+    expect(found!.range.toString().replace(/\s+/g, "")).toBe("Firstitemhere.Seconditemthere.");
+  });
+  test("a 2,000-paragraph page: the target is found in well under a frame budget per paragraph", () => {
+    const paras = Array.from({ length: 2000 }, (_, k) => `Paragraph ${k} of the long page says something about crossing ${k}.`);
+    const a = article(formatWebHtml(paras.join("\n\n")));
+    const t0 = performance.now();
+    const found = discussState.editMarkTarget(a, { before: paras[1990]!, beforeCtx: "", afterCtx: "", markText: "" });
+    const ms = performance.now() - t0;
+    expect(found!.range.toString()).toBe(paras[1990]!);
+    expect(ms).toBeLessThan(250);
+  });
+});
+
+describe("«Change the wording» and the reader's draft", () => {
+  test("an empty box gets the prompt; a draft is kept after it; the prompt is not added twice", () => {
+    const P = discussState.DISCUSS_REWORD_PROMPT;
+    expect(discussState.rewordDraft("")).toBe(P);
+    expect(discussState.rewordDraft("   ")).toBe(P);
+    expect(discussState.rewordDraft("shorter, please")).toBe(`${P}shorter, please`);
+    expect(discussState.rewordDraft(`${P}shorter`)).toBe(`${P}shorter`);
   });
 });

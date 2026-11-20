@@ -31,16 +31,19 @@
  *
  * A turn that ends `done` with a proposed edit (P4) gets a diff card, fetched
  * from `POST /api/wiki/discuss/apply` by the turn's id while it is the current
- * turn; a newer turn retires it. The card's block in the article is marked
- * ({@link DISCUSS_EDIT_MARK_CLASS}) while the edit is offered. Apply sends the
+ * turn; a newer turn retires it. The text the edit replaces is painted with
+ * the CSS highlight {@link DISCUSS_EDIT_MARK_HIGHLIGHT} (no element added, so
+ * the text nodes the chips' anchors hold stay as rendered; a closed Fold
+ * around it is opened) while the edit is offered. Apply sends the
  * preview's two hashes back and renders the page again, keeping the tab and
  * moving the reader to the applied note and the changed passage. A transient
  * refusal (another writer, uncommitted changes, a Gardener card, a server
  * error) keeps Apply; `stale`/`changed` and a failed preview offer «Preview
  * again» (fresh hashes); a lost Apply answer previews the turn again to learn
- * whether it wrote, never claiming it did not; «Change the wording»
- * fills the follow-up box (the reader sends it, and the turn carries the
- * discussion with this edit); Discard drops the card in this tab only. Apply
+ * whether it wrote, never claiming it did not; «Change the wording» puts
+ * its prompt ahead of any draft in the follow-up box (the reader sends it,
+ * and the turn carries the discussion with this edit); Discard drops the
+ * card in this tab only. Apply
  * is in the read-only write selectors, «Change the wording» in the egress
  * ones, and both in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
  */
@@ -53,6 +56,10 @@ import { WIKI_READONLY_INPUT_PLACEHOLDER, wikiReadonlyWikiFlag } from "./wiki-re
 import {
   anchorRange,
   applyDiscussFrame,
+  DISCUSS_REWORD_PROMPT,
+  editMarkTarget,
+  openFoldsAround,
+  rewordDraft,
   currentTurn,
   editAfterApplyRefusal,
   editAfterLostApply,
@@ -78,10 +85,9 @@ export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
 const APPLY_PATH = "/api/wiki/discuss/apply";
-/** The class on the article block the current turn's proposed edit would change. */
-export const DISCUSS_EDIT_MARK_CLASS = "wiki-discuss-edit-mark";
-/** What «Change the wording» puts in the follow-up box. */
-export const DISCUSS_REWORD_PROMPT = "Propose another wording for that edit, for the same passage: ";
+/** The CSS highlight (`::highlight(…)`) on the text the current turn's proposed edit would replace. */
+export const DISCUSS_EDIT_MARK_HIGHLIGHT = "wiki-discuss-edit-mark";
+export { DISCUSS_REWORD_PROMPT };
 
 export interface DiscussTabDeps {
   /** The served wiki's registry name. */
@@ -104,6 +110,9 @@ let turnSeq = 0;
  *  its boundaries, held weakly so a re-rendered article is not kept alive,
  *  and the text it covered as rendered. */
 const anchors = new Map<string, DiscussAnchor>();
+/** The edit mark now: for which turn's preview (turn key and preview hash),
+ *  in which article, over which range (null: not found there). */
+let editMark: { want: string; article: Element; range: Range | null } | null = null;
 /** The page the box's draft was typed on. */
 let draftPage = "";
 /** What the box held when it sent a turn, and on which page: the box is
@@ -446,12 +455,13 @@ async function applyEdit(key: string): Promise<void> {
   paint();
 }
 
-/** «Change the wording»: the follow-up box asks for another wording; the reader sends it. */
+/** «Change the wording»: the follow-up box asks for another wording, ahead of
+ *  any draft the reader had typed; the reader sends it. */
 function rewordEdit(key: string): void {
   const t = turnByKey(key);
   const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
   if (!t || !input || discussSendBlocked()) return;
-  input.value = DISCUSS_REWORD_PROMPT;
+  input.value = rewordDraft(input.value);
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
 }
@@ -463,24 +473,29 @@ function discardEdit(key: string): void {
   paint();
 }
 
-/** Mark the article block the current turn's ready edit would change; clear any other mark. */
+/** Paint the text the current turn's ready edit would replace (opening a
+ *  closed Fold around it); take the paint off on any other state, turn or
+ *  page. A target found, or not found, in this article is not searched again. */
 function syncEditMark(d: DiscussionView | null): void {
   const article = document.querySelector<HTMLElement>("#articleWrap .wiki-article");
   const cur = d ? currentTurn(d) : null;
-  const want = cur?.edit?.state === "ready" || cur?.edit?.state === "applying" ? cur.edit.preview?.markText ?? "" : "";
-  const marked = Array.from(document.querySelectorAll<HTMLElement>(`.${DISCUSS_EDIT_MARK_CLASS}`));
-  if (!want || !article) {
-    for (const el of marked) el.classList.remove(DISCUSS_EDIT_MARK_CLASS);
-    return;
-  }
-  if (marked.length === 1 && article.contains(marked[0]!) && marked[0]!.dataset.discussMark === want) return;
-  for (const el of marked) el.classList.remove(DISCUSS_EDIT_MARK_CLASS);
-  const found = findPassage(article, want);
-  const block = (found ? (found.block ?? found.node.parentElement) : null) as HTMLElement | null;
-  if (block && block !== article) {
-    block.classList.add(DISCUSS_EDIT_MARK_CLASS);
-    block.dataset.discussMark = want;
-  }
+  const p = cur?.edit?.state === "ready" || cur?.edit?.state === "applying" ? cur.edit.preview : null;
+  const want = p && cur ? `${cur.key}\n${p.previewHash}` : "";
+  if (editMark && article && editMark.want === want && editMark.article === article && (!editMark.range || article.contains(editMark.range.startContainer))) return;
+  editMark = null;
+  const found = p && article ? editMarkTarget(article, p) : null;
+  if (p && article) editMark = { want, article, range: found?.range ?? null };
+  if (found && article) openFoldsAround(article, found.node);
+  paintEditMark(found?.range ?? null);
+}
+
+/** The edit mark through the CSS Custom Highlight API; without it, no mark. */
+function paintEditMark(range: Range | null): void {
+  const registry = (globalThis as unknown as { CSS?: { highlights?: Map<string, unknown> } }).CSS?.highlights;
+  const Highlight = (globalThis as unknown as { Highlight?: new (...r: Range[]) => unknown }).Highlight;
+  if (!registry || !Highlight) return;
+  if (range) registry.set(DISCUSS_EDIT_MARK_HIGHLIGHT, new Highlight(range));
+  else registry.delete(DISCUSS_EDIT_MARK_HIGHLIGHT);
 }
 
 function turnByKey(key: string): DiscussTurnView | null {
