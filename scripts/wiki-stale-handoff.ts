@@ -16,9 +16,12 @@
  * with its own gate and `Stale:` line.
  *
  * - First call: per wiki, the gate (on the default branch: a pull
- *   `--ff-only` of `<remote> <default>`, as an unlocked fetch and then a
- *   fast-forward under the write locks of the checkout and every registered
- *   wiki root inside it (`lockRootsFor`); never a stash, reset or switch; each page
+ *   `--ff-only` of `<remote> <default>`, as an unlocked fetch, a classification
+ *   against the fetched sha (up to date, ahead, diverged, fast-forward; see
+ *   {@link classifyPull}), and then only a fast-forward that fits under the write
+ *   locks of the checkout and every registered wiki root inside it
+ *   (`lockRootsFor`), to that sha; never a stash, reset or switch, and a stopped
+ *   one is listed, never undone automatically; each page
  *   committed / uncommitted / carried / NOT carried / deleted), the fix path
  *   that fits the gate, the free report, then «fix by hand»: the hits and the
  *   To-check pages on the session's own pages, and nothing else. Nothing is
@@ -40,8 +43,8 @@
  * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`; ssh in batch
  * mode unless the user configured their own ssh command).
  */
-import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, lstatSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   CHECK_PAGE_DEADLINE_MS,
@@ -345,23 +348,22 @@ async function takeGateLocks(
  */
 export const FF_MAX = { files: 5_000, bytes: 100 * 1024 * 1024 };
 
-/** One path the fast-forward changes (`git diff-tree --raw`). */
+/** One path the fast-forward changes (`git diff-tree --raw`): A adds it, M/T/D change a tracked path. */
 interface FfEntry {
   status: string;
   path: string;
-  oldSha: string;
-  newSha: string;
-  oldMode: string;
-  newMode: string;
 }
-/** What the fast-forward will write, measured unlocked before it runs. */
+/** The fast-forward from `head` to the exact commit `target`, measured unlocked before it runs. */
 interface FfPlan {
+  kind: "ff";
   head: string;
+  target: string;
   entries: FfEntry[];
-  /** Folders the new files need that are not folders now: the restore may remove them. */
-  newDirs: string[];
+  /** The index file (`--git-path index`); its folder is the git dir. */
   index: string;
 }
+/** What the pull would do (the F13 class-check table, row A): nothing, a skip, or a measured fast-forward. */
+type PullPlan = { kind: "up-to-date" } | { kind: "ahead" } | { skip: string } | FfPlan;
 
 /** The index file's identity: a stopped merge that rewrote it changed this. */
 const statKey = (p: string) => {
@@ -372,27 +374,6 @@ const statKey = (p: string) => {
     return "";
   }
 };
-
-/** Does the working tree hold exactly this blob at `abs` (bytes, or a symlink's target)? */
-function holdsBlob(abs: string, sha: string, mode: string): boolean {
-  let data: Buffer;
-  try {
-    const st = lstatSync(abs);
-    if (mode === "120000") {
-      if (!st.isSymbolicLink()) return false;
-      data = readlinkSync(abs, { encoding: "buffer" });
-    } else {
-      if (!st.isFile()) return false;
-      data = readFileSync(abs);
-    }
-  } catch {
-    return false;
-  }
-  const h = new Bun.CryptoHasher(sha.length === 64 ? "sha256" : "sha1");
-  h.update(`blob ${data.length}\0`);
-  h.update(data);
-  return h.digest("hex") === sha;
-}
 const present = (abs: string) => {
   try {
     lstatSync(abs);
@@ -401,38 +382,53 @@ const present = (abs: string) => {
     return false;
   }
 };
-const ZERO = /^0+$/;
+const byHandPull = (main: string, shown: string) => `pull ${main} by hand: git -C ${shq(main)} pull --ff-only ${shown.replace("/", " ")}`;
+const firstFew = (ps: readonly string[]) => ps.slice(0, 5).join(", ") + (ps.length > 5 ? `, … (${ps.length} in all)` : "");
 
 /**
- * Measure the fast-forward from HEAD to `ref` before any lock is taken: the
- * paths it changes and the bytes it writes. Above {@link FF_MAX} it is a skip
+ * Row A, before any lock: resolve the target to one sha, classify HEAD against
+ * it, and measure a fast-forward. Up to date or ahead pulls nothing (never a
+ * size skip); diverged is a skip; a fast-forward over {@link FF_MAX} is a skip
  * telling the user to pull by hand, never a merge that cannot finish in time.
  */
-async function measureFastForward(main: string, ref: string, shown: string, git: Git, max: { files: number; bytes: number }): Promise<FfPlan | { skip: string }> {
-  const byHand = `pull ${main} by hand: git -C ${shq(main)} pull --ff-only ${shown.replace("/", " ")}`;
+async function classifyPull(main: string, ref: string, shown: string, git: Git, max: { files: number; bytes: number }): Promise<PullPlan> {
+  const byHand = byHandPull(main, shown);
   const cannot = (r: GitResult) => ({ skip: `git pull --ff-only not tried (could not measure the fast-forward to ${shown}: ${gitError(r.stderr) || `exit ${r.code}`}); ${byHand}` });
+  const t = await git(["rev-parse", "--verify", "-q", `${ref}^{commit}`], main);
+  if (t.code !== 0) return cannot(t);
   const h = await git(["rev-parse", "--verify", "-q", "HEAD"], main);
   if (h.code !== 0) return cannot(h);
-  const d = await git(["diff-tree", "-r", "-z", "--no-renames", "HEAD", ref], main);
+  const target = t.stdout.trim();
+  const head = h.stdout.trim();
+  if (head === target) return { kind: "up-to-date" };
+  const targetInHead = await git(["merge-base", "--is-ancestor", target, head], main);
+  if (targetInHead.code === 0) return { kind: "ahead" };
+  if (targetInHead.code !== 1) return cannot(targetInHead);
+  const headInTarget = await git(["merge-base", "--is-ancestor", head, target], main);
+  if (headInTarget.code === 1) return { skip: `git pull --ff-only not tried (HEAD and ${shown} have diverged, so there is no fast-forward); reconcile ${main} with ${shown} by hand` };
+  if (headInTarget.code !== 0) return cannot(headInTarget);
+  const d = await git(["diff-tree", "-r", "-z", "--no-renames", head, target], main);
   if (d.code !== 0) return cannot(d);
   const parts = d.stdout.split("\0");
   const entries: FfEntry[] = [];
+  let writes = false;
   for (let i = 0; i + 1 < parts.length; i += 2) {
-    const [oldMode, newMode, oldSha, newSha, status] = parts[i]!.replace(/^:/, "").split(" ");
+    const [oldMode, newMode, , , status] = parts[i]!.replace(/^:/, "").split(" ");
     // A submodule's folder is not written by the fast-forward.
     if (oldMode === "160000" || newMode === "160000") continue;
-    entries.push({ status: status!, path: parts[i + 1]!, oldSha: oldSha!, newSha: newSha!, oldMode: oldMode!, newMode: newMode! });
+    entries.push({ status: status!, path: parts[i + 1]! });
+    writes ||= status !== "D";
   }
   let bytes = 0;
-  if (entries.length <= max.files && entries.some((e) => !ZERO.test(e.newSha))) {
-    const t = await git(["ls-tree", "-r", "-l", "-z", ref], main);
-    if (t.code !== 0) return cannot(t);
+  if (entries.length <= max.files && writes) {
+    const ls = await git(["ls-tree", "-r", "-l", "-z", target], main);
+    if (ls.code !== 0) return cannot(ls);
     const size = new Map<string, number>();
-    for (const row of t.stdout.split("\0")) {
+    for (const row of ls.stdout.split("\0")) {
       const m = /^\d+ \w+ [0-9a-f]+ +(\d+|-)\t(.*)$/s.exec(row);
       if (m) size.set(m[2]!, Number(m[1]) || 0);
     }
-    for (const e of entries) bytes += size.get(e.path) ?? 0;
+    for (const e of entries) if (e.status !== "D") bytes += size.get(e.path) ?? 0;
   }
   if (entries.length > max.files || bytes > max.bytes) {
     const mb = (n: number) => `${Math.ceil(n / (1024 * 1024))} MB`;
@@ -441,30 +437,67 @@ async function measureFastForward(main: string, ref: string, shown: string, git:
   }
   const idx = await git(["rev-parse", "--path-format=absolute", "--git-path", "index"], main);
   if (idx.code !== 0) return cannot(idx);
-  const newDirs = new Set<string>();
-  for (const e of entries) {
-    if (ZERO.test(e.newSha)) continue;
-    for (let dir = path.dirname(e.path); dir !== "." && dir !== "/" && !newDirs.has(dir); dir = path.dirname(dir)) {
-      let isDir = false;
-      try {
-        isDir = lstatSync(path.join(main, dir)).isDirectory();
-      } catch {}
-      if (isDir) break;
-      newDirs.add(dir);
-    }
-  }
-  return { head: h.stdout.trim(), entries, newDirs: [...newDirs], index: idx.stdout.trim() };
+  return { kind: "ff", head, target, entries, index: idx.stdout.trim() };
+}
+
+/** Tracked paths whose index or working copy differs from HEAD (`git status`, no untracked scan), or why it could not finish. */
+async function trackedChanges(main: string, git: Git, ms: number): Promise<Set<string> | { late: string }> {
+  if (ms <= 0) return { late: "no time left" };
+  const r = await git(["--no-optional-locks", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=no"], main, ms);
+  if (r.timedOut) return { late: `git status did not finish in ${(ms / 1000).toFixed(1)} s` };
+  if (r.code !== 0) return { late: gitError(r.stderr) || `git status: exit ${r.code}` };
+  return new Set(r.stdout.split("\0").filter((row) => row.length > 3).map((row) => row.slice(3)));
 }
 
 /**
- * After a fast-forward was stopped with HEAD unmoved: put the checkout back as
- * it was, under the locks again. Only files the stopped merge wrote are
- * touched, each proven by its bytes: a new file holding the target's blob is
- * removed, a changed or deleted one holding the target's blob (or gone) is
- * restored from HEAD; any other untracked file of the user's is left alone.
- * Returns the skip's tail: what happened and the recovery.
+ * Does something on disk stand where the fast-forward adds `rel`: anything at the
+ * path itself (untracked, ignored or staged), or a file or symlink where it
+ * needs a folder (unless the fast-forward deletes that file).
  */
-async function takeBack(
+function occupied(main: string, rel: string, deleted: ReadonlySet<string>): boolean {
+  if (present(path.join(main, rel))) return true;
+  for (let dir = path.posix.dirname(rel); dir !== "." && dir !== "/"; dir = path.posix.dirname(dir)) {
+    if (deleted.has(dir)) continue;
+    try {
+      if (lstatSync(path.join(main, dir)).isDirectory()) return false;
+      return true;
+    } catch {}
+  }
+  return false;
+}
+
+/**
+ * Row B, under the locks with HEAD re-checked: what git's own «would be
+ * overwritten» check would refuse, done before git runs, so git is never stopped
+ * half-way over a user's files. Each path the fast-forward adds must be free
+ * on disk; each tracked path it changes or deletes must be clean.
+ */
+async function mergeBlockers(main: string, plan: FfPlan, git: Git, left: () => number): Promise<{ blocked: string[] } | { late: string }> {
+  const dirty = await trackedChanges(main, git, left());
+  if (!(dirty instanceof Set)) return dirty;
+  const deleted = new Set(plan.entries.filter((e) => e.status === "D").map((e) => e.path));
+  const blocked: string[] = [];
+  for (const e of plan.entries) {
+    if (left() <= 0) return { late: "no time left" };
+    if (e.status === "A" ? occupied(main, e.path, deleted) : dirty.has(e.path)) blocked.push(e.path);
+  }
+  return { blocked };
+}
+
+/** The NUL-separated lists a stopped fast-forward leaves under the git dir, for the recovery commands. */
+export const STOPPED_LISTS = { untracked: "muninn-stopped-ff-untracked", modified: "muninn-stopped-ff-modified" } as const;
+
+/**
+ * Row C: a fast-forward stopped at its bound. Nothing is deleted or restored
+ * automatically. With HEAD still at the measured commit and the index file
+ * unchanged, the gate takes the locks again (a fresh section), re-checks HEAD
+ * and lists what the stopped merge wrote: paths it adds that are on disk now
+ * (row B proved them free) and tracked paths it changes that are modified now
+ * (row B proved them clean). The lists go to two files under the git dir and the
+ * skip's tail names the count and the commands that undo them. HEAD at the
+ * target means the merge finished as it was stopped.
+ */
+async function afterStoppedMerge(
   main: string,
   plan: FfPlan,
   indexBefore: string,
@@ -472,95 +505,62 @@ async function takeBack(
   git: Git,
   roots: readonly string[],
   lock: ((root: string) => Promise<WikiLockOutcome>) | undefined,
-): Promise<string> {
+): Promise<{ merged: true } | { tail: string }> {
   const m = shq(main);
-  const byHand = `pull it by hand: git -C ${m} pull --ff-only ${shown.replace("/", " ")}`;
-  const added = `\`git -C ${m} diff --name-only --diff-filter=A HEAD ${shown}\` lists the files the fast-forward adds`;
-  if (statKey(plan.index) !== indexBefore) {
-    return `, after it had rewritten the index: run \`git status\` in ${main} before anything else; ${added}; then ${byHand}`;
-  }
-  const taken = await takeGateLocks(roots, lock);
-  if (!taken.ok) {
-    return `, and the wiki write lock was held (${taken.reason}), so files it wrote may be left: run \`git status\` in ${main}, delete the untracked ones it added (${added}), then ${byHand}`;
-  }
-  /** A regular file the stop cut short: its bytes are a start of the target's blob (measured: the one file git was writing). */
-  const cutShort = async (abs: string, sha: string, mode: string, deadline: number) => {
-    if (mode === "120000" || !present(abs) || !lstatSync(abs).isFile()) return false;
-    const ms = deadline - Date.now();
-    if (ms <= 0) return false;
-    const r = await git(["cat-file", "blob", sha], main, ms);
-    if (r.code !== 0) return false;
-    const have = readFileSync(abs, "utf8");
-    // Decoded both ways: a cut inside a multi-byte character fails the test, which leaves the file (the safe side).
-    return have.length < r.stdout.length && r.stdout.startsWith(have);
+  const byHand = `then pull it by hand: git -C ${m} pull --ff-only ${shown.replace("/", " ")}`;
+  const gitDir = path.dirname(plan.index);
+  const lists = { untracked: path.join(gitDir, STOPPED_LISTS.untracked), modified: path.join(gitDir, STOPPED_LISTS.modified) };
+  for (const f of Object.values(lists)) rmSync(f, { force: true });
+  const statusFirst = (why: string) => ({ tail: ` part-way, and ${why}, so nothing is listed: run \`git status\` in ${main} first, put back what it shows by hand, ${byHand}` });
+  const headNow = async (ms = GIT_TIMEOUT_MS) => {
+    const r = await git(["rev-parse", "HEAD"], main, ms);
+    return r.code === 0 ? r.stdout.trim() : "";
   };
-  const removed: string[] = [];
-  const left: string[] = [];
-  const restore: string[] = [];
-  let restoreError = "";
+  const indexMoved = () => statKey(plan.index) !== indexBefore || present(path.join(gitDir, "index.lock"));
+  const read = async (ms: number): Promise<{ merged: true } | { tail: string } | { untracked: string[]; modified: string[] }> => {
+    const now = await headNow(ms);
+    if (now === plan.target) return { merged: true };
+    if (now !== plan.head) return statusFirst(now ? `HEAD moved to ${now.slice(0, 12)} since (another writer)` : "HEAD could not be read");
+    if (indexMoved()) return statusFirst("it may have changed the index");
+    return { untracked: [], modified: [] };
+  };
+  // Read after the release: a merge stopped just after it moved HEAD has finished.
+  const first = await read(GIT_TIMEOUT_MS);
+  if (!("untracked" in first)) return first;
+  const taken = await takeGateLocks(roots, lock);
+  if (!taken.ok) return statusFirst(`the wiki write lock was held (${taken.reason}) when the gate came back to list what it wrote`);
+  let found: { merged: true } | { tail: string } | { untracked: string[]; modified: string[] };
   try {
-    const deadline = taken.since + LOCKED_SECTION_MS - KILL_GRACE_MS;
-    for (const e of plan.entries) {
-      const abs = path.join(main, e.path);
-      if (Date.now() >= deadline) {
-        left.push(e.path);
-        continue;
-      }
-      if (e.status === "D") {
-        if (!present(abs)) restore.push(e.path);
-        continue;
-      }
-      if (!present(abs)) {
-        if (e.status !== "A") restore.push(e.path);
-        continue;
-      }
-      // Untouched (the old bytes) costs no git call; the target's bytes, whole or cut short, are the merge's.
-      if (e.status !== "A" && holdsBlob(abs, e.oldSha, e.oldMode)) continue;
-      const wrote = holdsBlob(abs, e.newSha, e.newMode) || (await cutShort(abs, e.newSha, e.newMode, deadline));
-      if (!wrote) {
-        // Neither side's bytes: someone's file or edit. Never removed or overwritten blind.
-        left.push(e.path);
-      } else if (e.status === "A") {
-        try {
-          unlinkSync(abs);
-          removed.push(e.path);
-        } catch {
-          left.push(e.path);
+    const left = () => taken.since + LOCKED_SECTION_MS - Date.now() - KILL_GRACE_MS;
+    found = await read(Math.max(left(), 1));
+    if ("untracked" in found) {
+      const dirty = await trackedChanges(main, git, left());
+      if (!(dirty instanceof Set)) found = statusFirst(`listing what it wrote could not finish (${dirty.late})`);
+      else {
+        for (const e of plan.entries) {
+          if (e.status === "A") {
+            if (present(path.join(main, e.path))) found.untracked.push(e.path);
+          } else if (dirty.has(e.path)) found.modified.push(e.path);
         }
-      } else restore.push(e.path);
-    }
-    // Deepest first, and only a folder that is empty now: a file of anyone's keeps it.
-    for (const dir of plan.newDirs.sort((a, b) => b.length - a.length)) {
-      try {
-        if (readdirSync(path.join(main, dir)).length === 0) rmdirSync(path.join(main, dir));
-      } catch {}
-    }
-    if (restore.length) {
-      const ms = deadline - Date.now();
-      const tmp = mkdtempSync(path.join(tmpdir(), "wiki-stale-restore-"));
-      try {
-        const list = path.join(tmp, "paths");
-        writeFileSync(list, restore.join("\0") + "\0");
-        const r = ms > 0 ? await git(["--literal-pathspecs", "restore", "--source=HEAD", "--worktree", `--pathspec-from-file=${list}`, "--pathspec-file-nul"], main, ms) : null;
-        if (!r || r.code !== 0) {
-          restoreError = r ? gitError(r.stderr) || `exit ${r.code}` : "no time left";
-          left.push(...restore);
-        }
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
       }
     }
   } finally {
     taken.release();
   }
-  const putBack = removed.length + (restoreError ? 0 : restore.length);
-  if (!left.length) {
-    return putBack
-      ? ` and the ${putBack} file(s) it had written were put back, so ${main} is as last pulled; ${byHand}`
-      : ` before it wrote a file, so ${main} is as last pulled; ${byHand}`;
+  if (!("untracked" in found)) return found;
+  const { untracked, modified } = found;
+  if (!untracked.length && !modified.length) return { tail: ` before it wrote a file, so ${main} is as last pulled; ${byHand.replace(/^then /, "")}` };
+  const steps: string[] = [];
+  if (untracked.length) {
+    writeFileSync(lists.untracked, untracked.join("\0") + "\0");
+    steps.push(`cd ${m} && xargs -0 rm -f -- < ${shq(lists.untracked)}`);
   }
-  const first = left.slice(0, 3).join(", ") + (left.length > 3 ? ", …" : "");
-  return ` part-way, and ${left.length} file(s) it touched could not be put back (${first}${restoreError ? `; ${restoreError}` : ""}): run \`git status\` in ${main}, delete the untracked ones it added (${added}), put the changed ones back with \`git -C ${m} restore --source=HEAD -- <path>\`, then ${byHand}`;
+  if (modified.length) {
+    writeFileSync(lists.modified, modified.join("\0") + "\0");
+    steps.push(`git -C ${m} --literal-pathspecs restore --source=HEAD --worktree --pathspec-from-file=${shq(lists.modified)} --pathspec-file-nul`);
+  }
+  const what = [untracked.length ? `added ${untracked.length} untracked file(s) (listed in ${lists.untracked})` : "", modified.length ? `changed ${modified.length} tracked file(s) (listed in ${lists.modified})` : ""].filter(Boolean).join(" and ");
+  return { tail: ` part-way, and nothing was deleted or restored: it had ${what}. Undo them with: ${steps.join("; ")}; ${byHand}` };
 }
 
 /**
@@ -617,25 +617,28 @@ export async function runGate(
     const err = gitError(r.stderr) || `exit ${r.code}`;
     if (r.code === 0) {
       const shown = `${g.remote}/${def}`;
-      const ref = `refs/remotes/${shown}`;
-      // Measured before any lock (F13 round 2): a fast-forward too big to finish in the locked section is never started.
-      const plan = await measureFastForward(main, ref, shown, git, opts.ffMax ?? FF_MAX);
+      // Row A, before any lock (F13 class check): the target is one sha, and only a fast-forward that fits is ever started.
+      const plan = await classifyPull(main, `refs/remotes/${shown}`, shown, git, opts.ffMax ?? FF_MAX);
       if ("skip" in plan) {
         skip(plan.skip);
         g.note = g.skip;
+      } else if (plan.kind === "up-to-date") {
+        g.note = `up to date with ${shown}`;
+      } else if (plan.kind === "ahead") {
+        g.note = `ahead of ${shown}, nothing to pull`;
       } else {
         const roots = lockRootsFor(main, opts.roots ?? (await registeredWikiRoots()));
         const taken = await takeGateLocks(roots, opts.lock);
         if (!taken.ok) {
           g.note = `fetched ${shown}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
         } else {
+          const noTime = `fetched ${shown}, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled`;
           let after = "";
           let merged = false;
-          let before = "";
           let stopped: { mergeMs: number; indexBefore: string } | null = null;
           try {
-            // Every call in here ends before the locks' stale window, counted from
-            // before the first acquire: a writer takes a lock older than that over.
+            // Row B. Every call in here ends before the locks' stale window, counted
+            // from before the first acquire: a writer takes a lock older than that over.
             const left = () => taken.since + LOCKED_SECTION_MS - Date.now() - KILL_GRACE_MS;
             const head = async () => {
               const ms = left();
@@ -643,50 +646,61 @@ export async function runGate(
               const r = await git(["rev-parse", "HEAD"], main, ms);
               return r.code === 0 ? r.stdout.trim() : "";
             };
-            before = await head();
-            const mergeMs = left();
-            const indexBefore = statKey(plan.index);
-            if (before && before !== plan.head) {
+            const before = await head();
+            if (!before) {
+              g.note = left() <= 0 ? noTime : `fetched ${shown}, but HEAD could not be read under the wiki write lock; the main checkout is as last pulled`;
+            } else if (before !== plan.head) {
               // A commit landed between the measure and the lock: what was measured is not what would run.
               g.note = `fetched ${shown}, but HEAD moved while the fast-forward was measured; the main checkout is as last pulled`;
             } else {
-              // Never stash another session's edits: the flags beat merge.autoStash.
-              const m: GitResult | null = mergeMs > 0 ? await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", ref], main, mergeMs) : null;
-              if (!m) {
-                // Taking the locks used the section's time: nothing ran, as when a lock is held.
-                g.note = `fetched ${shown}, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled`;
-              } else if (m.code === 0) {
-                merged = true;
-                after = await head();
-              } else if (m.timedOut) {
-                stopped = { mergeMs, indexBefore };
-              } else {
-                skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
+              const check = await mergeBlockers(main, plan, git, left);
+              if ("late" in check) {
+                skip(`git pull --ff-only not tried (could not check the checkout in time for files the fast-forward to ${shown} would overwrite: ${check.late}); ${byHandPull(main, shown)}`);
                 g.note = g.skip;
+              } else if (check.blocked.length) {
+                skip(
+                  `git pull --ff-only not tried (git would refuse: ${firstFew(check.blocked)} ${check.blocked.length === 1 ? "holds" : "hold"} uncommitted edits or files of your own where the fast-forward to ${shown} writes); commit, move or remove them, then ${byHandPull(main, shown)}`,
+                );
+                g.note = g.skip;
+              } else {
+                const mergeMs = left();
+                const indexBefore = statKey(plan.index);
+                // The exact sha measured, never the ref (it can move meanwhile). Never stash another session's edits: the flags beat merge.autoStash.
+                const m: GitResult | null = mergeMs > 0 ? await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", plan.target], main, mergeMs) : null;
+                if (!m) {
+                  // The lock waits and the check used the section's time: nothing ran, as when a lock is held.
+                  g.note = noTime;
+                } else if (m.code === 0) {
+                  merged = true;
+                  after = await head();
+                } else if (m.timedOut) {
+                  stopped = { mergeMs, indexBefore };
+                } else {
+                  skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
+                  g.note = g.skip;
+                }
               }
             }
           } finally {
             taken.release();
           }
           if (stopped) {
-            // Read after the release: a merge stopped just after it moved HEAD has finished.
-            const now = await out(["rev-parse", "HEAD"]);
-            if (now && before && now !== before) {
+            const s = await afterStoppedMerge(main, plan, stopped.indexBefore, shown, git, roots, opts.lock);
+            if ("merged" in s) {
               merged = true;
-              after = now;
+              after = plan.target;
             } else {
-              const tail = await takeBack(main, plan, stopped.indexBefore, shown, git, roots, opts.lock);
               // «git pull» first: the fix path keys on that prefix (a worktree, until the checkout pulls cleanly).
               skip(
-                `git pull --ff-only timed out (the fast-forward to ${shown} did not finish in ${(stopped.mergeMs / 1000).toFixed(1)} s, kept inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); git was stopped${tail}`,
+                `git pull --ff-only timed out (the fast-forward to ${shown} did not finish in ${(stopped.mergeMs / 1000).toFixed(1)} s, kept inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); git was stopped${s.tail}`,
               );
               g.note = g.skip;
             }
           }
           if (merged) {
             // Counted after the release: a read, so it holds no writer up.
-            const n = before && after ? Number(await out(["rev-list", "--count", `${before}..${after}`])) || 0 : 0;
-            if (before && !after) g.note = `fast-forwarded to ${shown}`;
+            const n = after ? Number(await out(["rev-list", "--count", `${plan.head}..${after}`])) || 0 : 0;
+            if (!after) g.note = `fast-forwarded to ${shown}`;
             else g.note = n ? `pulled ${n} commit(s) from ${shown}` : `up to date with ${shown}`;
           }
         }
