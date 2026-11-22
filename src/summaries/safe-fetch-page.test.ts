@@ -147,6 +147,28 @@ describe("F61: the body is decoded in the charset the answer declares", () => {
       const doc = '<div title="<meta charset=iso-8859-1>"></div><p>Blåbær</p>';
       expect(decodeBody(utf8(doc), html)).toBe(doc);
     });
+    test("an attribute the 1024-byte head cuts off ends the prescan; its text is never read as markup (fix round 2)", () => {
+      // The description crosses byte 1024: at ae0772b1 its quoted `<meta charset=…>` was rescanned and won.
+      const pad = "x".repeat(950);
+      const crossing = `<meta name="description" content="${pad} put <meta charset=iso-8859-1> in the head of every page"><meta charset="utf-8"><p>Blåbær</p>`;
+      expect(crossing.indexOf("iso-8859-1>") + 11).toBeLessThan(1024);
+      expect(crossing.indexOf('page"')).toBeGreaterThan(1024);
+      expect(decodeBody(utf8(crossing), html)).toBe(crossing);
+      // The same through another tag, and a quote never closed inside the head.
+      const div = `<div title="${pad} <meta charset=iso-8859-1> and so on, past the end of the first kilobyte"></div><p>Blåbær</p>`;
+      expect(div.indexOf('kilobyte"')).toBeGreaterThan(1024);
+      expect(decodeBody(utf8(div), html)).toBe(div);
+      const unclosed = `<div title="<meta charset=iso-8859-1>${pad}<p>Blåbær</p>`;
+      expect(decodeBody(utf8(unclosed), html)).toBe(unclosed);
+      // A <meta> the head cuts off still counts with what it gathered.
+      const cut = `<meta charset="iso-8859-1" content="${pad}${pad}"><p>Blåbær</p>`;
+      expect(decodeBody(latin1(cut), html)).toBe(cut);
+    });
+    test("a meta naming x-user-defined reads as windows-1252; a content-type naming it keeps its own decoder", () => {
+      const meta = new Uint8Array([...new TextEncoder().encode('<meta charset="x-user-defined">'), 0xe5]);
+      expect(decodeBody(meta, html)).toBe('<meta charset="x-user-defined">å');
+      expect(decodeBody(new Uint8Array([0xe5]), "text/html; charset=x-user-defined")).toBe("");
+    });
     test("`charset=` inside a quoted content-type parameter is no charset", () => {
       expect(decodeBody(utf8("<p>Blåbær</p>"), 'text/html; foo="a;charset=latin1"')).toBe("<p>Blåbær</p>");
       expect(decodeBody(latin1("<p>Blåbær</p>"), 'text/html; foo="a;b"; Charset="ISO-8859-1"')).toBe("<p>Blåbær</p>");

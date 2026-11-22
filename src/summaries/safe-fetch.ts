@@ -200,13 +200,21 @@ function contentTypeCharset(contentType: string | null): string | null {
 const isPrescanSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\f" || c === "\r";
 const isAsciiLetter = (c: string | undefined) => c !== undefined && /^[A-Za-z]$/.test(c);
 
-/** One attribute of a tag at `pos`, as the prescan's "get an attribute" reads it; `null` at the tag's `>` or the end. */
-function prescanAttribute(s: string, pos: number): { name: string; value: string; pos: number } | null {
+/**
+ * One attribute of a tag at `pos`, as the prescan's "get an attribute" reads
+ * it; `"tag-end"` at the tag's `>`, `"eof"` when the head ends first (inside
+ * the tag, a name, an unclosed quote or a value). The prescan stops at `"eof"`
+ * and never reads that attribute's text again as markup (fix round 2: a
+ * description crossing byte 1024 that quoted `<meta charset=…>` was rescanned
+ * from its start and counted as a declaration).
+ */
+function prescanAttribute(s: string, pos: number): { name: string; value: string; pos: number } | "tag-end" | "eof" {
   while (isPrescanSpace(s[pos]) || s[pos] === "/") pos++;
-  if (pos >= s.length || s[pos] === ">") return null;
+  if (pos >= s.length) return "eof";
+  if (s[pos] === ">") return "tag-end";
   let name = "";
   for (;;) {
-    if (pos >= s.length) return null;
+    if (pos >= s.length) return "eof";
     const c = s[pos]!;
     if (c === "=" && name !== "") break;
     if (isPrescanSpace(c)) {
@@ -223,13 +231,13 @@ function prescanAttribute(s: string, pos: number): { name: string; value: string
   const q = s[pos];
   if (q === '"' || q === "'") {
     const end = s.indexOf(q, pos + 1);
-    if (end < 0) return null;
+    if (end < 0) return "eof";
     return { name, value: s.slice(pos + 1, end).toLowerCase(), pos: end + 1 };
   }
   if (q === ">") return { name, value: "", pos };
   let value = "";
   while (pos < s.length && !isPrescanSpace(s[pos]) && s[pos] !== ">") value += s[pos++]!.toLowerCase();
-  if (pos >= s.length) return null;
+  if (pos >= s.length) return "eof";
   return { name, value, pos };
 }
 
@@ -263,7 +271,8 @@ function charsetFromMetaContent(content: string): string | null {
  * beside `http-equiv="content-type"`. The first label the Encoding Standard
  * knows ends the prescan, as the spec's does; an unknown label is passed over,
  * and so is one naming the replacement encoding (the spec would stop there and
- * decode the page as one U+FFFD). UTF-16 is read as UTF-8.
+ * decode the page as one U+FFFD). UTF-16 is read as UTF-8, x-user-defined as
+ * windows-1252. A tag the head cuts off ends the prescan.
  */
 function prescanMetaDecoder(head: string): BodyDecoder | null {
   let pos = 0;
@@ -280,7 +289,8 @@ function prescanMetaDecoder(head: string): BodyDecoder | null {
       let gotPragma = false;
       let needPragma: boolean | null = null;
       let charset: string | null = null;
-      for (let a = prescanAttribute(head, pos); a; a = prescanAttribute(head, pos)) {
+      let a = prescanAttribute(head, pos);
+      for (; typeof a === "object"; a = prescanAttribute(head, pos)) {
         pos = a.pos;
         if (seen.has(a.name)) continue;
         seen.add(a.name);
@@ -299,16 +309,24 @@ function prescanMetaDecoder(head: string): BodyDecoder | null {
           needPragma = false;
         }
       }
+      // A meta the head cuts off still counts with what it gathered; then the prescan stops.
       if (needPragma !== null && !(needPragma && !gotPragma) && charset !== null) {
-        const found = decoderFor(charset);
+        const name = encodingForLabel(charset);
+        // The HTML prescan reads UTF-16 as UTF-8 and x-user-defined as
+        // windows-1252; a content-type naming x-user-defined keeps its own
+        // decoder, since the sniffing algorithm takes a transport encoding as is.
+        const found = name === "x-user-defined" ? decoderFor("windows-1252") : decoderFor(charset);
         if (found) return found.encoding.startsWith("utf-16") ? new TextDecoder("utf-8") : found;
       }
+      if (a === "eof") return null;
       pos++;
       continue;
     }
     if (head[pos] === "<" && (isAsciiLetter(head[pos + 1]) || (head[pos + 1] === "/" && isAsciiLetter(head[pos + 2])))) {
       while (pos < head.length && !isPrescanSpace(head[pos]) && head[pos] !== ">") pos++;
-      for (let a = prescanAttribute(head, pos); a; a = prescanAttribute(head, pos)) pos = a.pos;
+      let a = prescanAttribute(head, pos);
+      for (; typeof a === "object"; a = prescanAttribute(head, pos)) pos = a.pos;
+      if (a === "eof") return null;
       pos++;
       continue;
     }

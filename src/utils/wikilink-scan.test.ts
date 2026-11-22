@@ -78,4 +78,50 @@ describe("linear time on the shapes that were quadratic", () => {
   test("64k `[`, `[[a ` and `[[a|` repeated each scan in well under 100 ms", () => {
     for (const s of ["[".repeat(65_536), "[[a ".repeat(16_384), "[[a|".repeat(16_384), "[[a|b]".repeat(11_000)]) expect(time(s)).toBeLessThan(100);
   });
+
+  // A sticky call at every start (`collapseForLocate`, and `split`, which runs
+  // a sticky copy at every position): 2,617 ms for `split` on 64k `[` at ae0772b1.
+  test("sticky exec at every start and split, on 64k `[`, `[[a|` and `a` and 256k `[a`, each in well under 300 ms", () => {
+    for (const s of ["[".repeat(65_536), "[[a|".repeat(16_384), "[[a ".repeat(16_384), "a".repeat(65_536), `${"[a".repeat(131_072)}[[x]]`]) {
+      const t0 = performance.now();
+      const y = wikilinkRegExp("label", "y");
+      for (let at = 0; at < s.length; at++) {
+        y.lastIndex = at;
+        y.exec(s);
+      }
+      s.split(wikilinkRegExp("plain"));
+      expect(performance.now() - t0).toBeLessThan(300);
+    }
+  });
+
+  test("one sticky instance alternating between texts and positions agrees with the regex", () => {
+    const next = rng(1123);
+    const oldY = new RegExp(OLD_LABEL.source, "y");
+    const newY = wikilinkRegExp("label", "y");
+    const diffs: string[] = [];
+    for (let i = 0; i < 2_000; i++) {
+      const texts = [randomText(next), randomText(next)];
+      for (let n = 0; n < 40; n++) {
+        const s = texts[Math.floor(next() * 2)]!;
+        const at = Math.floor(next() * (s.length + 1));
+        oldY.lastIndex = newY.lastIndex = at;
+        const x = oldY.exec(s);
+        const y = newY.exec(s);
+        if ((x && shape(x)) !== (y && shape(y))) diffs.push(`@${at} ${JSON.stringify(s)}`);
+      }
+    }
+    expect(diffs.slice(0, 5)).toEqual([]);
+  });
+
+  test("split agrees with the regex on 5 000 random texts, both kinds", () => {
+    const next = rng(1122);
+    const diffs: string[] = [];
+    for (let i = 0; i < 5_000; i++) {
+      const s = randomText(next);
+      for (const [kind, old] of [["label", OLD_LABEL], ["plain", OLD_PLAIN]] as const) {
+        if (JSON.stringify(s.split(old)) !== JSON.stringify(s.split(wikilinkRegExp(kind)))) diffs.push(`${kind} ${JSON.stringify(s)}`);
+      }
+    }
+    expect(diffs.slice(0, 5)).toEqual([]);
+  });
 });
