@@ -137,7 +137,7 @@ DB tests require the local Postgres container (`bun run db:up`) and a test datab
 Anything verified in a browser goes through Playwright: an `e2e/` spec by default, `playwright-cli` for exploration. The rules for spawned servers (`e2eEnv()`), ports (`e2e/ports.ts`), throwaway bots (`MUNINN_BOTS_DIR`) and seeding (`db:seed:e2e`) are in `e2e/CLAUDE.md`.
 
 Two traps regardless of how the page is driven:
-- **Only a `--watch` server rebuilds the `/wiki` client bundle after an edit.** `wiki-client.ts` imports the reader shell as a value, so `bun run dev` restarts on any `/wiki` client file. A server without `--watch` (`bun run start`, the e2e spec server) serves its first good build until it restarts, and for every other client bundle (gardener, board, chat) `--watch` restarts only on a file the server imports too. A failed build is not kept: the next request builds again.
+- **Only a `--watch` server rebuilds the `/wiki` client bundle after an edit.** `wiki-client.ts` imports the reader shell as a value, so `bun run dev` restarts on any `/wiki` client file. A server without `--watch` (`bun run start`, the e2e spec server) serves its first good build until it restarts, and for every other client bundle (gardener, board, chat) `--watch` restarts only on a file the server imports too. A failed build is not kept: the next request builds again. The price: a `/wiki` client file that throws at import, such as a syntax error, now stops the server from starting (under `--watch`, until the file is fixed).
 - Driving `bun run dev` (port **3010**) by hand runs against the developer's real `.env` — live bots, live wikis. Read-only checks only; anything that writes belongs on the 3011 spec server.
 
 ### CI
