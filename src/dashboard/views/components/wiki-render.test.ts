@@ -233,7 +233,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // A2 fix round 1 batch 2 (the Ask stream drops NUL and U+0001, an angle-bracket link with a parked
 // code span stays as written): 923,689 (316,466 gzipped), so the pin moves to 923,690.
 // A2 rebased on A4 (#893): 928,661, so the pin moves to 928,800.
-const WIKI_CLIENT_MAX_BYTES = 928_800;
+// 2026-11-22, architecture review B5 (F11: the unavailable stale-count state on every surface), rebased on A2: 929,616,
+// so the pin moves to 929,800.
+const WIKI_CLIENT_MAX_BYTES = 929_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
