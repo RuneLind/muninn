@@ -40,7 +40,9 @@
  *
  * The run keeps inside the runner's net: every model call carries one run-wide
  * `deadlineAt` (min(net, tick) minus the net's margin, so `health.finish()` still runs), and
- * no seed starts with less than {@link MIN_SEED_MS} left.
+ * no seed starts with less than {@link MIN_SEED_MS} left. A seed whose model call the deadline
+ * cuts is no failure of the seed or the model: it is left for the next run uncharged, and
+ * `youtube:model` does not count it.
  */
 
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -77,6 +79,11 @@ export const HEALTH_STORE = "youtube:store";
 const MAX_SEEDS_LIMIT = 10;
 /** A seed needs this much of the run's budget left to start (a healthy run took 11–14 s in 4 live traces, 2026-11-14). */
 export const MIN_SEED_MS = 60_000;
+/**
+ * A model call that fails with less than this left before the run's deadline was cut by it: the
+ * router bounds its last attempt at the deadline itself, so such a call rejects at or after it.
+ */
+export const DEADLINE_CUT_SLACK_MS = 1_000;
 /** Failed attempts (the first one included) after which a seed is no longer retried. */
 export const MAX_SEED_ATTEMPTS = 3;
 /**
@@ -210,8 +217,12 @@ export const emptyTally = (): RunTally => ({
   searches: { ran: 0, failed: 0 },
 });
 
-/** Which steps one outcome reached and failed (`runDiscovery` runs read → queries → search → rank). */
-export function tallyOutcome(out: DiscoverRunOutcome, t: RunTally): void {
+/**
+ * Which steps one outcome reached and failed (`runDiscovery` runs read → queries → search → rank).
+ * A seed's searches count whatever later step failed. `deadlineCut`: the model call was cut by the
+ * run's deadline, which says nothing about the model, so the model step is not counted at all.
+ */
+export function tallyOutcome(out: DiscoverRunOutcome, t: RunTally, deadlineCut = false): void {
   const fail = (s: StepTally, detail: string) => {
     s.reached++;
     s.failed++;
@@ -234,19 +245,21 @@ export function tallyOutcome(out: DiscoverRunOutcome, t: RunTally): void {
       return;
     case "queries":
       pass(t.huginn);
-      fail(t.model, why);
+      if (!deadlineCut) fail(t.model, why);
       return;
     case "search":
       pass(t.huginn);
       pass(t.model);
       fail(t.search, why);
       t.searches.ran += out.searches ?? 0;
-      t.searches.failed += out.searches ?? 0;
+      t.searches.failed += out.failed ?? out.searches ?? 0;
       return;
     case "rank":
       pass(t.huginn);
       pass(t.search);
-      fail(t.model, why);
+      t.searches.ran += out.searches ?? 0;
+      t.searches.failed += out.failed ?? 0;
+      if (!deadlineCut) fail(t.model, why);
       return;
   }
 }
@@ -415,6 +428,18 @@ export async function checkYouTubeDiscovery(
     return new Set([...captured, ...stored, ...shelved]);
   };
   const opts = { deadlineAt };
+  // Set when a model call of the current seed rejects at the deadline (see DEADLINE_CUT_SLACK_MS).
+  let cut = false;
+  const bounded =
+    <A extends unknown[]>(call: (...a: A) => Promise<string>) =>
+    async (...a: A): Promise<string> => {
+      try {
+        return await call(...a);
+      } catch (err) {
+        if (deadlineAt - now() < DEADLINE_CUT_SLACK_MS) cut = true;
+        throw err;
+      }
+    };
   // The owner's interest profile, read once per run (it changes weekly at most).
   let profile: Promise<string | null> | null = null;
   const loadProfile = () => (profile ??= deps.profile(watcher.userId, botName));
@@ -443,12 +468,13 @@ export async function checkYouTubeDiscovery(
     }
     started.add(seed.id);
     if (isRetry) retried++;
+    cut = false;
     const tracer = deps.tracer?.(botConfig) ?? null;
     const out = await runDiscovery(
       {
         readRaw: deps.services.readRaw,
-        queriesCall: (p, b, t) => deps.services.queriesCall(p, b, t, opts),
-        rankCall: (p, b, t) => deps.services.rankCall(p, b, t, opts),
+        queriesCall: bounded((p, b, t) => deps.services.queriesCall(p, b, t, opts)),
+        rankCall: bounded((p, b, t) => deps.services.rankCall(p, b, t, opts)),
         search: deps.services.search,
         knownIds,
         profile: loadProfile,
@@ -457,7 +483,17 @@ export async function checkYouTubeDiscovery(
       tracer,
       { collection: YOUTUBE_SUMMARIES_COLLECTION, docId: seed.id },
     );
-    tallyOutcome(out, tally);
+    const deadlineCut = cut && !out.ok && out.code === "model_failed";
+    tallyOutcome(out, tally, deadlineCut);
+    if (deadlineCut) {
+      // The run ran out of time, not the seed: no attempt is charged, and a week seed stays a
+      // seed (carried). A retry keeps its record as it was; only a failed final save leaves the
+      // checkpoint's pre-charged attempt standing.
+      log.warn("YouTube discovery: the run's deadline cut {doc}; left for the next run", { botName, doc: seed.id });
+      started.delete(seed.id);
+      if (isRetry) retried--;
+      break;
+    }
     if (!isRetry && (out.ok || out.code !== "not_found")) weekRan++;
     if (!out.ok) {
       log.warn("YouTube discovery: {code} for {doc}: {error}", { botName, doc: seed.id, code: out.code, error: out.cause ?? out.error });

@@ -887,3 +887,83 @@ describe("F14 fix round 1 batch 1: retry budget, floor drops, state robustness",
     expect(state!.retry[id(1)]).toMatchObject({ attempts: 1, error: expect.stringContaining("search") });
   });
 });
+
+describe("F14 fix round 1 batch 3: search tally after a rank failure; a deadline cut is no failure", () => {
+  const DAY = 86_400_000;
+  const id = (n: number) => `ai/Seed ${n}.md`;
+
+  test("a rank failure after partly failed searches still counts the seed's searches: 2 of 6 failed", async () => {
+    listed = [doc(1, "2026-11-13"), doc(2, "2026-11-12")];
+    queriesAnswer = async (p) => {
+      const n = /Title: Seed (\d+)/.exec(p)?.[1];
+      return JSON.stringify([1, 2, 3].map((i) => ({ query: `s${n}q${i}`, why: "same topic" })));
+    };
+    searchAnswer = async (q) => (q === "s2q1" || q === "s2q2" ? null : [hit(vid(Number(q[1]) * 10 + Number(q[3])))]);
+    let ranks = 0;
+    rankAnswer = async () => {
+      if (++ranks === 2) throw new Error("429 overloaded");
+      return JSON.stringify([{ n: 1, score: 0.8, why: "fits" }]);
+    };
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(ranks).toBe(2);
+    expect(marks.get(HEALTH_SEARCH)).toEqual({ outcome: "ok", detail: "2 of 6 searches failed" });
+  });
+
+  const deadlineOf = (w: Watcher) => NOW + Math.min(computeWatcherTimeoutMs(w), TICK_TIMEOUT_MS) - WATCHER_TIMEOUT_MARGIN_MS;
+  /** The first rank call is cut by the run's deadline: the clock reaches it and the router's deadline error rejects. */
+  function cutRun(): { d: YouTubeDiscoveryDeps; w: Watcher; setClock: (t: number) => void } {
+    let clock = NOW;
+    const w = watcher({ timeoutMs: 300_000 });
+    const d = deps({
+      now: () => clock,
+      saveRun: async (run, hits) => {
+        saved.push({ run, hits });
+        recent.set(run.seedDocId, clock);
+        return `run-${saved.length}`;
+      },
+    });
+    d.services.rankCall = async () => {
+      if (clock < NOW + DAY) {
+        clock = deadlineOf(w);
+        throw new Error("haiku-router: deadline passed before the CLI call");
+      }
+      return rankAnswer("");
+    };
+    return { d, w, setClock: (t) => void (clock = t) };
+  }
+
+  test("a week seed whose rank call the deadline cuts: no retry record, carried to the next run, model not error", async () => {
+    listed = [doc(1, "2026-11-13")];
+    const { d, w, setClock } = cutRun();
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(saved).toEqual([]);
+    expect(state!.retry).toEqual({});
+    expect(state!.carryFrom).toBe("2026-11-13");
+    expect(marks.get(HEALTH_MODEL)?.outcome).not.toBe("error");
+    expect(carried).toContain(HEALTH_MODEL);
+    // Next week the seed runs again and makes its shelf.
+    setClock(NOW + 7 * DAY);
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual([id(1)]);
+  });
+
+  test("a retry whose rank call the deadline cuts keeps its attempt count", async () => {
+    listed = [doc(1, "2026-11-10")];
+    state = { carryFrom: null, retry: { [id(1)]: { attempts: 1, lastAt: NOW - 7 * DAY, error: "rank call: 429" } } };
+    const { d, w } = cutRun();
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(saved).toEqual([]);
+    expect(state!.retry[id(1)]).toEqual({ attempts: 1, lastAt: NOW - 7 * DAY, error: "rank call: 429" });
+    expect(marks.get(HEALTH_MODEL)?.outcome).not.toBe("error");
+  });
+
+  test("a queries call the deadline cuts is no failure either", async () => {
+    listed = [doc(1, "2026-11-13")];
+    const { d, w } = cutRun();
+    d.services.queriesCall = d.services.rankCall;
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(state!.retry).toEqual({});
+    expect(state!.carryFrom).toBe("2026-11-13");
+    expect(carried).toContain(HEALTH_MODEL);
+  });
+});

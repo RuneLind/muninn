@@ -83,8 +83,9 @@ export type DiscoverRunOutcome =
       cause?: string;
       /** The step that failed: the watcher's health keys judge each step on its own. */
       stage: "read" | "queries" | "search" | "rank";
-      /** On a `search` failure: how many searches ran (every one failed). */
+      /** On a `search` or `rank` failure: how many searches ran, and how many of them failed. */
       searches?: number;
+      failed?: number;
     };
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -157,7 +158,7 @@ export async function runDiscovery(
   tracer?.end("search", { failed }, failed === answers.length ? "error" : "ok");
   if (failed === answers.length) {
     tracer?.finish("error", { error: "every search failed" });
-    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search", searches: answers.length };
+    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search", searches: answers.length, failed };
   }
   const union = new Map<string, { hit: YouTubeHit; query: string }>();
   answers.forEach((hits, i) => {
@@ -192,13 +193,13 @@ export async function runDiscovery(
     } catch {
       tracer?.end("rank", { error: "unparseable" }, "error");
       tracer?.finish("error");
-      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again.", stage: "rank" };
+      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again.", stage: "rank", searches: answers.length, failed };
     }
     tracer?.end("rank", { scored: scores.size });
   } catch (err) {
     tracer?.end("rank", { error: errText(err) }, "error");
     tracer?.finish("error");
-    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}`, stage: "rank" };
+    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}`, stage: "rank", searches: answers.length, failed };
   }
   const results: DiscoverResult[] = fresh
     .map((f, i) => ({ f, s: scores.get(i + 1), i }))
