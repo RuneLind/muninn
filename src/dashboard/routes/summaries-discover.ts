@@ -36,14 +36,14 @@ import {
   getDiscoverKnownVideoIds,
   getDiscoverVideoDetails,
   isDiscoverHitState,
-  listDiscoverShelves,
+  listDiscoverShelfPage,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
   setDiscoverVideoState,
   type DiscoverHitInput,
   type DiscoverHitState,
   type DiscoverRunInput,
-  type DiscoverShelf,
+  type DiscoverShelfPage,
   type DiscoverVideoDetails,
 } from "../../db/youtube-discover.ts";
 import { renderSummariesDiscoverPage } from "../views/summaries-discover-page.ts";
@@ -90,7 +90,8 @@ export interface SummariesDiscoverDeps {
     setState: (videoId: string, state: DiscoverHitState) => Promise<number>;
     getDetails: (videoId: string) => Promise<DiscoverVideoDetails | null | undefined>;
     saveDetails: (videoId: string, details: DiscoverVideoDetails) => Promise<void>;
-    listShelves: () => Promise<DiscoverShelf[]>;
+    /** The page's shelves and how many older ones are left out (`listDiscoverShelfPage`). */
+    listShelves: () => Promise<DiscoverShelfPage>;
   };
   /** One details probe: details, `"unavailable"` when the video is gone, or `null` when it failed. `signal` aborts when no caller is left. */
   probeDetails: (videoId: string, signal?: AbortSignal) => Promise<DiscoverVideoDetails | "unavailable" | null>;
@@ -105,7 +106,7 @@ export const DISCOVER_STORE: SummariesDiscoverDeps["store"] = {
   setState: setDiscoverVideoState,
   getDetails: getDiscoverVideoDetails,
   saveDetails: saveDiscoverVideoDetails,
-  listShelves: () => listDiscoverShelves(),
+  listShelves: () => listDiscoverShelfPage(),
 };
 
 export function defaultSummariesDiscoverDeps(
@@ -197,14 +198,14 @@ export function registerSummariesDiscoverRoutes(
   }
 
   app.get("/summaries/discover", async (c) => {
-    let shelves: DiscoverShelf[];
+    let page: DiscoverShelfPage;
     try {
-      shelves = await deps.store.listShelves();
+      page = await deps.store.listShelves();
     } catch (err) {
       log.error("Discover page: shelves read failed: {error}", { error: errText(err) });
-      return c.html(await renderSummariesDiscoverPage({ shelves: [], error: "Could not read the stored shelves." }), 500);
+      return c.html(await renderSummariesDiscoverPage({ shelves: [], hidden: 0, error: "Could not read the stored shelves." }), 500);
     }
-    return c.html(await renderSummariesDiscoverPage({ shelves }));
+    return c.html(await renderSummariesDiscoverPage(page));
   });
 
   /** The seed bar's choices: every YouTube summary, newest first, and the categories. */
@@ -221,7 +222,8 @@ export function registerSummariesDiscoverRoutes(
   /** The stored shelves, for the page to re-render after a run. */
   app.get("/api/summaries/discover/shelves", async (c) => {
     try {
-      return c.json({ shelves: await deps.store.listShelves() });
+      const page = await deps.store.listShelves();
+      return c.json({ shelves: page.shelves, hidden: page.hidden });
     } catch (err) {
       log.error("Discover: shelves read failed: {error}", { error: errText(err) });
       return c.json({ error: "Could not read the stored shelves.", code: "internal" }, 500);
@@ -280,6 +282,7 @@ export function registerSummariesDiscoverRoutes(
             known: out.known,
             origin,
             botName: bot.name,
+            failed: out.failed,
           },
           out.results,
         );
@@ -292,6 +295,7 @@ export function registerSummariesDiscoverRoutes(
         results: out.results,
         searched: out.searched,
         known: out.known,
+        failed: out.failed,
         runId,
         shelfUrl: runId ? discoverShelfUrl(runId) : null,
       });

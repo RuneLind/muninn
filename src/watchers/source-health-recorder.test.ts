@@ -21,7 +21,7 @@ mock.module("../db/watchers.ts", () => ({
   },
 }));
 
-const { openSourceHealth, SOURCE_HEALTH_KEY, HEALTH_ESCALATE_AFTER } = await import("./source-health.ts");
+const { openSourceHealth, SOURCE_HEALTH_KEY, HEALTH_ESCALATE_AFTER, sourceEscalateAfter } = await import("./source-health.ts");
 
 const NOW = 1_800_000_000_000;
 const H = 3_600_000;
@@ -120,5 +120,26 @@ describe("openSourceHealth", () => {
     // whole point of buildHealthAlerts being pure.
     const alerts = await rec.finish();
     expect(alerts).toHaveLength(1);
+  });
+
+  test("a weekly source escalates on its first failed run (F16), with one id across the episode", async () => {
+    const escalateAfter = sourceEscalateAfter(7 * 24 * H);
+    const ids: string[] = [];
+    for (let run = 1; run <= 3; run++) {
+      const rec = await openSourceHealth("w1", "YouTube discovery", NOW + run * 7 * 24 * H, { escalateAfter });
+      rec.mark("youtube:search", "error", "yt-dlp missing");
+      const alerts = await rec.finish();
+      expect(alerts).toHaveLength(1);
+      ids.push(alerts[0]!.id);
+    }
+    // Re-emitted every run, deduped by the runner on one stable id (bucket 0 from the source's own threshold).
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toEndWith(":never:0");
+  });
+
+  test("without a threshold the recorder keeps three runs", async () => {
+    const rec = await openSourceHealth("w1", "W", NOW + H);
+    rec.mark("s", "error", "boom");
+    expect(await rec.finish()).toHaveLength(0);
   });
 });

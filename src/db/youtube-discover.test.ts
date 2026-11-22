@@ -9,9 +9,11 @@ import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
 import {
   getDiscoverKnownVideoIds,
+  getDiscoverRetrySeeds,
   getDiscoverVideoDetails,
   getLatestDiscoverRunTimes,
   getLatestDiscoverRunAt,
+  listDiscoverShelfPage,
   listDiscoverShelves,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
@@ -204,5 +206,60 @@ describe("getLatestDiscoverRunAt (fix round 2 batch 1)", () => {
     await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-10T12:00:00Z' WHERE id = ${other}`;
     expect(await getLatestDiscoverRunAt("watcher", "bot-a")).toBe(Date.parse("2026-11-07T12:00:00Z"));
     expect(await getLatestDiscoverRunAt("watcher", "bot-none")).toBeNull();
+  });
+});
+
+describe("failed runs and the shelf window (architecture review 2026-11-16, F14 + F18)", () => {
+  const at = (id: string, iso: string) => getDb()`UPDATE youtube_discover_runs SET created_at = ${iso} WHERE id = ${id}`;
+
+  test("a run stores its failed count; absent is 0", async () => {
+    await saveDiscoverRun(run({ seedDocId: "f/Clean.md" }), [hit("vidFFFFFFF1", 0.9)]);
+    await saveDiscoverRun(run({ seedDocId: "f/Failed.md", failed: 3 }), []);
+    const shelves = await listDiscoverShelves();
+    const by = Object.fromEntries(shelves.map((s) => [s.seedDocId, s.failed]));
+    expect(by).toEqual({ "f/Clean.md": 0, "f/Failed.md": 3 });
+  });
+
+  test("retry seeds: a seed whose newest run failed, with its failed runs since the last complete one", async () => {
+    const ok1 = await saveDiscoverRun(run({ seedDocId: "r/A.md" }), []);
+    const f1 = await saveDiscoverRun(run({ seedDocId: "r/A.md", failed: 2 }), []);
+    const f2 = await saveDiscoverRun(run({ seedDocId: "r/A.md", failed: 1 }), []);
+    const old = await saveDiscoverRun(run({ seedDocId: "r/A.md", failed: 5 }), []);
+    await at(old, "2026-10-01T00:00:00Z"); // before the complete run: not counted
+    await at(ok1, "2026-11-01T00:00:00Z");
+    await at(f1, "2026-11-08T00:00:00Z");
+    await at(f2, "2026-11-15T00:00:00Z");
+    // Recovered: its newest run is complete.
+    const bf = await saveDiscoverRun(run({ seedDocId: "r/B.md", failed: 1 }), []);
+    const bok = await saveDiscoverRun(run({ seedDocId: "r/B.md" }), []);
+    await at(bf, "2026-11-08T00:00:00Z");
+    await at(bok, "2026-11-15T00:00:00Z");
+    // Never complete.
+    await saveDiscoverRun(run({ seedDocId: "r/C.md", failed: 4 }), []);
+    // Another source.
+    await saveDiscoverRun(run({ seedDocId: "r/D.md", seedSource: "vimeo", failed: 1 }), []);
+    const got = await getDiscoverRetrySeeds();
+    expect([...got.entries()].sort()).toEqual([
+      ["r/A.md", 2],
+      ["r/C.md", 1],
+    ]);
+  });
+
+  test("the page reads 40 shelves, counts the rest, and keeps an older shelf holding a Later video", async () => {
+    const ids: string[] = [];
+    for (let i = 1; i <= 45; i++) {
+      const id = await saveDiscoverRun(run({ seedDocId: `w/Shelf ${i}.md` }), [hit(`vid${String(i).padStart(8, "0")}`, 0.9)]);
+      // Shelf 1 is the newest, shelf 45 the oldest.
+      await at(id, new Date(Date.parse("2026-11-20T00:00:00Z") - i * 3_600_000).toISOString());
+      ids.push(id);
+    }
+    expect(await setDiscoverVideoState("vid00000045", "later")).toBe(1);
+    const page = await listDiscoverShelfPage();
+    expect(page.shelves).toHaveLength(41);
+    expect(page.shelves.slice(0, 40).map((s) => s.seedDocId)).toEqual(Array.from({ length: 40 }, (_, i) => `w/Shelf ${i + 1}.md`));
+    expect(page.shelves[40]!.seedDocId).toBe("w/Shelf 45.md");
+    expect(page.shelves[40]!.hits[0]!.state).toBe("later");
+    expect(page.hidden).toBe(4);
+    expect(await listDiscoverShelfPage(50)).toMatchObject({ hidden: 0 });
   });
 });

@@ -1,7 +1,19 @@
 /** The Discover page's pure helpers: lengths, counts, ages, and which cards a shelf shows in what order. */
 import { describe, expect, test } from "bun:test";
-import { dscAge, dscCount, dscDuration, dscVisibleHits } from "./discover-page-client.ts";
-import type { DiscoverHit } from "../../../db/youtube-discover.ts";
+import {
+  dscAge,
+  dscCount,
+  dscDuration,
+  dscFailedNote,
+  dscHiddenNote,
+  dscVisibleHits,
+  followCaptureJob,
+  summarizeFlow,
+  type CaptureEnd,
+  type CaptureStream,
+  type SummarizeFlowDeps,
+} from "./discover-page-client.ts";
+import type { DiscoverHit, DiscoverHitState } from "../../../db/youtube-discover.ts";
 import { dscFilterSeeds } from "./discover-seed-bar-client.ts";
 import type { SeedDoc } from "../../../youtube/discover-seeds.ts";
 
@@ -99,5 +111,110 @@ describe("dscFilterSeeds (PR 3 pick list)", () => {
   test("an empty filter lists everything, up to the limit", () => {
     expect(dscFilterSeeds(docs, "  ")).toHaveLength(4);
     expect(dscFilterSeeds(docs, "", 2).map((d) => d.id)).toEqual(["ai/agents/1.md", "ai/claude/2.md"]);
+  });
+});
+
+/** A scripted EventSource: `fire` delivers an event the way the browser would. */
+function fakeStream() {
+  const listeners = new Map<string, ((e: MessageEvent) => void)[]>();
+  const es: CaptureStream & { url?: string; closed: boolean } = {
+    closed: false,
+    onerror: null,
+    addEventListener: (type, fn) => void listeners.set(type, [...(listeners.get(type) ?? []), fn]),
+    close: () => void (es.closed = true),
+  };
+  const fire = (type: string, data?: string) => {
+    const e = { data } as MessageEvent;
+    for (const fn of listeners.get(type) ?? []) fn(e);
+    // As in the browser: an `error` event (the server's `event: error` too) also reaches `onerror`.
+    if (type === "error") es.onerror?.(e as unknown as Event);
+  };
+  return { es, fire };
+}
+
+describe("followCaptureJob (F17)", () => {
+  test("the job's error event ends it with the job's message, and closes the stream", async () => {
+    const { es, fire } = fakeStream();
+    let url = "";
+    const p = followCaptureJob("job 1", (u) => ((url = u), es));
+    fire("status", JSON.stringify({ status: "fetching_transcript" }));
+    fire("error", JSON.stringify({ message: "No transcript for this video" }));
+    expect(await p).toEqual({ end: "error", message: "No transcript for this video" });
+    expect(url).toBe("/api/youtube/stream/job%201");
+    expect(es.closed).toBe(true);
+  });
+  test("complete ends it; a transport error (no data) is lost, not a failure", async () => {
+    const a = fakeStream();
+    const p1 = followCaptureJob("j", () => a.es);
+    a.fire("complete", "{}");
+    expect(await p1).toEqual({ end: "complete" });
+
+    const b = fakeStream();
+    const p2 = followCaptureJob("j", () => b.es);
+    b.fire("error"); // EventSource's own error event carries no data
+    expect(await p2).toEqual({ end: "lost" });
+  });
+});
+
+describe("summarizeFlow (F17)", () => {
+  const run = async (end: CaptureEnd, data: Record<string, unknown> = { job_id: "j1" }, before: DiscoverHitState = "new") => {
+    let state: DiscoverHitState = before;
+    const states: DiscoverHitState[] = [];
+    const toasts: string[] = [];
+    let queuedAt = -1;
+    const deps: SummarizeFlowDeps = {
+      start: async () => ({ ok: true, status: 200, data }),
+      setState: async (s) => {
+        state = s;
+        states.push(s);
+        return null;
+      },
+      follow: async () => end,
+      toast: (m) => void toasts.push(m),
+      queued: () => void (queuedAt = states.length),
+    };
+    await summarizeFlow(before, deps);
+    return { state, states, toasts, queuedAt };
+  };
+
+  test("a failed capture clears queued back to the earlier state and says why", async () => {
+    const r = await run({ end: "error", message: "No transcript for this video" });
+    expect(r.states).toEqual(["queued", "new"]);
+    expect(r.state).toBe("new");
+    expect(r.queuedAt).toBe(1);
+    expect(r.toasts.at(-1)).toBe("The summary failed: No transcript for this video. You can try again.");
+  });
+  test("a Later video goes back to Later", async () => {
+    expect((await run({ end: "error", message: "x" }, { job_id: "j1" }, "later")).state).toBe("later");
+  });
+  test("a completed or lost job stays queued; a duplicate is not followed", async () => {
+    expect((await run({ end: "complete" })).state).toBe("queued");
+    expect((await run({ end: "lost" })).state).toBe("queued");
+    expect((await run({ end: "error", message: "x" }, { duplicate: true, job_id: "j1" })).state).toBe("queued");
+  });
+  test("a refused start writes no state", async () => {
+    const states: DiscoverHitState[] = [];
+    const toasts: string[] = [];
+    await summarizeFlow("new", {
+      start: async () => ({ ok: false, status: 503, data: { error: "Summarizer offline" } }),
+      setState: async (s) => (states.push(s), null),
+      follow: async () => ({ end: "complete" }),
+      toast: (m) => void toasts.push(m),
+      queued: () => {},
+    });
+    expect(states).toEqual([]);
+    expect(toasts).toEqual(["Summarizer offline"]);
+  });
+});
+
+describe("shelf notes (F14, F18)", () => {
+  test("hidden shelves", () => {
+    expect(dscHiddenNote(0)).toBe("");
+    expect(dscHiddenNote(1)).toBe("1 older shelf is not shown. A shelf holding a video saved for Later is always shown.");
+    expect(dscHiddenNote(4)).toStartWith("4 older shelves are not shown.");
+  });
+  test("a failed run", () => {
+    expect(dscFailedNote({ failed: 1 })).toStartWith("1 call of this search failed");
+    expect(dscFailedNote({ failed: 3 })).toStartWith("3 calls of this search failed");
   });
 });

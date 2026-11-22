@@ -17,6 +17,8 @@ import {
   HEALTH_MODEL,
   HEALTH_SEARCH,
   HEALTH_STORE,
+  MAX_RETRY_ATTEMPTS,
+  discoveryEscalateAfter,
   resolveMaxSeeds,
   type YouTubeDiscoveryDeps,
 } from "./youtube-discovery.ts";
@@ -46,6 +48,7 @@ let marks: Map<string, { outcome: SourceOutcome; detail?: string }>;
 let carried: string[];
 let rankPrompts: string[];
 let lastWatcherRun: number | null;
+let retry: Map<string, number>;
 
 function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
   return {
@@ -72,6 +75,7 @@ function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
     },
     storedKnownIds: async () => stored,
     latestRunTimes: async (ids) => new Map([...recent].filter(([id]) => ids.includes(id))),
+    retrySeeds: async () => retry,
     lastWatcherRunAt: async () => lastWatcherRun,
     profile: async (userId, botName) => {
       profileCalls.push(`${userId}|${botName}`);
@@ -102,6 +106,7 @@ beforeEach(() => {
   carried = [];
   rankPrompts = [];
   lastWatcherRun = null;
+  retry = new Map();
 });
 
 describe("checkYouTubeDiscovery", () => {
@@ -166,13 +171,17 @@ describe("checkYouTubeDiscovery", () => {
     expect(saved).toEqual([]);
   });
 
-  test("every search failing marks search error, model and huginn ok", async () => {
+  test("every search failing marks search error, model and huginn ok; each seed is stored as a failed run", async () => {
     searchAnswer = async () => null;
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
     expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("error");
     expect(marks.get(HEALTH_MODEL)?.outcome).toBe("ok");
     expect(marks.get(HEALTH_HUGINN)?.outcome).toBe("ok");
-    expect(saved).toEqual([]);
+    expect(saved.map((s) => [s.run.seedDocId, s.run.failed, s.hits.length])).toEqual([
+      ["ai/Seed 1.md", 1, 0],
+      ["ai/Seed 2.md", 1, 0],
+      ["ai/Seed 3.md", 1, 0],
+    ]);
   });
 
   test("every rank call failing marks model error with the cause", async () => {
@@ -180,11 +189,11 @@ describe("checkYouTubeDiscovery", () => {
       throw new Error("429 overloaded");
     };
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
-    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "rank call: 429 overloaded" });
+    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: rank call: 429 overloaded" });
     expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("ok");
   });
 
-  test("one seed passing a step is enough for ok", async () => {
+  test("one seed failing a step is error, even when the others passed it (F14)", async () => {
     let n = 0;
     queriesAnswer = async () => {
       n++;
@@ -192,8 +201,8 @@ describe("checkYouTubeDiscovery", () => {
       return JSON.stringify([{ query: "agent evals", why: "same topic" }]);
     };
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
-    expect(marks.get(HEALTH_MODEL)?.outcome).toBe("ok");
-    expect(saved).toHaveLength(2);
+    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "1 of 3 seeds failed: queries call: timeout" });
+    expect(saved.map((s) => s.run.failed)).toEqual([0, 1, 0]);
   });
 
   test("a seed deleted since the listing is not a huginn failure; a failed read is", async () => {
@@ -269,7 +278,7 @@ describe("fix round 1 batch 1", () => {
         },
       }),
     );
-    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "relation youtube_discover_runs does not exist" });
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: relation youtube_discover_runs does not exist" });
 
     marks = new Map();
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
@@ -383,7 +392,7 @@ describe("fix round 2 batch 5 (pins)", () => {
         },
       }),
     );
-    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "failure 1" });
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: failure 1" });
   });
 });
 
@@ -408,5 +417,100 @@ describe("fix round 2 batch 6 (pins)", () => {
     await checkYouTubeDiscovery(watcher(), bot, undefined, d);
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
     expect(marks.get(HEALTH_STORE)?.outcome).toBe("ok");
+  });
+});
+
+describe("architecture review 2026-11-16 (F14, F16)", () => {
+  const five = () => {
+    listed = [1, 2, 3, 4, 5].map((n) => doc(n, "2026-11-13"));
+    raws = new Map([1, 2, 3, 4, 5].map((n) => [`ai/Seed ${n}.md`, raw(n)]));
+  };
+  // Seeds 1, 3 and 5's searches all fail; their queries name the seed.
+  const failFor = (bad: number[]) => {
+    queriesAnswer = async (p) => {
+      const n = /Invented summary (\d)/.exec(p)?.[1] ?? "0";
+      return JSON.stringify([
+        { query: `seed${n} a`, why: "x" },
+        { query: `seed${n} b`, why: "x" },
+      ]);
+    };
+    let call = 0;
+    searchAnswer = async (q) => {
+      if (bad.some((b) => q.startsWith(`seed${b} `))) return null;
+      call++;
+      return [hit(vid(call))];
+    };
+  };
+
+  test("searches failing for 3 of 5 seeds: stored with failed counts, youtube:search error", async () => {
+    five();
+    failFor([1, 3, 5]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => [s.run.seedDocId, s.run.failed])).toEqual([
+      ["ai/Seed 1.md", 2],
+      ["ai/Seed 2.md", 0],
+      ["ai/Seed 3.md", 2],
+      ["ai/Seed 4.md", 0],
+      ["ai/Seed 5.md", 2],
+    ]);
+    expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("error");
+    expect(marks.get(HEALTH_SEARCH)?.detail).toStartWith("3 of 5 seeds failed: ");
+  });
+
+  test("one failed search of a seed's two is a partial failure: the shelf is stored, failed=1, search error", async () => {
+    listed = [doc(1, "2026-11-13")];
+    queriesAnswer = async () => JSON.stringify([{ query: "good", why: "x" }, { query: "bad", why: "x" }]);
+    searchAnswer = async (q) => (q === "bad" ? null : [hit(vid(7))]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.run.failed).toBe(1);
+    expect(saved[0]!.hits.map((h) => h.videoId)).toEqual([vid(7)]);
+    expect(marks.get(HEALTH_SEARCH)).toEqual({ outcome: "error", detail: "1 of 1 seeds failed: 1 of 2 searches failed" });
+  });
+
+  test("a search that truly finds nothing is not a failure", async () => {
+    searchAnswer = async () => [];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.failed)).toEqual([0, 0, 0]);
+    expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("ok");
+  });
+
+  test("a failed seed is retried first next run, though the window has moved past it", async () => {
+    // Last week's failed seeds (dated two weeks ago) and this week's fresh one.
+    listed = [doc(1, "2026-10-30"), doc(2, "2026-10-30"), doc(3, "2026-11-13")];
+    raws = new Map([1, 2, 3].map((n) => [`ai/Seed ${n}.md`, raw(n)]));
+    lastWatcherRun = Date.parse("2026-11-07T12:00:00Z");
+    retry = new Map([
+      ["ai/Seed 1.md", 1],
+      ["ai/Seed 2.md", 1],
+    ]);
+    recent = new Map([
+      ["ai/Seed 1.md", lastWatcherRun],
+      ["ai/Seed 2.md", lastWatcherRun],
+    ]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 1.md", "ai/Seed 2.md", "ai/Seed 3.md"]);
+  });
+
+  test(`a seed that failed ${MAX_RETRY_ATTEMPTS} runs in a row is not retried, nor searched as fresh`, async () => {
+    listed = [doc(1, "2026-11-13"), doc(2, "2026-11-13")];
+    retry = new Map([["ai/Seed 1.md", MAX_RETRY_ATTEMPTS]]);
+    recent = new Map([["ai/Seed 1.md", NOW - 86_400_000]]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
+  });
+
+  test("a seed deleted since the listing stores no failed run", async () => {
+    listed = [doc(1, "2026-11-13")];
+    raws = new Map();
+    await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
+    expect(saved).toEqual([]);
+  });
+
+  test("F16: the weekly row escalates at 1; a daily row keeps 3", () => {
+    const weekly = { intervalMs: 7 * 86_400_000, config: { hour: 12 } } as unknown as Watcher;
+    const daily = { intervalMs: 86_400_000, config: {} } as unknown as Watcher;
+    expect(discoveryEscalateAfter(weekly)).toBe(1);
+    expect(discoveryEscalateAfter(daily)).toBe(3);
   });
 });

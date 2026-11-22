@@ -982,7 +982,9 @@ CREATE TABLE youtube_discover_runs (
   known         INTEGER NOT NULL DEFAULT 0,
   origin        TEXT NOT NULL CHECK (origin IN ('reader', 'page', 'watcher')),
   bot_name      TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Migration 092: the run's failed calls (searches, read, queries, rank); 0 = complete.
+  failed        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_source, seed_doc_id, created_at DESC);

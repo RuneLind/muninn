@@ -52,6 +52,8 @@ export interface DiscoverRunInput {
   known: number;
   origin: DiscoverRunOrigin;
   botName: string | null;
+  /** The run's failed calls (migration 092); absent = 0, a complete run. */
+  failed?: number;
 }
 
 export interface DiscoverHitInput {
@@ -83,6 +85,8 @@ export interface DiscoverShelf {
   searched: number;
   known: number;
   origin: DiscoverRunOrigin;
+  /** The run's failed calls (migration 092): searches, or the read/queries/rank call. 0 = complete. */
+  failed: number;
   /** Epoch ms. */
   createdAt: number;
   hits: DiscoverHit[];
@@ -132,10 +136,11 @@ export async function saveDiscoverRun(
   return getDb().begin(async (sql) => {
     const [row] = await sql`
       INSERT INTO youtube_discover_runs
-        (seed_source, seed_doc_id, seed_title, seed_video_id, seed_category, seed_date, queries, searched, known, origin, bot_name)
+        (seed_source, seed_doc_id, seed_title, seed_video_id, seed_category, seed_date, queries, searched, known, origin, bot_name, failed)
       VALUES
         (${run.seedSource ?? "youtube"}, ${run.seedDocId}, ${run.seedTitle}, ${run.seedVideoId}, ${run.seedCategory},
-         ${run.seedDate}, ${sql.json(run.queries as never)}, ${run.searched}, ${run.known}, ${run.origin}, ${run.botName})
+         ${run.seedDate}, ${sql.json(run.queries as never)}, ${run.searched}, ${run.known}, ${run.origin}, ${run.botName},
+         ${Math.max(0, Math.round(run.failed ?? 0))})
       RETURNING id
     `;
     const runId = row!.id as string;
@@ -165,19 +170,43 @@ export async function saveDiscoverRun(
   });
 }
 
+/** Shelves the Discover page reads at once (PR #861's cap); older ones are counted, not shown. */
+export const DISCOVER_SHELF_LIMIT = 40;
+
+export interface DiscoverShelfPage {
+  /** The newest {@link DISCOVER_SHELF_LIMIT} shelves, then every older shelf holding a Later video. */
+  shelves: DiscoverShelf[];
+  /** Older shelves left out. */
+  hidden: number;
+}
+
 /** The newest run of each seed, newest first, with its hits in rank order. */
-export async function listDiscoverShelves(limit = 40): Promise<DiscoverShelf[]> {
+export async function listDiscoverShelves(limit = DISCOVER_SHELF_LIMIT): Promise<DiscoverShelf[]> {
+  return (await listDiscoverShelfPage(limit)).shelves;
+}
+
+/**
+ * The page's read: the newest `limit` shelves, plus any older shelf holding a
+ * video saved for Later (architecture review 2026-11-16, F18: a starred video
+ * past the cap was unreachable), and how many older shelves are left out.
+ */
+export async function listDiscoverShelfPage(limit = DISCOVER_SHELF_LIMIT): Promise<DiscoverShelfPage> {
   const sql = getDb();
   const runs = await sql`
-    SELECT * FROM (
+    WITH newest AS (
       SELECT DISTINCT ON (seed_source, seed_doc_id) *
       FROM youtube_discover_runs
       ORDER BY seed_source, seed_doc_id, created_at DESC, id
-    ) newest
-    ORDER BY created_at DESC, id
-    LIMIT ${limit}
+    ), ranked AS (
+      SELECT *, row_number() OVER (ORDER BY created_at DESC, id) AS n, count(*) OVER () AS total FROM newest
+    )
+    SELECT * FROM ranked
+    WHERE n <= ${limit}
+       OR EXISTS (SELECT 1 FROM youtube_discover_hits h WHERE h.run_id = ranked.id AND h.state = 'later')
+    ORDER BY n
   `;
-  if (runs.length === 0) return [];
+  if (runs.length === 0) return { shelves: [], hidden: 0 };
+  const hidden = Number(runs[0]!.total) - runs.length;
   const ids = runs.map((r) => r.id as string);
   const hits = await sql`
     SELECT * FROM youtube_discover_hits WHERE run_id = ANY(${ids}::uuid[]) ORDER BY rank
@@ -188,7 +217,7 @@ export async function listDiscoverShelves(limit = 40): Promise<DiscoverShelf[]> 
     list.push(toHit(h));
     byRun.set(h.run_id as string, list);
   }
-  return runs.map((r) => ({
+  const shelves = runs.map((r) => ({
     runId: r.id as string,
     seedSource: r.seed_source as string,
     seedDocId: r.seed_doc_id as string,
@@ -200,9 +229,11 @@ export async function listDiscoverShelves(limit = 40): Promise<DiscoverShelf[]> 
     searched: Number(r.searched),
     known: Number(r.known),
     origin: r.origin as DiscoverRunOrigin,
+    failed: Number(r.failed ?? 0),
     createdAt: new Date(r.created_at as string).getTime(),
     hits: byRun.get(r.id as string) ?? [],
   }));
+  return { shelves, hidden };
 }
 
 /** Set a video's state on every hit row it has; returns how many rows changed (0 = no such video). */
@@ -269,4 +300,32 @@ export async function getLatestDiscoverRunAt(origin: DiscoverRunOrigin, botName:
     SELECT max(created_at) AS at FROM youtube_discover_runs WHERE origin = ${origin} AND bot_name = ${botName}
   `;
   return row?.at ? new Date(row.at as string).getTime() : null;
+}
+
+/**
+ * Seeds whose NEWEST run (any origin) failed (`failed > 0`), with how many
+ * failed runs they have had since their last complete one: the weekly watcher
+ * searches these first, so a failed week's seeds are not skipped by the next
+ * window (architecture review 2026-11-16, F14).
+ */
+export async function getDiscoverRetrySeeds(seedSource = "youtube"): Promise<Map<string, number>> {
+  const rows = await getDb()`
+    WITH last_ok AS (
+      SELECT seed_doc_id, max(created_at) AS at FROM youtube_discover_runs
+      WHERE seed_source = ${seedSource} AND failed = 0 GROUP BY seed_doc_id
+    ), newest AS (
+      SELECT DISTINCT ON (seed_doc_id) seed_doc_id, failed FROM youtube_discover_runs
+      WHERE seed_source = ${seedSource}
+      ORDER BY seed_doc_id, created_at DESC, id
+    )
+    SELECT n.seed_doc_id, count(r.id) AS attempts
+    FROM newest n
+    LEFT JOIN last_ok o ON o.seed_doc_id = n.seed_doc_id
+    JOIN youtube_discover_runs r
+      ON r.seed_source = ${seedSource} AND r.seed_doc_id = n.seed_doc_id AND r.failed > 0
+     AND (o.at IS NULL OR r.created_at > o.at)
+    WHERE n.failed > 0
+    GROUP BY n.seed_doc_id
+  `;
+  return new Map(rows.map((r) => [r.seed_doc_id as string, Number(r.attempts)]));
 }

@@ -8,6 +8,7 @@ import {
   isSourceHealthMap,
   recordOutcome,
   shouldEscalate,
+  sourceEscalateAfter,
   stalenessMs,
   type SourceHealth,
 } from "./source-health.ts";
@@ -164,3 +165,27 @@ describe("isSourceHealthMap", () => {
   });
 });
 
+describe("sourceEscalateAfter (architecture review 2026-11-16, F16)", () => {
+  test("weekly sources escalate at 1; daily, hourly and 2h sources keep 3", () => {
+    expect(sourceEscalateAfter(7 * 24 * H)).toBe(1);
+    expect(sourceEscalateAfter(14 * 24 * H)).toBe(1);
+    expect(sourceEscalateAfter(24 * H)).toBe(HEALTH_ESCALATE_AFTER);
+    expect(sourceEscalateAfter(2 * H)).toBe(HEALTH_ESCALATE_AFTER);
+    expect(sourceEscalateAfter(H)).toBe(HEALTH_ESCALATE_AFTER);
+  });
+
+  test("buildHealthAlerts at threshold 1 alerts on the first failure; the default still waits for 3", () => {
+    const map = { "youtube:search": { outcome: "error" as const, at: NOW, consecutive: 1, lastOkAt: NOW - 168 * H } };
+    expect(buildHealthAlerts("W", map, NOW)).toHaveLength(0);
+    const [alert] = buildHealthAlerts("W", map, NOW, 1);
+    expect(alert!.id).toBe(`watcher-health:W:youtube:search:${NOW - 168 * H}:0`);
+  });
+
+  test("the nag bucket counts from the source's own threshold", () => {
+    const h = (c: number): SourceHealth => ({ outcome: "error", at: NOW, consecutive: c, lastOkAt: NOW - H });
+    expect(healthAlertId("W", "k", h(1), 1)).toBe(healthAlertId("W", "k", h(HEALTH_RE_ESCALATE_EVERY), 1));
+    expect(healthAlertId("W", "k", h(1 + HEALTH_RE_ESCALATE_EVERY), 1)).not.toBe(healthAlertId("W", "k", h(1), 1));
+    expect(shouldEscalate(h(1), 1)).toBe(true);
+    expect(shouldEscalate(h(1))).toBe(false);
+  });
+});

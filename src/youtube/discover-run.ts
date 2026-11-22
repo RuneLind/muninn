@@ -71,6 +71,8 @@ export type DiscoverRunOutcome =
       results: DiscoverResult[];
       searched: number;
       known: number;
+      /** Searches that failed (answered `null` or threw); a search that found nothing is not one. */
+      failed: number;
     }
   | {
       ok: false;
@@ -81,6 +83,12 @@ export type DiscoverRunOutcome =
       cause?: string;
       /** The step that failed: the watcher's health keys judge each step on its own. */
       stage: "read" | "queries" | "search" | "rank";
+      /** The seed as read, once the read passed: the watcher stores a failed run under it. */
+      seed?: DiscoverSeed;
+      /** The queries written, once that call passed. */
+      queries?: DiscoverQuery[];
+      /** The run's failed calls: the failed searches, plus 1 for the failed read, queries or rank call. */
+      failed: number;
     };
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -105,11 +113,11 @@ export async function runDiscovery(
     raw = await deps.readRaw(collection, docId);
   } catch (err) {
     tracer?.finish("error", { error: `read failed: ${errText(err)}` });
-    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document.", cause: errText(err), stage: "read" };
+    return { ok: false, status: 502, code: "upstream", error: "Could not read the stored document.", cause: errText(err), stage: "read", failed: 1 };
   }
   if (raw === null) {
     tracer?.finish("error", { error: "not found" });
-    return { ok: false, status: 404, code: "not_found", error: "No such document.", stage: "read" };
+    return { ok: false, status: 404, code: "not_found", error: "No such document.", stage: "read", failed: 1 };
   }
   const stored = readStoredCapture(raw);
   const seed: DiscoverSeed = {
@@ -138,11 +146,13 @@ export async function runDiscovery(
       error: "The call that writes the search queries failed. Try again.",
       cause: `queries call: ${errText(err)}`,
       stage: "queries",
+      seed,
+      failed: 1,
     };
   }
   if (!queries || queries.length === 0) {
     tracer?.finish("error", { error: "no queries" });
-    return { ok: false, status: 502, code: "model_unparseable", error: "The model answered no usable search queries. Try again.", stage: "queries" };
+    return { ok: false, status: 502, code: "model_unparseable", error: "The model answered no usable search queries. Try again.", stage: "queries", seed, failed: 1 };
   }
   const qs = queries;
 
@@ -153,7 +163,16 @@ export async function runDiscovery(
   tracer?.end("search", { failed }, failed === answers.length ? "error" : "ok");
   if (failed === answers.length) {
     tracer?.finish("error", { error: "every search failed" });
-    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search" };
+    return {
+      ok: false,
+      status: 503,
+      code: "search_failed",
+      error: "Every YouTube search failed. Is yt-dlp installed and up to date?",
+      stage: "search",
+      seed,
+      queries: qs,
+      failed,
+    };
   }
   const union = new Map<string, { hit: YouTubeHit; query: string }>();
   answers.forEach((hits, i) => {
@@ -173,7 +192,7 @@ export async function runDiscovery(
   const known = searched - fresh.length;
   if (fresh.length === 0) {
     tracer?.finish("ok", { searched, known, shown: 0 });
-    return { ok: true, seed, queries: qs, results: [], searched, known };
+    return { ok: true, seed, queries: qs, results: [], searched, known, failed };
   }
 
   // 4. Rank (the YouTube gate), profile last.
@@ -188,13 +207,23 @@ export async function runDiscovery(
     } catch {
       tracer?.end("rank", { error: "unparseable" }, "error");
       tracer?.finish("error");
-      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again.", stage: "rank" };
+      return { ok: false, status: 502, code: "model_unparseable", error: "The ranking call answered no list. Try again.", stage: "rank", seed, queries: qs, failed: failed + 1 };
     }
     tracer?.end("rank", { scored: scores.size });
   } catch (err) {
     tracer?.end("rank", { error: errText(err) }, "error");
     tracer?.finish("error");
-    return { ok: false, status: 502, code: "model_failed", error: "The ranking call failed. Try again.", cause: `rank call: ${errText(err)}`, stage: "rank" };
+    return {
+      ok: false,
+      status: 502,
+      code: "model_failed",
+      error: "The ranking call failed. Try again.",
+      cause: `rank call: ${errText(err)}`,
+      stage: "rank",
+      seed,
+      queries: qs,
+      failed: failed + 1,
+    };
   }
   const results: DiscoverResult[] = fresh
     .map((f, i) => ({ f, s: scores.get(i + 1), i }))
@@ -206,5 +235,5 @@ export async function runDiscovery(
     .slice(0, DISCOVER_MAX_SHOWN)
     .map(({ f, s }) => ({ ...f.hit, score: s.score, why: s.why, query: f.query }));
   tracer?.finish("ok", { searched, known, shown: results.length });
-  return { ok: true, seed, queries: qs, results, searched, known };
+  return { ok: true, seed, queries: qs, results, searched, known, failed };
 }

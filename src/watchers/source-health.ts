@@ -52,6 +52,19 @@ export const HEALTH_ESCALATE_AFTER = 3;
  */
 export const HEALTH_RE_ESCALATE_EVERY = 24;
 
+/** A source polled this rarely escalates on its first bad run. */
+export const WEEKLY_SOURCE_CADENCE_MS = 7 * 86_400_000;
+
+/**
+ * The escalation threshold for a source polled every `cadenceMs`: 1 for a weekly
+ * source, {@link HEALTH_ESCALATE_AFTER} otherwise. Three runs is hours on the 2h
+ * rows and three WEEKS on a weekly one (architecture review 2026-11-16, F16);
+ * daily and faster sources keep 3.
+ */
+export function sourceEscalateAfter(cadenceMs: number): number {
+  return cadenceMs >= WEEKLY_SOURCE_CADENCE_MS ? 1 : HEALTH_ESCALATE_AFTER;
+}
+
 export type SourceOutcome = "ok" | "skipped" | "error";
 
 export interface SourceHealth {
@@ -121,8 +134,8 @@ export function recordOutcome(
  * and letting id-dedup collapse them means an undelivered alert is simply re-emitted next
  * run, because the runner only records an id it managed to send.
  */
-export function shouldEscalate(h: SourceHealth): boolean {
-  return h.outcome !== "ok" && h.consecutive >= HEALTH_ESCALATE_AFTER;
+export function shouldEscalate(h: SourceHealth, escalateAfter: number = HEALTH_ESCALATE_AFTER): boolean {
+  return h.outcome !== "ok" && h.consecutive >= escalateAfter;
 }
 
 /**
@@ -138,11 +151,17 @@ export function shouldEscalate(h: SourceHealth): boolean {
  *   on the weekly one.
  *
  * `lastOkAt` is the episode discriminator (the moment the source was last healthy);
- * `never` covers a source that has never succeeded.
+ * `never` covers a source that has never succeeded. The bucket counts from the
+ * source's own threshold (`run-health.ts`'s `runHealthAlertId` explains why).
  */
-export function healthAlertId(watcherName: string, key: string, h: SourceHealth): string {
+export function healthAlertId(
+  watcherName: string,
+  key: string,
+  h: SourceHealth,
+  escalateAfter: number = HEALTH_ESCALATE_AFTER,
+): string {
   const episode = h.lastOkAt ?? "never";
-  const bucket = Math.floor((h.consecutive - HEALTH_ESCALATE_AFTER) / HEALTH_RE_ESCALATE_EVERY);
+  const bucket = Math.floor((h.consecutive - escalateAfter) / HEALTH_RE_ESCALATE_EVERY);
   return `watcher-health:${watcherName}:${key}:${episode}:${bucket}`;
 }
 
@@ -187,10 +206,11 @@ export function buildHealthAlerts(
   watcherName: string,
   map: SourceHealthMap,
   now: number,
+  escalateAfter: number = HEALTH_ESCALATE_AFTER,
 ): WatcherAlert[] {
   const alerts: WatcherAlert[] = [];
   for (const [key, h] of Object.entries(map)) {
-    if (!shouldEscalate(h)) continue;
+    if (!shouldEscalate(h, escalateAfter)) continue;
     const hours = h.lastOkAt == null ? null : Math.round((now - h.lastOkAt) / 3_600_000);
     const since = hours == null ? "never succeeded" : `no successful run in ${hours}h`;
     log.error("Watcher \"{name}\": source {key} unhealthy — {n} consecutive {outcome} ({detail})", {
@@ -201,7 +221,7 @@ export function buildHealthAlerts(
       detail: h.detail ?? "no detail",
     });
     alerts.push({
-      id: healthAlertId(watcherName, key, h),
+      id: healthAlertId(watcherName, key, h, escalateAfter),
       source: HEALTH_ALERT_SOURCE,
       sender: "Watcher health",
       subject: `${watcherName}: ${key} ${h.outcome}`,
@@ -243,6 +263,8 @@ export async function openSourceHealth(
   watcherId: string,
   watcherName: string,
   now: number = Date.now(),
+  /** `escalateAfter`: this watcher's threshold (`sourceEscalateAfter`); absent = {@link HEALTH_ESCALATE_AFTER}. */
+  opts: { escalateAfter?: number } = {},
 ): Promise<SourceHealthRecorder> {
   let prior: SourceHealthMap = {};
   try {
@@ -265,7 +287,7 @@ export async function openSourceHealth(
       if (p) next[key] = p;
     },
     async finish() {
-      const alerts = buildHealthAlerts(watcherName, next, now);
+      const alerts = buildHealthAlerts(watcherName, next, now, opts.escalateAfter);
       try {
         await setWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY, next);
       } catch (err) {

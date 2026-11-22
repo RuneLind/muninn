@@ -86,7 +86,7 @@ function store(): SummariesDiscoverDeps["store"] {
     setState: async (id, st) => (states.has(id) ? (states.set(id, st), 1) : 0),
     getDetails: async (id) => (detailsCache.has(id) ? detailsCache.get(id)! : undefined),
     saveDetails: async (id, d) => void detailsCache.set(id, d),
-    listShelves: async () => [] as DiscoverShelf[],
+    listShelves: async () => ({ shelves: [] as DiscoverShelf[], hidden: 0 }),
   };
 }
 
@@ -312,6 +312,7 @@ describe("search and dedup", () => {
       results: [],
       searched: 5,
       known: 5,
+      failed: 0,
       runId: expect.any(String),
       shelfUrl: expect.stringMatching(/^\/summaries\/discover#run-/),
     });
@@ -537,17 +538,20 @@ describe("GET /summaries/discover", () => {
       searched: 5,
       known: 1,
       origin: "reader",
+      failed: 0,
       createdAt: 0,
       hits: [],
     };
     const d = deps();
-    d.store = { ...d.store, listShelves: async () => [shelf] };
+    d.store = { ...d.store, listShelves: async () => ({ shelves: [shelf], hidden: 3 }) };
     const res = await app(d).request("/summaries/discover");
     expect(res.status).toBe(200);
     const html = await res.text();
     const json = /<script type="application\/json" id="dscData">([^<]*)<\/script>/.exec(html)?.[1];
     expect(json).toBeDefined();
     expect(JSON.parse(json!).shelves[0].seedTitle).toBe("Invented </script><b>seed</b>");
+    // F18: the count of older shelves rides the page's JSON.
+    expect(JSON.parse(json!).hidden).toBe(3);
     expect(html).not.toContain("</script><b>seed");
   });
 });
@@ -711,10 +715,10 @@ describe("GET /api/summaries/discover/shelves (PR 3)", () => {
   test("answers the stored shelves", async () => {
     const shelf = { runId: "r1" } as unknown as DiscoverShelf;
     const d = deps();
-    d.store.listShelves = async () => [shelf];
+    d.store.listShelves = async () => ({ shelves: [shelf], hidden: 2 });
     const res = await app(d).request("/api/summaries/discover/shelves");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ shelves: [shelf] });
+    expect(await res.json()).toEqual({ shelves: [shelf], hidden: 2 });
   });
 
   test("a failed read is 500", async () => {
