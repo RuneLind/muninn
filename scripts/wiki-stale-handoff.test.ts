@@ -517,9 +517,13 @@ describe("the gate", () => {
       chmodSync(smudge, 0o755);
       await g(main, "config", "filter.slow.smudge", `'${smudge}'`);
       write(main, ".git/info/attributes", "new/sub/** filter=slow\n");
+      // Parallel checkout (`checkout.workers` other than 1, e.g. in a global config) writes the unfiltered files last,
+      // after the hang; a local setting beats a global one, so the count holds whatever the machine's git config says.
+      await g(main, "config", "checkout.workers", "1");
       const before = await g(main, "rev-parse", "HEAD");
-      // The first lock wait uses most of the section, so the merge's bound is ~1.2 s and the test stays short.
-      const { t, lock } = timedLock(LOCKED_SECTION_MS - 1_500 - 1_200);
+      // No lock wait: the merge gets the whole section, so a slow or loaded machine still reaches the hang long before
+      // its bound, and the hang (60 s) outlasts the section, so row C re-takes the locks.
+      const { t, lock } = timedLock();
       const gate = await runGate(main, [], git, { lock, roots: [] });
       const u = nulList(path.join(main, ".git/muninn-stopped-ff-untracked")) ?? [];
       const m = nulList(path.join(main, ".git/muninn-stopped-ff-modified")) ?? [];
