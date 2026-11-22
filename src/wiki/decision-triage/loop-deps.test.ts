@@ -393,33 +393,39 @@ seen.push(await deps.readState("a"));
       expect(lines.filter((l) => l.startsWith("warning "))).toEqual(["warning Decision triage for a: failed: the model call is off (D19), 3 card(s) with no facts"]);
     });
 
-    test("the memory guard's budget covers the day: the next wiki and a same-day retry measure from the day's first pass (F5)", async () => {
-      const { tmp, b, env } = withCards(2);
-      mkdirSync(path.join(b, "plans"));
-      writeFileSync(path.join(b, "plans", "p.mdx"), readFileSync(path.join(tmp, "a", "plans", "p.mdx"), "utf8"));
-      // RSS climbs 0.6 GiB at every reading and never falls back, so each pass starts where the last ended.
-      // The guard reads once per unanswered card: growth 0.6, 1.2 (a), 1.8, 2.4 (b), 3.0, 3.6 (a again).
-      const { seen } = await drive(`
-seen.push(await deps.run("a", new AbortController().signal));
-seen.push(await deps.run("b", new AbortController().signal));
-seen.push(await deps.run("a", new AbortController().signal));
-`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: (() => { let n = 0; return () => 0.6 * 1024 ** 3 * n++; })()`);
-      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "partial", "failed"]);
-      expect(runLines(tmp, "b")[0]).toMatchObject({ reason: "the model call is off (D19), 1 card(s) with no facts" });
-      const guarded = (wiki: string) => readFileSync(path.join(tmp, "logs", `${wiki}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.reason === "the memory guard stopped the gather").map((l) => l.id);
-      expect(guarded("b")).toEqual(["O2"]);
-      expect(guarded("a")).toEqual(["O1", "O2"]);
-    });
-
-    test("a new Oslo day records a new baseline: the guard does not carry yesterday's growth", async () => {
+    test("the memory guard counts only growth inside triage passes: a 2.5 GiB jump between two same-day passes still gathers (F5)", async () => {
       const { tmp, env } = withCards(2);
       const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+level = 3 * G;
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: () => level`, `const G = 1024 ** 3; let level = 0.5 * G;`);
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "ok"]);
+    });
+
+    test("the memory guard's day budget sums the passes' own growth: a pass stops once the day's passes together grew past it (F5)", async () => {
+      const { tmp, env } = withCards(2);
+      // Each reading adds 0.6 GiB; RSS falls back to 1 GiB between the passes, so a day-wide baseline would see little growth.
+      const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+level = G;
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: () => { const r = level; level += 0.6 * G; return r; }`, `const G = 1024 ** 3; let level = G;`);
+      // Pass 1 grows 1.8 GiB (start 1, cards 1.6 and 2.2, end 2.8); pass 2's first card adds 0.6 more: 2.4 > 2.
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "failed"]);
+      expect(logOf(tmp).filter((l) => l.reason === "the memory guard stopped the gather").map((l) => l.id)).toEqual(["O1", "O2"]);
+    });
+
+    test("a new Oslo day starts a new budget: the guard does not carry yesterday's growth, and a model-off partial night warns", async () => {
+      const { tmp, env } = withCards(2);
+      const { seen, lines } = await drive(`
 seen.push(await deps.run("a", new AbortController().signal));
 day = Date.parse("2026-10-21T05:00:00Z");
 seen.push(await deps.run("a", new AbortController().signal));
 `, env, tmp, `call: null, now: () => day, rss: (() => { let n = 0; return () => 1.5 * 1024 ** 3 * n++; })()`, `let day = Date.parse("2026-10-20T05:00:00Z");`);
-      // Day 1: baseline 0, readings 1.5 (gathers), 3.0 (stopped). Day 2: baseline 4.5, readings 6.0 (gathers), 7.5 (stopped).
+      // Each day: start, then card readings 1.5 GiB (gathers) and 3.0 GiB (stopped) above it.
       expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["partial", "partial"]);
+      expect(lines.filter((l) => l.startsWith("warning "))).toEqual(Array(2).fill("warning Decision triage for a: partial: the model call is off (D19), 1 card(s) with no facts"));
     });
 
     test("b: the bound fires while the pass writes its run line, and the pass returns normally: one line, one state record", async () => {

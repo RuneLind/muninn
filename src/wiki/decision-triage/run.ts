@@ -47,8 +47,8 @@ const CARD_GATHER_TIMEOUT_MS = 90_000;
 /** Replay stops gathering past this level: it is its own process, so its RSS is the
  *  gather's (the 10-02 kernel panic was a corpus script). */
 const RSS_GUARD_BYTES = 3 * 1024 ** 3;
-/** A pass stops gathering once RSS has grown this much since `rssAtStart` (the loop's: the
- *  day's first pass, `dayRssBaseline`; a standalone run's: its own start). It runs inside
+/** A pass stops gathering once RSS has grown this much since `rssAtStart` (the loop's: its own
+ *  start less the day's earlier passes' growth, `rssDay`; a standalone run's: its own start). It runs inside
  *  the server, whose level is no measure of the pass: a laptop server stood at 5.24 GiB
  *  3.5 h after boot, so a level guard gathered nothing on 7 of 11 nights (review F5). */
 export const RSS_GROWTH_GUARD_BYTES = 2 * 1024 ** 3;
