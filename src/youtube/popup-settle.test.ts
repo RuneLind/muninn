@@ -734,6 +734,72 @@ describe("the connector picker", () => {
     expect(noteText(d)).toContain("connector is not offered here");
   });
 
+  test("switching to a narrower connector and BACK restores the kind and Slides the reader chose", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      connectors: CONNECTORS,
+      stored: { summaryKind: "deep", frames: true },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    d.node("sel-connector").value = COPILOT_ID;
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    expect(d.node("sel-kind").value).toBe("standard");
+
+    d.node("sel-connector").value = "";
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    expect(d.node("sel-kind").value).toBe("deep");
+    expect(d.node("chk-frames").checked).toBe(true);
+    expect(noteText(d)).toBe("");
+  });
+
+  test("a kind and tick the reader changes AFTER settle are what a connector switch-back restores", async () => {
+    const d = await drivePopup({ options: "server", storage: "answers", connectors: CONNECTORS });
+    d.fireDomReady();
+    await d.settleTimers();
+    d.node("sel-kind").value = "deep";
+    d.node("sel-kind").fire("change");
+    d.node("chk-frames").checked = true;
+    d.node("chk-frames").fire("change");
+
+    d.node("sel-connector").value = COPILOT_ID;
+    d.node("sel-connector").fire("change");
+    d.node("sel-connector").value = "";
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    expect(d.node("sel-kind").value).toBe("deep");
+    expect(d.node("chk-frames").checked).toBe(true);
+  });
+
+  test("a settle-time note that still holds survives a connector change", async () => {
+    const d = await drivePopup({ options: "server", storage: "rejects", connectors: CONNECTORS });
+    d.fireDomReady();
+    await d.settleTimers();
+    expect(noteText(d)).toContain("Could not read the remembered");
+
+    d.node("sel-connector").value = SDK_ID;
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    expect(noteText(d)).toContain("Could not read the remembered");
+  });
+
+  test("Slides dimmed by a PICKED connector blames the pick, not the summarizer bot", async () => {
+    const d = await drivePopup({ options: "server", storage: "answers", connectors: CONNECTORS });
+    d.fireDomReady();
+    await d.settleTimers();
+    d.node("sel-connector").value = COPILOT_ID;
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    const note = d.node("frames-note").textContent;
+    expect(note).toContain("picked connector");
+    expect(note).not.toContain("summarizer bot");
+    expect(d.node("lbl-frames").title).not.toContain("Summarizer bot");
+  });
+
   test("an instance that lists no connectors shows no picker and submits the default", async () => {
     const d = await drivePopup({ options: "server", storage: "answers", stored: { captureConnector: SDK_ID } });
     d.fireDomReady();

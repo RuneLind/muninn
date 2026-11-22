@@ -107,6 +107,8 @@ const CONTROLS_BROKEN_MESSAGE =
 const FRAMES_UNSUPPORTED_NOTE =
   "Slides are off: this Muninn's summarizer bot uses a connector that cannot read frames.";
 const FRAMES_UNSUPPORTED_TITLE = "Summarizer bot's connector cannot read frames.";
+const FRAMES_UNSUPPORTED_PICKED_NOTE = 'Slides are off: the picked connector cannot read frames.';
+const FRAMES_UNSUPPORTED_PICKED_TITLE = 'The picked connector cannot read frames.';
 
 let videoInfo = null;
 /** What this Muninn offers, connector picker included. Replaced once the options endpoint answers. */
@@ -123,6 +125,19 @@ let captureOptions = FALLBACK_CAPTURE_OPTIONS;
  */
 let optionsNote = '';
 let framesNote = '';
+/**
+ * The settle-time notes (unreachable, storage lost). They describe the whole
+ * popup, not one connector, so a connector change keeps them.
+ */
+let settleNotes = [];
+/**
+ * The kind and Slides tick the reader CHOSE: restored at settle, then updated
+ * only by the reader's own changes. A connector change narrows the controls
+ * from these, not from what a narrower connector left in the controls, so
+ * switching back restores them.
+ */
+let chosenKind = null;
+let chosenFrames = false;
 /** Whether the capture panel is on screen — the panel the notes describe. */
 let panelShown = false;
 /** Whether {@link settle} has already run. It runs once. */
@@ -392,6 +407,9 @@ function paintControls({ options, stored, notes }) {
   if (!kindSelect || !frames) return false;
 
   baseOptions = options;
+  settleNotes = notes;
+  chosenKind = stored[KIND_KEY] ?? null;
+  chosenFrames = stored[FRAMES_KEY] === true;
   const connector = paintConnector(stored[CONNECTOR_KEY], options);
   captureOptions = optionsForConnector(options, connector);
 
@@ -484,10 +502,18 @@ function paintKindAndFrames(wantedKind, wantedFrames) {
   frames.checked = pickFrames(wantedFrames, captureOptions);
 
   // A dimmed control with no explanation reads as a bug. The reason is the
-  // CONNECTOR, which is a server fact the reader cannot infer.
-  framesNote = frames.disabled ? FRAMES_UNSUPPORTED_NOTE : '';
+  // CONNECTOR, which is a server fact the reader cannot infer: the picked one
+  // when there is a pick, else the summarizer bot's.
+  const connectorPicked = Boolean($('#sel-connector')?.value);
+  framesNote = frames.disabled
+    ? (connectorPicked ? FRAMES_UNSUPPORTED_PICKED_NOTE : FRAMES_UNSUPPORTED_NOTE)
+    : '';
   const label = $('#lbl-frames');
-  if (label) label.title = frames.disabled ? FRAMES_UNSUPPORTED_TITLE : FRAMES_LABEL_TITLE;
+  if (label) {
+    label.title = frames.disabled
+      ? (connectorPicked ? FRAMES_UNSUPPORTED_PICKED_TITLE : FRAMES_UNSUPPORTED_TITLE)
+      : FRAMES_LABEL_TITLE;
+  }
   renderVisualRow();
   return picked;
 }
@@ -505,6 +531,7 @@ function attachControlListeners() {
   listenersAttached = true;
 
   kindSelect.addEventListener('change', () => {
+    chosenKind = kindSelect.value;
     // The note explains a value the reader has now overridden.
     if (optionsNote && captureOptions.fromServer) {
       optionsNote = '';
@@ -518,6 +545,7 @@ function attachControlListeners() {
     // Ticking Slides is what reveals the Visuals row, so the paint and this
     // listener both go through `renderVisualRow` rather than each toggling the
     // class on their own.
+    chosenFrames = frames.checked;
     renderVisualRow();
     chrome.storage.sync
       .set({ [FRAMES_KEY]: frames.checked })
@@ -526,15 +554,16 @@ function attachControlListeners() {
   const connectorSelect = $('#sel-connector');
   connectorSelect?.addEventListener('change', () => {
     // The connector decides which kinds and whether Slides exist, so the two
-    // are repainted from its row, keeping the reader's current choices where
-    // they survive and saying so where they do not. Only the connector is
-    // persisted here: a kind or tick the new connector lacks is narrowed in the
-    // controls, not erased from what the reader chose.
-    const wantedKind = kindSelect.value;
-    const wantedFrames = frames.checked;
+    // are repainted from its row, from what the reader CHOSE (`chosenKind`,
+    // `chosenFrames`), not from what the controls show now: a narrower
+    // connector and back restores the choice. Only the connector is persisted;
+    // a kind or tick the new connector lacks is narrowed in the controls and
+    // said, never erased. The settle-time notes still hold and are kept; the
+    // "remembered connector not offered" one is answered by this pick.
     captureOptions = optionsForConnector(baseOptions, connectorSelect.value);
-    const picked = paintKindAndFrames(wantedKind, wantedFrames);
-    optionsNote = restoredKindNote(wantedKind, picked, captureOptions) ?? '';
+    const picked = paintKindAndFrames(chosenKind, chosenFrames);
+    const narrowed = restoredKindNote(chosenKind, picked, captureOptions);
+    optionsNote = [...settleNotes, ...(narrowed ? [narrowed] : [])].join(' ');
     renderNotes();
     chrome.storage.sync
       .set({ [CONNECTOR_KEY]: connectorSelect.value })
