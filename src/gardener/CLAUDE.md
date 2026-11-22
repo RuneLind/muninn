@@ -361,7 +361,7 @@ ran SQL. Now:
 
 - **Each verb holds the group's lease, and with it held an `approved` row is
   stranded, so both verbs take it.** The lease is a DB row
-  (`wiki_proposal_group_leases`, migration 092, `claimWikiProposalGroupLease`):
+  (`wiki_proposal_group_leases`, migration 093, `claimWikiProposalGroupLease`):
   one statement inserts it or takes one whose `expires_at` passed (TTL 120 s,
   renewed every 30 s while the verb runs, deleted by token in its `finally`). It
   holds across processes: `bun run dev:chat` runs the same routes on the same DB

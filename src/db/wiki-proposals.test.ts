@@ -769,7 +769,7 @@ describe("page claims across writers", () => {
   });
 });
 
-describe("group leases (F35, migration 092)", () => {
+describe("group leases (F35, migration 093)", () => {
   const G = "lint:series-unnamed:0123456789ab";
 
   test("one live lease per group: a second claim gets null, another group or wiki gets its own", async () => {

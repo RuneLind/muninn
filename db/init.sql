@@ -804,7 +804,7 @@ CREATE INDEX wiki_proposals_group_key_idx
   ON wiki_proposals (group_key) WHERE group_key IS NOT NULL;
 
 -- Which Accept or Dismiss of a gardener group holds it, across processes
--- (migration 092): claimed by insert or by taking an expired lease, renewed
+-- (migration 093): claimed by insert or by taking an expired lease, renewed
 -- while the verb runs, deleted by token when it ends.
 CREATE TABLE wiki_proposal_group_leases (
   scope       TEXT NOT NULL,           -- COALESCE(wiki_name, bot_name) of the group's rows

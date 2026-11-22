@@ -520,7 +520,7 @@ export interface BacklogRouteDeps extends CoverageDeps {
   /** Group Dismiss's CAS for a live row whose page already carries its draft:
    *  `draft`/`approved` → `applied` (`settleWikiProposalApplied`). */
   settleProposalApplied: (id: string, lease?: GroupLeaseRef) => Promise<WikiProposal | null>;
-  /** The group's cross-process lease (F35, migration 092): claim answers a
+  /** The group's cross-process lease (F35, migration 093): claim answers a
    *  token, or null when another Accept or Dismiss — in this process or
    *  another one on the same DB — holds a live lease; renew answers false when
    *  the token lost it. */
@@ -631,7 +631,7 @@ const lastBacklogRuns = new Map<string, LastBacklogRun>();
  * `<wiki lowercased>\0<group key>`: the synchronous first check, set with no
  * `await` after the check, so two clicks here cannot both pass. What holds
  * across processes is the DB lease each verb then claims (`claimGroupLease`,
- * migration 092): `bun run dev:chat` registers the same routes on the same DB
+ * migration 093): `bun run dev:chat` registers the same routes on the same DB
  * and wikis with its own set, and only the lease tells it an Accept here is
  * still running. An `approved` row with no live lease is stranded (a throw or
  * a restart), and both verbs take it (F35, arch review 2026-11-16).

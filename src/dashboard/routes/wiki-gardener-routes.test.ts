@@ -3006,7 +3006,7 @@ describe("lint proposals — seeding and the group verbs", () => {
   function groupStore(initial: unknown[]) {
     type Row = { id: string; status: string };
     let state = initial as Row[];
-    // The DB lease (migration 092), shared by every app registered on this
+    // The DB lease (migration 093), shared by every app registered on this
     // store the way two processes share one database.
     const leases = new Map<string, string>();
     let tokens = 0;
