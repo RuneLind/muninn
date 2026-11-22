@@ -58,12 +58,13 @@ export interface BoardWriteCommitters {
 /** Done's refusal for a page whose only dirt is the board's pending write,
  *  naming only the remedies that exist on this instance, and the loop only as
  *  far as its ledger is evidence. The sweep is named only when it commits the
- *  root AND the loop's outlook says the sweeper does not stand down for the
- *  same ledger entry (`sweeperStandsDown`, the rule `syncSubsumesSweeper`
- *  applies), so the message never promises a sweep that is stood down. */
+ *  root and the loop's ledger says the sweeper would commit the page
+ *  (`sweeper === "commits"`, `sweeperOutcome`): not stood down, not off the
+ *  default branch, not refused the way the loop's own commit was. The state
+ *  table is in `src/sync/CLAUDE.md`. */
 export function pendingBoardWriteMessage(relPath: string, committers: BoardWriteCommitters): string {
   const { syncLoop } = committers;
-  const sweeps = committers.sweeper && (syncLoop === null || !syncLoop.sweeperStandsDown);
+  const sweeps = committers.sweeper && (syncLoop === null || syncLoop.sweeper === "commits");
   const orSweep = sweeps ? " (or the daily wiki sweep does)" : "";
   let who: string;
   if (syncLoop === null) {

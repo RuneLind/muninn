@@ -429,6 +429,26 @@ export function sweeperSubsumption(
 }
 
 /**
+ * What the daily sweeper would do with a page this loop left dirty, read off
+ * the same entry: `stands-down` is {@link sweeperSubsumption}, unchanged; the
+ * other two are what the sweeper meets once it runs. A `paused` loop is off
+ * the default branch, where the sweeper's `onDefaultBranch` guard no-ops. A
+ * commit step `failed` with state `error` is `git add`/`git commit` refused by
+ * the repo itself (signing, a hook, `user.email`, an unreadable file), and the
+ * sweeper's commit runs in the same repo with the same config and hooks; a
+ * `transient` failure is a lost `index.lock`, which clears. The full state
+ * table: «Who commits a page the plans board left dirty» in `src/sync/CLAUDE.md`.
+ */
+export type SweeperOutcome = "stands-down" | "no-op" | "refused" | "commits";
+
+export function sweeperOutcome(entry: SyncLedgerEntry, now: number): SweeperOutcome {
+  if (sweeperSubsumption(entry, now).subsumed) return "stands-down";
+  if (entry.state === "paused") return "no-op";
+  if (entry.lastCommitStep === "failed" && entry.state === "error") return "refused";
+  return "commits";
+}
+
+/**
  * The card's tone. Deferral is normal — but a repo that has deferred every tick
  * for an hour, or has not had a clean sync in two hours, is not converging and
  * the card must stop looking healthy. A `blocked`/`error` state is always bad.
@@ -486,10 +506,8 @@ export function describeSyncState(state: SyncState, reason?: string): string {
  *  - `healthy`: everything else — `ok`, `deferred`, `transient`, `retrying`,
  *    which the next tick resolves on its own.
  *
- * `sweeperStandsDown` is the daily sweeper's answer for the SAME entry and
- * `now`: `sweeperSubsumption` (the rule `syncSubsumesSweeper` applies), or a
- * `paused` tick, since the sweeper no-ops off the default branch too. A caller
- * names the sweep only when it is false.
+ * `sweeper` is {@link sweeperOutcome} for the SAME entry and `now`; a caller
+ * names the sweep only when it is `commits`.
  */
 export type SyncLoopOutlook = (
   | { kind: "healthy" }
@@ -497,18 +515,18 @@ export type SyncLoopOutlook = (
   | { kind: "idle"; lastRunHoursAgo: number }
   | { kind: "unpushed"; state: "blocked" | "error"; reason: string }
   | { kind: "stopped"; state: "paused" | "blocked" | "error"; reason: string }
-) & { sweeperStandsDown: boolean };
+) & { sweeper: SweeperOutcome };
 
 export function syncLoopOutlook(entry: SyncLedgerEntry, now: number): SyncLoopOutlook {
-  const sweeperStandsDown = sweeperSubsumption(entry, now).subsumed || entry.state === "paused";
-  if (entry.state === "unknown" || entry.lastRunMs === null) return { kind: "never-run", sweeperStandsDown };
+  const sweeper = sweeperOutcome(entry, now);
+  if (entry.state === "unknown" || entry.lastRunMs === null) return { kind: "never-run", sweeper };
   const reason = entry.reason ?? entry.state;
   const commits = entry.lastCommitStep === "passed";
   if (!commits && (entry.state === "paused" || entry.state === "blocked" || entry.state === "error")) {
-    return { kind: "stopped", state: entry.state, reason, sweeperStandsDown };
+    return { kind: "stopped", state: entry.state, reason, sweeper };
   }
   const age = now - entry.lastRunMs;
-  if (age > SYNC_STALE_SUCCESS_MS) return { kind: "idle", lastRunHoursAgo: Math.round(age / 3_600_000), sweeperStandsDown };
-  if (entry.state === "blocked" || entry.state === "error") return { kind: "unpushed", state: entry.state, reason, sweeperStandsDown };
-  return { kind: "healthy", sweeperStandsDown };
+  if (age > SYNC_STALE_SUCCESS_MS) return { kind: "idle", lastRunHoursAgo: Math.round(age / 3_600_000), sweeper };
+  if (entry.state === "blocked" || entry.state === "error") return { kind: "unpushed", state: entry.state, reason, sweeper };
+  return { kind: "healthy", sweeper };
 }

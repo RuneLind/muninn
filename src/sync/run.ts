@@ -957,9 +957,9 @@ async function localSection(
       return out;
     }
     // No rebase directory ⇒ the rebase never started (a bad ref, a refused
-    // tree). Report git verbatim rather than attempting a confusing abort.
+    // tree). The card gets git's first line, `error` the verbatim text; no abort.
     out.state = "error";
-    out.reason = `rebase failed: ${rebase.stderr || rebase.stdout}`;
+    out.reason = clampReason(`rebase failed: ${rebase.stderr || rebase.stdout}`);
     out.error = rebase.stderr || rebase.stdout;
     return out;
   }

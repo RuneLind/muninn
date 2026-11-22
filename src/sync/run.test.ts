@@ -8,10 +8,10 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, writeFile, utimes, readFile, symlink } from "node:fs/promises";
+import { rm, mkdir, writeFile, utimes, readFile, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { __resetForTest } from "../wiki/commit.ts";
+import { __resetForTest, commitWikiChange, onDefaultBranch } from "../wiki/commit.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import {
   INDEX_LOCK_STALE_MS,
@@ -1517,6 +1517,9 @@ describe("the ledger Done reads after a tick that committed and then failed", ()
     const first = await syncRepo(wikiRepo(f), deps());
     expect(first.state).toBe("error");
     expect(first.reason).toContain("rebase failed");
+    // One line on the card and in Done's text; git's verbatim text stays on `error`.
+    expect(first.reason).not.toContain("\n");
+    expect(first.error).toContain("Other.md");
     expect(first.committed).toEqual(["wiki/concepts/Settled.md"]);
     // Asserted last, so a red on the unfixed code shows the message, not the missing field.
     const step = getSyncLedgerEntry("fixture").lastCommitStep;
@@ -1605,13 +1608,201 @@ describe("the ledger Done reads after a tick that committed and then failed", ()
             if (namesSweep) named++;
             const label = `${state}/${lastCommitStep}/${lastLocalSectionMs === null ? "null" : now - lastLocalSectionMs}/${now - run}`;
             if (namesSweep && subsumed) wrong.push(`${label}: names the sweep while subsumed`);
-            // The one other reason the sweeper commits nothing: off the default branch it no-ops.
-            if (!namesSweep && !subsumed && state !== "paused") wrong.push(`${label}: hides a sweep that runs`);
+            // The two other reasons the sweeper commits nothing: off the default branch it
+            // no-ops, and where the loop's add/commit was refused its own is refused too.
+            const refused = lastCommitStep === "failed" && state === "error";
+            if (namesSweep && refused) wrong.push(`${label}: names a sweep the repo refuses`);
+            if (!namesSweep && !subsumed && state !== "paused" && !refused) wrong.push(`${label}: hides a sweep that runs`);
           }
         }
       }
     }
     expect(wrong).toEqual([]);
     expect(named).toBeGreaterThan(0);
+  });
+});
+
+// ── F36 class check (round 3): one state table for who commits a board write ──
+// The table is «Who commits a page the plans board left dirty» in
+// src/sync/CLAUDE.md. Each row below is one row of it; the assertions read the
+// public answers (`syncSubsumesSweeper`, Done's text), not `sweeperOutcome`.
+
+type Kind = "never-run" | "healthy" | "stopped" | "unpushed";
+type SweeperStale = "stands-down" | "no-op" | "refused" | "commits" | null;
+/** [row, state, commit step, stamps, Done's outlook, sweeper when stale (null: the row stamps), sweep named when stale] */
+const BOARD_DIRT_TABLE: [number, SyncState, SyncCommitStep, boolean, Kind, SweeperStale, boolean | null][] = [
+  [1, "unknown", "not-reached", false, "never-run", "commits", true],
+  [3, "blocked", "not-reached", false, "stopped", "stands-down", false],
+  [4, "transient", "not-reached", false, "healthy", "commits", true],
+  [5, "error", "not-reached", false, "stopped", "commits", true],
+  [6, "blocked", "not-reached", false, "stopped", "stands-down", false],
+  [7, "paused", "not-reached", false, "stopped", "no-op", false],
+  [8, "error", "not-reached", false, "stopped", "commits", true],
+  [9, "deferred", "not-reached", false, "healthy", "commits", true],
+  [10, "transient", "failed", false, "healthy", "commits", true],
+  [11, "error", "failed", false, "stopped", "refused", false],
+  [12, "error", "failed", false, "stopped", "refused", false],
+  [13, "deferred", "passed", true, "healthy", null, null],
+  [14, "blocked", "passed", false, "unpushed", "stands-down", false],
+  [15, "error", "passed", false, "unpushed", "commits", true],
+  [16, "ok", "passed", true, "healthy", null, null],
+  [17, "error", "passed", true, "unpushed", null, null],
+  [18, "retrying", "passed", true, "healthy", null, null],
+  [19, "blocked", "passed", true, "unpushed", null, null],
+  [20, "error", "failed", false, "stopped", "refused", false],
+  [21, "transient", "failed", false, "healthy", "commits", true],
+  [22, "blocked", "passed", false, "unpushed", "stands-down", false],
+  [23, "error", "passed", false, "unpushed", "commits", true],
+  [24, "deferred", "passed", true, "healthy", null, null],
+  [25, "deferred", "passed", false, "healthy", "commits", true],
+  [26, "error", "not-reached", false, "stopped", "commits", true],
+];
+
+describe("the board-dirt state table", () => {
+  let base: string;
+  beforeEach(async () => {
+    __resetForTest();
+    __resetWikiWriteQueueForTest();
+    __resetSyncStateForTest();
+    base = await testTempDir(path.join(tmpdir(), "sync-board-table-"));
+  });
+  afterEach(async () => {
+    __resetSyncStateForTest();
+    await chmod(path.join(base, "A", "wiki", "concepts", "Locked.md"), 0o644).catch(() => {});
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const PLAN = "plans/p.mdx";
+  const SWEEP = "daily wiki sweep";
+  const done = (entry: SyncLedgerEntry, now: number, sweeper: boolean) =>
+    pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(entry, now), sweeper });
+
+  test.each(BOARD_DIRT_TABLE)("row %d: %s / %s", async (_row, state, lastCommitStep, stamps, kind, sweeperStale, namedStale) => {
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const now = Date.now();
+    const entry = (lastLocalSectionMs: number | null): SyncLedgerEntry => ({
+      state,
+      reason: "why",
+      consecutiveDeferrals: 0,
+      lastSuccessMs: null,
+      lastRunMs: state === "unknown" ? null : now - 60_000,
+      lastLocalSectionMs,
+      lastCommitStep,
+    });
+    // Fresh evidence (this tick's stamp or an earlier one's) stands the sweeper down in every row.
+    const fresh = entry(state === "unknown" ? null : now - 60_000);
+    if (state !== "unknown") {
+      __setSyncLedgerEntryForTest("fixture", fresh);
+      expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(true);
+      expect(done(fresh, now, true)).not.toContain(SWEEP);
+    }
+    expect(syncLoopOutlook(fresh, now).kind).toBe(kind);
+    if (stamps) {
+      expect(sweeperStale).toBeNull();
+      return;
+    }
+    for (const at of [null, now - SYNC_SUBSUME_MAX_AGE_MS - 60_000]) {
+      const stale = entry(at);
+      __setSyncLedgerEntryForTest("fixture", stale);
+      expect(syncLoopOutlook(stale, now).kind).toBe(kind);
+      expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(sweeperStale === "stands-down");
+      expect(done(stale, now, false)).not.toContain(SWEEP);
+      expect(done(stale, now, true).includes(SWEEP)).toBe(namedStale!);
+    }
+  });
+
+  test("row 2: outside a git repo Done never reaches the board-write message", async () => {
+    const dir = path.join(base, "not-a-repo");
+    await mkdir(path.join(dir, "plans"), { recursive: true });
+    await writeFile(path.join(dir, PLAN), "---\ntitle: P\npriority: high\n---\n# P\n");
+    expect(await dirtIsPendingBoardWrite(dir, PLAN)).toBe(false);
+  });
+
+  /** A real tick on clone A, then Done's text and the sweeper's answer a day later. */
+  async function aDayLater(f: Fixture) {
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const later = Date.now() + SYNC_SUBSUME_MAX_AGE_MS + 60_000;
+    const entry = getSyncLedgerEntry("fixture");
+    return {
+      entry,
+      sub: await syncSubsumesSweeper(top, { repos, now: later }),
+      text: done(entry, later, true),
+    };
+  }
+
+  test("row 12, real: a refused git commit with stale evidence does not name the sweep, whose own commit is refused too", async () => {
+    const f = await makeFixture(base);
+    await git(f.A, ["config", "commit.gpgsign", "true"]);
+    await git(f.A, ["config", "gpg.format", "openpgp"]);
+    await git(f.A, ["config", "gpg.program", "/bin/false"]);
+    const page = path.join(f.wikiA, "concepts", "New.md");
+    await writeFile(page, "# New\n");
+    await ageFile(page);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git commit failed");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastCommitStep).toBe("failed");
+    // The sweeper runs: the evidence is stale and nothing is blocked.
+    expect(sub.subsumed).toBe(false);
+    // Its commit goes through the same repo config, so it is refused the same way.
+    const sweep = await commitWikiChange(f.wikiA, ["concepts/New.md"], "[sweep] daily wiki sweep: 1 files", { push: false });
+    expect(sweep).toEqual({ committed: false, reason: "error" });
+    expect(text).toContain("is failing and will not commit it until that is cleared: git commit failed");
+    expect(text).not.toContain(SWEEP);
+  });
+
+  test("row 11, real: a refused git add records a failed commit step and does not name the sweep", async () => {
+    const f = await makeFixture(base);
+    const page = path.join(f.wikiA, "concepts", "Locked.md");
+    await writeFile(page, "# Locked\n");
+    await ageFile(page);
+    await chmod(page, 0o000);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git add failed");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastCommitStep).toBe("failed");
+    expect(sub.subsumed).toBe(false);
+    expect(text).toContain("will not commit it until that is cleared: git add failed");
+    expect(text).not.toContain(SWEEP);
+  });
+
+  test("row 14, real: a rebase conflict repeating with no evidence stands the sweeper down and is not named", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "Seed.md"), "# Seed — B\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B edits seed"]);
+    await git(f.B, ["push", "-q"]);
+    const seed = path.join(f.wikiA, "concepts", "Seed.md");
+    await writeFile(seed, "# Seed — A\n");
+    await ageFile(seed);
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("blocked");
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("blocked");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastLocalSectionMs).toBeNull();
+    // Stood down at any evidence age, and warning: the docs may not say it runs past ~26 h.
+    expect(sub).toMatchObject({ subsumed: true, configuredButIdle: true });
+    // A day with no tick reads idle; right after the tick it reads unpushed. Neither names the sweep.
+    expect(text).toContain("its last run was");
+    expect(text).not.toContain(SWEEP);
+    const nowText = done(entry, Date.now(), true);
+    expect(nowText).toContain("rebase conflict");
+    expect(nowText).not.toContain(SWEEP);
+  });
+
+  test("row 7, real: a paused loop with stale evidence lets the sweeper run, which no-ops off the default branch, so it is not named", async () => {
+    const f = await makeFixture(base);
+    await git(f.A, ["checkout", "-q", "-b", "feature"]);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("paused");
+    const { sub, text } = await aDayLater(f);
+    expect(sub.subsumed).toBe(false);
+    expect(await onDefaultBranch((await git(f.A, ["rev-parse", "--show-toplevel"])).out)).toBe(false);
+    expect(text).toContain("is paused and will not commit it");
+    expect(text).not.toContain(SWEEP);
   });
 });

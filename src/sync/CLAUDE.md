@@ -248,9 +248,59 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   although their commit landed, and the next tick commits again. So the ledger also
   records `lastCommitStep` (`passed` / `failed` at `git add`/`git commit`, either
   section / `not-reached`), and `syncLoopOutlook` (`decide.ts`, read by Done) calls a
-  `blocked`/`error` after a passed step `unpushed`, not `stopped`. Its
-  `sweeperStandsDown` comes from `sweeperSubsumption`, the pure half of
-  `syncSubsumesSweeper`, so Done names the sweep only where the sweeper runs (F36).
+  `blocked`/`error` after a passed step `unpushed`, not `stopped`. Its `sweeper`
+  field is `sweeperOutcome`, the table below (F36).
+
+## Who commits a page the plans board left dirty
+
+The board's writes pass no committer (`src/plans/write.ts`). Done's refusal of such a
+page (`pendingBoardWriteMessage`, `src/plans/board-dirt.ts`) names the loop from
+`syncLoopOutlook` and the daily sweep only when the root is one `sweeperCommits` says
+the sweeper commits AND `sweeperOutcome` answers `commits`. `sweeperOutcome` is
+`sweeperSubsumption` (stands down) first, then `paused` (no-op: the sweeper's
+`onDefaultBranch` guard), then commit step `failed` with state `error` (refused: the
+sweeper's `git add`/`git commit` runs in the same repo with the same config and
+hooks), else `commits`. One row per outcome a recorded tick ends in. *Fresh* is
+`lastLocalSectionMs` inside `SYNC_SUBSUME_MAX_AGE_MS` (~26 h), from this tick or an
+earlier one; a row that stamps is always fresh right after it. Fresh evidence stands
+the sweeper down in every row, so the *stale* column decides the sweep.
+
+| # | The tick ends at | state | step | stamps | Loop commits the page next tick | Sweeper, stale | Done (outlook) | Sweep named, stale |
+|---|---|---|---|---|---|---|---|---|
+| 1 | no tick since boot | `unknown` | not-reached | — | if it runs | commits | never-run | yes |
+| 2 | not a git repo | `error` | not-reached | no | no | finds no repo | unreachable: the page has no `HEAD`, Done keeps its plain refusal | — |
+| 3 | pre-flight: operation in progress, old or future `index.lock` | `blocked` | not-reached | no | no | stands down | stopped | no |
+| 4 | pre-flight: young `index.lock` | `transient` | not-reached | no | yes | commits | healthy | yes |
+| 5 | fetch failed | `error` | not-reached | no | no | commits (push fails) | stopped | yes |
+| 6 | unmerged paths | `blocked` | not-reached | no | no | stands down | stopped | no |
+| 7 | off the default branch | `paused` | not-reached | no | no | no-op | stopped | no |
+| 8 | no upstream and no `origin/main` | `error` | not-reached | no | no | commits (no push) | stopped | yes |
+| 9 | wiki lock held by another process (`sectionSkipped`) | `deferred` | not-reached | no | yes | commits | healthy | yes |
+| 10 | `git add`/`git commit` lost `index.lock` | `transient` | failed | no | yes | commits | healthy | yes |
+| 11 | `git add` refused | `error` | failed | no | no | refused | stopped | no |
+| 12 | `git commit` refused (signing, hook, `user.email`) | `error` | failed | no | no | refused | stopped | no |
+| 13 | hard `deferred` (behind, rebase-blocking dirt) | `deferred` | passed | yes | yes | — | healthy | — |
+| 14 | rebase conflict | `blocked` | passed | no | yes, unpushed | stands down | unpushed | no |
+| 15 | rebase never started | `error` | passed | no | yes, unpushed | commits | unpushed | yes |
+| 16 | `ok`, or a soft hold | `ok`/`deferred` | passed | yes | yes | — | healthy | — |
+| 17 | push failed (either push) | `error` | passed | yes | yes, unpushed | — | unpushed | — |
+| 18 | push rejected, then re-fetch failed or rejected again | `retrying` | passed | yes | yes | — | healthy | — |
+| 19 | no-upstream refusal | `blocked` | passed | yes | yes, unpushed | — | unpushed | — |
+| 20 | retry section: `git add`/`git commit` refused | `error` | failed | no | no | refused | stopped | no |
+| 21 | retry section: lost `index.lock` | `transient` | failed | no | yes | commits | healthy | yes |
+| 22 | retry section: rebase conflict | `blocked` | passed | no | yes, unpushed | stands down | unpushed | no |
+| 23 | retry section: rebase never started | `error` | passed | no | yes, unpushed | commits | unpushed | yes |
+| 24 | retry section: hard `deferred` | `deferred` | passed | yes | yes | — | healthy | — |
+| 25 | retry section: wiki lock held | `deferred` | passed | no | yes | commits | healthy | yes |
+| 26 | a throw | `error` | not-reached | no | unknown | commits | stopped | yes |
+
+A `—` in the stale columns: that row stamps, so its evidence is fresh. A ledger whose
+last tick is older than `SYNC_STALE_SUCCESS_MS` reads `idle` whatever its row (except
+the stopped ones), with the same sweep answer. Without `sweeperCommits` no row names
+the sweep. Pinned row by row in `run.test.ts` («the board-dirt state table»).
+**Residual, accepted:** the ledger keeps only the LAST tick's step, so a refused
+commit followed by ticks that stop earlier (row 12, then row 5 while offline) reads
+row 5 and names a sweep that will be refused.
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The

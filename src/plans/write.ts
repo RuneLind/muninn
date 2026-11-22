@@ -16,12 +16,12 @@
  *     Nothing that talks to git or the network is inside the section.
  *
  * There is no `log.md` entry, no reindex and no commit: an ordering is metadata.
- * Where `SYNC_REPOS` covers mimir in `wiki` mode the repo-sync loop commits it,
- * behind its 5-minute quiet period; otherwise the daily `wiki-committer` sweeper
- * does where `sweeperCommits` says it commits that root (it also runs beside a
- * loop with no commit pass in ~26h, `syncSubsumesSweeper`); otherwise nothing
- * commits it unattended and it stays dirty until a human does. A drag session is a burst;
- * 60 drops must not be 60 pushes.
+ * The repo-sync loop commits it where `SYNC_REPOS` covers mimir in `wiki` mode,
+ * behind its 5-minute quiet period; the daily `wiki-committer` sweeper where
+ * `sweeperCommits` says it commits that root and the loop's ledger says it
+ * would commit there (`sweeperOutcome`); otherwise nobody, until a human does.
+ * State by state: «Who commits a page the plans board left dirty» in
+ * `src/sync/CLAUDE.md`. A drag session is a burst; 60 drops must not be 60 pushes.
  *
  * **The base hash has three states, and two of them are not hashes** — the
  * distinction `PlanQueue.hash` in `source.ts` makes, honored here because the
