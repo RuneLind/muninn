@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { COMPONENT_NAMES, COMPONENT_SPEC, SELF_CLOSING_ALLOWED, type ComponentName } from "../format/component-spec.ts";
-import type { PageFiles } from "../format/query-block.ts";
+import { COMPONENT_NAMES, COMPONENT_SPEC, SELF_CLOSING_ALLOWED, type AttrSpec, type ComponentName } from "../format/component-spec.ts";
+import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import { renderAskAnswerHtml } from "./ask-render.ts";
+import { diagramSvgFromHtml } from "./diagram-svg.ts";
 import { questionRenderOptionsFor, renderWikiHtml } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
 
@@ -9,21 +10,33 @@ import type { WikiPageMeta } from "./store.ts";
  * F58 (architecture review 2026-11-16): the finished-HTML passes after the
  * render (glossary marks, line-ref chips, callout upgrades, paragraph gaps, the
  * sentinel restores) split and rewrite the page as a string, so each needs
- * every attribute value to hold no raw `<`, `>` or `"`. One page per component
- * and hostile fill goes through `renderWikiHtml` (views on and off) and
+ * every attribute value to hold no raw `<`, `>` or `"`. One page per component,
+ * setup and hostile fill goes through `renderWikiHtml` (views on and off) and
  * `renderAskAnswerHtml`; the output is parsed quote-aware, and a tag that does
- * not parse, a value holding `<` or `>`, a raw `<` in text or a NUL fails.
+ * not parse, a value holding `<` or `>`, a raw `<` in text, a NUL, an `on*` or
+ * `data-pwn` attribute, or an element the same setup never renders with a
+ * benign fill fails.
+ *
+ * Each component renders under its `hostile` setup (the fill in every
+ * attribute: the fallback paths) and under setups that walk each enumerated
+ * or typed attribute through its valid values while the fill sits in every
+ * free-text attribute, the body and the sibling files of the type the
+ * component reads, so the real views render (`the real views render` pins it).
  */
 
 const F53_FILL = `[x](https://example.com/**b**_e_/file.ts:12)`;
 const F55_FILL = "**bold** _em_ `code` [1] Hold";
 const F56_FILL = "x\n\ny";
 const F29_FILL = "<Pill>p</Pill>INLINE0`c`";
+/** What every hostile render is compared with: the same setup's elements. */
+const BENIGN_FILL = "Benign Hold";
 
 const FILLS = [
   // F26: a `>` and markup in an id, with a glossary term after the `>` and without.
   `Q-1>Hold <img src=x data-pwn onerror=alert(1)>`,
   `Q-1><img src=x data-pwn onerror=alert(1)>`,
+  // A raw quote that would close the value and add attributes.
+  `x" onmouseover="alert(1)" data-pwn="1`,
   // F57: a wikilink typed as the value.
   `[[Hostile Page]]`,
   `[[Hostile Page|Q 2 > x]]`,
@@ -39,75 +52,211 @@ const FILLS = [
 type Mode = "views" | "plain" | "ask";
 const MODES: Mode[] = ["views", "plain", "ask"];
 
-/**
- * Findings the next PR (A2) fixes: the fill that trips each and the shape of
- * its violation. A violation is excused only by a gap whose fill, mode and
- * `shape` all match, so a gap never hides another fault in the same case; and
- * each gap must still match somewhere, so its fix fails the last test until
- * the entry is deleted. Only F53, F55, F56 and F29 belong here: any other
- * failure is a new finding.
- */
-interface KnownGap {
-  finding: "F53" | "F55" | "F56" | "F29";
-  fill: string;
-  modes: readonly Mode[];
-  shape: RegExp;
-}
-const KNOWN_GAPS: KnownGap[] = [
-  // A markdown link's href re-processed by the emphasis pass (web-format.ts).
-  { finding: "F53", fill: F53_FILL, modes: ["views", "plain", "ask"], shape: /^raw < or > in an attribute value \(https:\/\/example\.com\/<\/?strong>/ },
-  // The Ask tab restores a citation's `<sup>` inside an attribute value (ask-render.ts).
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], shape: /^tag does not parse: <[a-z]+ [^>]*="[^"]*<sup class="wiki-ask-cite"/ },
-  // `paragraphGaps` writes `<br><br>` into a value holding a blank line (render.ts), here CaseBoard's yaml.
-  { finding: "F56", fill: F56_FILL, modes: ["views", "plain"], shape: /^raw < or > in an attribute value \([^)]*<br><br>/ },
-  // Two adjacent sentinels with a marker word between forge a third (markdown-core.ts): a NUL is served.
-  { finding: "F29", fill: F29_FILL, modes: ["views", "plain", "ask"], shape: /^NUL served/ },
-];
+// ── Setups ──────────────────────────────────────────────────────────────────
 
-type Variant = "attrs" | "files";
-const FILE_ATTRS = new Set(["src", "csv", "sql"]);
-const fileName = (attr: string) => (attr === "src" ? "cases.yaml" : attr === "csv" ? "q.csv" : "q.sql");
+/** A value per setup: a string, the fill made into one, or absent. */
+type Val = string | ((fill: string) => string) | undefined;
+
+/** One way to write the component: each attribute's value (absent ones
+ *  omitted) and, for Chart, the table it wraps. */
+interface Setup {
+  name: string;
+  attrs: Record<string, Val>;
+  table?: (fill: string) => string[];
+}
+
+const typedValue = (spec: AttrSpec): string | undefined =>
+  spec.type === "iso-date" || spec.type === "date" ? "2026-10-01" : spec.type === "number" ? "3" : spec.type === "positive-number" ? "5" : undefined;
+
+/**
+ * The values a valid setup cycles through for an attribute the spec calls
+ * text but a renderer checks (a path, a list grammar, a switch). An attribute
+ * absent here and in the spec's `enum`/`type` is free text: it takes the fill.
+ */
+const VALID: Partial<Record<ComponentName, Record<string, readonly Val[]>>> = {
+  Callout: { resolved: [undefined, "2026-10-01"] },
+  Fact: { n: ["1"] },
+  FactCheck: { date: ["2026-10-01"], ok: ["2"], warn: ["1"], bad: ["1"], unknown: ["1"] },
+  Embed: { src: ["x.html", "sub/x.html"], height: ["400", undefined] },
+  Fold: { open: ["true", undefined], for: [undefined, "dev", "agent"] },
+  AnnotatedCode: { lang: ["ts", (f) => f] },
+  Lane: { role: [undefined] },
+  Query: { csv: ["q.csv"], sql: ["q.sql"], run: ["2026-10-01"] },
+  CaseBoard: { src: ["cases.yaml"], labels: [(f) => `hold:${f},wait:${f}`, undefined] },
+  DeltaTable: { src: ["runs.csv", "runs.csv", undefined], better: ["lower", "higher", (f) => `${f}=lower`], decimal: ["dot", "comma", undefined] },
+  StatusRows: { tones: [(f) => `Status=good;${f}=warn`, "Status=info;Owner=muted"] },
+  Diagram: { src: ["x.architecture.json", "x.workflow.json", "x.lifecycle.json"] },
+  Steps: { src: ["x.lifecycle.json", "x.architecture.json"] },
+  Check: { env: ["FOO_BAR"], migration: ["086"], checkout: ["muninn"], pushed: ["muninn"], restart: ["3010"], on: ["mini"] },
+};
+
+/** Chart: one setup per kind over a table that kind reads. The column
+ *  attributes name plain headers (a fill there is a missing column, the
+ *  table fallback the hostile setup covers); the fill is the caption and the
+ *  first-column labels. */
+const CHART_SETUPS: Setup[] = ([
+  {
+    name: "gap",
+    attrs: { kind: "gap", value: "Value", target: "Target", gap: "Gap", mark: "Mark" },
+    table: (f) => ["| Item | Value | Target | Gap | Mark |", "|---|---|---|---|---|", `| ${f} | 3 | 5 | 2 | 4 |`, "| B | 1 | 2 | 1 | 1 |"],
+  },
+  {
+    name: "gate",
+    attrs: { kind: "gate", bar: "Bar", pass: "Pass", hold: "Hold" },
+    table: (f) => ["| Item | Bar | Pass | Hold |", "|---|---|---|---|", `| ${f} | 5 | 6 | 1 |`, "| B | 5 | 4 | 2 |"],
+  },
+  {
+    name: "steps",
+    attrs: { kind: "steps", x: "Step", ref: "Base", normalize: "none" },
+    table: (f) => ["| Step | A | B |", "|---|---|---|", "| Base | 10 | 20 |", `| ${f} | 5 | 6 |`, "| C | 7 | 8 |"],
+  },
+  {
+    name: "steps-ref",
+    attrs: { kind: "steps", x: "Step", ref: "Base", normalize: "ref" },
+    table: (f) => ["| Step | A | B |", "|---|---|---|", "| Base | 10 | 20 |", `| ${f} | 5 | 6 |`, "| C | 7 | 8 |"],
+  },
+  {
+    name: "funnel",
+    attrs: { kind: "funnel", value: "Count" },
+    table: (f) => ["| Stage | Count | Of |", "|---|---|---|", "| All | 10 | |", `| ${f} | 5 | 10 |`, "| C | 2 | 5 |"],
+  },
+  {
+    name: "bars",
+    attrs: { kind: "bars", value: "Count" },
+    table: (f) => ["| Item | Count |", "|---|---|", `| ${f} | 5 |`, "| B | 3 |"],
+  },
+  {
+    name: "range",
+    attrs: { kind: "range", value: "Range" },
+    table: (f) => ["| Item | Range |", "|---|---|", `| ${f} | 1–3 |`, "| B | 2–4 |"],
+  },
+] satisfies Setup[]).map((s) => ({ ...s, attrs: { ...s.attrs, caption: (f: string) => f } }));
+
+/** Every attribute the fill: the renderer's fallbacks. */
+const hostileSetup = (name: ComponentName): Setup => ({
+  name: "hostile",
+  attrs: Object.fromEntries(Object.keys(COMPONENT_SPEC[name].attrs).map((a) => [a, (f: string) => f])),
+});
+
+/** The valid setups: setup k gives each enumerated or checked attribute its
+ *  k-th valid value (cycling), each typed one a valid value, the rest the fill. */
+function validSetups(name: ComponentName): Setup[] {
+  if (name === "Chart") return CHART_SETUPS;
+  const specs = Object.entries(COMPONENT_SPEC[name].attrs) as [string, AttrSpec][];
+  const valuesOf = (a: string, spec: AttrSpec): readonly Val[] =>
+    VALID[name]?.[a] ?? spec.enum ?? (typedValue(spec) !== undefined ? [typedValue(spec)] : [(f: string) => f]);
+  const n = Math.max(1, ...specs.map(([a, s]) => valuesOf(a, s).length));
+  return Array.from({ length: n }, (_, k) => ({
+    name: `valid-${k}`,
+    attrs: Object.fromEntries(specs.map(([a, s]) => {
+      const vs = valuesOf(a, s);
+      return [a, vs[k % vs.length]];
+    })),
+  }));
+}
+
+const setupsFor = (name: ComponentName): Setup[] => (Object.keys(COMPONENT_SPEC[name].attrs).length ? [hostileSetup(name), ...validSetups(name)] : validSetups(name));
+
+// ── Pages ───────────────────────────────────────────────────────────────────
 
 // One target resolves (a live link); every other one is a missing link.
 const pages = (target: string): WikiPageMeta | undefined =>
   target.trim() === "Hostile Page" ? ({ name: "Hostile Page", relPath: `plans/h"<x>.mdx`, title: "Hostile" } as WikiPageMeta) : undefined;
 
-/** The page's sibling files, each carrying the fill in every field it has. */
+const yamlString = (s: string) => JSON.stringify(s);
+const htmlEscape = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+/** The diagram files, each kind carrying the fill in every text field. */
+function diagramJson(file: string, fill: string): string {
+  const views = [{ id: "v1", label: fill, focus: ["a"], note: fill }, { id: "v2", label: "Two", focus: ["b"], note: "" }];
+  if (file.endsWith(".architecture.json")) {
+    return JSON.stringify({
+      meta: { title: fill, views, legend: { entries: { backend: { label: fill } } } },
+      components: [{ id: "a", label: fill, sublabel: fill, type: "backend" }, { id: "b", label: "B", type: "database" }],
+      connections: [{ from: "a", to: "b", label: fill }],
+      boundaries: [{ kind: "zone", label: fill, wraps: ["a", "b"] }],
+    });
+  }
+  if (file.endsWith(".workflow.json")) {
+    return JSON.stringify({
+      meta: { title: fill, views },
+      lanes: [{ id: "l1", label: fill }],
+      nodes: [{ id: "a", label: fill, lane: "l1" }, { id: "b", label: "B", lane: "l1" }],
+      edges: [{ from: "a", to: "b", label: fill }],
+      groups: [{ id: "g", lane: "l1", label: fill, from: "a", to: "b" }],
+    });
+  }
+  return JSON.stringify({
+    meta: { title: fill, views },
+    states: [{ id: "a", label: fill, sublabel: fill }, { id: "b", label: "B" }],
+    transitions: [{ from: "a", to: "b", label: fill }],
+  });
+}
+
+/** The sanitized picture of each fill's diagram, as the loader hands it over. */
+const SVGS = new Map(
+  await Promise.all(
+    [...FILLS, BENIGN_FILL].map(async (fill) => {
+      const e = htmlEscape(fill);
+      const html = `<!doctype html><body><svg viewBox="0 0 100 100"><g data-node-id="a" aria-label="${e}"><rect width="5" height="5"></rect><text x="1" y="10">${e}</text></g><g data-node-id="b"><text x="1" y="30">B</text></g></svg></body>`;
+      return [fill, await diagramSvgFromHtml(html)] as const;
+    }),
+  ),
+);
+
+/** The page's sibling files, each of the type its component reads, with the
+ *  fill in every field it has. */
 function files(fill: string): PageFiles {
   const yaml = [
-    `- id: ${JSON.stringify(fill)}`,
-    `  status: ${JSON.stringify(fill)}`,
-    `  owner: ${JSON.stringify(fill)}`,
-    `  note: ${JSON.stringify(fill)}`,
-    `  kort: ${JSON.stringify(fill)}`,
-    `- id: B`,
-    `  status: hold`,
+    `- id: ${yamlString(fill)}`,
+    `  status: ${yamlString(fill)}`,
+    `  owner: ${yamlString(fill)}`,
+    `  note: ${yamlString(fill)}`,
+    `  kort: ${yamlString(fill)}`,
+    `  refs: [${yamlString(fill)}]`,
+    ...["hold", "wait", "wrong", "none", "ok"].flatMap((s, i) => [`- id: ${String.fromCharCode(66 + i)}`, `  status: ${s}`, `  owner: ${yamlString(fill)}`, `  kort: ${yamlString(fill)}`]),
   ].join("\n");
   const cell = `"${fill.replaceAll('"', '""')}"`;
   return {
-    get(ref: string) {
+    get(ref: string): PageFileResult | undefined {
       if (ref.endsWith(".yaml")) return { ok: true, text: yaml };
-      if (ref.endsWith(".csv")) return { ok: true, text: `${cell},n\n${cell},1\nb,2\n` };
+      if (ref.endsWith(".csv")) return { ok: true, text: `Run,${cell},n\n${cell},1.5,3\nb,2.5,4\n` };
       if (ref.endsWith(".sql")) return { ok: true, text: `select '${fill}'` };
+      if (ref.endsWith(".json")) return { ok: true, text: diagramJson(ref, fill), svg: SVGS.get(fill)! };
       return { ok: false, reason: "unavailable" };
     },
   };
 }
 
-function body(name: ComponentName, fill: string): string[] {
+function attrText(setup: Setup, fill: string): string {
+  return Object.entries(setup.attrs)
+    .flatMap(([a, v]) => {
+      const s = typeof v === "function" ? v(fill) : v;
+      return s === undefined ? [] : [`${a}="${s}"`];
+    })
+    .join(" ");
+}
+
+function body(name: ComponentName, fill: string, setup: Setup): string[] {
+  if (setup.table) return setup.table(fill);
   switch (name) {
-    case "DecisionLog":
     case "Timeline":
     case "Tldr":
     case "RunChecklist":
     case "Checklist":
     case "RuleTree":
-    case "StatusRows":
       return [`- **D1** — ${fill}`, `- **Q-1** — ${fill} 2026-10-01`, `  - nested ${fill}`];
+    case "DecisionLog":
+      // The fill as an item id too, the shape a Question's grid row reads.
+      return [`- **D1** — ${fill}`, `- **Q-1** — ${fill} 2026-10-01`, `  - nested ${fill}`, `- **${fill}** — Hold it?`];
+    case "StatusRows":
+      return ["- **Status:** open", `- **Owner:** ${fill}`, `- **${fill}:** ${fill}`];
     case "Chart":
     case "ComparisonTable":
     case "SystemMap":
       return ["| From | To | Status |", "|---|---|---|", `| ${fill} | B | ok |`, "| B | C | 2 |"];
+    case "DeltaTable":
+      return ["| Run | A | B |", "|---|---|---|", `| ${fill} | 1 | 2 |`, "| b | 3 | 4 |"];
     case "Glossary":
       return [`- **Hold** — ${fill}`];
     case "CodeTabs":
@@ -116,30 +265,29 @@ function body(name: ComponentName, fill: string): string[] {
       return [`<Lane kind="waiting" who="${fill}" since="2026-10-01">`, "", `- ${fill} **O16**`, "", "</Lane>"];
     case "Query":
       return ["```sql", `select '${fill}'`, "```", "", fill];
+    case "Steps":
+      return [`1. ${fill} \`a\``, `2. Then ${fill} \`b\``];
     default:
       return [`Text ${fill} with Hold.`, "", `- item ${fill}`];
   }
 }
 
-function block(name: ComponentName, fill: string, variant: Variant): string[] {
-  // `files`: only the file attributes, named, so the fill reaches the render
-  // through the file's content and cannot break the tag's line.
-  const attrs = Object.keys(COMPONENT_SPEC[name].attrs)
-    .filter((a) => variant === "attrs" || FILE_ATTRS.has(a))
-    .map((a) => `${a}="${variant === "files" ? fileName(a) : fill}"`)
-    .join(" ");
+function block(name: ComponentName, fill: string, setup: Setup): string[] {
+  const attrs = attrText(setup, fill);
   const open = `<${name}${attrs ? ` ${attrs}` : ""}`;
   if (name === "Check") return [`- run it ${open} />`];
   if (name === "Lane") return ["<NextMoves>", "", `${open}>`, "", `- ${fill} **O17**`, "", `</${name}>`, "", "</NextMoves>"];
   if (name === "Tab") return ["<CodeTabs>", "", `${open}>`, "", "```ts", fill, "```", "", `</${name}>`, "", "</CodeTabs>"];
-  if (SELF_CLOSING_ALLOWED.has(name)) return [`${open} />`];
-  return [`${open}>`, "", ...body(name, fill), "", `</${name}>`];
+  // Steps and DeltaTable read a body when written; the rest self-close.
+  if (SELF_CLOSING_ALLOWED.has(name) && name !== "Steps" && name !== "DeltaTable") return [`${open} />`];
+  return [`${open}>`, "", ...body(name, fill, setup), "", `</${name}>`];
 }
 
 /** The page around the block: a StatusRows slot, three plain questions the
- *  DecisionLog names (so the grid draws), an item whose id is the fill, a line
- *  ref and a Glossary the text uses. */
-function page(name: ComponentName, fill: string, variant: Variant): string {
+ *  DecisionLog names (so the grid draws), a line ref and a Glossary the text
+ *  uses. Only a Question page names the fill in the log (its grid row): any
+ *  other page holds the fill only where its component puts it. */
+function page(name: ComponentName, fill: string, setup: Setup = hostileSetup(name)): string {
   return [
     "---",
     "title: Hostile",
@@ -155,7 +303,7 @@ function page(name: ComponentName, fill: string, variant: Variant): string {
     "",
     "</StatusRows>",
     "",
-    ...block(name, fill, variant),
+    ...block(name, fill, setup),
     "",
     ...["O16", "O17", "O18"].flatMap((id) => [`<Question id="${id}">`, "", "Hold it?", "", "</Question>", ""]),
     "We Hold the line in file.ts:12.",
@@ -166,7 +314,7 @@ function page(name: ComponentName, fill: string, variant: Variant): string {
     "- **O16** — Hold it?",
     "- **O17** — Hold it?",
     "- **O18** — Hold it?",
-    `- **${fill}** — Hold it?`,
+    ...(name === "Question" ? [`- **${fill}** — Hold it?`] : []),
     "",
     "</DecisionLog>",
     "",
@@ -196,17 +344,49 @@ function render(md: string, mode: Mode, fill: string): string {
   });
 }
 
+// ── The scanner ─────────────────────────────────────────────────────────────
+
 const TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>=`]+))?)*)\s*\/?>/y;
-const VALUE_RE = /=\s*(?:"([^"]*)"|'([^']*)')/g;
+const ATTR_RE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+)))?/g;
 const RAW_TEXT = new Set(["script", "style"]);
 
-/** Every place `html` breaks the attribute contract: the reason, then the
- *  page from the offending tag on (the gaps' `shape`s read it). */
-export function attributeViolations(html: string): string[] {
-  const out: string[] = [];
-  const at = (i: number, why: string) => out.push(`${why}: ${html.slice(i, i + 400)}`);
-  if (html.includes("\0")) at(Math.max(0, html.indexOf("\0") - 80), "NUL served");
+type ViolationKind = "nul" | "unparsable" | "raw-lt" | "value-lt-gt" | "injected-attr" | "injected-element";
+
+/** One break of the contract: what, on which element (name and `class`) and
+ *  which attribute, and the page from there on. */
+interface Violation {
+  kind: ViolationKind;
+  tag: string;
+  cls: string;
+  attr: string;
+  /** The attribute's value, or for a NUL the text around it. */
+  value: string;
+  at: string;
+}
+
+const show = (v: Violation) => `${v.kind} <${v.tag}${v.cls ? `.${v.cls.split(/\s+/)[0]}` : ""}>${v.attr ? `[${v.attr}]` : ""} ${JSON.stringify(v.value.slice(0, 80))} at ${v.at.slice(0, 200)}`;
+
+interface Scan {
+  violations: Violation[];
+  /** Every element name the page opens. */
+  elements: Set<string>;
+}
+
+/** Every place `html` breaks the attribute contract, every NUL included. */
+export function scanHtml(html: string): Scan {
+  const violations: Violation[] = [];
+  const elements = new Set<string>();
+  const add = (kind: ViolationKind, i: number, tag = "", cls = "", attr = "", value = "") =>
+    violations.push({ kind, tag, cls, attr, value, at: html.slice(i, i + 400) });
+  // The element open at each NUL: the last open tag before it.
+  let lastOpen = { tag: "", cls: "" };
+  let nulFrom = 0;
+  const nulsUpTo = (end: number) => {
+    for (let k = html.indexOf("\0", nulFrom); k >= 0 && k < end; k = html.indexOf("\0", k + 1)) add("nul", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
+    nulFrom = Math.max(nulFrom, end);
+  };
   for (let i = html.indexOf("<"); i >= 0; i = html.indexOf("<", i)) {
+    nulsUpTo(i);
     if (html.startsWith("<!--", i)) {
       const end = html.indexOf("-->", i + 4);
       i = end < 0 ? html.length : end + 3;
@@ -215,77 +395,266 @@ export function attributeViolations(html: string): string[] {
     TAG_RE.lastIndex = i;
     const m = TAG_RE.exec(html);
     if (!m) {
-      at(i, /^<\/?[A-Za-z]/.test(html.slice(i, i + 3)) ? "tag does not parse" : "raw < in text");
+      const head = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(html.slice(i, i + 64));
+      if (head) {
+        // The attribute whose value the tag breaks in: the last `name="` before
+        // the first `<` inside the tag.
+        const rest = html.slice(i + 1, i + 2000);
+        const cut = rest.indexOf("<");
+        const before = cut < 0 ? rest : rest.slice(0, cut);
+        const attr = [...before.matchAll(/\s([^\s"'<>/=]+)="/g)].at(-1)?.[1] ?? "";
+        const cls = /\sclass="([^"<]*)"/.exec(before)?.[1] ?? "";
+        add("unparsable", i, head[1]!.toLowerCase(), cls, attr);
+      } else add("raw-lt", i, lastOpen.tag, lastOpen.cls);
       i++;
       continue;
     }
-    for (const v of m[2]!.matchAll(VALUE_RE)) {
-      const value = v[1] ?? v[2] ?? "";
-      if (/[<>]/.test(value)) at(i, `raw < or > in an attribute value (${value.slice(0, 80)})`);
+    const name = m[1]!.toLowerCase();
+    const closing = m[0].startsWith("</");
+    const attrs = [...m[2]!.matchAll(ATTR_RE)].map((a) => ({ name: a[1]!.toLowerCase(), value: a[2] ?? a[3] ?? a[4] ?? "" }));
+    const cls = attrs.find((a) => a.name === "class")?.value ?? "";
+    if (!closing) {
+      elements.add(name);
+      lastOpen = { tag: name, cls };
+    }
+    for (const a of attrs) {
+      if (/[<>]/.test(a.value)) add("value-lt-gt", i, name, cls, a.name, a.value);
+      if (/^on/.test(a.name) || a.name === "data-pwn") add("injected-attr", i, name, cls, a.name, a.value);
     }
     i = TAG_RE.lastIndex;
-    const name = m[1]!.toLowerCase();
-    if (!m[0].startsWith("</") && RAW_TEXT.has(name)) {
+    if (!closing && RAW_TEXT.has(name)) {
       const end = html.toLowerCase().indexOf(`</${name}`, i);
       i = end < 0 ? html.length : end;
     }
   }
-  return out;
+  nulsUpTo(html.length);
+  return { violations, elements };
 }
+
+/** The violations' lines, the shape the first tests read. */
+export const attributeViolations = (html: string): string[] => scanHtml(html).violations.map(show);
+
+/** Elements a fill's own markdown legitimately makes (a link, emphasis, a code
+ *  span, a citation, a wikilink, an inline `<Pill>`, a paragraph or list a
+ *  blank line starts, a line-ref chip), which a benign fill does not. */
+const FILL_MARKDOWN_ELEMENTS = new Set(["a", "strong", "em", "code", "sup", "span", "br", "p", "ul", "ol", "li", "del"]);
+
+// ── Known gaps ──────────────────────────────────────────────────────────────
+
+/**
+ * Findings the next PR (A2) fixes. A violation is excused only by a gap whose
+ * fill, mode and component match and whose kind, element, class and attribute
+ * are the violation's own, so a gap never excuses another element or another
+ * attribute of the same case; and each gap must still match on every component
+ * it names, so its fix fails the last test until the entry (or that component)
+ * is deleted. Only F53, F55, F56 and F29 belong here: any other failure is a
+ * new finding.
+ */
+interface KnownGap {
+  finding: "F53" | "F55" | "F56" | "F29";
+  fill: string;
+  modes: readonly Mode[];
+  components: readonly ComponentName[];
+  kind: ViolationKind;
+  /** The element, and its `class` attribute matched whole; absent for a NUL,
+   *  which `near` places instead. */
+  tag?: string;
+  cls?: RegExp;
+  /** The attributes it may break, and the value's shape. */
+  attrs?: readonly string[];
+  value?: RegExp;
+  /** For a NUL: the text around it (40 chars each side). */
+  near?: RegExp;
+}
+/** The components whose body, cells or file fields render the fill as inline
+ *  markdown, where F53 and F29 trip (measured on this guard's pages). */
+const F53_COMPONENTS: readonly ComponentName[] = [
+  "AnnotatedCode", "Callout", "CaseBoard", "Chart", "Checklist", "ComparisonTable", "DecisionLog", "DeltaTable", "Diff",
+  "FactCheck", "Figure", "FileTree", "Fold", "Glossary", "Historic", "Meter", "More", "Query", "Question", "RuleTree",
+  "RunChecklist", "StatusRows", "Steps", "SystemMap", "Timeline", "Tldr",
+];
+const F29_COMPONENTS: readonly ComponentName[] = [...F53_COMPONENTS, "Lane", "NextMoves"];
+
+const KNOWN_GAPS: KnownGap[] = [
+  // A markdown link's href re-processed by the emphasis pass (web-format.ts): a plain `<a>`'s href only.
+  {
+    finding: "F53", fill: F53_FILL, modes: ["views", "plain", "ask"], components: F53_COMPONENTS,
+    kind: "value-lt-gt", tag: "a", cls: /^$/, attrs: ["href"], value: /^https:\/\/example\.com\/<\/?strong>b<\/?strong><em>e<\/em>\/file\.ts:12$/,
+  },
+  // The Ask tab restores a citation's `<sup>` inside an attribute value (ask-render.ts): these three values.
+  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question"], kind: "unparsable", tag: "section", cls: /^question\b/, attrs: ["data-question-id"] },
+  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Lane", "NextMoves"], kind: "unparsable", tag: "div", cls: /^nm-lane\b/, attrs: ["data-who"] },
+  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Embed"], kind: "unparsable", tag: "figure", cls: /^embed$/, attrs: ["data-embed-title"] },
+  // `paragraphGaps` writes `<br><br>` into a value holding a blank line (render.ts): CaseBoard's status pill
+  // and, in dots view, the square's three values.
+  { finding: "F56", fill: F56_FILL, modes: ["views", "plain"], components: ["CaseBoard"], kind: "value-lt-gt", tag: "span", cls: /^cb-pill\b/, attrs: ["title"], value: /^status: x<br><br>y$/ },
+  {
+    finding: "F56", fill: F56_FILL, modes: ["views"], components: ["CaseBoard"],
+    kind: "value-lt-gt", tag: "button", cls: /^cb-dot cb-dot-unknown$/, attrs: ["title", "aria-label", "data-cb-say"], value: /^x<br><br>y(: | — )/,
+  },
+  // Two adjacent sentinels with a marker word between forge a third (markdown-core.ts): a NUL at the forged pair's edge.
+  { finding: "F29", fill: F29_FILL, modes: ["views", "plain", "ask"], components: F29_COMPONENTS, kind: "nul", near: /\0INLINECMP0<code>c<\/code>|<code>c<\/code>INLINE0\0/ },
+];
 
 interface Case {
   component: ComponentName;
+  setup: Setup;
   fill: string;
-  variant: Variant;
   mode: Mode;
 }
 
 function* cases(): Generator<Case> {
   for (const component of COMPONENT_NAMES) {
-    const hasFileAttr = Object.keys(COMPONENT_SPEC[component].attrs).some((a) => FILE_ATTRS.has(a));
-    for (const fill of FILLS) {
-      for (const variant of hasFileAttr ? (["attrs", "files"] as const) : (["attrs"] as const)) {
-        for (const mode of MODES) yield { component, fill, variant, mode };
+    for (const setup of setupsFor(component)) {
+      for (const fill of FILLS) {
+        for (const mode of MODES) yield { component, setup, fill, mode };
       }
     }
   }
 }
 
-/** `c`'s violations no applicable gap excuses, and the gaps that excused one. */
-function judge(c: Case): { left: string[]; excusedBy: KnownGap[] } {
-  const gaps = KNOWN_GAPS.filter((g) => g.fill === c.fill && g.modes.includes(c.mode));
+const benignElements = new Map<string, Set<string>>();
+/** The elements the case's setup renders with the benign fill. */
+function benign(c: Case): Set<string> {
+  const key = `${c.component} ${c.setup.name} ${c.mode}`;
+  let set = benignElements.get(key);
+  if (!set) {
+    set = scanHtml(render(page(c.component, BENIGN_FILL, c.setup), c.mode, BENIGN_FILL)).elements;
+    benignElements.set(key, set);
+  }
+  return set;
+}
+
+/** The elements a hostile render opens that its benign render does not and
+ *  the fill's own markdown cannot make. */
+const injectedElements = (hostile: Set<string>, known: Set<string>) => [...hostile].filter((e) => !known.has(e) && !FILL_MARKDOWN_ELEMENTS.has(e));
+
+/** Every violation of `c`: the scanner's, and each element the hostile render
+ *  opens that the benign one does not and the fill's markdown cannot make. */
+function violationsOf(c: Case): Violation[] {
+  const html = render(page(c.component, c.fill, c.setup), c.mode, c.fill);
+  const scan = scanHtml(html);
+  const extra = injectedElements(scan.elements, benign(c))
+    .map((e): Violation => {
+      const i = Math.max(0, html.search(new RegExp(`<${e}[\\s/>]`, "i")));
+      return { kind: "injected-element", tag: e, cls: "", attr: "", value: "", at: html.slice(i, i + 400) };
+    });
+  return [...scan.violations, ...extra];
+}
+
+const excuses = (g: KnownGap, c: Case, v: Violation) =>
+  g.fill === c.fill &&
+  g.modes.includes(c.mode) &&
+  g.components.includes(c.component) &&
+  g.kind === v.kind &&
+  (g.kind === "nul"
+    ? g.near!.test(v.value)
+    : g.tag === v.tag && g.cls!.test(v.cls) && g.attrs!.includes(v.attr) && (!g.value || g.value.test(v.value)));
+
+/** `c`'s violations no gap excuses, and the gaps that excused one. */
+function judge(c: Case): { left: Violation[]; excusedBy: KnownGap[] } {
   const excusedBy: KnownGap[] = [];
-  const left = attributeViolations(render(page(c.component, c.fill, c.variant), c.mode, c.fill)).filter((v) => {
-    const gap = gaps.find((g) => g.shape.test(v));
+  const left = violationsOf(c).filter((v) => {
+    const gap = KNOWN_GAPS.find((g) => excuses(g, c, v));
     if (gap) excusedBy.push(gap);
     return !gap;
   });
   return { left, excusedBy };
 }
 
-const label = (c: Case) => `${c.component} ${c.variant} ${c.mode} ${JSON.stringify(c.fill)}`;
+const label = (c: Case) => `${c.component} ${c.setup.name} ${c.mode} ${JSON.stringify(c.fill)}`;
+
+/** What a setup's real view renders on the reader (views on, benign fill). */
+function realViewMarks(name: ComponentName, setup: Setup): string[] {
+  const a = (k: string) => {
+    const v = setup.attrs[k];
+    return typeof v === "function" ? v(BENIGN_FILL) : v;
+  };
+  switch (name) {
+    case "Chart":
+      return [`<section class="vc vc-kind-${a("kind")}"`];
+    case "CaseBoard":
+      return a("view") === "dots" ? ['<div class="cb-dots"', '<div class="cb-row"'] : ['<div class="cb-row"'];
+    case "StatusRows":
+      return a("view") === "tiles" ? ['<section class="status-rows sr-tiles">', '<span class="sr-big">'] : ['<div class="sr-grid">'];
+    case "Meter":
+      return [`<div class="meter${a("tone") === "default" ? "" : ` meter-${a("tone")}`}"`];
+    case "Callout":
+      return a("resolved") ? ["callout-resolved-row"] : [`<div class="callout callout-${a("tone")}">`];
+    case "Pill":
+      return [`<span class="pill${a("tone") === "default" ? "" : ` pill-${a("tone")}`}">`];
+    case "Verdict":
+      return [`<span class="verdict verdict-${a("value")}`];
+    case "Fact":
+      return [`class="fc-chip fc-chip-${a("v")}"`];
+    case "Lane":
+      return [`<details class="nm-lane nm-${a("kind")}"`];
+    case "Embed":
+      return [`<figure class="embed" data-embed-src="${a("src")}"`];
+    case "Diagram":
+      return ["dgm-has-svg"];
+    case "Steps":
+      return ['class="stp', "dgm-has-svg"];
+    case "DeltaTable":
+      return ['class="dt-table'];
+    case "Query":
+      return ['class="query-table', "language-sql"];
+    default:
+      return [];
+  }
+}
+
+const FALLBACK_RE = /-unavailable"|embed-invalid|File type not allowed|invalid embed/;
 
 describe("rendered attribute values (F58)", () => {
-  test("the scanner catches F26's shape, a NUL and a stray quote, and passes clean tags", () => {
+  test("the scanner catches F26's shape, every NUL, a stray quote and an injected handler, and passes clean tags", () => {
     expect(attributeViolations(`<section id="qcard-q-1><img src=x data-pwn>"><p>x</p></section>`)).not.toEqual([]);
-    expect(attributeViolations(`<p>a\u0000b</p>`)).not.toEqual([]);
+    expect(attributeViolations(`<p>a\u0000b\u0000c</p><p>\u0000</p>`)).toHaveLength(3);
     expect(attributeViolations(`<span a="x" b="y"z">t</span>`)).not.toEqual([]);
     expect(attributeViolations(`<p>a < b</p>`)).not.toEqual([]);
+    expect(attributeViolations(`<span class="cb-owner"><img src=x data-pwn onerror=alert(1)></span>`).map((v) => v.split(" ")[0])).toEqual(["injected-attr", "injected-attr"]);
+    expect(attributeViolations(`<span title="x" onmouseover="y">t</span>`)).toHaveLength(1);
     expect(attributeViolations(`<section id="a" data-x="q &gt; 1"><p>x &lt; y</p><br><img src="x" alt=""/></section>`)).toEqual([]);
   });
 
+  test("the real views render: each valid setup draws its view, never a fallback", () => {
+    const missing: string[] = [];
+    for (const name of COMPONENT_NAMES) {
+      for (const setup of validSetups(name)) {
+        const html = render(page(name, BENIGN_FILL, setup), "views", BENIGN_FILL);
+        for (const mark of realViewMarks(name, setup)) if (!html.includes(mark)) missing.push(`${name} ${setup.name}: ${mark}`);
+        const fallback = FALLBACK_RE.exec(html);
+        if (fallback) missing.push(`${name} ${setup.name}: fallback ${fallback[0]}`);
+      }
+    }
+    expect(missing).toEqual([]);
+    // Every enumerated value of every component is some valid setup's.
+    for (const name of COMPONENT_NAMES) {
+      const setups = validSetups(name);
+      for (const [attr, spec] of Object.entries(COMPONENT_SPEC[name].attrs) as [string, AttrSpec][]) {
+        for (const v of spec.enum ?? []) expect(setups.some((s) => s.attrs[attr] === v)).toBe(true);
+      }
+    }
+  });
+
+  test("an element the benign render never opens fails; the fill's own markdown does not", () => {
+    const known = scanHtml(`<div class="callout"><p>Benign Hold</p></div>`).elements;
+    const hostile = scanHtml(`<div class="callout"><p><strong>b</strong> <a href="x">x</a> <b>c</b><img src="x"></p></div>`).elements;
+    expect(injectedElements(hostile, known)).toEqual(["b", "img"]);
+  });
+
   test("F26's page reaches the passes the guard is for: a card anchor, the grid and a glossary mark", () => {
-    const html = render(page("Question", FILLS[0], "attrs"), "views", FILLS[0]);
+    const html = render(page("Question", FILLS[0]), "views", FILLS[0]);
     expect(html).toContain('id="qcard-o16"');
     expect(html).toContain('href="#qcard-o16"');
     expect(html).toContain('class="gl-mark"');
     expect(html).toContain('data-question-id="Q-1&gt;Hold &lt;img src=x data-pwn onerror=alert(1)&gt;"');
     // A waiting lane naming a question takes its card.
-    expect(render(page("NextMoves", FILLS[1], "attrs"), "views", FILLS[1])).toContain('<div class="nm-qcard" id="nm-q-o16">');
+    expect(render(page("NextMoves", FILLS[1]), "views", FILLS[1])).toContain('<div class="nm-qcard" id="nm-q-o16">');
   });
 
   test("F57: a wikilink typed as a Question or Query id anchors on its link text", () => {
-    const md = page("Query", "Q-16", "attrs").replace('<Question id="O18">', '<Question id="[[Hostile Page]]">') + '\n<Query id="[[Hostile Page|Q 2]]">\n\nx\n\n</Query>\n';
+    const md = page("Query", "Q-16").replace('<Question id="O18">', '<Question id="[[Hostile Page]]">') + '\n<Query id="[[Hostile Page|Q 2]]">\n\nx\n\n</Query>\n';
     const views = render(md, "views", "Q-16");
     expect(views).toContain('id="qcard-hostile-page"');
     expect(views).toContain('<section class="query" id="q-2">');
@@ -374,15 +743,20 @@ describe("rendered attribute values (F58)", () => {
 
   const results = [...cases()].map((c) => ({ c, ...judge(c) }));
 
-  test("no component and hostile fill breaks an attribute value", () => {
+  test("every component, setup and hostile fill keeps the contract", () => {
     const failures = results
       .filter((r) => r.left.length)
-      .map((r) => `${label(r.c)}\n  ${r.left.slice(0, 3).map((v) => v.slice(0, 240)).join("\n  ")}`);
+      .map((r) => `${label(r.c)}\n  ${r.left.slice(0, 3).map(show).join("\n  ")}`);
     expect(failures).toEqual([]);
   });
 
-  test("every known gap still breaks somewhere (delete the entry with its fix)", () => {
-    const alive = new Set(results.flatMap((r) => r.excusedBy));
-    expect(KNOWN_GAPS.filter((g) => !alive.has(g)).map((g) => g.finding)).toEqual([]);
+  test("every known gap still breaks on every component it names (delete the entry or the component with its fix)", () => {
+    const dead: string[] = [];
+    for (const g of KNOWN_GAPS) {
+      for (const component of g.components) {
+        if (!results.some((r) => r.c.component === component && r.excusedBy.includes(g))) dead.push(`${g.finding} ${g.tag ?? g.kind} ${component}`);
+      }
+    }
+    expect(dead).toEqual([]);
   });
 });
