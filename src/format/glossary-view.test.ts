@@ -137,6 +137,13 @@ describe("where a term is never marked", () => {
     }
   });
 
+  test("a tag with an unbalanced quote stays whole: no mark inside it", () => {
+    const entries: GlossaryEntry[] = [{ term: "Hold", ...glossaryKey("Hold"), definition: "kept back", codeSpelled: false, at: 0 }];
+    const out = markGlossaryTerms('<p><span title=a"b Hold>x</span> Hold</p>', entries);
+    expect(out.startsWith('<p><span title=a"b Hold>x</span> ')).toBe(true);
+    expect(marks(out)).toEqual([["hold", "Hold"]]);
+  });
+
   test("a CaseBoard's count strip and status pills are never marked; its note is prose", () => {
     const files = new Map([["c.yaml", { ok: true as const, text: "- {id: LIB-1, status: hold, note: Asked for a Hold}\n" }]]);
     const html = renderWikiHtml('<CaseBoard src="c.yaml" />\n' + HOLD, () => undefined, { views: true, files });

@@ -61,8 +61,9 @@ const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
 const SECTION_TAGS = new Set(["h2", "h3"]);
 // A tag ends at the first `>` outside a quoted value: a `>` inside one is
-// text, and splitting there would put a mark inside the attribute (F26).
-const TOKEN_RE = /<!--[\s\S]*?-->|<\/?[A-Za-z](?:[^"'>]|"[^"]*"|'[^']*')*>|[^<]+|</g;
+// text, and splitting there would put a mark inside the attribute (F26). A tag
+// with an unbalanced quote falls back to ending at its first `>`, still whole.
+const TOKEN_RE = /<!--[\s\S]*?-->|<\/?[A-Za-z](?:[^"'>]|"[^"]*"|'[^']*')*>|<\/?[A-Za-z][^>]*>|[^<]+|</g;
 const WORD_CHAR_RE = /[\p{L}\p{N}\p{M}_-]/u;
 const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/|^www\./i;
 

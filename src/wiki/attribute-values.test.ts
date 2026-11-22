@@ -294,6 +294,84 @@ describe("rendered attribute values (F58)", () => {
     expect(render(md, "plain", "Q-16")).toContain('<section class="query" id="q-2">');
   });
 
+  /** A page of `<Question>` cards with these ids, a DecisionLog naming the
+   *  three plain ones (so the grid draws), `extra` blocks before them and
+   *  `items` more log items. */
+  const cardsPage = (ids: string[], extra: string[] = [], items: string[] = []) =>
+    [
+      "---", "title: Hostile", "type: plan", "code_at: abc1234", "---", "", "# Hostile", "",
+      "<StatusRows>", "", "- **Status** — open", "", "</StatusRows>", "",
+      ...extra,
+      ...ids.flatMap((id) => [`<Question id="${id}">`, "", "Hold it?", "", "</Question>", ""]),
+      "<DecisionLog>", "", "- **O16** — Hold it?", "- **O17** — Hold it?", "- **O18** — Hold it?", ...items, "", "</DecisionLog>", "",
+    ].join("\n");
+  const cardIds = (html: string) =>
+    [...html.matchAll(/<section class="question[^"]*"(?: id="([^"]*)")?[^>]*? data-question-id="([^"]*)"/g)].map((m) => [m[2]!, m[1] ?? null]);
+  const idCount = (html: string, id: string) => html.split(` id="${id}"`).length - 1;
+
+  test("a safe id keeps its anchor, and a slugged one never takes a safe id's", () => {
+    const html = render(cardsPage(["(O16)", "Q.1", "O 2", "O16'", "O16", "Q-1", "O17", "O18"]), "views", "x");
+    expect(cardIds(html)).toEqual([
+      ["(O16)", "qcard-(o16)"],
+      ["Q.1", "qcard-q.1"],
+      ["O 2", "qcard-o 2"],
+      ["O16'", "qcard-o16-2"],
+      ["O16", "qcard-o16"],
+      ["Q-1", "qcard-q-1"],
+      ["O17", "qcard-o17"],
+      ["O18", "qcard-o18"],
+    ]);
+    for (const [, anchor] of cardIds(html)) expect(idCount(html, anchor!)).toBe(1);
+    // The grid's row for O16 lands on the card whose id is O16.
+    expect(html).toContain('<a class="qg-card" href="#qcard-o16">');
+    expect(html).toMatch(/<section class="question[^"]*" id="qcard-o16" data-question-id="O16"/);
+  });
+
+  test("the grid row of a slugged card links the suffixed anchor it took", () => {
+    const md = cardsPage(["o19", "[[Hostile Page|O19]]", "O16", "O17", "O18"], [], ["- **[[Hostile Page|O19]]** — Hold it?"]);
+    const html = render(md, "views", "x");
+    expect(idCount(html, "qcard-o19")).toBe(1);
+    expect(idCount(html, "qcard-o19-2")).toBe(1);
+    expect(html).toContain('<a class="qg-card" href="#qcard-o19-2">');
+  });
+
+  test("a slugged id yields to a Query card's anchor too", () => {
+    const html = render(cardsPage(["qcard-O16'", "O16", "O17", "O18"], ['<Query id="qcard-qcard-o16">', "", "x", "", "</Query>", ""]), "views", "x");
+    expect(cardIds(html)[0]).toEqual(["qcard-O16'", "qcard-qcard-o16-2"]);
+    expect(html).toContain('<section class="query" id="qcard-qcard-o16">');
+  });
+
+  test("a Query whose id is a wikilink yields its slug to a plain Query id", () => {
+    const queries = ['<Query id="[[Hostile Page|Q 2]]">', "", "x", "", "</Query>", "", '<Query id="Q-2">', "", "y", "", "</Query>", ""];
+    const html = render(cardsPage(["O16", "O17", "O18"], queries), "views", "x");
+    expect(html).toMatch(/<section class="query" id="q-2-2">[\s\S]*?<a class="query-id" href="#q-2-2">[\s\S]*?<section class="query" id="q-2">[\s\S]*?<a class="query-id" href="#q-2">Q-2</);
+  });
+
+  test("an unsafe id that slugs to nothing takes no anchor and no link", () => {
+    const html = render(cardsPage(["'&'", "O16", "O17", "O18"]), "views", "x");
+    expect(cardIds(html)[0]).toEqual(["'&amp;'", null]);
+    expect(html).not.toMatch(/ id="qcard-"|href="#qcard-"/);
+  });
+
+  test("a lane's card: a safe id keeps nm-q-o16 and the unsafe one's moved line follows its suffix", () => {
+    const lane = ["<NextMoves>", "", '<Lane kind="waiting" who="Owner Person" since="2026-10-01">', "", "- answer **O16'** and **O16**", "", "</Lane>", "", "</NextMoves>", ""];
+    const md = cardsPage(["O17", "O18"], lane) + ["", "Between.", "", `<Question id="O16'">`, "", "Hold it?", "", "</Question>", "", "Between.", "", `<Question id="O16">`, "", "Hold it?", "", "</Question>", ""].join("\n");
+    const html = render(md, "views", "x");
+    expect(html).toMatch(/<div class="nm-qcard" id="nm-q-o16"><section class="question[^"]*"[^>]* data-question-id="O16"/);
+    expect(html).toMatch(/<div class="nm-qcard" id="nm-q-o16-2"><section class="question[^"]*"[^>]* data-question-id="O16'"/);
+    expect(html).toContain('<a class="q-moved-link" href="#nm-q-o16-2">Question O16\' is');
+    expect(html).toContain('<a class="q-moved-link" href="#nm-q-o16">Question O16 is');
+    expect(idCount(html, "nm-q-o16")).toBe(1);
+    expect(idCount(html, "nm-q-o16-2")).toBe(1);
+  });
+
+  test("an unsafe lane id that slugs to nothing takes nm-q-card, never the bare nm-q-", () => {
+    const lane = ["<NextMoves>", "", '<Lane kind="waiting" who="Owner Person" since="2026-10-01">', "", "- answer **'&'**", "", "</Lane>", "", "</NextMoves>", ""];
+    const html = render(cardsPage(["'&'", "O16", "O17", "O18"], lane), "views", "x");
+    expect(html).toContain('<div class="nm-qcard" id="nm-q-card">');
+    expect(html).not.toContain('id="nm-q-"');
+  });
+
   const results = [...cases()].map((c) => ({ c, ...judge(c) }));
 
   test("no component and hostile fill breaks an attribute value", () => {
