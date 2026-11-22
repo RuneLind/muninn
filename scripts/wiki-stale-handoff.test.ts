@@ -485,53 +485,62 @@ describe("the gate", () => {
   }, 30_000);
 
   test("F13 class check C, real git: a real fast-forward stopped part-way leaves its files and lists them; the user's stay; the printed commands give back a pullable checkout", async () => {
-    const { up, main } = await withRemote();
-    // A tracked file the checkout changes and one it deletes, each put back from HEAD by the printed restore.
-    write(up, "aaa/x.md", "# X\nold\n");
-    write(up, "aab.md", "# AAB\n");
-    await g(up, "add", "-A");
-    await g(up, "commit", "-qm", "early files");
-    await g(up, "push", "-q", "origin", "main");
-    await g(main, "pull", "-q", "--ff-only", "origin", "main");
-    const N = 25_000;
-    write(up, "aaa/x.md", "# X\nnew\n");
-    rmSync(path.join(up, "aab.md"));
-    for (let i = 0; i < 10; i++) write(up, `bulk/b${i}.md`, `# ${i}\n`);
-    for (let i = 0; i < N; i++) write(up, `new/sub/p${i}.md`, `# ${i}\n`);
-    await g(up, "add", "-A");
-    await g(up, "commit", "-qm", "bulk");
-    await g(up, "push", "-q", "origin", "main");
-    // The user's own untracked files: an empty one in a folder the fast-forward writes into, one whose bytes start a target blob.
-    write(main, "bulk/mine.md", "");
-    write(main, "notes/mine.md", "# 1");
-    const before = await g(main, "rev-parse", "HEAD");
-    // The first lock wait uses most of the section, so the merge's bound (~1 s) stops git mid-checkout.
-    const { t, lock } = timedLock(LOCKED_SECTION_MS - 1_500 - 1_200);
-    const gate = await runGate(main, [], git, { lock, roots: [], ffMax: { files: 1e9, bytes: 1e12 } });
-    const u = nulList(path.join(main, ".git/muninn-stopped-ff-untracked")) ?? [];
-    const m = nulList(path.join(main, ".git/muninn-stopped-ff-modified")) ?? [];
-    expect({
-      skip: gate.skip?.slice(0, 61),
-      nothingUndone: gate.skip?.includes("git was stopped part-way, and nothing was deleted or restored: it had added ") ? true : gate.skip,
-      wrote: u.length > 12,
-      locks: t.calls,
-    }).toEqual({ skip: "git pull --ff-only timed out (the fast-forward to origin/main", nothingUndone: true, wrote: true, locks: 2 });
-    // Only the fast-forward's own paths are listed, and every one of them is on disk as the stop left it.
-    expect({
-      foreign: u.filter((p) => !/^(new\/sub\/p\d+|bulk\/b\d)\.md$/.test(p)),
-      missing: u.filter((p) => !existsSync(path.join(main, p))),
-      m: m.filter((p) => !["aaa/x.md", "aab.md"].includes(p)),
-      head: await g(main, "rev-parse", "HEAD"),
-      mine: [readFileSync(path.join(main, "bulk/mine.md"), "utf8"), readFileSync(path.join(main, "notes/mine.md"), "utf8")],
-    }).toEqual({ foreign: [], missing: [], m: [], head: before, mine: ["", "# 1"] });
-    for (const step of undoSteps(gate.skip!)) await sh(step);
-    expect({ status: await status(main), x: readFileSync(path.join(main, "aaa/x.md"), "utf8"), aab: existsSync(path.join(main, "aab.md")) }).toEqual({
-      status: ["?? bulk/mine.md", "?? notes/mine.md"],
-      x: "# X\nold\n",
-      aab: true,
-    });
-    await g(main, "pull", "-q", "--ff-only", "origin", "main");
-    expect(existsSync(path.join(main, `new/sub/p${N - 1}.md`))).toBe(true);
+    const { bare, up, main } = await withRemote();
+    // Its 75k files outlast the preload's 5 s cleanup hook on a CI runner: the test removes them itself.
+    try {
+      // A tracked file the checkout changes and one it deletes, each put back from HEAD by the printed restore.
+      write(up, "aaa/x.md", "# X\nold\n");
+      write(up, "aab.md", "# AAB\n");
+      await g(up, "add", "-A");
+      await g(up, "commit", "-qm", "early files");
+      await g(up, "push", "-q", "origin", "main");
+      await g(main, "pull", "-q", "--ff-only", "origin", "main");
+      const N = 25_000;
+      write(up, "aaa/x.md", "# X\nnew\n");
+      rmSync(path.join(up, "aab.md"));
+      for (let i = 0; i < 10; i++) write(up, `bulk/b${i}.md`, `# ${i}\n`);
+      for (let i = 0; i < N; i++) write(up, `new/sub/p${i}.md`, `# ${i}\n`);
+      await g(up, "add", "-A");
+      await g(up, "commit", "-qm", "bulk");
+      await g(up, "push", "-q", "origin", "main");
+      // The user's own untracked files: an empty one in a folder the fast-forward writes into, one whose bytes start a target blob.
+      write(main, "bulk/mine.md", "");
+      write(main, "notes/mine.md", "# 1");
+      const before = await g(main, "rev-parse", "HEAD");
+      // The first lock wait uses most of the section, so the merge's bound (~1 s) stops git mid-checkout.
+      const { t, lock } = timedLock(LOCKED_SECTION_MS - 1_500 - 1_200);
+      // A fast runner checks the 25k files out inside the merge's bound, so the merge spends that bound here and
+      // gives git only its last 250 ms: git is stopped mid-checkout on any machine, at the same moment as before.
+      const slowMerge: Git = async (args, cwd, ms) =>
+        args.includes("merge") && ms !== undefined && ms > 250 ? (await Bun.sleep(ms - 250), git(args, cwd, 250)) : git(args, cwd, ms);
+      const gate = await runGate(main, [], slowMerge, { lock, roots: [], ffMax: { files: 1e9, bytes: 1e12 } });
+      const u = nulList(path.join(main, ".git/muninn-stopped-ff-untracked")) ?? [];
+      const m = nulList(path.join(main, ".git/muninn-stopped-ff-modified")) ?? [];
+      expect({
+        skip: gate.skip?.slice(0, 61),
+        nothingUndone: gate.skip?.includes("git was stopped part-way, and nothing was deleted or restored: it had added ") ? true : gate.skip,
+        wrote: u.length > 12,
+        locks: t.calls,
+      }).toEqual({ skip: "git pull --ff-only timed out (the fast-forward to origin/main", nothingUndone: true, wrote: true, locks: 2 });
+      // Only the fast-forward's own paths are listed, and every one of them is on disk as the stop left it.
+      expect({
+        foreign: u.filter((p) => !/^(new\/sub\/p\d+|bulk\/b\d)\.md$/.test(p)),
+        missing: u.filter((p) => !existsSync(path.join(main, p))),
+        m: m.filter((p) => !["aaa/x.md", "aab.md"].includes(p)),
+        head: await g(main, "rev-parse", "HEAD"),
+        mine: [readFileSync(path.join(main, "bulk/mine.md"), "utf8"), readFileSync(path.join(main, "notes/mine.md"), "utf8")],
+      }).toEqual({ foreign: [], missing: [], m: [], head: before, mine: ["", "# 1"] });
+      for (const step of undoSteps(gate.skip!)) await sh(step);
+      expect({ status: await status(main), x: readFileSync(path.join(main, "aaa/x.md"), "utf8"), aab: existsSync(path.join(main, "aab.md")) }).toEqual({
+        status: ["?? bulk/mine.md", "?? notes/mine.md"],
+        x: "# X\nold\n",
+        aab: true,
+      });
+      await g(main, "pull", "-q", "--ff-only", "origin", "main");
+      expect(existsSync(path.join(main, `new/sub/p${N - 1}.md`))).toBe(true);
+    } finally {
+      for (const dir of [up, path.dirname(bare), path.dirname(main)]) rmSync(dir, { recursive: true, force: true });
+    }
   }, 120_000);
 
   test("F13 fix round 1 batch 2: lock waits that use up the locked section run no merge: a note, the checkout as last pulled", async () => {
