@@ -218,7 +218,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // later text-node replacement is found again): 920,001 (312,613 gzipped), so the pin moves to 920,100.
 // 2026-11-22, architecture review B1 (F7: the inbox's Close warns when the commit failed): 920,198,
 // so the pin moves to 920,300.
-const WIKI_CLIENT_MAX_BYTES = 920_300;
+// 2026-11-22, architecture review A3 (F70: the article head's url gated with isSafeLinkHref): 920,458,
+// so the pin moves to 920,600.
+const WIKI_CLIENT_MAX_BYTES = 920_600;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
