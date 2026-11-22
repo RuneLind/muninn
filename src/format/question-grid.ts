@@ -12,6 +12,7 @@
 
 import type { Block } from "./markdown-ast.ts";
 import { escapeHtml } from "./markdown-core.ts";
+import { idAnchor } from "./query-block.ts";
 import { parseLaneSince } from "./component-spec.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import type { ChainAnalysis } from "./decision-chain.ts";
@@ -177,8 +178,10 @@ export function questionGridRows(blocks: Block[], analysis: ChainAnalysis, today
   return rows.sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open") || num(a) - num(b));
 }
 
-/** The anchor a `<Question>` card takes on the page render. */
-export const questionCardAnchor = (id: string): string => `qcard-${id.toLowerCase()}`;
+/** The anchor a `<Question>` card takes on the page render, and the grid's
+ *  link to it: `qcard-` + {@link idAnchor}, so `Q-16` stays `qcard-q-16`. */
+export const questionCardAnchor = (id: string, linkTexts?: readonly string[]): string =>
+  `qcard-${idAnchor(id, linkTexts, true)}`;
 
 function rowHtml(r: QuestionGridRow, language: QuestionLanguage): string {
   const L = LABELS[language];

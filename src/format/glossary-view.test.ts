@@ -127,6 +127,16 @@ describe("where a term is never marked", () => {
     expect(marks(html)).toEqual([]);
   });
 
+  test("a `>` inside a quoted attribute value does not end the tag (F26)", () => {
+    const entries: GlossaryEntry[] = [{ term: "Hold", ...glossaryKey("Hold"), definition: "kept back", codeSpelled: false, at: 0 }];
+    for (const q of ['"', "'"]) {
+      const html = `<p><span title=${q}a > Hold <b>${q} data-x="1">x</span> then Hold.</p>`;
+      const out = markGlossaryTerms(html, entries);
+      expect(out.startsWith(`<p><span title=${q}a > Hold <b>${q} data-x="1">x</span> then `)).toBe(true);
+      expect(marks(out)).toEqual([["hold", "Hold"]]);
+    }
+  });
+
   test("a CaseBoard's count strip and status pills are never marked; its note is prose", () => {
     const files = new Map([["c.yaml", { ok: true as const, text: "- {id: LIB-1, status: hold, note: Asked for a Hold}\n" }]]);
     const html = renderWikiHtml('<CaseBoard src="c.yaml" />\n' + HOLD, () => undefined, { views: true, files });

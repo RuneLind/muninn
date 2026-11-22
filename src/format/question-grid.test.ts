@@ -287,3 +287,17 @@ describe("on the page render", () => {
     expect(html).not.toContain(questionCardAnchor("O1"));
   });
 });
+
+describe("questionCardAnchor (F26, F57)", () => {
+  test("an id of only [A-Za-z0-9_-] keeps today's anchor, edge dashes included", () => {
+    expect(["Q-16", "O1", "S_3", "-Q1-", "abc"].map((id) => questionCardAnchor(id))).toEqual(["qcard-q-16", "qcard-o1", "qcard-s_3", "qcard--q1-", "qcard-abc"]);
+  });
+  test("any other id is slugged: no <, >, quote, space or NUL reaches the value", () => {
+    expect(questionCardAnchor('Q-1><img src=x onerror="a">')).toBe("qcard-q-1-img-src-x-onerror-a");
+    expect(questionCardAnchor("Spørsmål 8")).toBe("qcard-spørsmål-8");
+  });
+  test("a parked wikilink reads as its link text, any other sentinel as nothing", () => {
+    expect(questionCardAnchor("\x00WIKIPAGELINK1\x00", ["x", "Hostile Page"])).toBe("qcard-hostile-page");
+    expect(questionCardAnchor("A\x00INLINE0\x00B")).toBe("qcard-a-b");
+  });
+});

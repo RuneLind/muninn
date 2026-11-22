@@ -427,6 +427,8 @@ export const E2E_PORTS = {
   "wiki-discuss-tab": 3253,
   // Discuss P4: the proposed edit's diff card and Apply, on a git wiki with no remote.
   "wiki-discuss-apply": 3254,
+  // F26: a hostile <Question id> in the reader, with a glossary term after it.
+  "wiki-reader-html-gate": 3255,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

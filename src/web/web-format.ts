@@ -42,6 +42,7 @@ import {
   STEPS_NO_SRC,
   QUERY_CSV_MAX_ROWS,
   anchorSlug,
+  idAnchor,
   formatCount,
   lookupPageFile,
   pageFileFailureText,
@@ -722,7 +723,7 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
   // The question grid's link lands here; only the page render draws that grid.
-  const anchor = currentViews && id !== "" && !isDuplicate ? ` id="${questionCardAnchor(id)}"` : "";
+  const anchor = currentViews && id !== "" && !isDuplicate ? ` id="${questionCardAnchor(id, currentLinkTexts)}"` : "";
   return `<section class="${cls}"${anchor}${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }
 
@@ -1484,7 +1485,7 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   const takenLane = new Map<string, Block[]>();
   const anchors = new Set<string>();
   const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
-    const base = `nm-q-${anchorSlug(id)}`;
+    const base = `nm-q-${idAnchor(id, currentLinkTexts)}`;
     let anchor = base;
     for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
     anchors.add(anchor);
@@ -2533,8 +2534,9 @@ const webRenderer: BlockRenderer = {
         // One card per query: header (id, question, answer, run date, uses),
         // the reading, the result table, the SQL behind a closed disclosure.
         const q = parseQueryAttrs(attrs);
-        // Made unique across the page by `uniqueAnchors`, after rendering.
-        const anchor = q.anchor;
+        // Made unique across the page by `uniqueAnchors`, after rendering. Read
+        // with a parked wikilink as its text, never the sentinel (F57).
+        const anchor = idAnchor(q.id, currentLinkTexts);
         const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
         const idHtml = !q.id
           ? ""
