@@ -6,13 +6,28 @@ Chrome extension that sends YouTube videos to Muninn for AI-powered summarizatio
 
 1. Navigate to a YouTube video page
 2. Click the extension icon
-3. Pick a **Kind** — what the summary should be
-4. Tick **Slides** if you want the summary to quote what is on screen
-5. With Slides on, pick a **Visuals** policy — how much of the video to show
-6. Click "Summarize"
-7. Muninn dashboard opens in a new tab with the summary streaming in real-time
+3. Optionally pick a **Model** — which connector and model the capture runs on
+4. Pick a **Kind** — what the summary should be
+5. Tick **Slides** if you want the summary to quote what is on screen
+6. With Slides on, pick a **Visuals** policy — how much of the video to show
+7. Click "Summarize"
+8. Muninn dashboard opens in a new tab with the summary streaming in real-time
 
 The server fetches the transcript, summarizes it with Claude, categorizes it, and indexes it in the knowledge base for later search.
+
+### Model
+
+Lists your Muninn's named connectors (the `connectors` table, the same ones a
+chat thread can pick), each a connector type plus a model, e.g. "claude-sdk
+claude-sonnet-5-5". **Default** is the summarizer bot's own connector and model.
+The picker is hidden on a Muninn with no named connectors.
+
+The connector decides which kinds exist and whether Slides work, so changing it
+repaints both: a kind or Slides tick the new connector cannot run is switched
+off, with a line saying so. When the picked connector names a model, **Deep**
+keeps that model and only raises the thinking budget, and its label reads
+"Deep (full thinking)". Remembered under `captureConnector`; a remembered
+connector that is no longer listed falls back to Default with a line saying so.
 
 ### Kind
 
@@ -110,10 +125,10 @@ Sends `VIDEO_PAGE` messages to the background worker on navigation.
 When clicked on a YouTube video page:
 1. Asks the background worker for cached video state (`GET_STATE`)
 2. Falls back to querying the content script directly (`GET_VIDEO_INFO`)
-3. Asks the worker for `GET_OPTIONS` and renders the **Kind** picker, the
-   **Slides** tick and the **Visuals** picker from the answer, restoring the
-   remembered choices against it (`summaryKind`, `frames` and `visualDetail` in
-   `chrome.storage.sync`)
+3. Asks the worker for `GET_OPTIONS` and renders the **Model** picker, the
+   **Kind** picker, the **Slides** tick and the **Visuals** picker from the
+   answer, restoring the remembered choices against it (`captureConnector`,
+   `summaryKind`, `frames` and `visualDetail` in `chrome.storage.sync`)
 4. Shows the video title and a "Summarize" button
 5. On click, sends `SUMMARIZE` to the background worker
 6. Background worker POSTs to the API and opens the dashboard
@@ -131,8 +146,9 @@ Caches video info per tab (used by the popup for fast access). Handles two actio
 `SUMMARIZE`:
 1. Reads `muninnUrl` from settings
 2. POSTs to `/api/youtube/summarize` with
-   `{ title, url, video_id, kind, frames, visual_detail? }` — `visual_detail` is
-   omitted entirely for a Muninn that does not offer the choice
+   `{ title, url, video_id, kind, frames, visual_detail?, connector_id? }` —
+   `visual_detail` is omitted entirely for a Muninn that does not offer the
+   choice, and `connector_id` when Default is picked
 3. Opens the dashboard YouTube page with the job ID
 
 Declared `"type": "module"` in the manifest, since it imports `capture-rules.js`.

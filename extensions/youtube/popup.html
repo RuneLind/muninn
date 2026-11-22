@@ -16,6 +16,12 @@
 
     <div id="video-info" class="hidden">
       <div class="video-title" id="video-title"></div>
+      <!-- Which named connector (and so which model) the capture runs on.
+           Hidden on a Muninn with no named connectors. -->
+      <label class="opt kind hidden" id="lbl-connector" title="Which connector and model this capture runs on. Default is the summarizer bot's own. Changing it can change which kinds and whether Slides are available.">
+        Model
+        <select id="sel-connector"></select>
+      </label>
       <label class="opt kind" id="lbl-kind" title="Which summary this capture writes. Deep runs the bigger model with the bot's full thinking budget and takes noticeably longer.">
         Kind
         <select id="sel-kind"></select>

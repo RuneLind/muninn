@@ -29,8 +29,12 @@ import {
   FALLBACK_CAPTURE_OPTIONS,
   FALLBACK_KIND_ID,
   FALLBACK_VISUAL_DETAIL_ID,
+  DEFAULT_CONNECTOR_ID,
   buildSummarizeBody,
+  optionsForConnector,
   parseCaptureOptions,
+  pickConnector,
+  restoredConnectorNote,
   pickFrames,
   pickKind,
   pickVisualDetail,
@@ -78,6 +82,8 @@ describe("parseCaptureOptions", () => {
       // An instance with no visual-detail capability at all: no control, and no
       // such field on the POST.
       visualDetail: null,
+      // No connector picker on an instance that lists none.
+      connectors: null,
       fromServer: true,
     });
   });
@@ -281,7 +287,124 @@ describe("pickVisualDetail — the second axis, re-validated the same way", () =
   });
 });
 
+const SDK_ID = "11111111-1111-4111-8111-111111111111";
+const COPILOT_ID = "22222222-2222-4222-8222-222222222222";
+
+/** What the options endpoint answers on an instance with named connectors. */
+const SERVER_PAYLOAD_CONNECTORS = {
+  ...SERVER_PAYLOAD_V2,
+  connectors: {
+    default_label: "Default: jarvis (claude-cli · claude-opus-5-5)",
+    options: [
+      {
+        id: SDK_ID,
+        label: "claude-sdk claude-sonnet-5-5",
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "deep", label: "Deep (full thinking)" },
+        ],
+        frames: { supported: true },
+      },
+      {
+        id: COPILOT_ID,
+        label: "copilot-sdk opus-5.5",
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "talk-notes", label: "Talk notes (timeline)" },
+        ],
+        frames: { supported: false },
+      },
+    ],
+  },
+};
+
+describe("the connector picker", () => {
+  const options = parseCaptureOptions(SERVER_PAYLOAD_CONNECTORS)!;
+
+  test("the connector rows are read with their own kinds and Slides", () => {
+    expect(options.connectors?.defaultLabel).toBe("Default: jarvis (claude-cli · claude-opus-5-5)");
+    expect(options.connectors?.options.map((c) => [c.id, c.framesSupported])).toEqual([
+      [SDK_ID, true],
+      [COPILOT_ID, false],
+    ]);
+    // The top level stays the DEFAULT connector's.
+    expect(options.kinds.map((k) => k.id)).toEqual(["standard", "deep", "talk-notes"]);
+  });
+
+  test("junk rows are dropped and a list with nothing usable is no picker at all", () => {
+    const junk = parseCaptureOptions({
+      ...SERVER_PAYLOAD,
+      connectors: {
+        options: [
+          null,
+          { id: "", kinds: [{ id: "standard" }] },
+          { id: "no-kinds", kinds: [] },
+          { id: "ok", kinds: [{ id: "standard" }], frames: { supported: "yes" } },
+        ],
+      },
+    })!;
+    expect(junk.connectors).toEqual({
+      defaultLabel: "Default",
+      options: [{ id: "ok", label: "ok", kinds: [{ id: "standard", label: "standard" }], framesSupported: true }],
+    });
+    for (const connectors of [undefined, null, "x", {}, { options: [] }, { options: [{ id: "a", kinds: [] }] }]) {
+      expect(parseCaptureOptions({ ...SERVER_PAYLOAD, connectors })!.connectors).toBeNull();
+    }
+  });
+
+  test("a remembered connector still listed is restored; anything else is the default, and SAID", () => {
+    expect(pickConnector(SDK_ID, options)).toBe(SDK_ID);
+    expect(restoredConnectorNote(SDK_ID, SDK_ID, options)).toBeNull();
+
+    expect(pickConnector("gone", options)).toBe(DEFAULT_CONNECTOR_ID);
+    expect(restoredConnectorNote("gone", DEFAULT_CONNECTOR_ID, options)).toContain("not offered here");
+
+    // Nothing stored is the default, not a fallback.
+    for (const stored of [undefined, null, "", 7]) {
+      expect(pickConnector(stored, options)).toBe(DEFAULT_CONNECTOR_ID);
+      expect(restoredConnectorNote(stored, DEFAULT_CONNECTOR_ID, options)).toBeNull();
+    }
+    // No picker at all: never an id, and silent under the unreachable fallback.
+    expect(pickConnector(SDK_ID, FALLBACK_CAPTURE_OPTIONS)).toBe(DEFAULT_CONNECTOR_ID);
+    expect(restoredConnectorNote(SDK_ID, DEFAULT_CONNECTOR_ID, FALLBACK_CAPTURE_OPTIONS)).toBeNull();
+  });
+
+  test("the kinds and Slides follow the picked connector, and the kind is re-validated against them", () => {
+    const copilot = optionsForConnector(options, COPILOT_ID);
+    expect(copilot.kinds.map((k) => k.id)).toEqual(["standard", "talk-notes"]);
+    expect(copilot.framesSupported).toBe(false);
+    // A remembered `deep` does not survive onto a connector that lacks it, and
+    // a remembered Slides tick does not survive onto one that cannot read frames.
+    expect(pickKind("deep", copilot)).toBe("standard");
+    expect(restoredKindNote("deep", "standard", copilot)).toContain("not offered here");
+    expect(pickFrames(true, copilot)).toBe(false);
+
+    expect(optionsForConnector(options, SDK_ID).kinds.find((k) => k.id === "deep")?.label).toBe(
+      "Deep (full thinking)",
+    );
+    // The default id, or one not listed, changes nothing.
+    expect(optionsForConnector(options, DEFAULT_CONNECTOR_ID)).toBe(options);
+    expect(optionsForConnector(options, "gone")).toBe(options);
+  });
+
+  test("a connector row without the server's default kind defaults to its own first kind", () => {
+    const odd = parseCaptureOptions({
+      ...SERVER_PAYLOAD,
+      connectors: { options: [{ id: "x", kinds: [{ id: "talk-notes" }] }] },
+    })!;
+    expect(optionsForConnector(odd, "x").defaultKind).toBe("talk-notes");
+  });
+});
+
 describe("buildSummarizeBody", () => {
+  test("a picked connector rides along, and the default is an ABSENT key", () => {
+    expect(buildSummarizeBody({ url: "u", videoId: "v", connectorId: ` ${SDK_ID} ` }).connector_id).toBe(SDK_ID);
+    for (const connectorId of [undefined, null, DEFAULT_CONNECTOR_ID, "   ", 7]) {
+      const body = buildSummarizeBody({ url: "u", videoId: "v", connectorId });
+      expect("connector_id" in JSON.parse(JSON.stringify(body))).toBe(false);
+    }
+  });
+
   test("the two coercions the route 400s on", () => {
     expect(
       buildSummarizeBody({ title: "T", url: "https://x/y", videoId: "dQw4w9WgXcQ", kind: "deep", frames: true }),

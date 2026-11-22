@@ -81,7 +81,7 @@ let youtubeSummarizeCalls = 0;
  *  resolved summary KIND ride on them. */
 let lastYouTubeOpts: {
   frames?: boolean;
-  preset?: { id: string; instruction?: string };
+  preset?: { id: string; label?: string; instruction?: string; run?: { model: string; thinking: string } };
   visualDetail?: string;
 } | null = null;
 /**
@@ -90,6 +90,8 @@ let lastYouTubeOpts: {
  * running parks the first one here.
  */
 let youtubeSummarizeGate: Promise<void> | null = null;
+/** The bot config the LAST started YouTube capture ran on — a picked connector lands here. */
+let lastYouTubeBot: Record<string, unknown> | null = null;
 /**
  * The huginn doc id this capture "ingests", or null for a capture that never
  * reaches the ingest. The real `summarizeVideo` calls the route's `onIngested`
@@ -104,7 +106,7 @@ mock.module("../../youtube/summarizer.ts", () => ({
     videoId: string,
     _title: string,
     _config: unknown,
-    _botConfig: unknown,
+    botConfig: Record<string, unknown>,
     opts?: {
       frames?: boolean;
       preset?: { id: string };
@@ -112,6 +114,7 @@ mock.module("../../youtube/summarizer.ts", () => ({
     },
   ) => {
     youtubeSummarizeCalls++;
+    lastYouTubeBot = botConfig;
     lastYouTubeOpts = opts ?? {};
     if (youtubeSummarizeGate) await youtubeSummarizeGate;
     if (youtubeIngestDocId !== null) opts?.onIngested?.(videoId, youtubeIngestDocId);
@@ -211,6 +214,7 @@ const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
 const { registerYouTubeRoutes, YOUTUBE_RECENT_INGEST_TTL_MS } = await import("./youtube-routes.ts");
 const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
 const { resolveCapturePresets } = await import("../../summaries/presets.ts");
+const { applyCaptureConnector } = await import("./capture-connector.ts");
 const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
 const ttState = await import("../../tiktok/state.ts");
 const ytState = await import("../../youtube/state.ts");
@@ -241,16 +245,38 @@ function ttApp(): Hono {
  * remove frames under the developer's real `~/.muninn/frames` on the next test
  * that fires `notifySummaryDocumentDeleted`.
  */
+/**
+ * The `connectors` table rows the YouTube routes see. Injected on every
+ * registration, because the default reads the real DB, and this file runs in
+ * the unit chain with no database. Empty by default: no picker.
+ */
+let connectorRows: Array<Record<string, unknown>> = [];
+let connectorReadThrows: Error | null = null;
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const connectorDeps = {
+  getConnector: async (id: string) => {
+    if (connectorReadThrows) throw connectorReadThrows;
+    // What Postgres does with a non-uuid against the UUID column: a cast error,
+    // not "no row". So the route's uuid guard is what keeps that a 400.
+    if (!UUID_SHAPE.test(id)) throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    return (connectorRows.find((r) => r.id === id) ?? null) as never;
+  },
+  listConnectors: async () => {
+    if (connectorReadThrows) throw connectorReadThrows;
+    return connectorRows as never;
+  },
+};
+
 function ytApp(): Hono {
   const app = new Hono();
-  registerYouTubeRoutes(app, config, { framesRoot: tmpFramesRoot() });
+  registerYouTubeRoutes(app, config, { framesRoot: tmpFramesRoot(), connectors: connectorDeps });
   return app;
 }
 
 /** The same app with an injected clock, for the recently-ingested map's TTL. */
 function ytAppAt(now: () => number): Hono {
   const app = new Hono();
-  registerYouTubeRoutes(app, config, { now, framesRoot: tmpFramesRoot() });
+  registerYouTubeRoutes(app, config, { now, framesRoot: tmpFramesRoot(), connectors: connectorDeps });
   return app;
 }
 
@@ -360,6 +386,9 @@ beforeEach(() => {
   tiktokSummarizeCalls = 0;
   youtubeSummarizeCalls = 0;
   lastYouTubeOpts = null;
+  lastYouTubeBot = null;
+  connectorRows = [];
+  connectorReadThrows = null;
   youtubeSummarizeGate = null;
   youtubeIngestDocId = null;
   vimeoSummarizeCalls = 0;
@@ -1143,6 +1172,217 @@ describe("YouTube: the summary KIND (`/api/youtube/options` + `kind`)", () => {
     });
     // No new run: the kind is validated above the dedup, not instead of it.
     expect(ytState.getRecentJobs().length).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+});
+
+describe("YouTube: the CONNECTOR pick (`/api/youtube/options` connectors + `connector_id`)", () => {
+  const YT_ID = "dQw4w9WgXcQ";
+  const YT_URL = `https://www.youtube.com/watch?v=${YT_ID}`;
+  const SDK_ID = "11111111-1111-4111-8111-111111111111";
+  const COPILOT_ID = "22222222-2222-4222-8222-222222222222";
+  const NO_MODEL_ID = "33333333-3333-4333-8333-333333333333";
+  const sdkSonnet = {
+    id: SDK_ID,
+    name: "claude-sdk claude-sonnet-5-5",
+    connectorType: "claude-sdk",
+    model: "claude-sonnet-5-5",
+  };
+  const copilotOpus = { id: COPILOT_ID, name: "Copilot opus", connectorType: "copilot-sdk", model: "claude-opus-5.5" };
+  /** A row that sets no model: the bot's model, so Deep keeps its opus swap. */
+  const sdkNoModel = { id: NO_MODEL_ID, name: "claude-sdk bare", connectorType: "claude-sdk" };
+  const options = async (app: Hono) => (await app.request("/api/youtube/options")).json() as Promise<{
+    kinds: { id: string; label: string }[];
+    connectors?: {
+      default_label: string;
+      options: { id: string; label: string; kinds: { id: string; label: string }[]; frames: { supported: boolean } }[];
+    };
+  }>;
+  const jobCount = () => ytState.getRecentJobs().length;
+
+  test("each named connector is listed with the kinds and Slides it would get", async () => {
+    summarizerBot = { ...cliBot, model: "claude-opus-5-5" };
+    connectorRows = [sdkSonnet, copilotOpus, sdkNoModel];
+    const body = await options(ytApp());
+    expect(body.connectors?.default_label).toBe("Default: jarvis (claude-cli · claude-opus-5-5)");
+    expect(body.connectors?.options).toEqual([
+      {
+        id: SDK_ID,
+        label: "claude-sdk claude-sonnet-5-5",
+        // The picked model wins over Deep's opus swap, and the label says so.
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "deep", label: "Deep (full thinking)" },
+          { id: "talk-notes", label: "Talk notes (timeline)" },
+        ],
+        frames: { supported: true },
+      },
+      {
+        id: COPILOT_ID,
+        // The name does not say the type, so the label adds it.
+        label: "Copilot opus (copilot-sdk)",
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "talk-notes", label: "Talk notes (timeline)" },
+        ],
+        frames: { supported: false },
+      },
+      {
+        id: NO_MODEL_ID,
+        label: "claude-sdk bare",
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "deep", label: "Deep (opus, full thinking)" },
+          { id: "talk-notes", label: "Talk notes (timeline)" },
+        ],
+        frames: { supported: true },
+      },
+    ]);
+    // The top level is still the default connector's.
+    expect(body.kinds.find((k) => k.id === "deep")?.label).toBe("Deep (opus, full thinking)");
+  });
+
+  test("no named connectors, or a failed listing, is no picker — never a 500", async () => {
+    expect("connectors" in (await options(ytApp()))).toBe(false);
+    connectorRows = [sdkSonnet];
+    connectorReadThrows = new Error("db down");
+    const res = await ytApp().request("/api/youtube/options");
+    expect(res.status).toBe(200);
+    expect("connectors" in ((await res.json()) as object)).toBe(false);
+  });
+
+  test("a picked connector's type and model reach the capture; the bot's identity stays", async () => {
+    summarizerBot = { ...cliBot, model: "claude-opus-5-5" };
+    connectorRows = [sdkSonnet];
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, connector_id: SDK_ID });
+    expect(res.status).toBe(200);
+    expect(lastYouTubeBot).toMatchObject({ name: "jarvis", dir: "/tmp/jarvis", connector: "claude-sdk", model: "claude-sonnet-5-5" });
+  });
+
+  test("absent or null connector_id is the summarizer bot as configured", async () => {
+    // A distinct video per POST, so the second is never answered `in_flight`.
+    for (const [video_id, connector_id] of [["aaaaaaaaaaa", undefined], ["bbbbbbbbbbb", null]] as const) {
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id, connector_id });
+      expect(res.status).toBe(200);
+      expect(lastYouTubeBot).toBe(cliBot);
+    }
+  });
+
+  test("Deep on a picked connector with a model keeps that model; on one without, it still swaps to opus", async () => {
+    connectorRows = [sdkSonnet, sdkNoModel];
+    await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, kind: "deep", connector_id: SDK_ID });
+    expect(lastYouTubeOpts?.preset).toMatchObject({ id: "deep", run: { model: "bot", thinking: "inherit" } });
+    await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: "ccccccccccc", kind: "deep", connector_id: NO_MODEL_ID });
+    expect(lastYouTubeOpts?.preset).toMatchObject({ id: "deep", run: { model: "opus" } });
+  });
+
+  test("the kind and Slides checks run against the PICKED connector, before any job", async () => {
+    connectorRows = [copilotOpus];
+    const before = jobCount();
+    const deep = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL, video_id: YT_ID, kind: "deep", connector_id: COPILOT_ID,
+    });
+    expect(deep.status).toBe(400);
+    expect(((await deep.json()) as { code: string }).code).toBe("bad_kind");
+
+    const slides = await post(ytApp(), "/api/youtube/summarize", {
+      url: YT_URL, video_id: YT_ID, frames: true, connector_id: COPILOT_ID,
+    });
+    expect(slides.status).toBe(503);
+    const body = (await slides.json()) as { code: string; detail: string };
+    expect(body.code).toBe("frames_unsupported");
+    // The remedy names the pick, not SUMMARIZER_BOT, which the reader did not touch.
+    expect(body.detail).toContain('Connector "Copilot opus"');
+    expect(body.detail).not.toContain("SUMMARIZER_BOT");
+    expect(jobCount()).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a picked claude-cli row over a non-CLI bot gets the CLI-age check for Slides", async () => {
+    summarizerBot = copilotBot;
+    connectorRows = [{ id: NO_MODEL_ID, name: "claude-cli opus", connectorType: "claude-cli", model: "claude-opus-5-5" }];
+    __setClaudeCliVersionForTest("2.1.200");
+    const before = jobCount();
+    try {
+      const res = await post(ytApp(), "/api/youtube/summarize", {
+        url: YT_URL, video_id: YT_ID, frames: true, connector_id: NO_MODEL_ID,
+      });
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { code: string }).code).toBe("cli_too_old");
+      expect(jobCount()).toBe(before);
+      expect(youtubeSummarizeCalls).toBe(0);
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("a row of ANOTHER model family inherits none of the bot's model-bound fields; the same type does", () => {
+    const bot = {
+      name: "melosys", dir: "/tmp/melosys", connector: "copilot-sdk", model: "gpt-5.5",
+      baseUrl: "http://bot-endpoint", thinkingMaxTokens: 32000, effort: "high", timeoutMs: 900_000,
+    } as never;
+    const crossType = applyCaptureConnector(bot, {
+      id: NO_MODEL_ID, name: "cli opus", connectorType: "claude-cli", model: "claude-opus-5-5",
+    } as never);
+    expect(crossType).toMatchObject({
+      name: "melosys", dir: "/tmp/melosys", connector: "claude-cli", model: "claude-opus-5-5", timeoutMs: 900_000,
+    });
+    for (const field of ["baseUrl", "thinkingMaxTokens", "effort"]) {
+      expect((crossType as unknown as Record<string, unknown>)[field]).toBeUndefined();
+    }
+    const sameType = applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "copilot bare", connectorType: "copilot-sdk" } as never);
+    expect(sameType).toMatchObject({ connector: "copilot-sdk", model: "gpt-5.5", baseUrl: "http://bot-endpoint", effort: "high" });
+  });
+
+  test("claude-cli and claude-sdk are ONE model family: a model-less row keeps the bot's model and effort", () => {
+    const bot = { name: "jarvis", dir: "/tmp/jarvis", connector: "claude-cli", model: "claude-opus-5-5", effort: "high" } as never;
+    expect(applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "sdk bare", connectorType: "claude-sdk" } as never))
+      .toMatchObject({ connector: "claude-sdk", model: "claude-opus-5-5", effort: "high" });
+    // A bot with no `connector` key runs claude-cli, the documented default.
+    const bare = { name: "jarvis", dir: "/tmp/jarvis", model: "claude-opus-5-5" } as never;
+    expect(applyCaptureConnector(bare, { id: NO_MODEL_ID, name: "sdk bare", connectorType: "claude-sdk" } as never))
+      .toMatchObject({ connector: "claude-sdk", model: "claude-opus-5-5" });
+  });
+
+  test("a row that cannot run over this bot is not offered, and is 400 connector_incomplete before any job", async () => {
+    summarizerBot = { ...cliBot, model: "claude-opus-5-5" };
+    const COPILOT_BARE = "55555555-5555-4555-8555-555555555555";
+    const LOCAL_NO_URL = "66666666-6666-4666-8666-666666666666";
+    connectorRows = [
+      sdkSonnet,
+      // Another model family and no model of its own: nothing sensible to run.
+      { id: COPILOT_BARE, name: "copilot bare", connectorType: "copilot-sdk" },
+      // A local model with no endpoint, over a bot that has none for it.
+      { id: LOCAL_NO_URL, name: "gemma", connectorType: "openai-compat", model: "gemma4:26B" },
+    ];
+    const body = await options(ytApp());
+    expect(body.connectors?.options.map((o) => o.id)).toEqual([SDK_ID]);
+
+    const before = jobCount();
+    for (const connector_id of [COPILOT_BARE, LOCAL_NO_URL]) {
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, connector_id });
+      expect(res.status).toBe(400);
+      const err = (await res.json()) as { code: string; error: string };
+      expect(err.code).toBe("connector_incomplete");
+      expect(err.error).toContain(connector_id === COPILOT_BARE ? "copilot bare" : "gemma");
+    }
+    expect(jobCount()).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a connector_id that is not a listed row is 400 bad_connector, and a failed lookup 503 — no job either way", async () => {
+    connectorRows = [sdkSonnet];
+    const before = jobCount();
+    for (const connector_id of [7, true, {}, "", "   ", "not-a-uuid", "44444444-4444-4444-8444-444444444444"]) {
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, connector_id });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { code: string }).code).toBe("bad_connector");
+    }
+    connectorReadThrows = new Error("db down");
+    const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, connector_id: SDK_ID });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { code: string }).code).toBe("connector_lookup_failed");
+    expect(jobCount()).toBe(before);
     expect(youtubeSummarizeCalls).toBe(0);
   });
 });
