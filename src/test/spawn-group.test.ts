@@ -87,7 +87,23 @@ const CASES: [string, string, SiteKind[]][] = [
   ["Bun[\"spawn\"](…)", `Bun["spawn"](["git"], { detached: true });`, ["value"]],
   ["Bun.spawn as a value", `const sp = Bun.spawn;`, ["value"]],
   ["an unrelated pool.spawn is flagged too", `pool.spawn(["git"]);`, ["spawn"]],
-  ["a string that is exactly spawn", `const reason = "spawn";`, ["value"]],
+  // A string spelled like a spawner is a site only as a property key (D12): anywhere else it is data.
+  ["a string that is exactly spawn", `const reason = "spawn";`, []],
+  ["an error code", `const e = { ok: false, reason: "spawn" };`, []],
+  ["a case label and a comparison", `switch (x) { case "spawn": break; }\nif (e === "runProc") f();`, []],
+  ["a call argument, an array element and a template", "use(\"spawn\");\nconst a = [\"runProc\"];\nconst t = `spawn`;", []],
+  ["the left of in", `if ("spawn" in Bun) f();`, []],
+  ["the string as the object of an index", `const c = "spawn"[0];`, []],
+  ["x?.[\"spawn\"](…)", `Bun?.["spawn"](["git"], { detached: true });`, ["value"]],
+  ["x[(\"spawn\")] and x[\"spawn\" as const]", `Bun[("spawn")](["git"]);\nBun["spawn" as const](["git"]);`, ["value", "value"]],
+  ["x[c ? \"spawn\" : k] and x[k ?? \"runProc\"]", `Bun[c ? "spawn" : k](["git"]);\nm[k ?? "runProc"](c, 5, "x");`, ["value", "value"]],
+  ["x[k && \"spawn\"] and x[(f(), \"runProc\")]", `Bun[k && "spawn"](["git"]);\nm[(f(), "runProc")](c, 5, "x");`, ["value", "value"]],
+  ["a ternary's condition and a binding default are data", `const v = m["spawn" ? a : b];\nconst { a = "runProc" } = x;`, []],
+  ["x[`spawn`]", "Bun[`spawn`]([\"git\"]);", ["value"]],
+  ["rp[\"runProc\"] as a value", `const r = rp["runProc"];`, ["value"]],
+  ["const { \"spawn\": s } = Bun", `const { "spawn": s } = Bun;`, ["value"]],
+  ["({ [\"runProc\"]: r } = m)", `({ ["runProc"]: r } = m);`, ["value"]],
+  ["a computed key in data is still a key", `const o = { ["spawn"]: f };`, ["value"]],
   ["a string literal type is a type", `type R = "spawn" | "x";`, []],
 
   // A key in a destructuring assignment reads the property: an alias, like a binding element.
@@ -254,12 +270,9 @@ describe("spawn group scan", () => {
   /** [form, source, words the message must hold, words it must not]. */
   const MESSAGES: [string, string, string[], string[]][] = [
     // A remedy that fits the form.
-    ["a string that is exactly spawn (an error code)", `const e = { ok: false, reason: "spawn" };`,
-      ['the string "spawn"', 'as in `x["spawn"](…)`', "a string that is data, such as an error code, is listed"], [HARM, "directly with the literal"]],
-    ["a case label", `switch (x) { case "spawn": break; }`, ['the string "spawn"', "refuses every such string"], [HARM]],
-    ["a comparison", `if (e === "runProc") f();`, ['the string "runProc"', "refuses every such string"], [HARM]],
-    ["a kind tag", `const k = { kind: "spawn" };`, ['the string "spawn"'], [HARM]],
-    ["an index access with the name", `Bun["spawn"](["git"], { detached: true });`, ['the string "spawn"', "Call a spawner by its plain name (`x.spawn(…)`)"], [HARM]],
+    ["an index access with the name", `Bun["spawn"](["git"], { detached: true });`,
+      ['the string "spawn"', 'as in `x["spawn"](…)`', "refuses every such key", "Call a spawner by its plain name (`x.spawn(…)`)"], [HARM, "error code", "every such string"]],
+    ["a quoted key in a destructuring target", `({ "runProc": r } = m);`, ['the string "runProc"', "refuses every such key"], [HARM]],
     ["a renamed child_process spawn", `import { spawn as sp } from "node:child_process";`,
       ["only un-renamed", "Import it as `{ spawn }`."], ["`exec`", "directly", HARM]],
     ["a renamed child_process Sync name", `import { execFileSync as efs } from "node:child_process";`,
