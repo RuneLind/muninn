@@ -21,7 +21,11 @@ import type { WikiPageMeta } from "./store.ts";
  * attribute: the fallback paths) and under setups that walk each enumerated
  * or typed attribute through its valid values while the fill sits in every
  * free-text attribute, the body and the sibling files of the type the
- * component reads, so the real views render (`the real views render` pins it).
+ * component reads. `the real views render` asserts, with the benign fill
+ * only, that each valid setup draws its real view (a mark the fallback never
+ * emits) and no fallback. A hostile fill can still knock a setup onto its
+ * fallback (measured 2026-11-22, the blank-line fill does for 36 valid setups); the contract is
+ * checked on whatever renders, fallback or real view.
  */
 
 const F53_FILL = `[x](https://example.com/**b**_e_/file.ts:12)`;
@@ -47,6 +51,13 @@ const FILLS = [
   F53_FILL,
   F56_FILL,
   F29_FILL,
+  // Entities a pass might decode back into markup or a quote: named, decimal, hex.
+  `&lt;img src=x data-pwn onerror=alert(1)&gt; 1 < 2`,
+  `&#60;img src=x data-pwn onerror=alert(1)&#62;`,
+  `&#x3c;img src=x data-pwn onerror=alert(1)&#x3e;`,
+  `x&quot; data-pwn=&quot;1`,
+  // A lone `<`, one before a letter.
+  `x <y and 1 < 2`,
 ] as const;
 
 type Mode = "views" | "plain" | "ask";
@@ -267,6 +278,10 @@ function body(name: ComponentName, fill: string, setup: Setup): string[] {
       return ["```sql", `select '${fill}'`, "```", "", fill];
     case "Steps":
       return [`1. ${fill} \`a\``, `2. Then ${fill} \`b\``];
+    case "Diff":
+      return ["```diff", `- ${fill}`, `+ ${fill}`, "```", "", `Text ${fill} with Hold.`];
+    case "AnnotatedCode":
+      return ["```ts", fill, "```", "", `Text ${fill} with Hold.`];
     default:
       return [`Text ${fill} with Hold.`, "", `- item ${fill}`];
   }
@@ -277,6 +292,7 @@ function block(name: ComponentName, fill: string, setup: Setup): string[] {
   const open = `<${name}${attrs ? ` ${attrs}` : ""}`;
   if (name === "Check") return [`- run it ${open} />`];
   if (name === "Lane") return ["<NextMoves>", "", `${open}>`, "", `- ${fill} **O17**`, "", `</${name}>`, "", "</NextMoves>"];
+  if (name === "More") return ["<Tldr>", "", `- ${fill}`, "", `${open}>`, "", ...body(name, fill, setup), "", `</${name}>`, "", "</Tldr>"];
   if (name === "Tab") return ["<CodeTabs>", "", `${open}>`, "", "```ts", fill, "```", "", `</${name}>`, "", "</CodeTabs>"];
   // Steps and DeltaTable read a body when written; the rest self-close.
   if (SELF_CLOSING_ALLOWED.has(name) && name !== "Steps" && name !== "DeltaTable") return [`${open} />`];
@@ -287,7 +303,7 @@ function block(name: ComponentName, fill: string, setup: Setup): string[] {
  *  DecisionLog names (so the grid draws), a line ref and a Glossary the text
  *  uses. Only a Question page names the fill in the log (its grid row): any
  *  other page holds the fill only where its component puts it. */
-function page(name: ComponentName, fill: string, setup: Setup = hostileSetup(name)): string {
+function page(name: ComponentName, fill: string, setup: Setup = hostileSetup(name), withBlock = true): string {
   return [
     "---",
     "title: Hostile",
@@ -303,7 +319,7 @@ function page(name: ComponentName, fill: string, setup: Setup = hostileSetup(nam
     "",
     "</StatusRows>",
     "",
-    ...block(name, fill, setup),
+    ...(withBlock ? block(name, fill, setup) : []),
     "",
     ...["O16", "O17", "O18"].flatMap((id) => [`<Question id="${id}">`, "", "Hold it?", "", "</Question>", ""]),
     "We Hold the line in file.ts:12.",
@@ -350,7 +366,7 @@ const TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]
 const ATTR_RE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+)))?/g;
 const RAW_TEXT = new Set(["script", "style"]);
 
-type ViolationKind = "nul" | "unparsable" | "raw-lt" | "value-lt-gt" | "injected-attr" | "injected-element";
+type ViolationKind = "nul" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
 
 /** One break of the contract: what, on which element (name and `class`) and
  *  which attribute, and the page from there on. */
@@ -381,15 +397,24 @@ export function scanHtml(html: string): Scan {
   // The element open at each NUL: the last open tag before it.
   let lastOpen = { tag: "", cls: "" };
   let nulFrom = 0;
+  // Text runs from here to the next `<`: a raw `>` in it is a tag a pass
+  // un-escaped (no renderer writes one into text: each escapes it).
+  let textFrom = 0;
+  const textUpTo = (end: number) => {
+    const k = html.indexOf(">", textFrom);
+    if (k >= 0 && k < end) add("raw-gt", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
+  };
   const nulsUpTo = (end: number) => {
     for (let k = html.indexOf("\0", nulFrom); k >= 0 && k < end; k = html.indexOf("\0", k + 1)) add("nul", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
     nulFrom = Math.max(nulFrom, end);
   };
   for (let i = html.indexOf("<"); i >= 0; i = html.indexOf("<", i)) {
     nulsUpTo(i);
+    textUpTo(i);
     if (html.startsWith("<!--", i)) {
       const end = html.indexOf("-->", i + 4);
       i = end < 0 ? html.length : end + 3;
+      textFrom = i;
       continue;
     }
     TAG_RE.lastIndex = i;
@@ -407,6 +432,7 @@ export function scanHtml(html: string): Scan {
         add("unparsable", i, head[1]!.toLowerCase(), cls, attr);
       } else add("raw-lt", i, lastOpen.tag, lastOpen.cls);
       i++;
+      textFrom = i;
       continue;
     }
     const name = m[1]!.toLowerCase();
@@ -426,8 +452,10 @@ export function scanHtml(html: string): Scan {
       const end = html.toLowerCase().indexOf(`</${name}`, i);
       i = end < 0 ? html.length : end;
     }
+    textFrom = i;
   }
   nulsUpTo(html.length);
+  textUpTo(html.length);
   return { violations, elements };
 }
 
@@ -463,13 +491,14 @@ interface KnownGap {
   /** The attributes it may break, and the value's shape. */
   attrs?: readonly string[];
   value?: RegExp;
-  /** For a NUL: the text around it (40 chars each side). */
+  /** For a NUL or a raw `>`: the text around it (40 chars each side; for a
+   *  `>`, matched up to and including it). */
   near?: RegExp;
 }
 /** The components whose body, cells or file fields render the fill as inline
  *  markdown, where F53 and F29 trip (measured on this guard's pages). */
 const F53_COMPONENTS: readonly ComponentName[] = [
-  "AnnotatedCode", "Callout", "CaseBoard", "Chart", "Checklist", "ComparisonTable", "DecisionLog", "DeltaTable", "Diff",
+  "AnnotatedCode", "Callout", "CaseBoard", "Chart", "Checklist", "ComparisonTable", "DecisionLog", "DeltaTable",
   "FactCheck", "Figure", "FileTree", "Fold", "Glossary", "Historic", "Meter", "More", "Query", "Question", "RuleTree",
   "RunChecklist", "StatusRows", "Steps", "SystemMap", "Timeline", "Tldr",
 ];
@@ -485,6 +514,13 @@ const KNOWN_GAPS: KnownGap[] = [
   { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question"], kind: "unparsable", tag: "section", cls: /^question\b/, attrs: ["data-question-id"] },
   { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Lane", "NextMoves"], kind: "unparsable", tag: "div", cls: /^nm-lane\b/, attrs: ["data-who"] },
   { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Embed"], kind: "unparsable", tag: "figure", cls: /^embed$/, attrs: ["data-embed-title"] },
+  // The same restore into a fence's `language-` class, which a `lang=` reaches (its broken value hides the class).
+  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["AnnotatedCode"], kind: "unparsable", tag: "code", cls: /^$/, attrs: ["class"] },
+  // The broken value's own `" Hold">` tail, which then reads as text after the restored `</sup>`.
+  {
+    finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question", "Lane", "NextMoves", "Embed", "AnnotatedCode"],
+    kind: "raw-gt", tag: "sup", cls: /^wiki-ask-cite$/, near: /\[1\]<\/sup> Hold">$/,
+  },
   // `paragraphGaps` writes `<br><br>` into a value holding a blank line (render.ts): CaseBoard's status pill
   // and, in dots view, the square's three values.
   { finding: "F56", fill: F56_FILL, modes: ["views", "plain"], components: ["CaseBoard"], kind: "value-lt-gt", tag: "span", cls: /^cb-pill\b/, attrs: ["title"], value: /^status: x<br><br>y$/ },
@@ -549,7 +585,9 @@ const excuses = (g: KnownGap, c: Case, v: Violation) =>
   g.kind === v.kind &&
   (g.kind === "nul"
     ? g.near!.test(v.value)
-    : g.tag === v.tag && g.cls!.test(v.cls) && g.attrs!.includes(v.attr) && (!g.value || g.value.test(v.value)));
+    : g.kind === "raw-gt"
+      ? g.tag === v.tag && g.cls!.test(v.cls) && g.near!.test(v.value.slice(0, 41))
+      : g.tag === v.tag && g.cls!.test(v.cls) && g.attrs!.includes(v.attr) && (!g.value || g.value.test(v.value)));
 
 /** `c`'s violations no gap excuses, and the gaps that excused one. */
 function judge(c: Case): { left: Violation[]; excusedBy: KnownGap[] } {
@@ -564,7 +602,10 @@ function judge(c: Case): { left: Violation[]; excusedBy: KnownGap[] } {
 
 const label = (c: Case) => `${c.component} ${c.setup.name} ${c.mode} ${JSON.stringify(c.fill)}`;
 
-/** What a setup's real view renders on the reader (views on, benign fill). */
+/** What a setup's real view renders on the reader (views on, benign fill)
+ *  and its fallback never does: each mark must occur more often on the page
+ *  than on the same page without the block (StatusRows, Question, DecisionLog
+ *  and Glossary are on every page). */
 function realViewMarks(name: ComponentName, setup: Setup): string[] {
   const a = (k: string) => {
     const v = setup.attrs[k];
@@ -599,12 +640,64 @@ function realViewMarks(name: ComponentName, setup: Setup): string[] {
       return ['class="dt-table'];
     case "Query":
       return ['class="query-table', "language-sql"];
-    default:
-      return [];
+    case "Figure":
+      return ['<figure class="figure">'];
+    case "FileRef":
+      return ['<code class="fileref">'];
+    case "ComparisonTable":
+      return ['<div class="tablewrap">'];
+    case "Diff":
+      return ['<div class="diff">', 'class="diff-line diff-'];
+    case "FileTree":
+      return ['<div class="filetree">'];
+    case "Checklist":
+      return ['class="check-item'];
+    case "AnnotatedCode":
+      return ['<div class="annotated-code">', '<div class="annotated-code-notes">'];
+    case "CodeTabs":
+    case "Tab":
+      return ['<div class="code-tabs">', 'class="code-tabs-tab'];
+    case "FactCheck":
+      return ['<details class="fc-block">', 'class="fc-count fc-count-ok"'];
+    case "Fold":
+      return ['<details class="fold'];
+    case "Historic":
+      return ['<section class="historic">'];
+    case "NextMoves":
+      return ['<details class="nm-lane nm-waiting"'];
+    case "Tldr":
+      return ['<section class="tldr">'];
+    case "More":
+      return ['<details class="tldr-more">'];
+    case "Timeline":
+      return ['<section class="gtl">', 'class="gtl-item'];
+    case "DecisionLog":
+      return ['<section class="decision-log">'];
+    case "Question":
+      return ['<section class="question'];
+    case "RuleTree":
+      return ['class="rt-node'];
+    case "Glossary":
+      return ['<div class="glossary">'];
+    case "SystemMap":
+      return ['class="sm-map'];
+    case "Check":
+      return ['class="step-check'];
+    case "RunChecklist":
+      return ['<section class="run-checklist">'];
+    default: {
+      const unmarked: never = name;
+      return unmarked;
+    }
   }
 }
 
-const FALLBACK_RE = /-unavailable"|embed-invalid|File type not allowed|invalid embed/;
+/** A fallback any component renderer emits: every `*-fallback` and
+ *  `*-unavailable` class in the renderers' source but `embed-fallback`, the
+ *  real Embed view's own placeholder line (`the fallback classes` pins it). */
+const FALLBACK_RE = /\b(?:vc|sm|dgm|code-tabs)-fallback\b|\b(?:cb|dgm|dt|query|stp)-unavailable\b|embed-invalid|File type not allowed|invalid embed/;
+const FALLBACK_EXEMPT = new Set(["embed-fallback"]);
+const count = (html: string, mark: string) => html.split(mark).length - 1;
 
 describe("rendered attribute values (F58)", () => {
   test("the scanner catches F26's shape, every NUL, a stray quote and an injected handler, and passes clean tags", () => {
@@ -612,6 +705,7 @@ describe("rendered attribute values (F58)", () => {
     expect(attributeViolations(`<p>a\u0000b\u0000c</p><p>\u0000</p>`)).toHaveLength(3);
     expect(attributeViolations(`<span a="x" b="y"z">t</span>`)).not.toEqual([]);
     expect(attributeViolations(`<p>a < b</p>`)).not.toEqual([]);
+    expect(attributeViolations(`<p>a > b</p><!-- > --><script>a > b</script>`).map((v) => v.split(" ")[0])).toEqual(["raw-gt"]);
     expect(attributeViolations(`<span class="cb-owner"><img src=x data-pwn onerror=alert(1)></span>`).map((v) => v.split(" ")[0])).toEqual(["injected-attr", "injected-attr"]);
     expect(attributeViolations(`<span title="x" onmouseover="y">t</span>`)).toHaveLength(1);
     expect(attributeViolations(`<section id="a" data-x="q &gt; 1"><p>x &lt; y</p><br><img src="x" alt=""/></section>`)).toEqual([]);
@@ -622,7 +716,10 @@ describe("rendered attribute values (F58)", () => {
     for (const name of COMPONENT_NAMES) {
       for (const setup of validSetups(name)) {
         const html = render(page(name, BENIGN_FILL, setup), "views", BENIGN_FILL);
-        for (const mark of realViewMarks(name, setup)) if (!html.includes(mark)) missing.push(`${name} ${setup.name}: ${mark}`);
+        const without = render(page(name, BENIGN_FILL, setup, false), "views", BENIGN_FILL);
+        const marks = realViewMarks(name, setup);
+        if (!marks.length) missing.push(`${name} ${setup.name}: no mark`);
+        for (const mark of marks) if (count(html, mark) <= count(without, mark)) missing.push(`${name} ${setup.name}: ${mark}`);
         const fallback = FALLBACK_RE.exec(html);
         if (fallback) missing.push(`${name} ${setup.name}: fallback ${fallback[0]}`);
       }
@@ -635,6 +732,14 @@ describe("rendered attribute values (F58)", () => {
         for (const v of spec.enum ?? []) expect(setups.some((s) => s.attrs[attr] === v)).toBe(true);
       }
     }
+  });
+
+  test("the fallback classes: FALLBACK_RE knows every one the renderers emit", async () => {
+    const sources = [...new Bun.Glob("src/format/*.ts").scanSync(), "src/web/web-format.ts"].filter((f) => !f.endsWith(".test.ts"));
+    const classes = new Set<string>();
+    for (const f of sources) for (const [c] of (await Bun.file(f).text()).matchAll(/\b[a-z][a-z0-9-]*-(?:fallback|unavailable)\b/g)) classes.add(c);
+    expect(classes.size).toBeGreaterThan(5);
+    expect([...classes].filter((c) => !FALLBACK_EXEMPT.has(c) && !FALLBACK_RE.test(c))).toEqual([]);
   });
 
   test("an element the benign render never opens fails; the fill's own markdown does not", () => {
