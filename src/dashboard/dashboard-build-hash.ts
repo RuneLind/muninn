@@ -18,25 +18,33 @@ import { tracesWaterfallClientScript } from "./views/components/traces-waterfall
  *
  * The hash itself is memoized — first call triggers both bundle builds
  * concurrently and SHA-1s their concatenation; every subsequent call is a
- * cache hit. On muninn restart the memo is reset (new process) and the
- * first request rebuilds. Process restart is the only thing that changes
- * the hash, which is exactly the "should I tell the operator to reload"
- * boundary.
+ * cache hit. A failed build is not kept: the next call builds again, so one
+ * broken client file does not fail every page that embeds the hash until a
+ * restart. On muninn restart the memo is reset (new process) and the first
+ * request rebuilds. Process restart is the only thing that changes the hash,
+ * which is exactly the "should I tell the operator to reload" boundary.
  */
-let cached: Promise<string> | null = null;
+export const getDashboardBuildHash = makeBuildHash([helpersClientScript, tracesWaterfallClientScript]);
 
-export async function getDashboardBuildHash(): Promise<string> {
-  return (cached ??= compute());
+/** The memoized hash over `sources`' bundles; exported so a test can hand it a
+ *  build that fails once. */
+export function makeBuildHash(sources: readonly (() => Promise<string>)[]): () => Promise<string> {
+  let cached: Promise<string> | null = null;
+  return () => {
+    if (cached) return cached;
+    const p = compute(sources);
+    cached = p;
+    p.catch(() => {
+      if (cached === p) cached = null;
+    });
+    return p;
+  };
 }
 
-async function compute(): Promise<string> {
-  const [helpers, traces] = await Promise.all([
-    helpersClientScript(),
-    tracesWaterfallClientScript(),
-  ]);
+async function compute(sources: readonly (() => Promise<string>)[]): Promise<string> {
+  const bundles = await Promise.all(sources.map((s) => s()));
   const h = createHash("sha1");
-  h.update(helpers);
-  h.update(traces);
+  for (const b of bundles) h.update(b);
   return h.digest("hex").slice(0, 12);
 }
 
