@@ -4,8 +4,8 @@
  *
  * Like `temp-dir-scan.ts` it parses with the TypeScript compiler and refuses a
  * name, never an import path. Every value-position `runProc` or `spawn` (an
- * identifier, a property name, or a string that is exactly the name) is a site,
- * unless it is the callee of a call whose options object literal carries a
+ * identifier, a property name, or a string that is exactly the name and used as
+ * a property key, as in `x["spawn"]`) is a site, unless it is the callee of a call whose options object literal carries a
  * top-level `processGroup: true` (runProc's fourth argument) or `detached: true`
  * (spawn's last argument). The child_process module may be imported only for
  * `spawn`, `*Sync` names and types.
@@ -131,6 +131,25 @@ function unreadCallee(n: ts.Node): ts.CallExpression | ts.NewExpression | null {
       || (ts.isBinaryExpression(p) && (OR.has(p.operatorToken.kind) || p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || p.operatorToken.kind === ts.SyntaxKind.CommaToken))
       || (ts.isConditionalExpression(p) && p.condition !== e);
     if (!through) return null;
+    e = p;
+  }
+}
+
+/**
+ * A string used as a property key: an element access's index (also through parentheses, a cast, a ternary branch
+ * or `??`/`||`/`&&`/comma), a computed key, or a quoted key in a destructuring target or binding pattern. A data
+ * key (`{ "spawn": f }`) is a declared name and never reaches here; any other string is data.
+ */
+function keyString(n: ts.Node): boolean {
+  if (ts.isPropertyAssignment(n.parent)) return n.parent.name === n;
+  if (ts.isBindingElement(n.parent)) return n.parent.propertyName === n;
+  let e = n;
+  for (;;) {
+    const p = e.parent;
+    const through = UNWRAP(p)
+      || (ts.isBinaryExpression(p) && (OR.has(p.operatorToken.kind) || p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || p.operatorToken.kind === ts.SyntaxKind.CommaToken))
+      || (ts.isConditionalExpression(p) && p.condition !== e);
+    if (!through) return (ts.isElementAccessExpression(p) && p.argumentExpression === e) || ts.isComputedPropertyName(p);
     e = p;
   }
 }
@@ -297,6 +316,7 @@ export function scanSource(file: string, source: string): Site[] {
       }
       continue;
     }
+    if (ts.isStringLiteralLike(n) && !keyString(n)) continue;
     const call = calleeCall(n);
     if (!call) {
       const through = ts.isStringLiteralLike(n) ? null : unreadCallee(n);
@@ -354,7 +374,7 @@ const WHY = {
     spawn: "the scan cannot follow a name used as a value to its calls, so it cannot tell whether they are grouped. Call `spawn` directly, with an options literal holding `detached: true` as its last argument.",
     runProc: "the scan cannot follow a name used as a value to its calls, so it cannot tell whether they are grouped. For an injected dependency, call it in the shape the scan reads: `(deps.runProc ?? runProc)(…, { processGroup: true })`.",
   },
-  string: "a string spelled exactly like a spawner's name can reach it unchecked, as in `x[\"spawn\"](…)`, so the scan refuses every such string. Call a spawner by its plain name (`x.spawn(…)`); a string that is data, such as an error code, is listed.",
+  string: "a property key spelled exactly like a spawner's name can reach it unchecked, as in `x[\"spawn\"](…)`, so the scan refuses every such key. Call a spawner by its plain name (`x.spawn(…)`).",
   rename: (from: string) =>
     `the scan follows \`runProc\` and \`spawn\` only under their own names, so it cannot check the calls behind a rename. Import or export the name un-renamed (\`{ ${from} }\`), and give no other binding that name.`,
   renameTo: (from: string, to: string) =>
