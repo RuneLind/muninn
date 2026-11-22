@@ -242,6 +242,35 @@ describe("the Stale check's fix routes", () => {
     expect({ report: report.fixed, row: hubRow(summary).fixed, summary: summary.fixed }).toEqual({ report: "unavailable", row: "unavailable", summary: "unavailable" });
   });
 
+  /** The store with one read failing: the status-line verdicts still answer, so only the `fixed` read is unknown. */
+  const failing = (which: "fixed-get" | "pages") =>
+    ({
+      get: (wiki, kind, keys) => (which === "fixed-get" && kind === "fixed" ? Promise.reject(new Error("db down")) : verdicts.get(wiki, kind, keys)),
+      upsert: (v) => verdicts.upsert(v),
+      pages: (wiki, kind) => (which === "pages" ? Promise.reject(new Error("db down")) : verdicts.pages!(wiki, kind)),
+    }) satisfies Parameters<typeof __setStaleVerdictStoreForTest>[0];
+
+  for (const which of ["fixed-get", "pages"] as const) {
+    test(`fix round 2 batch 1: the status-line verdicts answer but the \`fixed\` read fails (${which}): M reads as unknown on the row, the summary and the page`, async () => {
+      await seedWiki();
+      await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+      expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+      await git(root, Date.now() - 30 * DAY, "commit", "-q", "--amend", "--no-edit", "--reset-author");
+      __resetWikiCacheForTest();
+      __setStaleVerdictStoreForTest(failing(which));
+      const report = await get("wiki=fixwiki&page=hub.md");
+      const summary = await get("wiki=fixwiki");
+      expect({ verdicts: [report.verdicts, summary.verdicts], report: report.fixed, row: hubRow(summary).fixed, summary: summary.fixed }).toEqual({
+        verdicts: [undefined, undefined],
+        report: "unavailable",
+        row: "unavailable",
+        summary: "unavailable",
+      });
+      // N (the status lines) stays known: only M is unknown.
+      expect(staleCountsToken(staleCounts(report))).toBe("0·?");
+    });
+  }
+
   test("a Stale check fix commit is not a page change: the wiki-wide total drops after an Apply on a mutual link", async () => {
     await seedWiki();
     await seedPair();

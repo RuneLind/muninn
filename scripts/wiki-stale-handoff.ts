@@ -40,8 +40,8 @@
  * shell, a bound per call, no prompt (`GIT_TERMINAL_PROMPT=0`; ssh in batch
  * mode unless the user configured their own ssh command).
  */
-import { existsSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import {
   CHECK_PAGE_DEADLINE_MS,
@@ -337,6 +337,233 @@ async function takeGateLocks(
 }
 
 /**
+ * The largest fast-forward the gate runs inside the locks (F13 round 2). A
+ * killed checkout leaves its new files untracked and every later pull refuses,
+ * so a bigger one is never started: it is left to a pull by hand. Measured on
+ * a laptop: 20 000 files in 1.7 s, 100 MB in one file in 0.1 s, against the
+ * merge's ~6.5 s; the limits keep a wide margin for a loaded machine.
+ */
+export const FF_MAX = { files: 5_000, bytes: 100 * 1024 * 1024 };
+
+/** One path the fast-forward changes (`git diff-tree --raw`). */
+interface FfEntry {
+  status: string;
+  path: string;
+  oldSha: string;
+  newSha: string;
+  oldMode: string;
+  newMode: string;
+}
+/** What the fast-forward will write, measured unlocked before it runs. */
+interface FfPlan {
+  head: string;
+  entries: FfEntry[];
+  /** Folders the new files need that are not folders now: the restore may remove them. */
+  newDirs: string[];
+  index: string;
+}
+
+/** The index file's identity: a stopped merge that rewrote it changed this. */
+const statKey = (p: string) => {
+  try {
+    const s = statSync(p);
+    return `${s.ino}:${s.size}:${s.mtimeMs}`;
+  } catch {
+    return "";
+  }
+};
+
+/** Does the working tree hold exactly this blob at `abs` (bytes, or a symlink's target)? */
+function holdsBlob(abs: string, sha: string, mode: string): boolean {
+  let data: Buffer;
+  try {
+    const st = lstatSync(abs);
+    if (mode === "120000") {
+      if (!st.isSymbolicLink()) return false;
+      data = readlinkSync(abs, { encoding: "buffer" });
+    } else {
+      if (!st.isFile()) return false;
+      data = readFileSync(abs);
+    }
+  } catch {
+    return false;
+  }
+  const h = new Bun.CryptoHasher(sha.length === 64 ? "sha256" : "sha1");
+  h.update(`blob ${data.length}\0`);
+  h.update(data);
+  return h.digest("hex") === sha;
+}
+const present = (abs: string) => {
+  try {
+    lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const ZERO = /^0+$/;
+
+/**
+ * Measure the fast-forward from HEAD to `ref` before any lock is taken: the
+ * paths it changes and the bytes it writes. Above {@link FF_MAX} it is a skip
+ * telling the user to pull by hand, never a merge that cannot finish in time.
+ */
+async function measureFastForward(main: string, ref: string, shown: string, git: Git, max: { files: number; bytes: number }): Promise<FfPlan | { skip: string }> {
+  const byHand = `pull ${main} by hand: git -C ${shq(main)} pull --ff-only ${shown.replace("/", " ")}`;
+  const cannot = (r: GitResult) => ({ skip: `git pull --ff-only not tried (could not measure the fast-forward to ${shown}: ${gitError(r.stderr) || `exit ${r.code}`}); ${byHand}` });
+  const h = await git(["rev-parse", "--verify", "-q", "HEAD"], main);
+  if (h.code !== 0) return cannot(h);
+  const d = await git(["diff-tree", "-r", "-z", "--no-renames", "HEAD", ref], main);
+  if (d.code !== 0) return cannot(d);
+  const parts = d.stdout.split("\0");
+  const entries: FfEntry[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const [oldMode, newMode, oldSha, newSha, status] = parts[i]!.replace(/^:/, "").split(" ");
+    // A submodule's folder is not written by the fast-forward.
+    if (oldMode === "160000" || newMode === "160000") continue;
+    entries.push({ status: status!, path: parts[i + 1]!, oldSha: oldSha!, newSha: newSha!, oldMode: oldMode!, newMode: newMode! });
+  }
+  let bytes = 0;
+  if (entries.length <= max.files && entries.some((e) => !ZERO.test(e.newSha))) {
+    const t = await git(["ls-tree", "-r", "-l", "-z", ref], main);
+    if (t.code !== 0) return cannot(t);
+    const size = new Map<string, number>();
+    for (const row of t.stdout.split("\0")) {
+      const m = /^\d+ \w+ [0-9a-f]+ +(\d+|-)\t(.*)$/s.exec(row);
+      if (m) size.set(m[2]!, Number(m[1]) || 0);
+    }
+    for (const e of entries) bytes += size.get(e.path) ?? 0;
+  }
+  if (entries.length > max.files || bytes > max.bytes) {
+    const mb = (n: number) => `${Math.ceil(n / (1024 * 1024))} MB`;
+    const what = entries.length > max.files ? `touches ${entries.length} files, over ${max.files}` : `writes ${mb(bytes)}, over ${mb(max.bytes)}`;
+    return { skip: `git pull --ff-only not tried (the fast-forward to ${shown} ${what}, too big to finish inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); ${byHand}` };
+  }
+  const idx = await git(["rev-parse", "--path-format=absolute", "--git-path", "index"], main);
+  if (idx.code !== 0) return cannot(idx);
+  const newDirs = new Set<string>();
+  for (const e of entries) {
+    if (ZERO.test(e.newSha)) continue;
+    for (let dir = path.dirname(e.path); dir !== "." && dir !== "/" && !newDirs.has(dir); dir = path.dirname(dir)) {
+      let isDir = false;
+      try {
+        isDir = lstatSync(path.join(main, dir)).isDirectory();
+      } catch {}
+      if (isDir) break;
+      newDirs.add(dir);
+    }
+  }
+  return { head: h.stdout.trim(), entries, newDirs: [...newDirs], index: idx.stdout.trim() };
+}
+
+/**
+ * After a fast-forward was stopped with HEAD unmoved: put the checkout back as
+ * it was, under the locks again. Only files the stopped merge wrote are
+ * touched, each proven by its bytes: a new file holding the target's blob is
+ * removed, a changed or deleted one holding the target's blob (or gone) is
+ * restored from HEAD; any other untracked file of the user's is left alone.
+ * Returns the skip's tail: what happened and the recovery.
+ */
+async function takeBack(
+  main: string,
+  plan: FfPlan,
+  indexBefore: string,
+  shown: string,
+  git: Git,
+  roots: readonly string[],
+  lock: ((root: string) => Promise<WikiLockOutcome>) | undefined,
+): Promise<string> {
+  const m = shq(main);
+  const byHand = `pull it by hand: git -C ${m} pull --ff-only ${shown.replace("/", " ")}`;
+  const added = `\`git -C ${m} diff --name-only --diff-filter=A HEAD ${shown}\` lists the files the fast-forward adds`;
+  if (statKey(plan.index) !== indexBefore) {
+    return `, after it had rewritten the index: run \`git status\` in ${main} before anything else; ${added}; then ${byHand}`;
+  }
+  const taken = await takeGateLocks(roots, lock);
+  if (!taken.ok) {
+    return `, and the wiki write lock was held (${taken.reason}), so files it wrote may be left: run \`git status\` in ${main}, delete the untracked ones it added (${added}), then ${byHand}`;
+  }
+  /** A regular file the stop cut short: its bytes are a start of the target's blob (measured: the one file git was writing). */
+  const cutShort = async (abs: string, sha: string, mode: string, deadline: number) => {
+    if (mode === "120000" || !present(abs) || !lstatSync(abs).isFile()) return false;
+    const ms = deadline - Date.now();
+    if (ms <= 0) return false;
+    const r = await git(["cat-file", "blob", sha], main, ms);
+    if (r.code !== 0) return false;
+    const have = readFileSync(abs, "utf8");
+    // Decoded both ways: a cut inside a multi-byte character fails the test, which leaves the file (the safe side).
+    return have.length < r.stdout.length && r.stdout.startsWith(have);
+  };
+  const removed: string[] = [];
+  const left: string[] = [];
+  const restore: string[] = [];
+  let restoreError = "";
+  try {
+    const deadline = taken.since + LOCKED_SECTION_MS - KILL_GRACE_MS;
+    for (const e of plan.entries) {
+      const abs = path.join(main, e.path);
+      if (Date.now() >= deadline) {
+        left.push(e.path);
+        continue;
+      }
+      if (e.status === "D") {
+        if (!present(abs)) restore.push(e.path);
+        continue;
+      }
+      if (!present(abs)) {
+        if (e.status !== "A") restore.push(e.path);
+        continue;
+      }
+      // Untouched (the old bytes) costs no git call; the target's bytes, whole or cut short, are the merge's.
+      if (e.status !== "A" && holdsBlob(abs, e.oldSha, e.oldMode)) continue;
+      const wrote = holdsBlob(abs, e.newSha, e.newMode) || (await cutShort(abs, e.newSha, e.newMode, deadline));
+      if (!wrote) {
+        // Neither side's bytes: someone's file or edit. Never removed or overwritten blind.
+        left.push(e.path);
+      } else if (e.status === "A") {
+        try {
+          unlinkSync(abs);
+          removed.push(e.path);
+        } catch {
+          left.push(e.path);
+        }
+      } else restore.push(e.path);
+    }
+    // Deepest first, and only a folder that is empty now: a file of anyone's keeps it.
+    for (const dir of plan.newDirs.sort((a, b) => b.length - a.length)) {
+      try {
+        if (readdirSync(path.join(main, dir)).length === 0) rmdirSync(path.join(main, dir));
+      } catch {}
+    }
+    if (restore.length) {
+      const ms = deadline - Date.now();
+      const tmp = mkdtempSync(path.join(tmpdir(), "wiki-stale-restore-"));
+      try {
+        const list = path.join(tmp, "paths");
+        writeFileSync(list, restore.join("\0") + "\0");
+        const r = ms > 0 ? await git(["--literal-pathspecs", "restore", "--source=HEAD", "--worktree", `--pathspec-from-file=${list}`, "--pathspec-file-nul"], main, ms) : null;
+        if (!r || r.code !== 0) {
+          restoreError = r ? gitError(r.stderr) || `exit ${r.code}` : "no time left";
+          left.push(...restore);
+        }
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    taken.release();
+  }
+  const putBack = removed.length + (restoreError ? 0 : restore.length);
+  if (!left.length) {
+    return putBack
+      ? ` and the ${putBack} file(s) it had written were put back, so ${main} is as last pulled; ${byHand}`
+      : ` before it wrote a file, so ${main} is as last pulled; ${byHand}`;
+  }
+  const first = left.slice(0, 3).join(", ") + (left.length > 3 ? ", …" : "");
+  return ` part-way, and ${left.length} file(s) it touched could not be put back (${first}${restoreError ? `; ${restoreError}` : ""}): run \`git status\` in ${main}, delete the untracked ones it added (${added}), put the changed ones back with \`git -C ${m} restore --source=HEAD -- <path>\`, then ${byHand}`;
+}
+
+/**
  * The gate for one main checkout: pull on the default branch, then each
  * page's state. Pulls only (`--ff-only`); never stashes, resets or switches.
  */
@@ -344,7 +571,7 @@ export async function runGate(
   main: string,
   pages: PageRef[],
   git: Git,
-  opts: { pull?: boolean; lock?: (root: string) => Promise<WikiLockOutcome>; roots?: readonly string[] } = {},
+  opts: { pull?: boolean; lock?: (root: string) => Promise<WikiLockOutcome>; roots?: readonly string[]; ffMax?: { files: number; bytes: number } } = {},
 ): Promise<Gate> {
   const lines: string[] = [];
   const g: Gate = { main, fixPath: "", lines, pages: [] };
@@ -389,52 +616,79 @@ export async function runGate(
     const r = await git(["fetch", "--quiet", "--no-write-fetch-head", g.remote, `+refs/heads/${def}:refs/remotes/${g.remote}/${def}`], main, PULL_TIMEOUT_MS);
     const err = gitError(r.stderr) || `exit ${r.code}`;
     if (r.code === 0) {
-      const taken = await takeGateLocks(lockRootsFor(main, opts.roots ?? (await registeredWikiRoots())), opts.lock);
-      if (!taken.ok) {
-        g.note = `fetched ${g.remote}/${def}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
+      const shown = `${g.remote}/${def}`;
+      const ref = `refs/remotes/${shown}`;
+      // Measured before any lock (F13 round 2): a fast-forward too big to finish in the locked section is never started.
+      const plan = await measureFastForward(main, ref, shown, git, opts.ffMax ?? FF_MAX);
+      if ("skip" in plan) {
+        skip(plan.skip);
+        g.note = g.skip;
       } else {
-        let after = "";
-        let merged = false;
-        let before = "";
-        try {
-          // Every call in here ends before the locks' stale window, counted from
-          // before the first acquire: a writer takes a lock older than that over.
-          const left = () => taken.since + LOCKED_SECTION_MS - Date.now() - KILL_GRACE_MS;
-          const head = async () => {
-            const ms = left();
-            if (ms <= 0) return "";
-            const r = await git(["rev-parse", "HEAD"], main, ms);
-            return r.code === 0 ? r.stdout.trim() : "";
-          };
-          before = await head();
-          const mergeMs = left();
-          // Never stash another session's edits: the flags beat merge.autoStash.
-          const m: GitResult | null =
-            mergeMs > 0 ? await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", `refs/remotes/${g.remote}/${def}`], main, mergeMs) : null;
-          if (!m) {
-            // Taking the locks used the section's time: nothing ran, as when a lock is held.
-            g.note = `fetched ${g.remote}/${def}, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled`;
-          } else if (m.code === 0) {
-            merged = true;
-            after = await head();
-          } else if (m.timedOut) {
-            // «git pull» first: the fix path keys on that prefix (a worktree, until the checkout pulls cleanly).
-            skip(
-              `git pull --ff-only timed out (the fast-forward to ${g.remote}/${def} did not finish in ${(mergeMs / 1000).toFixed(1)} s, kept inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); git was stopped, check \`git status\` in ${main}`,
-            );
-            g.note = g.skip;
-          } else {
-            skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
-            g.note = g.skip;
+        const roots = lockRootsFor(main, opts.roots ?? (await registeredWikiRoots()));
+        const taken = await takeGateLocks(roots, opts.lock);
+        if (!taken.ok) {
+          g.note = `fetched ${shown}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
+        } else {
+          let after = "";
+          let merged = false;
+          let before = "";
+          let stopped: { mergeMs: number; indexBefore: string } | null = null;
+          try {
+            // Every call in here ends before the locks' stale window, counted from
+            // before the first acquire: a writer takes a lock older than that over.
+            const left = () => taken.since + LOCKED_SECTION_MS - Date.now() - KILL_GRACE_MS;
+            const head = async () => {
+              const ms = left();
+              if (ms <= 0) return "";
+              const r = await git(["rev-parse", "HEAD"], main, ms);
+              return r.code === 0 ? r.stdout.trim() : "";
+            };
+            before = await head();
+            const mergeMs = left();
+            const indexBefore = statKey(plan.index);
+            if (before && before !== plan.head) {
+              // A commit landed between the measure and the lock: what was measured is not what would run.
+              g.note = `fetched ${shown}, but HEAD moved while the fast-forward was measured; the main checkout is as last pulled`;
+            } else {
+              // Never stash another session's edits: the flags beat merge.autoStash.
+              const m: GitResult | null = mergeMs > 0 ? await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", ref], main, mergeMs) : null;
+              if (!m) {
+                // Taking the locks used the section's time: nothing ran, as when a lock is held.
+                g.note = `fetched ${shown}, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled`;
+              } else if (m.code === 0) {
+                merged = true;
+                after = await head();
+              } else if (m.timedOut) {
+                stopped = { mergeMs, indexBefore };
+              } else {
+                skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
+                g.note = g.skip;
+              }
+            }
+          } finally {
+            taken.release();
           }
-        } finally {
-          taken.release();
-        }
-        if (merged) {
-          // Counted after the release: a read, so it holds no writer up.
-          const n = before && after ? Number(await out(["rev-list", "--count", `${before}..${after}`])) || 0 : 0;
-          if (before && !after) g.note = `fast-forwarded to ${g.remote}/${def}`;
-          else g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
+          if (stopped) {
+            // Read after the release: a merge stopped just after it moved HEAD has finished.
+            const now = await out(["rev-parse", "HEAD"]);
+            if (now && before && now !== before) {
+              merged = true;
+              after = now;
+            } else {
+              const tail = await takeBack(main, plan, stopped.indexBefore, shown, git, roots, opts.lock);
+              // «git pull» first: the fix path keys on that prefix (a worktree, until the checkout pulls cleanly).
+              skip(
+                `git pull --ff-only timed out (the fast-forward to ${shown} did not finish in ${(stopped.mergeMs / 1000).toFixed(1)} s, kept inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); git was stopped${tail}`,
+              );
+              g.note = g.skip;
+            }
+          }
+          if (merged) {
+            // Counted after the release: a read, so it holds no writer up.
+            const n = before && after ? Number(await out(["rev-list", "--count", `${before}..${after}`])) || 0 : 0;
+            if (before && !after) g.note = `fast-forwarded to ${shown}`;
+            else g.note = n ? `pulled ${n} commit(s) from ${shown}` : `up to date with ${shown}`;
+          }
         }
       }
     } else if (!r.timedOut && AUTH_FAILURE.test(r.stderr)) {

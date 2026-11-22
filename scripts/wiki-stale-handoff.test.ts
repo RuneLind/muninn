@@ -3,9 +3,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
-import { COSTED_PAGE_CAP, gitRunner, lockRootsFor, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
+import { COSTED_PAGE_CAP, FF_MAX, LOCKED_SECTION_MS, gitRunner, lockRootsFor, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
 import type { FetchJson, PostJson, PostSse } from "./wiki-stale.ts";
-import { takeWikiWriteLock } from "../src/wiki/lockfile.ts";
+import { takeWikiWriteLock, WIKI_LOCK_STALE_MS } from "../src/wiki/lockfile.ts";
 
 /** Fixture repos get a repo-local identity: CI has no global one. */
 const git = gitRunner();
@@ -137,6 +137,178 @@ describe("the gate", () => {
     expect(gate.fixPath).toStartWith("fix in a worktree:");
   }, 20_000);
 
+  /** Every lock the gate takes, with the time the first one was taken and the time the first one was released. */
+  function timedLock(firstWaitMs = 0) {
+    const t = { taken: 0, released: 0, calls: 0 };
+    const lock = async (root: string) => {
+      if (t.calls++ === 0 && firstWaitMs) await Bun.sleep(firstWaitMs);
+      const o = await takeWikiWriteLock(root, { op: "stale-handoff-ff" });
+      t.taken ||= Date.now();
+      if (o.ok && o.lock) {
+        const release = o.lock.release;
+        o.lock.release = () => ((t.released ||= Date.now()), release());
+      }
+      return o;
+    };
+    return { t, lock };
+  }
+  const status = async (main: string) => (await g(main, "status", "--porcelain", "--untracked-files=all")).split("\n").filter(Boolean);
+
+  test("F13 fix round 2 batch 1: a git that ignores SIGTERM is SIGKILLed and the lock released before its stale window", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const pidFile = path.join(tmp(), "merge.pid");
+    const fake = path.join(tmp(), "deaf-git");
+    writeFileSync(fake, `#!/bin/sh\necho $$ > ${pidFile}\ntrap '' TERM\nexec sleep 30\n`);
+    chmodSync(fake, 0o755);
+    const deaf = gitRunner(fake);
+    const { t, lock } = timedLock();
+    const gate = await runGate(main, [], (args, cwd, ms) => (args.includes("merge") ? deaf(args, cwd, ms) : git(args, cwd, ms)), { lock });
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    expect({ heldInsideStaleWindow: t.released - t.taken < WIKI_LOCK_STALE_MS, killed: !alive, lockLeft: existsSync(path.join(main, ".wiki-write.lock")) }).toEqual({
+      heldInsideStaleWindow: true,
+      killed: true,
+      lockLeft: false,
+    });
+    expect(gate.skip).toStartWith("git pull --ff-only timed out (");
+  }, 30_000);
+
+  test("F13 fix round 2 batch 1: a fast-forward over the file limit is never started: the checkout stays clean and the skip names the pull by hand, which works", async () => {
+    const { up, main } = await withRemote();
+    for (let i = 0; i <= FF_MAX.files; i++) write(up, `bulk/p${i}.md`, `# ${i}\n`);
+    await g(up, "add", ".");
+    await g(up, "commit", "-qm", "bulk");
+    await g(up, "push", "-q", "origin", "main");
+    const before = await g(main, "rev-parse", "HEAD");
+    const gate = await runGate(main, [], git, { roots: [] });
+    expect(gate.skip).toBe(
+      `git pull --ff-only not tried (the fast-forward to origin/main touches ${FF_MAX.files + 1} files, over ${FF_MAX.files}, too big to finish inside the wiki write lock's 10 s stale window); pull ${main} by hand: git -C ${main} pull --ff-only origin main`,
+    );
+    expect({ head: await g(main, "rev-parse", "HEAD"), status: await status(main) }).toEqual({ head: before, status: [] });
+    expect(gate.fixPath).toStartWith("fix in a worktree:");
+    await g(main, "pull", "-q", "--ff-only", "origin", "main");
+    expect(existsSync(path.join(main, `bulk/p${FF_MAX.files}.md`))).toBe(true);
+  }, 60_000);
+
+  test("F13 fix round 2 batch 1: the byte limit too, from the blob sizes", async () => {
+    const { up, main } = await withRemote();
+    write(up, "big.bin", "x".repeat(4096));
+    await g(up, "add", ".");
+    await g(up, "commit", "-qm", "big");
+    await g(up, "push", "-q", "origin", "main");
+    const gate = await runGate(main, [], git, { roots: [], ffMax: { files: 100, bytes: 4095 } });
+    expect(gate.skip).toStartWith("git pull --ff-only not tried (the fast-forward to origin/main writes 1 MB, over 1 MB, too big");
+    expect(await status(main)).toEqual([]);
+    const fits = await runGate(main, [], git, { roots: [], ffMax: { files: 100, bytes: 4096 } });
+    expect(fits.note).toBe("pulled 1 commit(s) from origin/main");
+  }, 30_000);
+
+  /** A merge that writes `script`'s files into the checkout, then stalls: the take-back sees exactly those bytes. */
+  async function stalledWriter(script: string) {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    write(up, "new/a.md", "# A full\n");
+    write(up, "new/b.md", "# B with a longer body\n");
+    write(up, "new/c.md", "# C\n");
+    await g(up, "add", "-A");
+    await g(up, "commit", "-qm", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const fake = path.join(tmp(), "writing-git");
+    writeFileSync(fake, `#!/bin/sh\nmkdir -p new\n${script}\nexec sleep 30\n`);
+    chmodSync(fake, 0o755);
+    const writer = gitRunner(fake);
+    const before = await g(main, "rev-parse", "HEAD");
+    const gate = await runGate(main, [], (args, cwd, ms) => (args.includes("merge") ? writer(args, cwd, ms) : git(args, cwd, ms)), { roots: [] });
+    return { main, gate, before };
+  }
+
+  test("F13 fix round 2 batch 1: the take-back removes new files whole or cut short and restores an overwritten one; nothing is left", async () => {
+    const { main, gate, before } = await stalledWriter(`printf '# A full\\n' > new/a.md\nprintf '# B wi' > new/b.md\n: > new/c.md\nprintf '# A\\nnew\\n' > plans/a.md`);
+    expect(gate.skip).toEndWith(`git was stopped and the 4 file(s) it had written were put back, so ${main} is as last pulled; pull it by hand: git -C ${main} pull --ff-only origin main`);
+    expect({ head: await g(main, "rev-parse", "HEAD"), status: await status(main), newFolder: existsSync(path.join(main, "new")) }).toEqual({ head: before, status: [], newFolder: false });
+    await g(main, "pull", "-q", "--ff-only", "origin", "main");
+  }, 30_000);
+
+  test("F13 fix round 2 batch 1: bytes that are neither side's are never removed: the skip names them and the recovery", async () => {
+    const { main, gate } = await stalledWriter(`printf '# A full\\n' > new/a.md\nprintf 'not the blob' > new/b.md`);
+    expect(gate.skip).toContain(
+      `git was stopped part-way, and 1 file(s) it touched could not be put back (new/b.md): run \`git status\` in ${main}, delete the untracked ones it added (\`git -C ${main} diff --name-only --diff-filter=A HEAD origin/main\` lists the files the fast-forward adds)`,
+    );
+    expect({ status: await status(main), b: readFileSync(path.join(main, "new/b.md"), "utf8") }).toEqual({ status: ["?? new/b.md"], b: "not the blob" });
+  }, 30_000);
+
+  test("F13 fix round 2 batch 1: a commit between the measure and the lock runs no merge: a note, the checkout as it is", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const verbs: string[] = [];
+    const moving: Git = async (args, cwd, ms) => {
+      verbs.push(args.find((a) => ["merge", "diff-tree"].includes(a)) ?? "");
+      // The locked section's own HEAD read: someone committed just before it.
+      if (args.join(" ") === "rev-parse HEAD" && verbs.includes("diff-tree") && !verbs.includes("moved")) {
+        verbs.push("moved");
+        await g(main, "commit", "-q", "--allow-empty", "-m", "a session's commit");
+      }
+      return git(args, cwd, ms);
+    };
+    const gate = await runGate(main, [], moving, { roots: [] });
+    expect({ note: gate.note, merged: verbs.includes("merge") }).toEqual({
+      note: "fetched origin/main, but HEAD moved while the fast-forward was measured; the main checkout is as last pulled",
+      merged: false,
+    });
+  }, 30_000);
+
+  test("F13 fix round 2 batch 1: a real fast-forward stopped part-way is taken back: only its own files go, the user's stay, and the next pull works", async () => {
+    const { up, main } = await withRemote();
+    // Two files the checkout writes first (a deletion, then index order), each put back from HEAD.
+    write(up, "aaa/x.md", "# X\nold\n");
+    write(up, "aab.md", "# AAB\n");
+    await g(up, "add", "-A");
+    await g(up, "commit", "-qm", "early files");
+    await g(up, "push", "-q", "origin", "main");
+    await g(main, "pull", "-q", "--ff-only", "origin", "main");
+    const N = 25_000;
+    write(up, "aaa/x.md", "# X\nnew\n");
+    rmSync(path.join(up, "aab.md"));
+    for (let i = 0; i < 10; i++) write(up, `bulk/b${i}.md`, `# ${i}\n`);
+    for (let i = 0; i < N; i++) write(up, `new/sub/p${i}.md`, `# ${i}\n`);
+    await g(up, "add", "-A");
+    await g(up, "commit", "-qm", "bulk");
+    await g(up, "push", "-q", "origin", "main");
+    // The user's own untracked files, one in a folder the fast-forward also writes into: never removed.
+    write(main, "bulk/mine.md", "mine\n");
+    write(main, "notes/mine.md", "mine\n");
+    const before = await g(main, "rev-parse", "HEAD");
+    // The first lock wait uses most of the section, so the merge's bound (~0.8 s) stops git mid-checkout.
+    const { t, lock } = timedLock(LOCKED_SECTION_MS - 1_500 - 800);
+    const gate = await runGate(main, [], git, { lock, roots: [], ffMax: { files: 1e9, bytes: 1e12 } });
+    const put = /git was stopped and the (\d+) file\(s\) it had written were put back, so (.*) is as last pulled; pull it by hand: git -C (\S+) pull --ff-only origin main$/.exec(gate.skip ?? "");
+    expect({ skip: gate.skip?.slice(0, 61), put: put ? true : gate.skip, wrote: Number(put?.[1]) > 12, locks: t.calls }).toEqual({
+      skip: "git pull --ff-only timed out (the fast-forward to origin/main",
+      put: true,
+      wrote: true,
+      locks: 2,
+    });
+    expect({
+      head: await g(main, "rev-parse", "HEAD"),
+      status: await status(main),
+      x: readFileSync(path.join(main, "aaa/x.md"), "utf8"),
+      aab: existsSync(path.join(main, "aab.md")),
+      newFolder: existsSync(path.join(main, "new")),
+    }).toEqual({ head: before, status: ["?? bulk/mine.md", "?? notes/mine.md"], x: "# X\nold\n", aab: true, newFolder: false });
+    await g(main, "pull", "-q", "--ff-only", "origin", "main");
+    expect(existsSync(path.join(main, `new/sub/p${N - 1}.md`))).toBe(true);
+  }, 120_000);
+
   test("F13 fix round 1 batch 2: lock waits that use up the locked section run no merge: a note, the checkout as last pulled", async () => {
     const { up, main } = await withRemote();
     write(up, "plans/a.md", "# A\nnew\n");
@@ -212,7 +384,7 @@ await runGate(main, [], async (args) => {
   if (a === "symbolic-ref --short -q HEAD") return ok("main");
   if (a === "remote") return ok("origin");
   if (a.startsWith("symbolic-ref --short -q refs/remotes/origin/HEAD")) return ok("origin/main");
-  if (a === "rev-parse HEAD") return ok("abc");
+  if (a === "rev-parse HEAD" || a === "rev-parse --verify -q HEAD") return ok("abc");
   if (args.includes("merge")) {
     console.log("READY");
     return new Promise((r) => setTimeout(() => r(ok()), 60_000));
