@@ -3885,14 +3885,20 @@ let wikiAssetsCache: Promise<WikiAssets> | null = null;
 
 /** The reader's script and stylesheet, built and hashed once per process. The
  *  page and the asset route both read this one memo, so the URL a page names is
- *  always one the route serves. It shares `wikiClientScript`'s memo, so
- *  `bun --watch` still serves the first build until the process restarts. */
+ *  always one the route serves. Like `wikiClientScript`'s memo it keeps no
+ *  failure: a failed build is built again on the next request. */
 export function getWikiAssets(): Promise<WikiAssets> {
-  return (wikiAssetsCache ??= (async () => {
+  if (wikiAssetsCache) return wikiAssetsCache;
+  const p = (async () => {
     const js = await wikiClientScript();
     return {
       js: wikiAsset(js, "js", "text/javascript; charset=utf-8"),
       css: wikiAsset(buildWikiPageCss(), "css", "text/css; charset=utf-8"),
     };
-  })());
+  })();
+  wikiAssetsCache = p;
+  p.catch(() => {
+    if (wikiAssetsCache === p) wikiAssetsCache = null;
+  });
+  return p;
 }
