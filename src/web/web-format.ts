@@ -742,6 +742,8 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     // A duplicated id is read-only: the answer route refuses it (409).
     ` data-wiki-answerable="${opts.answerable && !isDuplicate ? "true" : "false"}"` +
     ` data-question-lang="${opts.language}"` +
+    // The wording this render shows, sent back with a save (F49).
+    (id && opts.questionHashes?.has(id) ? ` data-question-hash="${escapeHtml(opts.questionHashes.get(id)!)}"` : "") +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +
     // Names only: no client reads an ident, and the reader's page should not

@@ -12,6 +12,7 @@ import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { DECISION_ID_RE, eachComponent, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
+import { lineCodeSpanRanges } from "./code-spans.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
 export type CloseRuling =
@@ -121,8 +122,39 @@ function regionItems(lines: string[], r: Region, fenced: Set<number>): Item[] {
 
 const decisionNumber = (id: string) => Number(id.slice(1));
 
-/** Text on one line, so it can open no item of its own, with MDX's `<`, `{` and `}` escaped. */
-const mdxText = (text: string) => text.replace(/\s+/g, " ").trim().replace(/</g, "&lt;").replace(/\{/g, "&#123;").replace(/\}/g, "&#125;");
+/**
+ * What in the owner's text the page's parsers would read as grammar rather
+ * than prose: an inline tag (`<Fact …>`, `<Check/>`: the reader renders them),
+ * a decision's «Lukker/Closes On» (a decision-chain edge) and a canonical
+ * close or reopen word before a date (the close rule).
+ */
+const GRAMMAR_RE =
+  /<[A-Za-z/!][^>]*>?|(?<![\p{L}\p{N}_])(?:[Ll]ukker|[Cc]loses)(?=[ \t ]+[SO]\d)|(?<![\p{L}\p{N}_])(?:Closed|Lukket|Reopened|Gjenåpnet)(?=[ \t ]+\d)/gu;
+
+/**
+ * Text on one line, so it can open no item of its own, written as the reader
+ * shows it: no entities (the reader prints `&lt;` as typed, arch review
+ * 2026-11-16 F50), and each {@link GRAMMAR_RE} hit outside the text's own code
+ * spans put in a code span — every parser masks those, so «Closes O2» in an
+ * answer stays words. The fence is longer than any backtick run on the line,
+ * so it pairs with nothing else.
+ */
+function mdxText(text: string): string {
+  const one = text.replace(/\s+/g, " ").trim();
+  const fence = "`".repeat(Math.max(0, ...(one.match(/`+/g) ?? []).map((r) => r.length)) + 1);
+  const inert = (prose: string) =>
+    prose.replace(GRAMMAR_RE, (hit) => {
+      const pad = hit.startsWith("`") || hit.endsWith("`") ? " " : "";
+      return `${fence}${pad}${hit}${pad}${fence}`;
+    });
+  let out = "";
+  let last = 0;
+  for (const r of lineCodeSpanRanges(one)) {
+    out += inert(one.slice(last, r.start)) + one.slice(r.start, r.end);
+    last = r.end;
+  }
+  return out + inert(one.slice(last));
+}
 
 /** One line of answer text ({@link mdxText}), ending in a sentence stop. */
 function answerSentence(text: string): string {

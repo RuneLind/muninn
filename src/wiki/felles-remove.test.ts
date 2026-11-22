@@ -82,6 +82,26 @@ describe("TARGET SET: remove targets what publish uploads for the page as it sta
     expect({ dataFiles: got.dataFiles, refused: got.refused }).toEqual({ dataFiles, refused });
   });
 
+  // F48: publish uploads a diagram file's HTML sibling beside it (muninn-nais #24).
+  const diagram = (src: string) => `<Diagram src="${src}" />\n\n`;
+  test.each([
+    ["a diagram file and its HTML sibling are both targeted", diagram("flow.workflow.json"), { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ["p/flow.workflow.json", "p/flow.html"]],
+    ["a sibling alone (the JSON missing) is still targeted", diagram("flow.workflow.json"), { "/w/p/flow.html": F() }, ["p/flow.html"]],
+    ["a sibling over 1 MiB but within the reader's 2 MiB is targeted", diagram("flow.workflow.json"), { "/w/p/flow.html": F(1536 * 1024) }, ["p/flow.html"]],
+    ["a Steps over the same diagram names its sibling once", diagram("flow.workflow.json") + `<Steps src="./flow.workflow.json" />\n`, { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ["p/flow.workflow.json", "p/flow.html"]],
+    ["a symlinked sibling is not targeted", diagram("flow.workflow.json"), { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": LINK }, ["p/flow.workflow.json"]],
+  ] as [string, string, Record<string, Entry>, string[]][])("%s", async (_n, md, entries, dataFiles) => {
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx"], pageAt(md), probe(entries, ext4));
+    expect(got.dataFiles).toEqual(dataFiles);
+  });
+
+  test("a sibling another local page's diagram draws is kept", async () => {
+    const read = async (abs: string) =>
+      abs === "/w/p/page.mdx" ? diagram("flow.workflow.json") : abs === "/w/q/other.md" ? diagram("../p/flow.architecture.json") : null;
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "q/other.md"], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
+    expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
+  });
+
   test("a data file another local page reads is kept, also across NFC and NFD spellings", async () => {
     const read = async (abs: string) =>
       abs === "/w/p/page.mdx" ? refs("d.csv", NFC) : abs === "/w/q/other.md" ? refs(`../p/${NFD}`) : null;

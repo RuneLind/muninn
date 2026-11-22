@@ -354,6 +354,7 @@ export function saveErrorText(status: number, payload: unknown, L: QuestionLabel
   // The two refusals no retry can change, which the card acts on (save()).
   if (status === 409 && code === "answer_redacted") return L.composer.editRedacted;
   if (status === 409 && code === "question_closed") return L.composer.questionClosed;
+  if (status === 409 && code === "question_changed") return L.composer.questionChanged;
   const error =
     payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
       ? (payload as { error: string }).error

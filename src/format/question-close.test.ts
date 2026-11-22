@@ -3,6 +3,8 @@ import { closeCardEdit, type CloseRuling } from "./question-close.ts";
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseQuestionPage } from "./question.ts";
 import { checkPageText } from "../wiki/lint.ts";
+import { analyzeDecisionChains } from "./decision-chain.ts";
+import { renderWikiHtml } from "../wiki/render.ts";
 
 const TODAY = "2026-11-07";
 const q = (id: string, text = "Which one?") => `<Question id="${id}" choices="A|B">\n\n${text}\n\n</Question>\n`;
@@ -42,11 +44,38 @@ describe("closeCardEdit", () => {
     expect(r.lines).toEqual(["- **O2** — Which one. Closed 2026-11-07 (D5).", "- **D5** — Answer B on card O2. Rune Lind, 06.11.2026."]);
   });
 
-  test("a text answer becomes the decision's text, on one line, escaped for MDX", () => {
+  test("a text answer becomes the decision's text, on one line, a tag in a code span and no entities", () => {
     const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n\n</DecisionLog>\n");
     const r = ok(closeCardEdit(text, "O1", answer({ choice: null, body: "Go with the <second>\n  and {keep} it" }), TODAY));
-    expect(r.content).toContain("- **D1** — Go with the &lt;second> and &#123;keep&#125; it. Rune Lind, 06.11.2026.");
+    expect(r.content).toContain("- **D1** — Go with the `<second>` and {keep} it. Rune Lind, 06.11.2026.");
     expect(stateOf(r.content, "O1")).toEqual({ kind: "decided", decision: "D1" });
+    expect(check10(r.content)).toEqual([]);
+  });
+
+  // Arch review 2026-11-16 F50: the reader prints an entity as typed, and the
+  // answer is the owner's prose, never decision-log grammar.
+  test("an answer's «Closes O2», & and < show as written and add no chain edge", () => {
+    const text = page(q("O1"), q("O2"), "<DecisionLog>\n\n- **O1** — Which one?\n- **O2** — And this?\n\n</DecisionLog>\n");
+    const body = "Closes O2 too & keep 1 < 2 <Fact id=\"f\">x</Fact>, `Closes O2` as code";
+    const r = ok(closeCardEdit(text, "O1", answer({ choice: null, body }), TODAY));
+    expect(r.content).toContain(
+      "- **D1** — ``Closes`` O2 too & keep 1 < 2 ``<Fact id=\"f\">``x``</Fact>``, `Closes O2` as code. Rune Lind, 06.11.2026.",
+    );
+    const blocks = parseBlocks(r.content.replace(/^---\n[\s\S]*?\n---\n/, ""));
+    const d1 = analyzeDecisionChains(blocks, []).chains.find((c) => c.decision === "D1");
+    // The close's own edge O1 → D1 stays; O2 is not pulled in by the answer's words.
+    expect(d1?.questions.map((x) => x.id)).toEqual(["O1"]);
+    expect(stateOf(r.content, "O2")).toEqual({ kind: "open" });
+    const html = renderWikiHtml(r.content, () => undefined, {});
+    const item = /<li class="dl-item[^"]*" id="d1"[^>]*>([\s\S]*?)<\/li>/.exec(html)![1]!;
+    expect(item).not.toContain("&amp;lt;");
+    expect(item).toContain("too &amp; keep 1 &lt; 2 <code>&lt;Fact id=&quot;f&quot;&gt;</code>x<code>&lt;/Fact&gt;</code>");
+  });
+
+  test("a close or reopen word before a date in an answer is put in a code span", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer({ choice: null, body: "Lukket 01.01.2026 (D9) was wrong; it ``Reopened`` later" }), TODAY));
+    expect(r.content).toContain("- **D1** — ```Lukket``` 01.01.2026 (D9) was wrong; it ``Reopened`` later. Rune Lind, 06.11.2026.");
     expect(check10(r.content)).toEqual([]);
   });
 
@@ -136,10 +165,10 @@ describe("closeCardEdit", () => {
     expect(closeCardEdit(text, "O1", answer(), TODAY)).toMatchObject({ ok: false, code: "not-open" });
   });
 
-  test("the author and the choice are escaped for MDX like the body", () => {
+  test("the author and the choice are made inert like the body", () => {
     const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n\n</DecisionLog>\n");
     const r = ok(closeCardEdit(text, "O1", answer({ choice: "<b>", author: "Rune {L} <x>" }), TODAY));
-    expect(r.content).toContain("- **D1** — Answer &lt;b> on card O1. Rune &#123;L&#125; &lt;x>, 06.11.2026.");
+    expect(r.content).toContain("- **D1** — Answer `<b>` on card O1. Rune {L} `<x>`, 06.11.2026.");
   });
 
   test("a line break in the author or the choice stays on the decision's line: no second item", () => {

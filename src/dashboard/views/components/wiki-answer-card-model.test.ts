@@ -324,6 +324,15 @@ describe("a save refused for good", () => {
     expect(saveErrorText(409, closed, en)).toBe("The answer was not saved: the question was closed while you were writing.");
     expect(saveErrorText(409, closed, no)).toBe("Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.");
   });
+
+  // Arch review 2026-11-16 F49.
+  test("a 409 question_changed tells the reader the wording moved and to reload, in the card's language", () => {
+    const changed = { error: "question O1 was changed since this page loaded: reload the page", code: "question_changed" };
+    expect(saveErrorText(409, changed, en)).toBe(en.composer.questionChanged);
+    expect(saveErrorText(409, changed, no)).toBe(no.composer.questionChanged);
+    expect(en.composer.questionChanged).toContain("Reload the page");
+    expect(no.composer.questionChanged).toContain("Last siden på nytt");
+  });
 });
 
 describe("answer cards PR 5 fix round 1", () => {

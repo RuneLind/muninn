@@ -5,7 +5,9 @@
  *
  * Target set: exactly the data files `publiser-felles-wiki.ts` uploads for the
  * page as it stands. The refs come from the reader's own rule
- * (`pageFileRefKinds`), resolved from the page's folder; then each spelling
+ * (`pageFileRefKinds`), resolved from the page's folder, each diagram file
+ * followed by its HTML sibling (`removeCases` in `page-file-refs.cases.json`
+ * pin that list for both repos); then each spelling
  * gets publish's per-file checks ({@link publishDataFileCheck}: `relUnder`,
  * `lstat`, `sjekkSti`, the `O_NOFOLLOW` open, `isFile`, the 1 MiB cap) and
  * publish's in-run collision rule (small letters + NFC). Two spellings of one
@@ -18,25 +20,37 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync } f
 import path from "node:path";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
-import { checkPageFileRef, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
+import { checkPageFileRef, diagramSiblingRelPath, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
+import { DIAGRAM_HTML_MAX_BYTES } from "./page-files.ts";
 import { splitFrontmatter } from "./page-text.ts";
 
 /** The data-file refs a page's markdown reads, resolved to wiki-relative
- *  paths in the page's own spelling, in source order, each spelling once. */
-function pageDataFileSpellings(pageRelPath: string, markdown: string): string[] {
-  if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return [];
-  const out: string[] = [];
+ *  paths in the page's own spelling, in source order, each spelling once.
+ *  Each diagram file is followed by its HTML sibling (`diagramSiblingRelPath`,
+ *  the reader's own path), which publish uploads beside it (muninn-nais #24);
+ *  `html` holds the spellings that are siblings. */
+function pageDataFileSpellings(pageRelPath: string, markdown: string): { rels: string[]; html: Set<string> } {
+  const rels: string[] = [];
+  const html = new Set<string>();
+  if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return { rels, html };
   for (const [ref, kinds] of pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))) {
     if (checkPageFileRef(ref, kinds) !== "ok") continue;
     const rel = resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), ref);
-    if (rel !== null && !out.includes(rel)) out.push(rel);
+    if (rel !== null && !rels.includes(rel)) rels.push(rel);
+    const sibling = kinds.has("diagram") ? diagramSiblingRelPath(pageRelPath, ref) : null;
+    if (sibling !== null && !rels.includes(sibling)) {
+      rels.push(sibling);
+      html.add(sibling);
+    }
   }
-  return out;
+  return { rels, html };
 }
 
-/** The wiki-relative data files a page's markdown reads, NFC, in source order. */
+/** The wiki-relative files publish uploads beside a page — the data files it
+ *  reads and each diagram file's HTML sibling — NFC, in source order. Pinned
+ *  by `removeCases` in `page-file-refs.cases.json`. */
 export function pageDataFileRelPaths(pageRelPath: string, markdown: string): string[] {
-  return [...new Set(pageDataFileSpellings(pageRelPath, markdown).map((r) => r.normalize("NFC")))];
+  return [...new Set(pageDataFileSpellings(pageRelPath, markdown).rels.map((r) => r.normalize("NFC")))];
 }
 
 /** The script's `MAKS_SEGMENT_BYTES`: the longest object-name segment it sends. */
@@ -109,7 +123,12 @@ export const realFsProbe: FsProbe = {
  *   still takes part in the collision rule;
  * - `uploads`: publish uploads it unless the scanner or a collision refuses it.
  */
-export function publishDataFileCheck(root: string, rel: string, probe: FsProbe = realFsProbe): "missing" | "refused" | "uploads" {
+export function publishDataFileCheck(
+  root: string,
+  rel: string,
+  probe: FsProbe = realFsProbe,
+  maxBytes: number = FELLES_DATA_MAX_BYTES,
+): "missing" | "refused" | "uploads" {
   const segments = rel.split("/");
   let dir = root;
   for (const segment of segments.slice(0, -1)) {
@@ -123,7 +142,7 @@ export function publishDataFileCheck(root: string, rel: string, probe: FsProbe =
   const nfc = rel.normalize("NFC");
   if (fellesObjectPathRefusal(rel) !== null || nfc.split("/").some((d) => d.startsWith("."))) return "refused";
   const opened = probe.open(abs);
-  if ("error" in opened || !opened.isFile || opened.size > FELLES_DATA_MAX_BYTES) return "refused";
+  if ("error" in opened || !opened.isFile || opened.size > maxBytes) return "refused";
   return "uploads";
 }
 
@@ -157,8 +176,13 @@ export async function fellesRemoveDataFiles(
   const page = pageRelPath.normalize("NFC");
   const named: { object: string; verdict: "refused" | "uploads" }[] = [];
   const refused: string[] = [];
-  for (const spelling of pageDataFileSpellings(pageRelPath, markdown)) {
-    const verdict = publishDataFileCheck(root, spelling, probe);
+  const spellings = pageDataFileSpellings(pageRelPath, markdown);
+  for (const spelling of spellings.rels) {
+    // A sibling gets the reader's 2 MiB sibling cap: a cap above publish's only
+    // targets an object never uploaded («not in the bucket» = success); one
+    // below it would leave the uploaded sibling behind.
+    const cap = spellings.html.has(spelling) ? DIAGRAM_HTML_MAX_BYTES : FELLES_DATA_MAX_BYTES;
+    const verdict = publishDataFileCheck(root, spelling, probe, cap);
     if (verdict === "missing") continue;
     const object = spelling.normalize("NFC");
     named.push({ object, verdict });

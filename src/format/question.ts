@@ -92,6 +92,10 @@ export interface QuestionRenderOptions {
   /** `WIKI_ANSWER_OWNER`, on an answerable wiki only: who a question is for
    *  when neither `to=` nor `questions_to:` names anyone (D9). */
   owner?: string | null;
+  /** On an answerable wiki: sha256 of each question's `hashInput` by id (the
+   *  first block wins), rendered on the card so a save names the wording the
+   *  reader answered and the route can refuse a stale one (arch review F49). */
+  questionHashes?: ReadonlyMap<string, string>;
 }
 
 // ── Targets ─────────────────────────────────────────────────────────────────

@@ -83,6 +83,8 @@ export interface QuestionLabels {
     editRedacted: string;
     /** A 409 question_closed: the question closed while the reader wrote. */
     questionClosed: string;
+    /** A 409 question_changed: the page's wording moved since this tab rendered it. */
+    questionChanged: string;
     failed: string;
     loadFailed: string;
     /** The POST succeeded, the reload of the answers did not. */
@@ -175,6 +177,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
         "You already answered this question. Your text is now an edit of that answer, shown above it; saving it replaces that answer.",
       editRedacted: "The answer you were editing was redacted. Your change was not saved.",
       questionClosed: "The answer was not saved: the question was closed while you were writing.",
+      questionChanged: "The answer was not saved: the question was changed since this page loaded. Reload the page, read the new wording and answer again.",
       failed: "The answer was not saved",
       loadFailed: "Answers could not be loaded.",
       savedReloadFailed: "The answer was saved, but the answers could not be loaded again.",
@@ -251,6 +254,7 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
         "Du har allerede svart på dette spørsmålet. Teksten din er nå en endring av det svaret, som vises over; lagrer du den, erstatter den svaret.",
       editRedacted: "Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.",
       questionClosed: "Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.",
+      questionChanged: "Svaret ble ikke lagret: spørsmålet er endret siden siden ble lastet. Last siden på nytt, les den nye ordlyden og svar igjen.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",
       savedReloadFailed: "Svaret ble lagret, men svarene kunne ikke hentes på nytt.",

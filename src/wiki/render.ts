@@ -45,7 +45,8 @@ import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
-import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
+import { parseQuestionPage, parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
 import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
 
@@ -343,11 +344,20 @@ export function questionRenderOptionsFor(
   /** `WIKI_ANSWER_OWNER`; used only when `answerable`. */
   owner: string | null = null,
 ): QuestionRenderOptions {
+  // The answer route's own reading (`questionTargetsOf`): the same parse, the
+  // first block per id, the same hash — so the card's hash is the one it checks.
+  const questionHashes = new Map<string, string>();
+  if (answerable && markdown.includes("<Question")) {
+    for (const q of parseQuestionPage(parseBlocks(stripFrontmatter(markdown))).questions) {
+      if (q.id !== null && !questionHashes.has(q.id)) questionHashes.set(q.id, sha256(q.hashInput));
+    }
+  }
   return {
     questionsTo: parseQuestionsTo(parseFrontmatter(markdown).questions_to),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     answerable,
     ...(answerable && owner ? { owner } : {}),
+    ...(questionHashes.size ? { questionHashes } : {}),
   };
 }
 

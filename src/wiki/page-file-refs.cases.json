@@ -600,5 +600,25 @@
         }
       ]
     }
+  ],
+  "removeCases": [
+    {
+      "name": "a diagram page's targets: each diagram file, then its HTML sibling once, beside the other data files",
+      "page": "flows/side.mdx",
+      "markdown": "<Diagram src=\"side-flyt.workflow.json\" />\n\n<Steps src=\"./side-flyt.workflow.json\" />\n\n<Diagram src=\"../kart/side-kart.architecture.json\" />\n\n<Query id=\"Q\" csv=\"data/q.csv\" />\n\n<Diagram src=\"side.json\" />\n",
+      "targets": [
+        "flows/side-flyt.workflow.json",
+        "flows/side-flyt.html",
+        "kart/side-kart.architecture.json",
+        "kart/side-kart.html",
+        "flows/data/q.csv"
+      ]
+    },
+    {
+      "name": "a diagram file above the root names no file and no sibling",
+      "page": "side.mdx",
+      "markdown": "<Diagram src=\"../ute.lifecycle.json\" />\n\n```mdx\n<Diagram src=\"inne.workflow.json\" />\n```\n",
+      "targets": []
+    }
   ]
 }
