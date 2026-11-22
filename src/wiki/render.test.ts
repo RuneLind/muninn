@@ -573,3 +573,14 @@ describe("readerPayload (the lens switch's page inputs)", () => {
     });
   });
 });
+
+describe("renderWikiHtml on a long line of `[` (architecture review 2026-11-16, A4 fix round 1)", () => {
+  // Measured before the linear wikilink matcher: 3,722 ms for 64k `[`, 1,013 ms for `[[a ` × 16k.
+  test("64k `[` and 64k chars of `[[a ` render in under 250 ms each", () => {
+    for (const s of ["[".repeat(65_536), "[[a ".repeat(16_384)]) {
+      const t0 = performance.now();
+      renderWikiHtml(s, () => undefined);
+      expect(performance.now() - t0).toBeLessThan(250);
+    }
+  });
+});

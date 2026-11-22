@@ -48,6 +48,7 @@
 import { isIP } from "node:net";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { getLog } from "../logging.ts";
+import { ENCODING_LABELS, SINGLE_BYTE_TABLES } from "./whatwg-encodings.ts";
 
 const log = getLog("summaries", "safe-fetch");
 
@@ -107,12 +108,51 @@ function isAllowedContentType(raw: string | null): boolean {
   return type.startsWith("text/") || type === "application/json" || type === "application/xhtml+xml";
 }
 
-/** A decoder for `label`, or `null` when the runtime does not know it. */
-function decoderFor(label: string): TextDecoder | null {
+/** What {@link decodeBody} needs of a decoder: `TextDecoder`, or a table decoder. */
+interface BodyDecoder {
+  readonly encoding: string;
+  decode(buf: Uint8Array): string;
+}
+
+const ENCODING_BY_LABEL = new Map(Object.entries(ENCODING_LABELS).flatMap(([name, labels]) => labels.map((l) => [l, name] as const)));
+
+/** The WHATWG "get an encoding": ASCII white space stripped, ASCII-lowercased, looked up. */
+function encodingForLabel(label: string): string | null {
+  const key = label.replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "").replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return ENCODING_BY_LABEL.get(key) ?? null;
+}
+
+/** A single-byte decoder over a generated table of bytes 0x80–0xFF (all BMP). */
+function tableDecoder(name: string, high: string): BodyDecoder {
+  const map = new Uint16Array(256);
+  for (let b = 0; b < 128; b++) map[b] = b;
+  for (let b = 0; b < 128; b++) map[128 + b] = high.charCodeAt(b);
+  return {
+    encoding: name.toLowerCase(),
+    decode(buf: Uint8Array): string {
+      const units = new Uint16Array(buf.length);
+      for (let i = 0; i < buf.length; i++) units[i] = map[buf[i]!]!;
+      return new TextDecoder("utf-16le").decode(units);
+    },
+  };
+}
+
+/**
+ * A decoder for `label`, or `null` when the Encoding Standard does not know it
+ * or maps it to the replacement encoding (fix round 1: `charset=replacement` or
+ * `iso-2022-kr` made the whole body one U+FFFD). The runtime is asked by the
+ * encoding's name, not the label (Bun refuses `iso88593` yet takes
+ * `iso-8859-3`); a single-byte encoding Bun refuses outright decodes through its
+ * generated WHATWG table (`whatwg-encodings.ts`).
+ */
+function decoderFor(label: string): BodyDecoder | null {
+  const name = encodingForLabel(label);
+  if (name === null || name === "replacement") return null;
   try {
-    return new TextDecoder(label.trim().toLowerCase());
+    return new TextDecoder(name.toLowerCase());
   } catch {
-    return null;
+    const high = SINGLE_BYTE_TABLES[name];
+    return high === undefined ? null : tableDecoder(name, high);
   }
 }
 
@@ -220,10 +260,12 @@ function charsetFromMetaContent(content: string): string | null {
  * The encoding a `<meta>` declares in `head`, by the WHATWG prescan (fix round
  * 1): comments are skipped, every other tag's attributes are skipped whole,
  * `charset` counts only as an attribute name, and a `content` charset only
- * beside `http-equiv="content-type"`. A label the runtime does not know is
- * passed over, as the prescan does; UTF-16 is read as UTF-8.
+ * beside `http-equiv="content-type"`. The first label the Encoding Standard
+ * knows ends the prescan, as the spec's does; an unknown label is passed over,
+ * and so is one naming the replacement encoding (the spec would stop there and
+ * decode the page as one U+FFFD). UTF-16 is read as UTF-8.
  */
-function prescanMetaDecoder(head: string): TextDecoder | null {
+function prescanMetaDecoder(head: string): BodyDecoder | null {
   let pos = 0;
   while (pos < head.length) {
     if (head.startsWith("<!--", pos)) {
@@ -287,7 +329,7 @@ function prescanMetaDecoder(head: string): TextDecoder | null {
  * first, then the content-type's `charset`, then — for HTML — a `<meta
  * charset>` or `http-equiv` content-type in the first 1024 bytes, read by the
  * WHATWG prescan ({@link prescanMetaDecoder}), else UTF-8.
- * A label the runtime does not know is skipped. A meta tag naming UTF-16 is
+ * A label {@link decoderFor} refuses is skipped. A meta tag naming UTF-16 is
  * read as UTF-8, as browsers do (the bytes that spelled the tag were ASCII).
  */
 export function decodeBody(buf: Uint8Array, contentType: string | null): string {

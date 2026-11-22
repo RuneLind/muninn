@@ -34,6 +34,7 @@ import { parseTimelineItem } from "../format/genre-lists.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { DISCUSS_CONTEXT_KEY_CHARS } from "./discuss-bounds.ts";
 import { keyChar, locateKey, matchStarts } from "./locate-key.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 
 /** How many key characters the edges tier compares at each end. */
 export const LOCATE_EDGE_CHARS = 80;
@@ -267,7 +268,7 @@ function readerLines(raw: string) {
 
 const TABLE_RULE_RE =/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
 const COMPONENT_TAG_RE = /<\/?([A-Z][A-Za-z0-9]*)/y;
-const WIKILINK_AT_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/y;
+const WIKILINK_AT_RE = wikilinkRegExp("label", "y");
 const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
 
 /**

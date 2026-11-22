@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { decodeBody, safeFetchPage, safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
+import { ENCODING_LABELS, SINGLE_BYTE_ENCODINGS } from "./whatwg-encodings.ts";
 
 /**
  * `safeFetchPage` — `safeFetchText`'s guards with the landing URL and the
@@ -150,6 +151,39 @@ describe("F61: the body is decoded in the charset the answer declares", () => {
       expect(decodeBody(utf8("<p>Blåbær</p>"), 'text/html; foo="a;charset=latin1"')).toBe("<p>Blåbær</p>");
       expect(decodeBody(latin1("<p>Blåbær</p>"), 'text/html; foo="a;b"; Charset="ISO-8859-1"')).toBe("<p>Blåbær</p>");
       expect(decodeBody(latin1("<p>Blåbær</p>"), "text/html;charset=iso-8859-1;charset=utf-8")).toBe("<p>Blåbær</p>");
+    });
+  });
+
+  describe("labels Bun's TextDecoder refuses (fix round 1, batch 2)", () => {
+    const bytes = (...b: number[]) => new Uint8Array(b);
+    test("the refused single-byte charsets decode by the WHATWG tables", () => {
+      expect(decodeBody(bytes(0x42, 0x6c, 0xe5, 0x62, 0xe6, 0x72, 0x20, 0xa4), "text/html; charset=iso-8859-15")).toBe("Blåbær €");
+      expect(decodeBody(bytes(0xb1, 0xe6), "text/plain; charset=iso-8859-2")).toBe("ąć");
+      expect(decodeBody(bytes(0xe0, 0xe1), "text/plain; charset=windows-1251")).toBe("аб");
+      expect(decodeBody(bytes(0xc1, 0xc2), "text/plain; charset=koi8-r")).toBe("аб");
+      expect(decodeBody(bytes(0xfe, 0xf0), "text/plain; charset=windows-1254")).toBe("şğ");
+      expect(decodeBody(bytes(0x9a, 0x9e), "text/plain; charset=windows-1250")).toBe("šž");
+    });
+    test("a label is matched as the standard matches it: ASCII white space stripped, any case", () => {
+      expect(decodeBody(bytes(0xe5), 'text/html; charset="\tISO-8859-15 "')).toBe("å");
+      // Bun refuses this label of an encoding it decodes by its name.
+      expect(decodeBody(bytes(0xe5), "text/html; charset=iso88593")).toBe("ċ");
+    });
+    test("every label of every single-byte encoding decodes a high byte", () => {
+      const missed: string[] = [];
+      for (const name of SINGLE_BYTE_ENCODINGS)
+        for (const label of ENCODING_LABELS[name]!) if (decodeBody(bytes(0x61, 0xe5), `text/plain; charset=${label}`) === "a�") missed.push(label);
+      expect(missed).toEqual([]);
+    });
+    test("a meta label Bun refuses ends the prescan, as the standard's does", () => {
+      const doc = '<meta charset="iso-8859-15"><meta charset="utf-8"><p>Blåbær</p>';
+      expect(decodeBody(latin1(doc), "text/html")).toBe(doc);
+    });
+    test("a label naming the replacement encoding is no declaration", () => {
+      const utf8 = new TextEncoder().encode("<p>Blåbær</p>");
+      for (const label of ENCODING_LABELS["replacement"]!) expect(decodeBody(utf8, `text/html; charset=${label}`)).toBe("<p>Blåbær</p>");
+      const doc = '<meta charset="replacement"><meta charset="iso-8859-1"><p>Blåbær</p>';
+      expect(decodeBody(latin1(doc), "text/html")).toBe(doc);
     });
   });
 

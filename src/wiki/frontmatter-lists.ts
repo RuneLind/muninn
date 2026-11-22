@@ -18,7 +18,8 @@ import path from "node:path";
 import { frontmatterBodyLine } from "./page-text.ts";
 import { JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
 import { stampedKeys } from "./trackers/jira.ts";
-import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
+import { extractWikilinks } from "./wikilinks.ts";
 
 /** A page's `owns:` as read: whether the frontmatter has the key, the keys it
  *  names, the entry as written (after `owns:`, whitespace collapsed) and the
@@ -169,7 +170,7 @@ const RELATED_WALK_DEPTH_MAX = 8;
  *  larger than its text, and past the budget the walk stops (one `unread`). */
 const RELATED_WALK_STEPS_PER_CHAR = 4;
 
-const HAS_WIKILINK_RE = new RegExp(WIKILINK_RE.source);
+const HAS_WIKILINK_RE = wikilinkRegExp("plain", "");
 /** A `:` after a span, past any whitespace: the span is a map key. */
 const KEY_AFTER_RE = /\s*:/y;
 
@@ -182,7 +183,7 @@ interface Span {
 }
 
 function scanSpans(text: string): Span[] {
-  return [...text.matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => {
+  return [...text.matchAll(wikilinkRegExp("plain"))].map((m) => {
     const inner = m[0].slice(2, -2).replace(/^\[+/, "");
     const end = m.index + m[0].length;
     return { start: end - inner.length - 4, end, inner };

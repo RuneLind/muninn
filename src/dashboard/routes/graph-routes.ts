@@ -6,6 +6,7 @@ import {
 } from "../../ai/knowledge-api-client.ts";
 import { renderGraphPage } from "../views/graph-page.ts";
 import { getLog } from "../../logging.ts";
+import { wikilinkRegExp } from "../../utils/wikilink-scan.ts";
 
 const log = getLog("dashboard", "graph-routes");
 
@@ -17,7 +18,7 @@ const WIKILINK_COLLECTIONS = ["wiki", "nav-wiki", "capra-wiki"];
  *  documents: without it a dangling `[[` pairs with a later line's `]]` and
  *  invents an edge to a page nobody linked (while hiding the real one).
  *  Exported for its unit test only. */
-export const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
+export const WIKILINK_RE = wikilinkRegExp("plain");
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface WikilinkEdge {
