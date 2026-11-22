@@ -123,43 +123,121 @@ function regionItems(lines: string[], r: Region, fenced: Set<number>): Item[] {
 const decisionNumber = (id: string) => Number(id.slice(1));
 
 /**
- * What in the owner's text the page's parsers would read as grammar rather
- * than prose: an inline tag (`<Fact …>`, `<Check/>`: the reader renders them),
- * a decision's «Lukker/Closes On» (a decision-chain edge) and a canonical
- * close or reopen word before a date (the close rule).
+ * Where the page's parsers would read the owner's prose as grammar: an inline
+ * tag's `<` (the reader renders `<Fact …>`, `<Check/>`), the first letter of a
+ * decision's «Lukker/Closes On» (a decision-chain edge) and of a canonical
+ * close or reopen word before a date (the close rule). A WORD JOINER goes
+ * after the match: invisible in the reader, and no parser's tag or word
+ * pattern spans it.
  */
 const GRAMMAR_RE =
-  /<[A-Za-z/!][^>]*>?|(?<![\p{L}\p{N}_])(?:[Ll]ukker|[Cc]loses)(?=[ \t ]+[SO]\d)|(?<![\p{L}\p{N}_])(?:Closed|Lukket|Reopened|Gjenåpnet)(?=[ \t ]+\d)/gu;
+  /<(?=[A-Za-z/!?>])|(?<![\p{L}\p{N}_])(?=(?:[Ll]ukker|[Cc]loses)[ \t\u00a0]+[SO]\d)\p{L}|(?<![\p{L}\p{N}_])(?=(?:Closed|Lukket|Reopened|Gjenåpnet)[ \t\u00a0]+\d)\p{L}/gu;
+const JOINER = "\u2060";
+
+type Seg =
+  | { kind: "fixed"; text: string }
+  | { kind: "prose"; text: string }
+  /** `inner`: the text between the delimiters, as written. */
+  | { kind: "code"; inner: string; fence: number };
 
 /**
- * Text on one line, so it can open no item of its own, written as the reader
- * shows it: no entities (the reader prints `&lt;` as typed, arch review
- * 2026-11-16 F50), and each {@link GRAMMAR_RE} hit outside the text's own code
- * spans put in a code span — every parser masks those, so «Closes O2» in an
- * answer stays words. The fence is longer than any backtick run on the line,
- * so it pairs with nothing else.
+ * One owner text as segments: on one line (it can open no item of its own),
+ * split by its OWN code spans, which is what the owner sees in that text alone.
  */
-function mdxText(text: string): string {
+function ownerSegs(text: string): Seg[] {
   const one = text.replace(/\s+/g, " ").trim();
-  const fence = "`".repeat(Math.max(0, ...(one.match(/`+/g) ?? []).map((r) => r.length)) + 1);
-  const inert = (prose: string) =>
-    prose.replace(GRAMMAR_RE, (hit) => {
-      const pad = hit.startsWith("`") || hit.endsWith("`") ? " " : "";
-      return `${fence}${pad}${hit}${pad}${fence}`;
-    });
-  let out = "";
+  const out: Seg[] = [];
   let last = 0;
   for (const r of lineCodeSpanRanges(one)) {
-    out += inert(one.slice(last, r.start)) + one.slice(r.start, r.end);
+    if (r.start > last) out.push({ kind: "prose", text: one.slice(last, r.start) });
+    out.push({ kind: "code", inner: one.slice(r.start + r.runLen, r.end - r.runLen), fence: r.runLen });
     last = r.end;
   }
-  return out + inert(one.slice(last));
+  if (last < one.length) out.push({ kind: "prose", text: one.slice(last) });
+  return out;
 }
 
-/** One line of answer text ({@link mdxText}), ending in a sentence stop. */
-function answerSentence(text: string): string {
-  const one = mdxText(text);
-  return /[.!?]$/.test(one) ? one : `${one}.`;
+const fixed = (text: string): Seg[] => [{ kind: "fixed", text }];
+const segText = (s: Seg) => (s.kind === "code" ? "`".repeat(s.fence) + s.inner + "`".repeat(s.fence) : s.text);
+
+/**
+ * The decision's line from fixed words and owner texts, written so the page
+ * reads what each owner text shows on its own (arch review 2026-11-16 F50): no
+ * entities (the reader prints `&lt;` as typed), the owner's code spans as the
+ * only code, and no grammar from the prose.
+ *
+ * Code spans pair across the whole line, so a backtick in one text can pair
+ * with one in another. When the line pairs otherwise than the texts do, every
+ * owner span is re-fenced longer than any run on the line (its content shows
+ * the same), and a stray run that still pairs gets a span of its own. Grammar
+ * is then broken with {@link JOINER}, in prose only: inserting it moves no
+ * backtick and splits no backslash run, so the pairing checked here is the one
+ * every parser and the reader compute. Null when the pairing cannot be made to
+ * agree; the close then refuses.
+ */
+function inertLine(parts: Seg[][]): string | null {
+  const segs = parts.flat();
+  const lineOf = () => segs.map(segText).join("");
+  /** The first span the line pairs that the segments do not mean, or null when they agree. */
+  const firstStray = () => {
+    const actual = lineCodeSpanRanges(lineOf());
+    const expected: { start: number; end: number }[] = [];
+    let at = 0;
+    for (const s of segs) {
+      const len = segText(s).length;
+      if (s.kind === "code") expected.push({ start: at, end: at + len });
+      at += len;
+    }
+    const k = actual.findIndex((a, i) => a.start !== expected[i]?.start || a.end !== expected[i]?.end);
+    if (k >= 0) return actual[k]!.start;
+    return actual.length === expected.length ? null : -1;
+  };
+  if (firstStray() !== null) {
+    const fence = Math.max(...(lineOf().match(/`+/g) ?? [""]).map((r) => r.length)) + 1;
+    for (const s of segs) if (s.kind === "code") s.fence = fence;
+    for (let guard = 0; ; guard++) {
+      const start = firstStray();
+      if (start === null) break;
+      if (start < 0 || guard > 1000) return null;
+      let at = 0;
+      const i = segs.findIndex((s) => {
+        const len = segText(s).length;
+        if (start < at + len) return true;
+        at += len;
+        return false;
+      });
+      const s = segs[i];
+      if (!s || s.kind !== "prose") return null;
+      const from = start - at;
+      let to = from;
+      while (s.text[to] === "`") to++;
+      const pieces: Seg[] = [];
+      if (from > 0) pieces.push({ kind: "prose", text: s.text.slice(0, from) });
+      pieces.push({ kind: "code", inner: ` ${s.text.slice(from, to)} `, fence });
+      if (to < s.text.length) pieces.push({ kind: "prose", text: s.text.slice(to) });
+      segs.splice(i, 1, ...pieces);
+    }
+  }
+  // The scan reads the whole line with its spans blanked, so a phrase running
+  // from one text into the next is seen.
+  const masked = segs.map((s) => (s.kind === "code" ? "\n".repeat(segText(s).length) : s.text)).join("");
+  const cuts = new Set<number>();
+  for (const m of masked.matchAll(GRAMMAR_RE)) cuts.add(m.index! + m[0].length);
+  let out = "";
+  let at = 0;
+  for (const s of segs) {
+    const t = segText(s);
+    if (s.kind === "prose") for (let k = 0; k < t.length; k++) out += t[k] + (cuts.has(at + k + 1) ? JOINER : "");
+    else out += t;
+    at += t.length;
+  }
+  return out;
+}
+
+/** An answer's text as segments, ending in a sentence stop. */
+function answerSentence(text: string): Seg[] {
+  const segs = ownerSegs(text);
+  return /[.!?]$/.test(segs.map(segText).join("")) ? segs : [...segs, ...fixed(".")];
 }
 
 function withStop(line: string): string {
@@ -213,8 +291,11 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
     const anchor = ds.at(-1) ?? own ?? items.filter((it) => it.region === regions[0]).at(-1);
     const style = anchor ?? { indent: "", marker: "-", gap: " ", sep: " — " };
     const sep = style.sep || " — ";
-    const what = ruling.choice !== null ? `Answer ${mdxText(ruling.choice)} on card ${id}.` : answerSentence(ruling.body);
-    if (!what.replace(/[.\s]/g, "")) return { ok: false, code: "no-ruling", reason: "the answer is empty: write the ruling on the page" };
+    const what = ruling.choice !== null ? [fixed("Answer "), ownerSegs(ruling.choice), fixed(` on card ${id}.`)] : [answerSentence(ruling.body)];
+    if (!what.flat().map(segText).join("").replace(/[.\s]/g, "")) return { ok: false, code: "no-ruling", reason: "the answer is empty: write the ruling on the page" };
+    // Every owner text on the decision's one line, read together (`inertLine`).
+    const decisionText = inertLine([...what, fixed(" "), ownerSegs(ruling.author), fixed(", "), ownerSegs(ruling.date), fixed(".")]);
+    if (decisionText === null) return { ok: false, code: "unplaceable", reason: `the answer's backticks cannot be written on one line: close ${id} on the page` };
     const at = anchor ? anchor.end : regions[0]!.open;
     const lead = `${style.indent}${style.marker}${style.gap}`;
     const block: string[] = [];
@@ -222,7 +303,6 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
       block.push(`${lead}**${id}**${sep}See the card. Closed ${today} (${decision}).`);
       inserted.push({ id, itemText: `See the card. Closed ${today} (${decision}).` });
     }
-    const decisionText = `${what} ${mdxText(ruling.author)}, ${mdxText(ruling.date)}.`;
     block.push(`${lead}**${decision}**${sep}${decisionText}`);
     inserted.push({ id: decision, itemText: decisionText });
     // An empty log gets its list after a blank line, and keeps one before the close tag.
