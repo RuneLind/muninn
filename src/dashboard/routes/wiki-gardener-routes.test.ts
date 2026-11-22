@@ -335,7 +335,7 @@ const lintGroupStubs = {
   releaseGroupLease: async () => {},
   markProposal: async () => true,
   seedLintProposals: async () => ({
-    proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [],
+    proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [],
   }),
 } satisfies Pick<
   BacklogRouteDeps,
@@ -2953,7 +2953,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a READ-ONLY INSTANCE refuses before the lint even runs", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     __setWikiReadonlyForTest(true);
 
     const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
@@ -2965,7 +2965,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a READ-ONLY ROOT refuses too, and the two refusals are distinct", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     __setReadonlyWikiRootsForTest([root]);
 
     const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
@@ -2985,7 +2985,7 @@ describe("lint proposals — seeding and the group verbs", () => {
       deps({
         seedLintProposals: async (_f: unknown, d: { wikiDir: string; wikiName: string }) => {
           handed = d;
-          return { proposed: 2, rows: 5, skipped: 1, claimed: 0, refused: 0, staled: 0, refusals: [] };
+          return { proposed: 2, rows: 5, skipped: 1, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] };
         },
       }),
     );
@@ -3078,7 +3078,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a non-JSON POST is 415 and seeds nothing", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     for (const init of NON_JSON) {
       const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", init);
       expect(res.status).toBe(415);
@@ -4447,6 +4447,50 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(bNow.passages.map((x) => x.text).join(" ")).toContain("shipped");
     const bKey = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, bNow);
     expect((await verdicts.get("stalegate", "passage", [bKey])).has(bKey)).toBe(false);
+  });
+
+  // F35 fix round 1 batch 2: a card a dead pass already wrote (rows left
+  // `approved`, no lease) still carries the linking verdicts of the pages it
+  // rewrote, on Accept and on Dismiss, whether the write is still uncommitted
+  // (the before-copy is HEAD's) or something committed it (an older commit's).
+  test.each([
+    ["approve", false],
+    ["approve", true],
+    ["reject", false],
+    ["reject", true],
+  ] as const)("%s over pages a dead pass wrote (committed: %p) carries the linking verdicts to the new content hash", async (verb, committed) => {
+    // notes/r.md links notes/a.md, which the card rewrites; its verdict is keyed on a's current hash.
+    await Bun.write(path.join(root, "notes/r.md"), page("R", "The note [[a]] said 23.05 on 1.05."));
+    await git(Date.now() - 30 * DAY, "add", "-A");
+    await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "r");
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("23.05.", "23.05. See the log."));
+    await git(Date.now() - 6 * DAY, "commit", "-q", "-am", "a grows");
+    __resetWikiCacheForTest();
+    let index = (await getWikiIndex({ root }))!;
+    const r = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/r.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, r), verdict: "stale", reason: "a moved", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    const rows = await card();
+    // The dead pass: both pages written, rows left `approved`.
+    for (const row of rows) await Bun.write(path.join(root, row.targetPath), row.draft);
+    if (committed) await git(Date.now() - DAY / 4, "commit", "-q", "-am", "[sweep] wiki");
+    const s = store(rows.map((row) => ({ ...row, status: "approved" }) as WikiProposal));
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      settleProposalApplied: async (id: string) => {
+        const before = s.rows().find((x) => x.id === id);
+        await s.deps!.markProposal(id, "applied");
+        return before ? ({ ...before, status: "applied" } as WikiProposal) : null;
+      },
+    } as unknown as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    __resetWikiCacheForTest();
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/${verb}?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(s.rows().map((x) => x.status)).toEqual(["applied", "applied"]);
+    __resetWikiCacheForTest();
+    index = (await getWikiIndex({ root }))!;
+    const rNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    const key = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, rNow);
+    expect((await verdicts.get("stalegate", "passage", [key])).get(key)).toMatchObject({ verdict: "stale", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
   });
 
   test("Dismiss turns the card's edits into reader «still true» rows, «kept as written», and writes no page", async () => {

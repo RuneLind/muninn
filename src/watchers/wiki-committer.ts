@@ -50,10 +50,29 @@ import {
 } from "../wiki/commit.ts";
 import { syncSubsumesSweeper, treeOperationBlock } from "../sync/run.ts";
 import { todayOslo } from "../utils/date-hash.ts";
+import { getAllWatchers } from "../db/watchers.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-committer");
+
+/**
+ * The `wikiDir`s this sweeper covers: the bot's, for every ENABLED
+ * `wiki-committer` watcher row (the opt-in `scripts/setup-wiki-committer.ts`
+ * creates). A tick sweeps that dir's whole subtree, so a wiki root inside one
+ * (`sweeperCommits`, `src/wiki/series-committer.ts`) is committed by it,
+ * whatever name the registry gave that wiki. Rows read off `getAllWatchers`
+ * unless `listWatchers` is given.
+ */
+export async function sweptWikiDirs(
+  bots: readonly Pick<BotConfig, "name" | "wikiDir">[],
+  listWatchers: () => Promise<readonly Pick<Watcher, "botName" | "type" | "enabled">[]> = () => getAllWatchers(),
+): Promise<string[]> {
+  const sweeping = new Set(
+    (await listWatchers()).filter((w) => w.type === "wiki-committer" && w.enabled).map((w) => w.botName.toLowerCase()),
+  );
+  return bots.filter((b) => !!b.wikiDir && sweeping.has(b.name.toLowerCase())).map((b) => b.wikiDir!);
+}
 
 export async function checkWikiCommitter(
   watcher: Watcher,

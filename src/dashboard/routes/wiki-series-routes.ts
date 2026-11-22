@@ -59,10 +59,10 @@
  *
  * **Who commits it, then.** On mimir the repo-sync loop is the committer where
  * `SYNC_REPOS` lists it; on a machine where it does not, mimir's remote keeps
- * the route from committing it (below). On a BOT wiki the daily `wiki-committer` sweeper is, up to
- * ~24 h later, under a `[sweep]` subject — late, not lost. Neither covers a
- * standalone `WIKI_EXTRA` wiki outside a `wiki`-mode `SYNC_REPOS` entry, so
- * there THIS route commits the one page itself (`[series] edit: <relPath>`, no
+ * the route from committing it (below). On a wiki inside a bot `wikiDir` with an enabled
+ * `wiki-committer` watcher row the daily sweeper is, up to ~24 h later, under a
+ * `[sweep]` subject — late, not lost. Where neither covers the wiki,
+ * THIS route commits the one page itself (`[series] edit: <relPath>`, no
  * push) — when the wiki is its own repo and that repo has no remote
  * (`seriesSelfCommitBlocker`). Otherwise, or when the commit does not land, it logs
  * {@link seriesCommitterWarning}'s line.
@@ -117,6 +117,8 @@ import {
 } from "../../wiki/series-committer.ts";
 import { getSyncRepos } from "../../sync/config.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
+import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
+import { discoverActiveBots } from "../../bots/config.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("wiki", "series");
@@ -136,6 +138,20 @@ export interface WikiSeriesRouteDeps {
    * can only act before the request or after it.
    */
   readFile?: (absPath: string) => Promise<string | null>;
+  /** The `wikiDir`s the daily sweeper covers. Defaults to `sweptWikiDirs` over
+   *  the active bots and the DB's watcher rows. */
+  sweptWikiDirs?: () => Promise<string[]>;
+}
+
+/** The swept dirs, or none when the watcher rows cannot be read: a sweeper
+ *  nobody can confirm is not counted as a committer. */
+async function sweptDirsOrNone(deps: WikiSeriesRouteDeps): Promise<string[]> {
+  try {
+    return await (deps.sweptWikiDirs ?? (() => sweptWikiDirs(discoverActiveBots())))();
+  } catch (err) {
+    log.warn("Series edit: the wiki-committer watcher rows could not be read: {error}", { error: err instanceof Error ? err.message : String(err) });
+    return [];
+  }
 }
 
 /** The two frontmatter keys this route owns. */
@@ -350,6 +366,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       const noCommitter = seriesCommitterWarning(
         entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
         getSyncRepos().repos,
+        entry ? await sweptDirsOrNone(deps) : [],
       );
       const blocker = noCommitter !== null ? await seriesSelfCommitBlocker(root) : null;
       const selfCommit = noCommitter !== null && blocker === null;

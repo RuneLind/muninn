@@ -810,7 +810,7 @@ CREATE TABLE wiki_proposal_group_leases (
   scope       TEXT NOT NULL,           -- COALESCE(wiki_name, bot_name) of the group's rows
   group_key   TEXT NOT NULL,
   token       UUID NOT NULL,
-  verb        TEXT NOT NULL,           -- accept | dismiss
+  verb        TEXT NOT NULL,           -- accept | dismiss | self-heal
   expires_at  TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (scope, group_key)
 );

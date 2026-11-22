@@ -14,6 +14,7 @@ import {
   seriesCommitterWarning,
   seriesSelfCommitBlocker,
   seriesUncommittedReason,
+  sweeperCommits,
   type SeriesCommitterWiki,
 } from "./series-committer.ts";
 import type { SyncRepo } from "../sync/config.ts";
@@ -35,7 +36,7 @@ const repo = (over: Partial<SyncRepo> = {}): SyncRepo => ({
 
 describe("seriesCommitterWarning", () => {
   test("warns on a standalone wiki no SYNC_REPOS entry covers", () => {
-    const line = seriesCommitterWarning(wiki({ name: "scratch", root: "/tmp/scratch" }), [repo()]);
+    const line = seriesCommitterWarning(wiki({ name: "scratch", root: "/tmp/scratch" }), [repo()], []);
     expect(line).toContain("scratch");
     expect(line).toContain("/tmp/scratch");
     expect(line).toContain("NO");
@@ -44,25 +45,36 @@ describe("seriesCommitterWarning", () => {
   test("says nothing when the repo-sync loop owns the wiki", () => {
     // A `wiki`-mode entry covers it as the wiki it syncs, and by the root
     // simply living under the repo path.
-    expect(seriesCommitterWarning(wiki(), [repo({ wikiRoot: "/repos/mimir" })])).toBeNull();
+    expect(seriesCommitterWarning(wiki(), [repo({ wikiRoot: "/repos/mimir" })], [])).toBeNull();
     expect(
-      seriesCommitterWarning(wiki({ root: "/repos/mimir/pages" }), [repo({ path: "/repos/mimir" })]),
+      seriesCommitterWarning(wiki({ root: "/repos/mimir/pages" }), [repo({ path: "/repos/mimir" })], []),
     ).toBeNull();
     // A trailing separator is the same directory.
-    expect(seriesCommitterWarning(wiki(), [repo({ path: "/repos/mimir/" })])).toBeNull();
+    expect(seriesCommitterWarning(wiki(), [repo({ path: "/repos/mimir/" })], [])).toBeNull();
   });
 
   test("a SIBLING directory is not coverage", () => {
     // `/repos/mimir-notes` starts with `/repos/mimir`; only a path SEGMENT
     // boundary counts, or every neighbour of a synced repo reads as covered.
-    expect(seriesCommitterWarning(wiki({ root: "/repos/mimir-notes" }), [repo()])).not.toBeNull();
+    expect(seriesCommitterWarning(wiki({ root: "/repos/mimir-notes" }), [repo()], [])).not.toBeNull();
   });
 
-  test("a BOT wiki never warns — the daily sweeper covers it", () => {
-    expect(seriesCommitterWarning(wiki({ source: "bot", root: "/bots/jarvis/wiki" }), [])).toBeNull();
-    // …and neither does the bare `WIKI_DIR` override, which is a bot wiki under
-    // another name.
-    expect(seriesCommitterWarning(null, [])).toBeNull();
+  test("a swept bot wikiDir covers the wiki whatever its source; a bot wiki with no sweeper is not covered", () => {
+    const swept = ["/bots/jarvis/wiki"];
+    expect(seriesCommitterWarning(wiki({ source: "bot", root: "/bots/jarvis/wiki" }), [], swept)).toBeNull();
+    // A WIKI_EXTRA wiki at (or under) a swept bot's wikiDir is swept too.
+    expect(seriesCommitterWarning(wiki({ source: "extra", root: "/bots/jarvis/wiki" }), [], swept)).toBeNull();
+    expect(seriesCommitterWarning(wiki({ source: "extra", root: "/bots/jarvis/wiki/notes" }), [], swept)).toBeNull();
+    // No enabled sweeper row: a bot wiki has no committer.
+    expect(seriesCommitterWarning(wiki({ source: "bot", root: "/bots/jarvis/wiki" }), [], [])).toContain("NO committer");
+    // …and the bare `WIKI_DIR` override is never warned about.
+    expect(seriesCommitterWarning(null, [], [])).toBeNull();
+  });
+
+  test("sweeperCommits: a swept dir covers itself and what lies under it, not a sibling", () => {
+    expect(sweeperCommits("/bots/jarvis/wiki", ["/bots/jarvis/wiki/"])).toBe(true);
+    expect(sweeperCommits("/bots/jarvis/wiki-old", ["/bots/jarvis/wiki"])).toBe(false);
+    expect(sweeperCommits("/bots/jarvis", ["/bots/jarvis/wiki"])).toBe(false);
   });
 
   test("a root reached through a symlink is still covered", async () => {
@@ -74,7 +86,7 @@ describe("seriesCommitterWarning", () => {
       const link = path.join(base, "linked");
       await mkdir(real);
       await symlink(real, link);
-      expect(seriesCommitterWarning(wiki({ root: link }), [repo({ path: real })])).toBeNull();
+      expect(seriesCommitterWarning(wiki({ root: link }), [repo({ path: real })], [])).toBeNull();
     } finally {
       await rm(base, { recursive: true, force: true });
     }
@@ -84,7 +96,7 @@ describe("seriesCommitterWarning", () => {
     for (const mode of ["plain", "status-only"] as const) {
       const line = seriesCommitterWarning(wiki({ root: "/repos/big/wiki" }), [
         repo({ path: "/repos/big", mode, containedWikiRoots: ["/repos/big/wiki"] }),
-      ]);
+      ], []);
       expect(line).not.toBeNull();
       // The wiki IS inside SYNC_REPOS here, so the line must not say otherwise.
       expect(line).not.toContain("outside SYNC_REPOS");
@@ -93,7 +105,7 @@ describe("seriesCommitterWarning", () => {
   });
 
   test("a wiki-mode entry at / covers every root", () => {
-    expect(seriesCommitterWarning(wiki(), [repo({ path: "/" })])).toBeNull();
+    expect(seriesCommitterWarning(wiki(), [repo({ path: "/" })], [])).toBeNull();
   });
 });
 

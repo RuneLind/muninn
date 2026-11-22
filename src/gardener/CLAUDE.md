@@ -302,9 +302,13 @@ rows (`listLintGroupRowsByWiki` — rows, not keys, because three different
 questions are asked of them):
 
 1. **SELF-HEAL first — and it runs on a pass with NOTHING to propose.** Every
-   live `draft` group whose key no CURRENT finding mints is marked `stale`
-   (`markLintGroupStale`; `approved` rows are mid-apply and the apply's own
-   terminal CAS owns them). The weekly watcher therefore calls the seeder
+   live group whose key no CURRENT finding mints is retired
+   (`retireVanishedLintGroup`, F35): it claims the group's lease, settles a row
+   whose page already IS its draft `applied` (logged and committed, as Dismiss
+   does) and marks every other live row, `draft` and stranded `approved` alike,
+   `stale` (`markLintGroupStale` fenced on the lease token). A group an Accept
+   or Dismiss holds is left whole and keeps its key and pages (`held`); the
+   next pass retires it. The weekly watcher therefore calls the seeder
    whenever the wiki is writable, before its own clean-wiki return, rather than
    short-circuiting on `fixable.length === 0`: a wiki whose fixable findings
    have all been fixed is EXACTLY the state where every live group is
@@ -389,7 +393,9 @@ ran SQL. Now:
   a throw after the write still knows) `applied`, and puts every other claimed
   row back to `draft`. A row is never reverted over a page it wrote. A Stale
   check group writes its `fixed` verdicts before the status marks, and for the
-  landed rows on a throw.
+  landed rows on a throw. For a page a dead pass already wrote (recovered,
+  no-op, `alreadyWritten`) the verdict carry's before-copy is the committed
+  copy matching the row's `base_hash` (`committedPageWithHash`).
 - **The apply is safe to re-run.** A row that throws still gets the group's log
   entry and commit for every page written before it (and its own, when its
   write landed). A re-run's no-op row whose page carries uncommitted changes is

@@ -8,8 +8,9 @@
  * page (Done) must not blame a session for it (F36, arch review 2026-11-16).
  * Which committer that is depends on the instance: the repo-sync loop only when
  * `SYNC_REPOS` covers that wiki in `wiki` mode, the daily `wiki-committer`
- * sweeper only when the wiki is a bot's `wikiDir` (it sweeps nothing else), and
- * otherwise nobody — the message then says to commit it by hand.
+ * sweeper only when the wiki root lies inside the `wikiDir` of a bot with an
+ * enabled sweeper row (`sweeperCommits`; it sweeps nothing else), and otherwise
+ * nobody — the message then says to commit it by hand.
  *
  * The answer compares the page with its `HEAD` blob through the wiki's own
  * metadata-only rule (`classifyPageChange`), narrowed to the board's keys: the
@@ -45,7 +46,7 @@ export async function dirtIsPendingBoardWrite(wikiDir: string, relPath: string):
 export interface BoardWriteCommitters {
   /** A `wiki`-mode `SYNC_REPOS` entry covers the wiki. */
   syncLoop: boolean;
-  /** The wiki is a bot's `wikiDir`, which the daily sweeper sweeps. */
+  /** The wiki root lies inside a swept bot `wikiDir` (`sweeperCommits`). */
   sweeper: boolean;
 }
 

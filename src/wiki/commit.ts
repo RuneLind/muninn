@@ -38,6 +38,7 @@
 
 import path from "node:path";
 import { isWikiWriteArtifact } from "./lockfile.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { realpath, stat } from "node:fs/promises";
 import { createQueue } from "./queue.ts";
 import { getLog } from "../logging.ts";
@@ -737,6 +738,29 @@ export async function pageHasUncommittedChanges(wikiDir: string, relPath: string
   const r = await git(top, [...STATUS_READONLY_ARGS, "--porcelain", "-z", "-uall", "--", path.join(canonicalWiki, relPath)], { raw: true });
   if (r.code !== 0) return null;
   return r.stdout.length > 0;
+}
+
+/**
+ * A page's committed bytes whose sha256 is `sha256Hex` (a proposal's
+ * `base_hash`): HEAD's copy first, then each of the last `depth` commits that
+ * touched the page, newest first. Null outside git, or when no copy matches.
+ * A Stale check row whose page a dead pass already rewrote reads its "before"
+ * content here: HEAD while the write is uncommitted, an older commit once a
+ * sweep or the dead pass committed it.
+ */
+export async function committedPageWithHash(wikiDir: string, relPath: string, sha256Hex: string, depth = 20): Promise<string | null> {
+  const top = await gitToplevel(wikiDir);
+  if (!top) return null;
+  const canonicalWiki = await realpath(wikiDir).catch(() => wikiDir);
+  const abs = path.join(canonicalWiki, relPath);
+  const inRepo = path.relative(top, abs).split(path.sep).join("/");
+  const touched = await git(top, ["log", `-n${depth}`, "--format=%H", "--", abs]);
+  const revs = ["HEAD", ...(touched.code === 0 ? touched.stdout.split("\n").filter(Boolean) : [])];
+  for (const rev of revs) {
+    const shown = await git(top, ["show", `${rev}:${inRepo}`], { raw: true });
+    if (shown.code === 0 && sha256(shown.stdout) === sha256Hex) return shown.stdout;
+  }
+  return null;
 }
 
 /** The dirty-state snapshot of a wiki's repo for the `/wiki` Index-card badge. */

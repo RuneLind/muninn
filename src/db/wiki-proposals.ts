@@ -740,7 +740,7 @@ export const GROUP_LEASE_RENEW_MS = 30_000;
 export async function claimWikiProposalGroupLease(
   scope: string,
   groupKey: string,
-  verb: "accept" | "dismiss",
+  verb: "accept" | "dismiss" | "self-heal",
   ttlMs: number = GROUP_LEASE_TTL_MS,
 ): Promise<string | null> {
   const sql = getDb();
@@ -812,8 +812,8 @@ export interface LintGroupRow {
  *  - **which PAGES are claimed** — the `target_path` of every live row. One page
  *    may be in one live group at a time, or applying either group stales the
  *    other forever;
- *  - **which live DRAFT groups no longer match a finding** — the self-heal's
- *    input (see `seedLintProposals`).
+ *  - **which live groups no longer match a finding** — the self-heal's input
+ *    (see `seedLintProposals`).
  */
 export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGroupRow[]> {
   const sql = getDb();
@@ -862,7 +862,7 @@ export async function insertLintGroupRows(wikiName: string, rows: readonly Inser
 }
 
 /**
- * Retire every `draft` row of one lint group — the self-heal's write.
+ * Retire the live rows of one lint group — the self-heal's write.
  *
  * `stale` rather than `rejected`: the reviewer said nothing, the FINDING changed
  * shape under the card (the cluster grew a member after a sibling fix applied),
@@ -870,17 +870,32 @@ export async function insertLintGroupRows(wikiName: string, rows: readonly Inser
  * describes the wiki". A `rejected` row would silence the successor group too,
  * since a dismissal is by group key and the key is what moved.
  *
- * `approved` rows are left alone: they are mid-apply, and the apply's own
- * terminal CAS owns them.
+ * Without `leaseToken` only `draft` rows are retired. With it, `approved` rows
+ * are retired too, and only while that token still holds a live lease on the
+ * group ({@link claimWikiProposalGroupLease}): with no verb holding the group,
+ * an `approved` row is one a failed or restarted Accept stranded (F35), not one
+ * an apply is writing. The token check keeps the statement off a group a verb
+ * claimed after the self-heal's lease ran out.
  */
-export async function markLintGroupStale(wikiName: string, groupKey: string): Promise<number> {
+export async function markLintGroupStale(wikiName: string, groupKey: string, leaseToken?: string): Promise<number> {
   const sql = getDb();
-  const rows = await sql`
-    UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
-    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
-    RETURNING id
-  `;
+  const rows = leaseToken
+    ? await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+        AND EXISTS (
+          SELECT 1 FROM wiki_proposal_group_leases
+          WHERE scope = ${wikiName} AND group_key = ${groupKey} AND token = ${leaseToken} AND expires_at > now()
+        )
+      RETURNING id
+    `
+    : await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status = 'draft'
+      RETURNING id
+    `;
   return rows.length;
 }
 

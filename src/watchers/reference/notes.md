@@ -1446,7 +1446,8 @@ instance is wiki-readonly or the ROOT is registered read-only. A pass seeds
 when the bot has a `wikiDir`, `getWikiIndex` reads the wiki, and neither
 read-only check refuses; it seeds even with zero fixable findings. A pass with
 no `wikiDir` or an unreadable wiki returns `[]` before seeding. The seeder's
-self-heal retires every live `draft` group no current finding mints, and a wiki
+self-heal retires every live group no current finding mints (`draft` rows, and
+`approved` rows no Accept or Dismiss holds), and a wiki
 whose fixable findings are all fixed is exactly where that matters. The cost is
 one indexed read per wiki per week. Do not restore a `fixable.length` guard in
 `wiki-linter.ts`; the first cut had one, and it left fixed cards live forever.

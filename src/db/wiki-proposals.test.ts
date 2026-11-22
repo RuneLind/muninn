@@ -5,6 +5,8 @@ import path from "node:path";
 import { testTempDir } from "../test/temp-dir.ts";
 import { sendStaleFix } from "../gardener/stale-proposals.ts";
 import { seedLintProposals } from "../gardener/lint-proposals.ts";
+import { runGit } from "../wiki/commit.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { LintFinding } from "../wiki/lint.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import { setupTestDb } from "../test/setup-db.ts";
@@ -509,7 +511,8 @@ describe("lint groups", () => {
     await insertWikiProposal(lintRow("plans/a.mdx"));
     await insertWikiProposal(lintRow("plans/b.mdx"));
     await insertWikiProposal(lintRow("plans/z.mdx", OTHER));
-    // An `approved` row is mid-apply; the apply's own terminal CAS owns it.
+    // Without a lease token only `draft` rows are retired; the self-heal's
+    // retire of an `approved` row goes through the lease (below).
     await approveWikiProposalGroup("lintwiki", OTHER);
 
     expect(await markLintGroupStale("lintwiki", GROUP)).toBe(2);
@@ -789,5 +792,95 @@ describe("group leases (F35, migration 092)", () => {
     const t = await claimWikiProposalGroupLease("lintwiki", G, "accept");
     await releaseWikiProposalGroupLease("lintwiki", G, t!);
     expect(await claimWikiProposalGroupLease("lintwiki", G, "dismiss")).toBeString();
+  });
+});
+
+/**
+ * F35 fix round 1 batch 2: the lint self-heal over a superseded group with a
+ * stranded `approved` row (no live lease) — the real seeder, the real DB and a
+ * scratch git wiki.
+ */
+describe("the lint self-heal retires a stranded group (F35)", () => {
+  const W = "healwiki";
+  const G = "lint:series-unnamed:5eed0000beef";
+  const ORIG_A = "---\ntitle: A\n---\n\nBody A.\n";
+  const ORIG_B = "---\ntitle: B\n---\n\nBody B.\n";
+  const DRAFT_A = "---\ntitle: A\nseries: a\n---\n\nBody A.\n";
+  const DRAFT_B = "---\ntitle: B\nseries: a\n---\n\nBody B.\n";
+  let root = "";
+  const g = (...args: string[]) => runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+  const row = (relPath: string, orig: string, draft: string): InsertWikiProposalParams =>
+    makeProposal({
+      botName: W,
+      wikiName: W,
+      topicKey: `${G}:${relPath}`,
+      groupKey: G,
+      kind: "lint",
+      mode: "update",
+      targetPath: relPath,
+      baseHash: sha256(orig),
+      draft,
+      sourceDocs: [],
+      rationale: "two linked pages declare no series:",
+    });
+  const statuses = async () => (await listWikiProposalsByGroup(W, G)).map((r) => [r.targetPath, r.status]);
+  /** No current finding mints `G`, so the group is superseded. */
+  const heal = () => seedLintProposals([], { wikiDir: root, wikiName: W, push: false, readFile: async (abs) => Bun.file(abs).text().catch(() => null) });
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "lint-heal-"));
+    await Bun.write(path.join(root, "plans/a.mdx"), ORIG_A);
+    await Bun.write(path.join(root, "plans/b.mdx"), ORIG_B);
+    await Bun.write(path.join(root, "log.md"), "# Log\n");
+    await g("init", "-q", "-b", "main");
+    await g("config", "user.email", "t@example.invalid");
+    await g("config", "user.name", "t");
+    await g("add", "-A");
+    await g("commit", "-q", "-m", "seed");
+    // [approved, draft]: an Accept claimed the group, put b back and died
+    // before it settled a (a restart, a mark that threw).
+    await insertWikiProposal(row("plans/a.mdx", ORIG_A, DRAFT_A));
+    await insertWikiProposal(row("plans/b.mdx", ORIG_B, DRAFT_B));
+    await approveWikiProposalGroup(W, G);
+    await revertWikiProposalToDraft((await listWikiProposalsByGroup(W, G)).find((r) => r.targetPath === "plans/b.mdx")!.id);
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("with no lease held, the stranded approved row is retired with its draft", async () => {
+    const out = await heal();
+    expect(await statuses()).toEqual([["plans/a.mdx", "stale"], ["plans/b.mdx", "stale"]]);
+    expect(out).toMatchObject({ staled: 2, settled: 0, held: 0 });
+    // The lease is released: a verb can claim the group after it.
+    expect(await claimWikiProposalGroupLease(W, G, "accept")).toBeString();
+  });
+
+  test("a stranded row whose page already carries its draft is settled applied, logged and committed — not retired", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), DRAFT_A);
+    const out = await heal();
+    expect(await statuses()).toEqual([["plans/a.mdx", "applied"], ["plans/b.mdx", "stale"]]);
+    expect(out).toMatchObject({ staled: 1, settled: 1, held: 0 });
+    expect(await Bun.file(path.join(root, "log.md")).text()).toContain("1 page: plans/a.mdx");
+    expect((await g("log", "-1", "--format=%s")).stdout).toBe(`[lint] fix: 1 page (${G})`);
+    expect((await g("status", "--porcelain")).stdout).toBe("");
+  });
+
+  test("with a live lease held, the group is left whole and keeps its key", async () => {
+    const token = await claimWikiProposalGroupLease(W, G, "accept");
+    const out = await heal();
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+    expect(out).toMatchObject({ staled: 0, settled: 0, held: 1 });
+    // The holder's lease is untouched.
+    expect(await renewWikiProposalGroupLease(W, G, token!)).toBe(true);
+  });
+
+  test("the stale write is fenced on the lease token: a token that no longer holds the group retires nothing", async () => {
+    expect(await markLintGroupStale(W, G, crypto.randomUUID())).toBe(0);
+    const old = await claimWikiProposalGroupLease(W, G, "self-heal", 1);
+    await Bun.sleep(20);
+    expect(await markLintGroupStale(W, G, old!)).toBe(0);
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
   });
 });

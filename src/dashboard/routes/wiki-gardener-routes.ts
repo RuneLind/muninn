@@ -21,7 +21,7 @@ import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-cli
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
 import { proposalCategory, type ProposalCategory } from "../../gardener/category.ts";
 import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
-import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
+import { commitWikiChange, committedPageWithHash, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -3055,6 +3055,8 @@ export function registerWikiGardenerRoutes(
         wikiDir: entry.root,
         wikiName: entry.name,
         seededBy: "lint-proposals",
+        // The self-heal's settle commit follows the owning bot's push policy, as the group verbs do.
+        push: getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)?.wikiAutoCommit?.push ?? true,
       });
       log.info(
         "Lint proposals for {wiki}: {proposed} group(s), {rows} row(s), {skipped} skipped, {claimed} page-claimed, {staled} retired",
@@ -3202,8 +3204,10 @@ export function registerWikiGardenerRoutes(
       const { actions, applied, noop, recovered } = groupApplyActions(rows, result);
       // D29: a Stale check Accept writes a `fixed` verdict on each written
       // linking page's new passage, on the index the apply refreshed. Before the
-      // status marks, so a mark that throws does not lose them.
-      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered], snapshots);
+      // status marks, so a mark that throws does not lose them. A no-op row's
+      // page already carries its edit (a dead pass wrote it and something
+      // committed it): it gets them too, as Dismiss's `alreadyWritten` does.
+      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered, ...noop], snapshots);
       // A terminal CAS this request loses means another verb moved the row
       // while this one applied it (only possible once its lease expired): the
       // answer reports it rather than "applied".
@@ -3333,6 +3337,9 @@ export function registerWikiGardenerRoutes(
       // between the first read and the claim.
       const current = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
       const live = current.filter(isLiveGroupRow);
+      // A Stale check row an earlier Accept wrote: its page's linking passage
+      // keys from before that write, so its verdicts follow it below.
+      const snapshots = await staleCheckSnapshots(scope.wikiEntry, live);
       // Rows an earlier Accept already wrote: read, compared, logged and
       // settled `applied` inside ONE write section, committed after it, so a
       // row is `applied` only over a page that carried its draft when settled
@@ -3346,10 +3353,10 @@ export function registerWikiGardenerRoutes(
       if (rejected.length === 0 && written.length === 0) {
         return c.json({ error: "group is no longer a draft", statuses: statusCounts(current) }, 409);
       }
-      // A Stale check row an earlier Accept wrote gets its `fixed` verdict
-      // (best effort, logged inside).
+      // A Stale check row an earlier Accept wrote gets its `fixed` verdict and
+      // the carry of its linking verdicts (best effort, logged inside).
       if (written.length > 0) {
-        await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), []);
+        await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), snapshots);
       }
       // D20: a rejected Stale check card's edits are «kept as written»: reader
       // «still true» rows where the stored verdict still carries the edit.
@@ -3443,7 +3450,15 @@ export function registerWikiGardenerRoutes(
 }
 
 /** The passage keys a Stale check group's pages carry before the write
- *  (`snapshotPassageKeys`), read off disk; empty for another kind. Best effort. */
+ *  (`snapshotPassageKeys`); empty for another kind. Best effort.
+ *
+ *  A page that already IS its row's draft was written by a pass that died
+ *  (F35): its bytes on disk are the after-content, whose keys would carry
+ *  nothing. Its before-content is the committed copy whose sha256 is the
+ *  row's `base_hash` (`committedPageWithHash`: HEAD while the write is
+ *  uncommitted, an older commit once something committed it). With no such
+ *  copy (outside git, history past the depth) the page is left out. The keys'
+ *  context (the page's title and plan facts) is read off the current index. */
 async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly WikiProposal[]): Promise<PassageKeySnapshot[]> {
   const stale = rows.filter((r) => r.kind === "stale-check");
   if (!stale.length) return [];
@@ -3452,8 +3467,15 @@ async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly Wiki
     if (!index) return [];
     const pages: { relPath: string; content: string }[] = [];
     for (const r of stale) {
-      const content = await readFileOrNull(path.join(entry.root, r.targetPath));
-      if (content !== null) pages.push({ relPath: r.targetPath, content });
+      const onDisk = await readFileOrNull(path.join(entry.root, r.targetPath));
+      if (onDisk === null) continue;
+      if (onDisk !== r.draft) {
+        pages.push({ relPath: r.targetPath, content: onDisk });
+        continue;
+      }
+      const before = r.baseHash ? await committedPageWithHash(entry.root, r.targetPath, r.baseHash) : null;
+      if (before !== null) pages.push({ relPath: r.targetPath, content: before });
+      else log.warn("Stale check: {page} already carries its draft and no committed copy matches its base, so its verdicts are not carried", { page: r.targetPath });
     }
     return await snapshotPassageKeys(index, pages);
   } catch (err) {

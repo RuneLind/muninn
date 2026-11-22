@@ -23,6 +23,8 @@ import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
 import { setPlanPriority, setPlanStatus } from "../../plans/frontmatter.ts";
 import { PLANS_WIKI_NAME } from "../../plans/source.ts";
 import { __resetSyncReposForTest } from "../../sync/config.ts";
+import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
+import { saveWatcher, toggleWatcher } from "../../db/watchers.ts";
 
 setupTestDb();
 
@@ -51,6 +53,9 @@ let app: Hono;
 let guardRefusal: Response | null = null;
 let commitResult: CommitWikiResult | null = null;
 const NOW = Date.parse("2026-11-10T12:00:00+01:00");
+/** The plans wiki's registry `source`, and the bots `sweptWikiDirs` reads (F36, fix round 1). */
+let plansSource: "bot" | "extra" = "extra";
+let sweeperBots: { name: string; wikiDir?: string }[] = [];
 
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", root, ...args], {
@@ -107,7 +112,9 @@ beforeAll(async () => {
   const config = { dashboardPort: 3010, profile: "default", knowledgeApiUrl: "http://127.0.0.1:9" } as unknown as Config;
   const guards: DecisionCloseGuards = { readonlyRefusal: () => guardRefusal, egressRefusal: () => null };
   const deps = (): StepDoneDeps => ({
-    registry: () => registry,
+    registry: () => registry.map((e) => (e.name === PLANS ? { ...e, source: plansSource } : e)),
+    // The real watcher rows in the test DB, against the bots a test names.
+    sweptWikiDirs: () => sweptWikiDirs(sweeperBots),
     workMapWikis: () => [WIKI, LOCKED, PLANS],
     answerConfig: () => ({ wikis: new Set([WIKI, OUTSIDE, LOCKED, PLANS]), owner: null, groups: new Map() }),
     now: () => NOW,
@@ -329,6 +336,45 @@ describe("/api/wiki/step-done", () => {
       syncRepos(`${PLANS}=${root}:plain`);
       const { body } = await doneAfter(flipped());
       expect(body.error).toBe(`${BOARD} Nothing on this instance commits it automatically: commit it by hand. Then try again.`);
+    });
+
+    // F36 fix round 1: the sweeper is named only when an ENABLED `wiki-committer`
+    // row exists for a bot whose wikiDir contains this root, never off `source`.
+    describe("the daily sweeper", () => {
+      const SWEPT = `${BOARD} The daily wiki sweep commits it, or commit it by hand. Then try again.`;
+      const NOBODY = `${BOARD} Nothing on this instance commits it automatically: commit it by hand. Then try again.`;
+      const committerRow = (botName: string) => saveWatcher({ userId: "u1", botName, name: "Wiki sweep", type: "wiki-committer" });
+      afterAll(() => {
+        plansSource = "extra";
+        sweeperBots = [];
+      });
+
+      test("a bot wiki whose bot has an enabled wiki-committer watcher: the sweep is named", async () => {
+        syncRepos(undefined);
+        plansSource = "bot";
+        sweeperBots = [{ name: PLANS, wikiDir: root }];
+        await committerRow(PLANS);
+        const { status, body } = await doneAfter(flipped());
+        expect(status).toBe(409);
+        expect(body.error).toBe(SWEPT);
+      });
+
+      test("the same bot wiki with no wiki-committer watcher, or a disabled one: nothing is named", async () => {
+        syncRepos(undefined);
+        plansSource = "bot";
+        sweeperBots = [{ name: PLANS, wikiDir: root }];
+        expect((await doneAfter(flipped())).body.error).toBe(NOBODY);
+        await toggleWatcher(await committerRow(PLANS), false);
+        expect((await doneAfter(flipped())).body.error).toBe(NOBODY);
+      });
+
+      test("a WIKI_EXTRA wiki whose root is another bot's wikiDir, with a watcher: the sweep is named", async () => {
+        syncRepos(undefined);
+        plansSource = "extra";
+        sweeperBots = [{ name: "jarvis", wikiDir: root }];
+        await committerRow("jarvis");
+        expect((await doneAfter(flipped())).body.error).toBe(SWEPT);
+      });
     });
 
     test("a board flip beside a body edit keeps the session refusal", async () => {

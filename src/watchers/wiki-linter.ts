@@ -136,7 +136,7 @@ export async function checkWikiLinter(
   //
   // **It runs even when this pass has NOTHING to propose, and before the
   // clean-wiki return.** The seeder's first rule is the SELF-HEAL, which retires
-  // every live `draft` group whose key no current finding mints — so a wiki
+  // every live group whose key no current finding mints — so a wiki
   // whose fixable findings have all been fixed is EXACTLY the state where every
   // live group is superseded. The first cut skipped the call on
   // `fixable.length === 0` and claimed the opposite ("nothing that could have
@@ -154,6 +154,7 @@ export async function checkWikiLinter(
         ...DEFAULT_LINT_PROPOSAL_DEPS,
         wikiDir: botConfig.wikiDir,
         wikiName: name,
+        push: botConfig.wikiAutoCommit?.push ?? true,
       });
       if (seeded.proposed > 0 || seeded.staled > 0) {
         log.info(
