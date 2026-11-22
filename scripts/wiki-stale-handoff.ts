@@ -15,8 +15,9 @@
  * overrides the main checkout. Pages in several repos are several wikis, each
  * with its own gate and `Stale:` line.
  *
- * - First call: per wiki, the gate (on the default branch: `git pull
- *   --ff-only <remote> <default>`, never a stash, reset or switch; each page
+ * - First call: per wiki, the gate (on the default branch: a pull
+ *   `--ff-only` of `<remote> <default>`, as an unlocked fetch and then a
+ *   fast-forward under the wiki write lock; never a stash, reset or switch; each page
  *   committed / uncommitted / carried / NOT carried / deleted), the fix path
  *   that fits the gate, the free report, then «fix by hand»: the hits and the
  *   To-check pages on the session's own pages, and nothing else. Nothing is
@@ -55,6 +56,7 @@ import {
   type PostSse,
   type StaleLedger,
 } from "./wiki-stale.ts";
+import { takeWikiWriteLock, type WikiLockOutcome } from "../src/wiki/lockfile.ts";
 
 type Json = Record<string, any>;
 
@@ -259,7 +261,7 @@ export interface Gate {
  * The gate for one main checkout: pull on the default branch, then each
  * page's state. Pulls only (`--ff-only`); never stashes, resets or switches.
  */
-export async function runGate(main: string, pages: PageRef[], git: Git, opts: { pull?: boolean } = {}): Promise<Gate> {
+export async function runGate(main: string, pages: PageRef[], git: Git, opts: { pull?: boolean; lock?: (root: string) => Promise<WikiLockOutcome> } = {}): Promise<Gate> {
   const lines: string[] = [];
   const g: Gate = { main, fixPath: "", lines, pages: [] };
   const skip = (why: string) => (g.skip ??= why);
@@ -297,13 +299,31 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
   } else if (!g.remote) {
     g.note = "no remote, nothing to pull";
   } else if (opts.pull !== false) {
-    const before = await out(["rev-parse", "HEAD"]);
-    // Never stash another session's edits, never rebase: the flags beat merge.autoStash, rebase.autoStash and pull.rebase.
-    const r = await git(["-c", "merge.autoStash=false", "-c", "rebase.autoStash=false", "pull", "--ff-only", "--no-rebase", "--no-autostash", "--quiet", g.remote, def], main, PULL_TIMEOUT_MS);
+    // The pull in two steps (F13): the fetch is network I/O and runs unlocked;
+    // only the fast-forward, which writes the main checkout's files, holds the
+    // wiki's cross-process write lock, so it never lands inside a muninn write.
+    const r = await git(["fetch", "--quiet", "--no-write-fetch-head", g.remote, `+refs/heads/${def}:refs/remotes/${g.remote}/${def}`], main, PULL_TIMEOUT_MS);
     const err = gitError(r.stderr) || `exit ${r.code}`;
     if (r.code === 0) {
-      const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
-      g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
+      const taken = await (opts.lock ?? ((root: string) => takeWikiWriteLock(root, { op: "stale-handoff-ff" })))(main);
+      if (!taken.ok) {
+        g.note = `fetched ${g.remote}/${def}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
+      } else {
+        try {
+          const before = await out(["rev-parse", "HEAD"]);
+          // Never stash another session's edits: the flags beat merge.autoStash.
+          const m = await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", `refs/remotes/${g.remote}/${def}`], main);
+          if (m.code === 0) {
+            const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
+            g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
+          } else {
+            skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
+            g.note = g.skip;
+          }
+        } finally {
+          taken.lock?.release();
+        }
+      }
     } else if (!r.timedOut && AUTH_FAILURE.test(r.stderr)) {
       g.note = `not authorized — could not authenticate to ${g.remote} (${err}); the main checkout is as last pulled`;
     } else if (r.timedOut || /could not resolve|unable to access|could not read from remote|connection (refused|timed out)|network is unreachable|operation timed out/i.test(r.stderr)) {

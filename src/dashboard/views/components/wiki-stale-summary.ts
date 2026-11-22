@@ -20,6 +20,8 @@ export interface StaleSummaryRow {
   title: string;
   staleLines: number;
   toCheck: number;
+  /** The free hit count: the status-line hits, confirmed or not. */
+  hits?: number;
   changed?: boolean;
   /** PR 3 (D31): fixes for this page waiting in the Gardener. */
   inReview?: number;
@@ -50,12 +52,14 @@ export const inReviewText = (n: number) => `${plural(n, "fix", "fixes")} in revi
  *  K fixes wait in the Gardener (PR 3); "" when all are 0. */
 export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
   const review = Number(c?.inReview) || 0;
-  if (!c || (!c.staleLines && !c.toCheck && !review)) return "";
-  const stale = c.staleLines || c.toCheck;
+  const unknown = c?.verdicts === "unavailable";
+  if (!c || (!c.staleLines && !c.toCheck && !review && !unknown)) return "";
+  const stale = c.staleLines || c.toCheck || unknown;
+  const lines = unknown ? "?" : String(c.staleLines);
   const words = [stale ? staleCountsText(c).replace(/^⚠ /, "") : "", review ? `${inReviewText(review)} in the Gardener` : ""].filter(Boolean).join(" · ");
   return (
-    `<span class="wiki-stale-rail${stale ? "" : " review-only"}" data-stale-rail="${c.staleLines}·${c.toCheck}"${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
-    (stale ? `⚠ ${c.staleLines} · ${c.toCheck}` : "") +
+    `<span class="wiki-stale-rail${stale ? "" : " review-only"}${unknown ? " unavailable" : ""}" data-stale-rail="${lines}·${c.toCheck}"${unknown ? ` data-stale-verdicts="unavailable"` : ""}${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
+    (stale ? `⚠ ${lines} · ${c.toCheck}` : "") +
     (review ? `${stale ? " " : ""}<span class="wiki-stale-rail-review">⧗ ${review}</span>` : "") +
     `</span>`
   );
@@ -65,11 +69,13 @@ export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
  *  or when it failed, so the pill never shows another page's numbers. */
 export function stalePillHtml(r: StaleReportView | null | undefined): string {
   if (!r || r.error) return "";
-  const c = staleCounts(r);
-  const none = !c.staleLines && !c.toCheck;
+  // A verdict store that is down never reads as the clean zero (F11).
+  const c: StalePageCounts = { ...staleCounts(r), ...(r.verdicts === "unavailable" ? { verdicts: "unavailable" as const } : {}) };
+  const unknown = c.verdicts === "unavailable";
+  const none = !c.staleLines && !c.toCheck && !unknown;
   const review = Number(c.inReview) || 0;
   return (
-    `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${c.staleLines}·${c.toCheck}" title="Open the STALE tab">` +
+    `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${unknown ? "?" : c.staleLines}·${c.toCheck}"${unknown ? ` data-stale-verdicts="unavailable"` : ""} title="Open the STALE tab">` +
     esc(staleCountsText(c)) +
     (review ? ` <span class="wiki-stale-pill-review" data-stale-pill-review="${review}">⧗ ${esc(inReviewText(review))}</span>` : "") +
     `</button>`
@@ -80,10 +86,12 @@ export function stalePillHtml(r: StaleReportView | null | undefined): string {
 const countedRows = (s: StaleSummaryView) =>
   (s.pages ?? []).map((r) => {
     const inReview = Number(r.inReview) || 0;
-    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}) } as StalePageCounts };
+    // The `verdicts` flag travels with a row that has hits to confirm (F11).
+    const unknown = s.verdicts === "unavailable" && (Number(r.hits) || 0) > 0;
+    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" } : {}) } as StalePageCounts };
   });
 
-const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0;
+const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0 || c.verdicts === "unavailable";
 
 /** The wiki's totals as the route sends them (confirmed stale lines, D26). */
 const totalsOf = (s: StaleSummaryView): StalePageCounts => ({ staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0 });
@@ -129,6 +137,7 @@ export function wikiStaleSummaryStyles(): string {
   return `
     .wiki-stale-rail { font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 8px; white-space: nowrap; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
     .wiki-stale-rail.review-only { background: color-mix(in srgb, var(--status-info) 18%, transparent); }
+    .wiki-stale-rail.unavailable { background: color-mix(in srgb, var(--text-dim) 22%, transparent); }
     .wiki-stale-rail-review, .wiki-stale-pill-review { white-space: nowrap; }
     .wiki-stale-pill-slot:empty { display: none; }
     .wiki-stale-pill { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; cursor: pointer; border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }

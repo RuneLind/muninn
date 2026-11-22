@@ -70,7 +70,8 @@ export function staleCounts(r: StaleReportView | null | undefined): StalePageCou
   if (!r || r.error) return { staleLines: 0, toCheck: 0 };
   const staleLines = confirmedHits(r).length;
   const inReview = Number(r.inReview?.fixes) || 0;
-  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0, ...(inReview ? { inReview } : {}) };
+  const unknown = r.verdicts === "unavailable" && (r.hits?.length ?? 0) > 0;
+  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" as const } : {}) };
 }
 
 export interface StalePageCounts {
@@ -78,6 +79,9 @@ export interface StalePageCounts {
   toCheck: number;
   /** PR 3 (D31): fixes waiting in the Gardener, shown as ⧗. */
   inReview?: number;
+  /** The verdict store was down and the page has status-line hits, so
+   *  `staleLines` is unknown, not 0 (F11). */
+  verdicts?: "unavailable";
 }
 
 /** The two numbers in words (D26): «N stale status lines · M linking pages
@@ -86,8 +90,9 @@ export interface StalePageCounts {
  *  things counted too: «✓ nothing stale» read as a verdict on the whole page
  *  (first-screen-claims F15). */
 export function staleCountsText(c: StalePageCounts): string {
-  const words = `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
-  return c.staleLines || c.toCheck ? `⚠ ${words}` : words;
+  const lines = c.verdicts === "unavailable" ? "stale status lines unknown (verdicts unavailable)" : `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"}`;
+  const words = `${lines} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  return c.staleLines || c.toCheck || c.verdicts === "unavailable" ? `⚠ ${words}` : words;
 }
 
 /** The hits a reader sees: confirmed stale only (D11). */

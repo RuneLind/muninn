@@ -112,3 +112,25 @@ describe("PR 3: the ⧗ «in review» states (D31)", () => {
     expect(m.get("hub.md")).toEqual({ staleLines: 0, toCheck: 1, inReview: 2 });
   });
 });
+
+describe("a verdict store that is down (F11)", () => {
+  test("the flag travels with a row that has hits; a row with none keeps its plain counts", () => {
+    const m = staleCountMap({
+      pages: [
+        { relPath: "hit.md", title: "Hit", staleLines: 0, toCheck: 0, hits: 2 },
+        { relPath: "quiet.md", title: "Quiet", staleLines: 0, toCheck: 0, hits: 0, changed: true },
+      ],
+      verdicts: "unavailable",
+    });
+    expect(m.get("hit.md")).toEqual({ staleLines: 0, toCheck: 0, verdicts: "unavailable" });
+    expect(staleRailBadgeHtml(m.get("hit.md"))).toContain(">⚠ ? · 0</span>");
+    expect(staleRailBadgeHtml(m.get("quiet.md"))).toBe("");
+  });
+
+  test("the pill shows the unavailable state, not the clean zero, even with no hits", () => {
+    const pill = stalePillHtml({ hits: [], buckets: null, verdicts: "unavailable" });
+    expect(pill).toContain('data-stale-verdicts="unavailable"');
+    expect(pill).not.toContain("wiki-stale-pill none");
+    expect(pill).toContain(">⚠ stale status lines unknown (verdicts unavailable) · 0 linking pages to check</button>");
+  });
+});

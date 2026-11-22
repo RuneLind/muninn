@@ -5,6 +5,7 @@ import path from "node:path";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 import { COSTED_PAGE_CAP, gitRunner, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
 import type { FetchJson, PostJson, PostSse } from "./wiki-stale.ts";
+import { takeWikiWriteLock } from "../src/wiki/lockfile.ts";
 
 /** Fixture repos get a repo-local identity: CI has no global one. */
 const git = gitRunner();
@@ -87,6 +88,40 @@ describe("the gate", () => {
     ]);
   });
 
+  test("F13: the fetch runs while the wiki write lock is held elsewhere; the fast-forward waits for it", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const held = await takeWikiWriteLock(main, { op: "test-writer" });
+    if (!held.ok || !held.lock) throw new Error("the test could not take the lock");
+    const events: string[] = [];
+    let released = false;
+    const watched: Git = async (args, cwd, ms) => {
+      const verb = args.find((a) => ["fetch", "merge", "pull"].includes(a));
+      if (verb) events.push(`${verb} start, lock ${released ? "free" : "held"}`);
+      const r = await git(args, cwd, ms);
+      if (verb === "fetch") setTimeout(() => ((released = true), held.lock!.release()), 300);
+      return r;
+    };
+    const gate = await runGate(main, [], watched);
+    expect(events).toEqual(["fetch start, lock held", "merge start, lock free"]);
+    expect(gate.note).toBe("pulled 1 commit(s) from origin/main");
+    expect(existsSync(path.join(main, ".wiki-write.lock"))).toBe(false);
+  });
+
+  test("F13: a lock still held past its wait leaves the checkout as last pulled, a note and no skip", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const before = await g(main, "rev-parse", "HEAD");
+    const gate = await runGate(main, [], git, { lock: async () => ({ ok: false, reason: "held by pid 1" }) });
+    expect(gate.note).toBe("fetched origin/main, but the wiki write lock is held (held by pid 1); the main checkout is as last pulled");
+    expect(gate.skip).toBeUndefined();
+    expect(await g(main, "rev-parse", "HEAD")).toBe(before);
+  });
+
   test("gap: no upstream — a default branch with no tracking info still pulls, a remote without the branch is a note, not a skip", async () => {
     const { main } = await withRemote();
     await g(main, "branch", "--unset-upstream");
@@ -106,7 +141,7 @@ describe("the gate", () => {
     expect(gate.note).toStartWith("offline — could not reach origin (");
     expect(gate.lines.at(-2)).toBe("gate: Check may run");
     // A pull that never answers is the same, bounded.
-    const hung: Git = (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true }) : git(args, cwd, ms));
+    const hung: Git = (args, cwd, ms) => (args.includes("fetch") ? Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true }) : git(args, cwd, ms));
     expect((await runGate(main, [], hung)).note).toBe("offline — could not reach origin (no answer in 30 s); the main checkout is as last pulled");
   });
 
@@ -620,7 +655,7 @@ describe("fix round 1 batch 2: the user's ssh command is kept, and an auth failu
 
   test("auth and permission failures are their own note; network failures stay offline", async () => {
     const { main } = await withRemote();
-    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
+    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("fetch") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
     const cases: [string, "auth" | "offline"][] = [
       ["git@h: Permission denied (publickey).\nfatal: Could not read from remote repository.", "auth"],
       ["Host key verification failed.\nfatal: Could not read from remote repository.", "auth"],
@@ -1115,7 +1150,7 @@ describe("fix round 1 batch 5: the Stale line and the gate's wording", () => {
 
   test("every pull note takes the error: or fatal: line, else the first non-hint line, else the exit code", async () => {
     const { main } = await withRemote();
-    const pulling = (code: number, stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code, stdout: "", stderr }) : git(args, cwd, ms));
+    const pulling = (code: number, stderr: string): Git => (args, cwd, ms) => (args.includes("fetch") ? Promise.resolve({ code, stdout: "", stderr }) : git(args, cwd, ms));
     const hints = "hint: one\nhint: two\n";
     expect((await runGate(main, [], pulling(1, `${hints}remote: noise\nfatal: Authentication failed for 'https://x/'`))).note).toBe(
       "not authorized — could not authenticate to origin (fatal: Authentication failed for 'https://x/'); the main checkout is as last pulled",
@@ -1156,7 +1191,7 @@ describe("fix round 2 batch 3: a local «Permission denied» is a refused pull, 
 
   test("stubbed: local EACCES shapes refuse; remote auth shapes are «not authorized»", async () => {
     const { main } = await withRemote();
-    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("pull") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
+    const pullSays = (stderr: string): Git => (args, cwd, ms) => (args.includes("fetch") ? Promise.resolve({ code: 128, stdout: "", stderr }) : git(args, cwd, ms));
     const cases: [string, "auth" | "refused"][] = [
       ["error: unable to unlink old 'plans/a.md': Permission denied", "refused"],
       ["error: cannot open .git/FETCH_HEAD: Permission denied", "refused"],
@@ -1271,7 +1306,7 @@ describe("fix round 2 batch 3: the run's bound starts after the gate and uses th
     let off = 0;
     // The runner returns a timed-out pull by its bound plus its 1.5 s of graces.
     const slowPull: Git = (args, cwd, ms) => {
-      if (!args.includes("pull")) return git(args, cwd, ms);
+      if (!args.includes("fetch")) return git(args, cwd, ms);
       off += 31_500;
       return Promise.resolve({ code: -1, stdout: "", stderr: "", timedOut: true });
     };
