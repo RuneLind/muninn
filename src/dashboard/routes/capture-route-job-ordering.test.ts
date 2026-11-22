@@ -214,6 +214,7 @@ const { registerTikTokRoutes } = await import("./tiktok-routes.ts");
 const { registerYouTubeRoutes, YOUTUBE_RECENT_INGEST_TTL_MS } = await import("./youtube-routes.ts");
 const { registerVimeoRoutes } = await import("./vimeo-routes.ts");
 const { resolveCapturePresets } = await import("../../summaries/presets.ts");
+const { applyCaptureConnector } = await import("./capture-connector.ts");
 const { notifySummaryDocumentDeleted } = await import("../../summaries/document-deleted.ts");
 const ttState = await import("../../tiktok/state.ts");
 const ytState = await import("../../youtube/state.ts");
@@ -251,9 +252,13 @@ function ttApp(): Hono {
  */
 let connectorRows: Array<Record<string, unknown>> = [];
 let connectorReadThrows: Error | null = null;
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const connectorDeps = {
   getConnector: async (id: string) => {
     if (connectorReadThrows) throw connectorReadThrows;
+    // What Postgres does with a non-uuid against the UUID column: a cast error,
+    // not "no row". So the route's uuid guard is what keeps that a 400.
+    if (!UUID_SHAPE.test(id)) throw new Error(`invalid input syntax for type uuid: "${id}"`);
     return (connectorRows.find((r) => r.id === id) ?? null) as never;
   },
   listConnectors: async () => {
@@ -1291,6 +1296,35 @@ describe("YouTube: the CONNECTOR pick (`/api/youtube/options` connectors + `conn
     expect(body.detail).not.toContain("SUMMARIZER_BOT");
     expect(jobCount()).toBe(before);
     expect(youtubeSummarizeCalls).toBe(0);
+  });
+
+  test("a picked claude-cli row over a non-CLI bot gets the CLI-age check for Slides", async () => {
+    summarizerBot = copilotBot;
+    connectorRows = [{ id: NO_MODEL_ID, name: "claude-cli bare", connectorType: "claude-cli" }];
+    __setClaudeCliVersionForTest("2.1.200");
+    try {
+      const res = await post(ytApp(), "/api/youtube/summarize", {
+        url: YT_URL, video_id: YT_ID, frames: true, connector_id: NO_MODEL_ID,
+      });
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { code: string }).code).toBe("cli_too_old");
+    } finally {
+      __setClaudeCliVersionForTest("2.1.304");
+    }
+  });
+
+  test("a row of ANOTHER connector type inherits none of the bot's type-bound fields; the same type does", () => {
+    const bot = {
+      name: "melosys", dir: "/tmp/melosys", connector: "copilot-sdk", model: "gpt-5.5",
+      baseUrl: "http://bot-endpoint", thinkingMaxTokens: 32000, effort: "high", timeoutMs: 900_000,
+    } as never;
+    const crossType = applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "cli bare", connectorType: "claude-cli" } as never);
+    expect(crossType).toMatchObject({ name: "melosys", dir: "/tmp/melosys", connector: "claude-cli", timeoutMs: 900_000 });
+    for (const field of ["model", "baseUrl", "thinkingMaxTokens", "effort"]) {
+      expect((crossType as unknown as Record<string, unknown>)[field]).toBeUndefined();
+    }
+    const sameType = applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "copilot bare", connectorType: "copilot-sdk" } as never);
+    expect(sameType).toMatchObject({ connector: "copilot-sdk", model: "gpt-5.5", baseUrl: "http://bot-endpoint", effort: "high" });
   });
 
   test("a connector_id that is not a listed row is 400 bad_connector, and a failed lookup 503 — no job either way", async () => {

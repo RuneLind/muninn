@@ -74,9 +74,25 @@ export async function resolveCaptureConnector(
   return { ok: true, bot: applyCaptureConnector(bot, row), picked: row };
 }
 
-/** The summarizer bot as it runs on `row`: the chat-thread merge, field by field. */
+/**
+ * The summarizer bot as it runs on `row`. A row of the bot's own connector
+ * type takes the chat-thread merge (unset fields fall back to the bot). A row
+ * of ANOTHER type takes only its own model, endpoint and thinking settings:
+ * the bot's are meant for its own connector, and inheriting them ran
+ * `claude --model gpt-5.5` or sent a Claude thinking budget to a local model
+ * as `max_tokens`. Unset there means that connector's default. The timeout is
+ * type-neutral and still falls back.
+ */
 export function applyCaptureConnector(bot: BotConfig, row: Connector): BotConfig {
-  return applyThreadConnector(bot, row);
+  const merged = applyThreadConnector(bot, row);
+  if ((bot.connector ?? "claude-cli") === row.connectorType) return merged;
+  return {
+    ...merged,
+    model: row.model,
+    baseUrl: row.baseUrl,
+    thinkingMaxTokens: row.thinkingMaxTokens,
+    effort: row.effort,
+  };
 }
 
 /** The kinds a capture offers on a picked connector; see {@link presetsForPickedModel}. */
