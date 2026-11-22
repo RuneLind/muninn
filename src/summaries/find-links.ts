@@ -32,6 +32,7 @@ import {
   splitLinksSection,
   type LinkLine,
 } from "./links-section.ts";
+import { firstElementText, ldJsonBodies, openTags, tagsToSpaces, withoutBlocks, withoutComments, withoutLinkTargets } from "./html-scan.ts";
 import { namedEntity } from "./html-entities.ts";
 import type { SafePage } from "./safe-fetch.ts";
 import { sourceTextOfRaw } from "./source-text.ts";
@@ -60,6 +61,12 @@ export const FIND_LINKS_MAX_ADD = 10;
 export const AUTHOR_CHECK_MIN_TEXT = 500;
 
 const FIELD_MAX = 300;
+/**
+ * The most of a page {@link judgePage} reads (F59): `safeFetchPage`'s 2 MB byte
+ * cap, so it binds only a caller handing in a longer string. The readers are
+ * linear, so this bounds the work, not the label.
+ */
+export const JUDGE_PAGE_MAX_CHARS = 2 * 1024 * 1024;
 /** A quote shorter than this (non-space characters) proves nothing: `Claude` is on every page about it. */
 const MIN_QUOTE_CHARS = 20;
 
@@ -273,17 +280,17 @@ function decodeHtml(text: string): string {
 }
 
 function stripTags(html: string): string {
-  return decodeHtml(html.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+  return decodeHtml(tagsToSpaces(html)).replace(/\s+/g, " ").trim();
 }
 
 /** The markup with every block whose text is not the page's own removed: scripts, styles, inline SVG (its `<title>` is an icon's). */
 function withoutNonContent(html: string): string {
-  return html.replace(/<(script|style|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, " ");
+  return withoutBlocks(html, ["script", "style", "noscript", "template", "svg"]);
 }
 
 /** The markup a `<meta>` is read from (D19 7): comments, scripts and styles removed, so a tag inside a JS string does not count. */
 function metaMarkup(html: string): string {
-  return html.replace(/<!--[\s\S]*?-->/g, " ").replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, " ");
+  return withoutBlocks(withoutComments(html), ["script", "style"]);
 }
 
 /** An attribute's value, quoted or not, matched only as a whole attribute name (`data-name=` is not `name=`). */
@@ -295,8 +302,9 @@ function attr(tag: string, name: string): string | null {
 /** `content` of every `<meta>` whose `name` or `property` is one of `keys`, in document order. */
 function metaContents(html: string, keys: readonly string[]): string[] {
   const out: string[] = [];
-  for (const m of metaMarkup(html).matchAll(/<meta\b[^>]*>/gi)) {
-    const tag = m[0];
+  const markup = metaMarkup(html);
+  for (const t of openTags(markup, /<meta\b/gi)) {
+    const tag = markup.slice(t.index, t.end);
     const key = (attr(tag, "name") ?? attr(tag, "property"))?.toLowerCase();
     const content = attr(tag, "content");
     if (key && keys.includes(key) && content !== null) {
@@ -341,9 +349,9 @@ export function extractPageTitle(html: string, url: string): string {
   const og = metaContents(html, ["og:title"])[0];
   if (og) return og;
   const content = withoutNonContent(html);
-  const title = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(content)?.[1];
+  const title = firstElementText(content, "title");
   if (title && stripTags(title)) return stripTags(title);
-  const h1 = /<h1\b[^>]*>([\s\S]*?)<\/h1>/i.exec(content)?.[1];
+  const h1 = firstElementText(content, "h1");
   return h1 ? stripTags(h1) : "";
 }
 
@@ -369,10 +377,9 @@ function jsonLdAuthors(html: string): string[] {
     }
   };
   // A commented-out block is no byline: comments go first, as in metaMarkup.
-  const markup = html.replace(/<!--[\s\S]*?-->/g, " ");
-  for (const m of markup.matchAll(/<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
+  for (const body of ldJsonBodies(withoutComments(html))) {
     try {
-      walk(JSON.parse(m[1]!), 0);
+      walk(JSON.parse(body), 0);
     } catch {
       // not JSON: no byline from it
     }
@@ -428,8 +435,13 @@ export function authorSurname(author: string | null): string | null {
 
 const KINDS = new Set(["post", "paper", "repo", "tool", "doc"]);
 
+/** White space collapsed, at most FIELD_MAX UTF-16 units, never ending in half of a surrogate pair the cut split. */
 function clip(value: unknown): string {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, FIELD_MAX) : "";
+  if (typeof value !== "string") return "";
+  const s = value.replace(/\s+/g, " ").trim();
+  if (s.length <= FIELD_MAX) return s;
+  const last = s.charCodeAt(FIELD_MAX - 1);
+  return s.slice(0, last >= 0xd800 && last <= 0xdbff ? FIELD_MAX - 1 : FIELD_MAX);
 }
 
 /** One candidate from untrusted JSON, bounded; `null` when it carries neither topic nor title. */
@@ -471,6 +483,9 @@ export function buildCandidatesPrompt(summary: string): string {
 
 const JSON_UNCLOSED_RETRIES = 32;
 
+/** Characters failed parses may cover in all, as a multiple of the input (F63). Prose brackets do not nest, so this binds only nesting. */
+const FAILED_WORK_FACTOR = 4;
+
 /** Every top-level JSON value opening with `open` that parses, in order. */
 function jsonValues(raw: string, open: "[" | "{"): unknown[] {
   const close = open === "[" ? "]" : "}";
@@ -479,6 +494,8 @@ function jsonValues(raw: string, open: "[" | "{"): unknown[] {
   // Each unclosed start scans to the end, so the retries are bounded:
   // 100k unbounded unclosed opens measured 6 s.
   let unclosed = 0;
+  let failedWork = 0;
+  const failedWorkMax = FAILED_WORK_FACTOR * raw.length;
   while (start >= 0) {
     let depth = 0;
     let inString = false;
@@ -505,7 +522,12 @@ function jsonValues(raw: string, open: "[" | "{"): unknown[] {
       out.push(JSON.parse(raw.slice(start, end + 1)));
       start = raw.indexOf(open, end + 1);
     } catch {
-      start = raw.indexOf(open, start + 1);
+      // A value inside one that does not parse may still (`[see [{…}]]`), but
+      // retrying from every opener inside a nested one is quadratic (F63):
+      // once the failed attempts have scanned FAILED_WORK_FACTOR × the input,
+      // a failed value is skipped whole.
+      failedWork += end + 1 - start;
+      start = raw.indexOf(open, failedWork > failedWorkMax ? end + 1 : start + 1);
     }
   }
   return out;
@@ -659,8 +681,7 @@ export type LinkLabel = "matched" | "reachable" | "unread";
  * entirely.
  */
 function normalizeForQuote(text: string): string {
-  return text
-    .replace(/\[([^\]]*)\]\([^)\s]*\)/g, "$1")
+  return withoutLinkTargets(text)
     .toLowerCase()
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
@@ -711,7 +732,7 @@ const normalizeApostrophes = (s: string) => s.replace(/[‘’]/g, "'");
  */
 export function judgePage(c: LinkCandidate, page: SafePage, quote: string): PageVerdict {
   if (page.text === null) return { label: "unread", pageTitle: "", lineTitle: "", score: null, authorCheck: "skipped", evidence: null };
-  const html = page.text;
+  const html = page.text.length > JUDGE_PAGE_MAX_CHARS ? page.text.slice(0, JUDGE_PAGE_MAX_CHARS) : page.text;
   const text = pageVisibleText(html);
   const repo = githubOwnerRepo(page.finalUrl);
   const pageTitle = extractPageTitle(html, page.finalUrl);
@@ -767,13 +788,16 @@ export interface FoundLink {
  * candidate's, D19 8), and the site name alone (D22): a page's byline metadata
  * names commenters and cited authors and drops co-authors, so none is stored.
  * The agent's manifest title is never stored: it is untrusted text. `_entry`
- * stays in the signature for the route's call.
+ * stays in the signature for the route's call. Title and detail have their
+ * white space collapsed (as `renderLinkLine` writes them, so the clip counts
+ * written characters) and are clipped to 300 characters (F62: a crafted page
+ * stored a 1.07M-character line).
  */
 export function foundLinkFrom(c: LinkCandidate, page: SafePage, _entry: ManifestEntry, verdict: PageVerdict): FoundLink | null {
   if (!verdict.label) return null;
   const html = page.text ?? "";
-  const title = verdict.lineTitle || c.title || c.topic;
-  const detail = html ? siteName(html) : "";
+  const title = clip(verdict.lineTitle) || c.title || c.topic;
+  const detail = html ? clip(siteName(html)) : "";
   const evidence: LinkEvidence = verdict.evidence ?? (verdict.label === "unread" ? "pdf" : "quote");
   return { url: page.finalUrl, title, detail, label: verdict.label, evidence };
 }

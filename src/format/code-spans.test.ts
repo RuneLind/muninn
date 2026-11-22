@@ -70,3 +70,25 @@ describe("codeSpanContent", () => {
     expect(content("`\tx\t`")).toEqual(["\tx\t"]);
   });
 });
+
+describe("lineCodeSpanRanges is linear (A4 fix round 2)", () => {
+  // Each unmatched opener scanned to the end of the line: 597 ms at ae0772b1
+  // for `` \``a `` × 16k (each run escaped to a one-backtick opener, and no
+  // one-backtick run closes it); runs of every length up to 360 took 15 ms.
+  test("unmatched openers on one long line pair in well under 100 ms", () => {
+    let growing = "";
+    for (let n = 1; n <= 360; n++) growing += `${"`".repeat(n)}a`;
+    for (const line of ["\\``a".repeat(16_384), growing, "`a` ".repeat(32_768)]) {
+      const t0 = performance.now();
+      lineCodeSpanRanges(line);
+      expect(performance.now() - t0).toBeLessThan(100);
+    }
+  });
+
+  test("an escaped opener, a run inside a paired span skipped, an unmatched one, a later same-length closer (as at ae0772b1)", () => {
+    expect(lineCodeSpanRanges("\\``a`` `b` ``c``")).toEqual([
+      { start: 2, end: 8, runLen: 1 },
+      { start: 11, end: 16, runLen: 2 },
+    ]);
+  });
+});

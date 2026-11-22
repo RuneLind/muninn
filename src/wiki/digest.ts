@@ -26,6 +26,7 @@ import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import { agentStatus, setConnectorInfo } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 import { isCalendarDay } from "../format/calendar-day.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 import type { WikiIndex, WikiPageMeta } from "./store.ts";
 import { changedPagesForEntry, type ChangedPage } from "./digest-changed-pages.ts";
 
@@ -340,7 +341,7 @@ export function renderEntriesBlock(entries: LogEntry[]): string {
  *  digest rewrites whole multi-line segments, so without it a dangling `[[` in a
  *  bullet pairs with a later bullet's `]]` and the rewrite eats every line
  *  between them. */
-const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
+const WIKILINK_RE = wikilinkRegExp("plain");
 const BACKTICK_RE = /`([^`\n]+)`/g;
 const QUOTED_RE = /[“"]([^“”"\n]+)[”"]/g;
 

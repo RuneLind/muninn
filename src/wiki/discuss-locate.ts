@@ -34,6 +34,7 @@ import { parseTimelineItem } from "../format/genre-lists.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
 import { DISCUSS_CONTEXT_KEY_CHARS } from "./discuss-bounds.ts";
 import { keyChar, locateKey, matchStarts } from "./locate-key.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 
 /** How many key characters the edges tier compares at each end. */
 export const LOCATE_EDGE_CHARS = 80;
@@ -265,10 +266,50 @@ function readerLines(raw: string) {
   return { text, rawOf, lines, lineStart, bodyFrom, skip, code, hidden, sentinels };
 }
 
-const TABLE_RULE_RE =/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+/**
+ * A table's delimiter row: what `/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/`
+ * matched, cell by cell (fix round 2 of A4: that regex backtracks
+ * exponentially, about 1 s for `-`, then `|:` × 26, then `x`).
+ */
+export function isTableRule(line: string): boolean {
+  const cells = line.split("|");
+  const first = cells.length > 1 && cells[0]!.trim() === "" ? 1 : 0;
+  return cells.every((c, k) => k < first || (k === first ? /^:?-+:?$/ : /^:?-*:?$/).test(c.trim()));
+}
+
 const COMPONENT_TAG_RE = /<\/?([A-Z][A-Za-z0-9]*)/y;
-const WIKILINK_AT_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/y;
-const MD_LINK_AT_RE = /\[([^\]\n]+)\]\(([^)\n]*)\)/y;
+const WIKILINK_AT_RE = wikilinkRegExp("label", "y");
+
+/** The first `ch` at or after a position in one line, remembered, so increasing positions read each character once. */
+function nextIndexOf(line: string, ch: string): (pos: number) => number {
+  let from = 0;
+  let at = -2;
+  return (pos) => {
+    if (at === -2 || pos < from || (at >= 0 && pos > at)) {
+      from = pos;
+      at = line.indexOf(ch, pos);
+    }
+    return at;
+  };
+}
+
+/**
+ * `/\[([^\]\n]+)\]\(([^)\n]*)\)/y` at `i` of a line holding no `\n`, without
+ * the regex's rescan to the end of the line from every `[` that does not close
+ * (fix round 2 of A4: 380 ms for 16k `[a ` at ae0772b1). The label ends at
+ * the first `]` after the `[`, the URL at the first `)` after the `(`.
+ */
+function mdLinkAt(
+  line: string,
+  i: number,
+  nextClose: (pos: number) => number,
+  nextParen: (pos: number) => number,
+): { label: string; length: number } | null {
+  const j = nextClose(i + 1);
+  if (j <= i + 1 || line[j + 1] !== "(") return null;
+  const k = nextParen(j + 2);
+  return k < 0 ? null : { label: line.slice(i + 1, j), length: k + 1 - i };
+}
 
 /**
  * The page source collapsed toward the text the reader renders, under the key.
@@ -334,7 +375,7 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
       li++;
       continue;
     }
-    if (TABLE_RULE_RE.test(line) && /-/.test(line)) {
+    if (isTableRule(line) && /-/.test(line)) {
       li++;
       continue;
     }
@@ -369,8 +410,13 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
     /** Block components opened on this line, whose closer on it is a tag too. */
     const openedHere = new Set<string>();
     const spans = lineCodeSpanRanges(line);
+    // Spans are in order and `i` only grows: the next span not yet behind `i`.
+    let nextSpan = 0;
+    const nextClose = nextIndexOf(line, "]");
+    const nextParen = nextIndexOf(line, ")");
     while (i < line.length) {
-      const span = spans.find((s) => s.start === i);
+      while (nextSpan < spans.length && spans[nextSpan]!.start < i) nextSpan++;
+      const span = spans[nextSpan]?.start === i ? spans[nextSpan] : undefined;
       if (span) {
         emitRange(base + span.start + span.runLen, base + span.end - span.runLen);
         i = span.end;
@@ -390,11 +436,10 @@ export function collapseForLocate(raw: string, opts: { stripTitle?: string } = {
           i += w[0].length;
           continue;
         }
-        MD_LINK_AT_RE.lastIndex = i;
-        const l = MD_LINK_AT_RE.exec(line);
+        const l = mdLinkAt(line, i, nextClose, nextParen);
         if (l) {
-          emitRange(base + i + 1, base + i + 1 + l[1]!.length);
-          i += l[0].length;
+          emitRange(base + i + 1, base + i + 1 + l.label.length);
+          i += l.length;
           continue;
         }
       }

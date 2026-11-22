@@ -6,6 +6,7 @@
  */
 import { stripFactWrappers } from "./markdown-ast.ts";
 import { supersededById } from "./genre-lists.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 import { splitFirstSentence } from "./report-top.ts";
 import {
   DECISION_ID_RE,
@@ -42,13 +43,15 @@ const STRUCK_SPAN_RE = /~~[\s\S]*?~~/g;
 const FILL = "\x01";
 const CLOSERS = String.raw`*~)\]»"”'’\x01`;
 
+const WIKILINK = wikilinkRegExp("label");
+
 /** Text with what a reader never sees as prose masked: tags and comments,
  *  link destinations, bare URLs and paths. Link text stays, a wikilink's label
  *  included; a bare `[[target]]` is a target. */
 function maskTargets(text: string): string {
   return text
     .replace(/<!--[\s\S]*?-->|<\/?[A-Za-z][^<>]*>/g, FILL)
-    .replace(/\[\[[^\]|\n]+?(?:\|([^\]\n]*?))?\]\]/g, (_m, label?: string) => label ?? FILL)
+    .replace(WIKILINK, (_m, _target: string, label?: string) => label ?? FILL)
     .replace(/!\[[^\]\n]*\]\((?:[^()\n]|\([^()\n]*\))*\)/g, FILL)
     .replace(/\]\((?:[^()\n]|\([^()\n]*\))*\)/g, `]${FILL}`)
     .replace(/\]\[[^[\]\n]*\]/g, `]${FILL}`)

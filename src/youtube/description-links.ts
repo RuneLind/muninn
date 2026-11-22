@@ -239,11 +239,24 @@ const URL_RE = /https?:\/\/[^\s<>"'`]+/g;
 const TRAILING_PUNCT = new Set([".", ",", ";", ":", "!", "?", "'", '"', "”", "’", "»", "*", "。", "，", "、", "！", "？", "：", "；"]);
 /** Closers stripped only when unbalanced, with their openers. */
 const CLOSERS: Record<string, string> = { ")": "(", "]": "[", "）": "（", "」": "「", "』": "『", "】": "【", "〉": "〈", "》": "《" };
-/** Trailing emoji (with skin tones, joiners, VS16): a pointer after a URL, never part of it. */
-const TRAILING_EMOJI_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u200d\ufe0f\u20e3]+$/u;
+/** One trailing emoji code point (with skin tones, joiners, VS16): a pointer after a URL, never part of it. */
+const EMOJI_CODE_POINT_RE = /^[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}‍️⃣]$/u;
+const OPENERS = new Set(Object.values(CLOSERS));
 
-function count(s: string, ch: string): number {
-  return s.split(ch).length - 1;
+/** Where the run of emoji code points ending at `end` starts (`end` when there is none). */
+function trailingEmojiStart(s: string, end: number): number {
+  let e = end;
+  while (e > 0) {
+    let start = e - 1;
+    const lo = s.charCodeAt(start);
+    if (lo >= 0xdc00 && lo <= 0xdfff && start > 0) {
+      const hi = s.charCodeAt(start - 1);
+      if (hi >= 0xd800 && hi <= 0xdbff) start--;
+    }
+    if (!EMOJI_CODE_POINT_RE.test(s.slice(start, e))) break;
+    e = start;
+  }
+  return e;
 }
 
 /**
@@ -251,27 +264,45 @@ function count(s: string, ch: string): number {
  * full-width punctuation and emoji) stripped, and a closing `)` (or `]`, `）`,
  * `」`…) stripped only when it is unbalanced, so `Foo_(bar)` keeps its own
  * parentheses and `(see https://a.b/c)` loses the prose one.
+ *
+ * Linear (F60): the end moves left one strip at a time, the emoji run is read
+ * code point by code point, and the bracket counts are taken once (no strip
+ * removes an opener; a closer strip lowers its own count). A `[…]+$` regex
+ * and a recount per strip were cubic on a URL followed by an emoji run and
+ * quadratic on a run of closing brackets.
  */
 export function trimUrl(raw: string): string {
-  let url = raw;
+  let end = raw.length;
+  let counts: Map<string, number> | null = null;
+  const countOf = (ch: string): number => {
+    if (!counts) {
+      counts = new Map();
+      for (let i = 0; i < raw.length; i++) {
+        const c = raw[i]!;
+        if (c in CLOSERS || OPENERS.has(c)) counts.set(c, (counts.get(c) ?? 0) + 1);
+      }
+    }
+    return counts.get(ch) ?? 0;
+  };
   for (;;) {
-    const emoji = TRAILING_EMOJI_RE.exec(url);
-    if (emoji) {
-      url = url.slice(0, emoji.index);
+    const emojiStart = trailingEmojiStart(raw, end);
+    if (emojiStart < end) {
+      end = emojiStart;
       continue;
     }
-    const last = url.at(-1);
-    if (last === undefined) return url;
+    if (end === 0) return "";
+    const last = raw[end - 1]!;
     if (TRAILING_PUNCT.has(last)) {
-      url = url.slice(0, -1);
+      end--;
       continue;
     }
     const opener = CLOSERS[last];
-    if (opener !== undefined && count(url, last) > count(url, opener)) {
-      url = url.slice(0, -1);
+    if (opener !== undefined && countOf(last) > countOf(opener)) {
+      counts!.set(last, countOf(last) - 1);
+      end--;
       continue;
     }
-    return url;
+    return raw.slice(0, end);
   }
 }
 

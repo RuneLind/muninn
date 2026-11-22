@@ -13,6 +13,7 @@ import {
   CONTEXT_FULL_MIN,
   CONTEXT_PARTIAL_MIN,
   contextAccepts,
+  isTableRule,
   LOCATE_EDGE_CHARS,
   locatePassage,
   pageHeadings,
@@ -388,5 +389,46 @@ describe("the collapse and the headings", () => {
     const { text, map } = stripFactWrappersWithMap(FACTS);
     for (let i = 0; i < text.length; i++) expect(FACTS[map[i]!]).toBe(text[i]!);
     expect(locatePassage(FACTS, { selection: "A whole checked paragraph.", before: "Before a checked claim after.", after: "The last line.", atEnd: true })).toMatchObject({ found: "exact", fromLine: 6, toLine: 6 });
+  });
+});
+
+describe("the collapse is linear on one long line (A4 fix round 2)", () => {
+  // Measured at ae0772b1: 4,665 ms for 64k `[`, 2,023 ms for `[[a ` × 16k,
+  // 380 ms for `[a ` × 16k, 340 ms for `` `a` `` × 16k (both doubled to 32k
+  // here so the bound has room on a loaded runner), 590 ms for `` \``a ``
+  // × 16k; the delimiter-row regex doubled per `|:` (about 1 s at 26).
+  test.each([
+    ["64k `[`", "[".repeat(65_536)],
+    // `indexOf` per `[` is quadratic with a small constant; this size shows it.
+    ["256k `[`", "[".repeat(262_144)],
+    ["`[[a ` × 16k", "[[a ".repeat(16_384)],
+    ["`[a ` × 32k", "[a ".repeat(32_768)],
+    ["`[a](` × 16k", "[a](".repeat(16_384)],
+    ["`` `a` `` × 32k", "`a` ".repeat(32_768)],
+    ["`` \\``a `` × 16k", "\\``a".repeat(16_384)],
+    ["a delimiter row that fails at its end", `-${"|:".repeat(40)}x`],
+  ])("%s collapses in well under 300 ms", (_name, line) => {
+    const t0 = performance.now();
+    collapseForLocate(line);
+    expect(performance.now() - t0).toBeLessThan(300);
+  });
+
+  test("links and code spans read as at ae0772b1", () => {
+    expect(collapseForLocate("a [[T|lab]] [x](u) [[T2]] `c` [y] [z]( [[q|]] [w]()").text).toBe("alabxt2c[y]z");
+    expect(collapseForLocate("[](u) [a][b](c) [d] (e) [f](g)h)").text).toBe("[](u)[a]b[d](e)fh)");
+  });
+
+  test("the delimiter-row check matches the regex it replaced on 20 000 random lines", () => {
+    const OLD = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+    const parts = ["|", "|", "-", "-", ":", " ", "\t", "x", " "];
+    let seed = 1122;
+    const next = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    const diffs: string[] = [];
+    for (let i = 0; i < 20_000; i++) {
+      let line = "";
+      for (let n = Math.floor(next() * 12); n > 0; n--) line += parts[Math.floor(next() * parts.length)];
+      if (isTableRule(line) !== OLD.test(line)) diffs.push(JSON.stringify(line));
+    }
+    expect(diffs.slice(0, 5)).toEqual([]);
   });
 });

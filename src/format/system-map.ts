@@ -31,6 +31,7 @@
 import type { TableBlock } from "./markdown-ast.ts";
 import { chartTable } from "./chart-block.ts";
 import { visibleText } from "./report-top.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 
 export type SystemMapStatus = "ok" | "wrong";
 
@@ -98,7 +99,7 @@ export function nodeKey(name: string): string {
   return name.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
+const WIKILINK_RE = wikilinkRegExp("label");
 const WHOLE_WIKILINK_RE = /^\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]$/;
 
 /** Every `[[t|l]]` in a cell as the text it shows: its label, else its target. */
