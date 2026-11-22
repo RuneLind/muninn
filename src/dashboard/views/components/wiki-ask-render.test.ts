@@ -122,3 +122,10 @@ test("askAnswerBodyHtml enhances a server-rendered answer_html carrying a confid
   const body = askAnswerBodyHtml(serverHtml, "", "");
   expect(body).toContain('wiki-fc-conf-chip mid">73/100');
 });
+
+test("F71: a Confidence line inside a fence or a code span stays code", () => {
+  const html = enhanceConfidenceHtml("<pre><code>Confidence: 80/100</code></pre>\n<code>Confidence: 70/100</code>\n\nConfidence: 60/100");
+  expect(html).toContain("<pre><code>Confidence: 80/100</code></pre>");
+  expect(html).toContain("<code>Confidence: 70/100</code>");
+  expect(html).toContain('wiki-fc-conf-chip mid">60/100');
+});

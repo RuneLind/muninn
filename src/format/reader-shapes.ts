@@ -486,7 +486,8 @@ function chipOne(whole: string, before: string, run: string, after: string): str
 
 /** Rendered inline HTML with the before → after chips drawn in its text:
  *  never inside a tag (an `href`, an attribute) and never across a parked
- *  placeholder (`\x00…\x00`: inline code, an inline component). */
+ *  placeholder (`\x00…\x01`: inline code, an inline component; `\x00…\x00`:
+ *  the reader's parked wikilink). */
 export function beforeAfterChipsHtml(html: string): string {
   if (!html.includes("→") && !html.includes("-&gt;")) return html;
   // The visible text so far, so a run's first value reads what precedes it
@@ -494,7 +495,7 @@ export function beforeAfterChipsHtml(html: string): string {
   // (`` `v`1.2 ``), a `<br>` as a space.
   let earlier = "";
   const chipped = html
-    .split(/(<[^>]*>|\x00[^\x00]*\x00)/)
+    .split(/(<[^>]*>|\x00[^\x00\x01]*[\x00\x01])/)
     .map((seg, k) => {
       const out = k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg, earlier);
       earlier = (earlier + (k % 2 === 0 ? seg : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "")).slice(-48);

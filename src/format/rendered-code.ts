@@ -58,6 +58,8 @@
  * third container fails there instead of silently in a reader's browser.
  */
 
+import { escapeHtml } from "./markdown-core.ts";
+
 /** A half-open `[start, end)` span of rendered HTML that is code. */
 export interface RenderedCodeRegion {
   start: number;
@@ -177,6 +179,24 @@ function mergeRegions(regions: RenderedCodeRegion[]): RenderedCodeRegion[] {
     else out.push(r);
   }
   return out;
+}
+
+/**
+ * The one restore for a caller's `\x00<MARKER><n>\x00` sentinels over rendered
+ * HTML, shared by the reader's wikilinks and the Ask tab's citations (F55,
+ * architecture review 2026-11-16: only `render.ts` had the attribute rule). A
+ * sentinel inside an attribute value or inside code goes back as `literal[n]`,
+ * escaped: link HTML in a value ends it, and code shows its source. Anywhere
+ * else it becomes `rendered[n]`. Every `"` in rendered text is escaped
+ * (`&quot;`), so a `="…"` run is an attribute value and nothing else.
+ */
+export function restoreParkedSentinels(html: string, marker: string, rendered: readonly string[], literal: readonly string[]): string {
+  if (!html.includes(`\x00${marker}`)) return html;
+  const re = new RegExp(`\\x00${marker}(\\d+)\\x00`, "g");
+  const source = (i: string) => escapeHtml(literal[parseInt(i, 10)] ?? "");
+  const valued = html.replace(/="[^"]*"/g, (value) => (value.includes("\x00") ? value.replace(re, (_m, i: string) => source(i)) : value));
+  const regions = renderedCodeRegions(valued);
+  return valued.replace(re, (_m, i: string, offset: number) => (inRenderedCode(regions, offset) ? source(i) : (rendered[parseInt(i, 10)] ?? "")));
 }
 
 /** Is `index` inside one of `regions`? Binary search — sound because

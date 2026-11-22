@@ -23,7 +23,7 @@
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
-import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
+import { restoreParkedSentinels } from "../format/rendered-code.ts";
 import type { Citation } from "../research/answer.ts";
 
 const CITE_MARKER_RE = /\[(\d+)\]/g;
@@ -38,7 +38,8 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
   const tokens: string[] = [];
   /** The source text behind each token — restored where it lands inside code. */
   const literal: string[] = [];
-  const withTokens = (answer ?? "").replace(CITE_MARKER_RE, (whole, num: string) => {
+  // A NUL is never content, and one in the answer could forge a sentinel.
+  const withTokens = (answer ?? "").replaceAll("\0", "").replace(CITE_MARKER_RE, (whole, num: string) => {
     const n = parseInt(num, 10);
     const c = citations[n - 1];
     // Only linkify in-range markers whose citation matched a wiki page — mirrors
@@ -58,16 +59,9 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
     literal.push(whole);
     return `\x00ASKCITE${idx}\x00`;
   });
-  const renderedHtml = formatWebHtml(withTokens);
-  const codeRegions = renderedCodeRegions(renderedHtml);
-  return renderedHtml.replace(
-    /\x00ASKCITE(\d+)\x00/g,
-    (_m, idx: string, offset: number) => {
-      const i = parseInt(idx, 10);
-      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
-      return tokens[i] ?? "";
-    },
-  );
+  // In code or in an attribute value the marker goes back as its source text.
+  // A citation's own title or page name can still carry a NUL: never served.
+  return restoreParkedSentinels(formatWebHtml(withTokens), "ASKCITE", tokens, literal).replaceAll("\0", "");
 }
 
 /**

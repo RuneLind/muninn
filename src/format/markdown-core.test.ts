@@ -40,8 +40,8 @@ describe("escapeHtml", () => {
 describe("Placeholders", () => {
   test("returns sentinel containing marker and index", () => {
     const p = new Placeholders();
-    expect(p.add("CODE", "<pre>x</pre>")).toBe("\x00CODE0\x00");
-    expect(p.add("CODE", "<pre>y</pre>")).toBe("\x00CODE1\x00");
+    expect(p.add("CODE", "<pre>x</pre>")).toBe("\x00CODE0\x01");
+    expect(p.add("CODE", "<pre>y</pre>")).toBe("\x00CODE1\x01");
   });
 
   test("restores stored values in place", () => {
@@ -71,7 +71,7 @@ describe("Placeholders", () => {
     const p = new Placeholders();
     p.add("CODE", "X");
     // Manually-crafted sentinel pointing at a slot that does not exist
-    expect(p.restore("a \x00CODE5\x00 b")).toBe("a  b");
+    expect(p.restore("a \x00CODE5\x01 b")).toBe("a  b");
   });
 
   test("restores to a fixed point when a value re-introduces an earlier marker", () => {
@@ -84,5 +84,18 @@ describe("Placeholders", () => {
     const restored = p.restore(outer);
     expect(restored).toBe("<span><code>x</code></span>");
     expect(restored).not.toContain("\x00");
+  });
+});
+
+describe("Placeholders: distinct open and close delimiters (F29)", () => {
+  test("a marker word between two sentinels forges no third, in either store order", () => {
+    const p = new Placeholders();
+    const code = p.add("INLINE", "<code>c</code>");
+    const cmp = p.add("INLINECMP", "<b>p</b>");
+    expect(p.restore(`${cmp}INLINE0${code}`)).toBe("<b>p</b>INLINE0<code>c</code>");
+    const q = new Placeholders();
+    const cmp2 = q.add("INLINECMP", "<b>p</b>");
+    const code2 = q.add("INLINE", "<code>c</code>");
+    expect(q.restore(`${cmp2}INLINE0${code2}`)).toBe("<b>p</b>INLINE0<code>c</code>");
   });
 });

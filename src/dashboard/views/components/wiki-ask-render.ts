@@ -14,6 +14,7 @@
  */
 
 import { formatWebHtml } from "../../../web/web-format.ts";
+import { inRenderedCode, renderedCodeRegions } from "../../../format/rendered-code.ts";
 
 /**
  * Matches a standalone `Confidence: NN/100` line in **formatWebHtml output**.
@@ -37,7 +38,10 @@ const CONFIDENCE_HTML_RE = /(^|\n|>)([ \t]*)Confidence:[ \t]*(\d{1,3})\/100(?=$|
  * answer body.
  */
 export function enhanceConfidenceHtml(html: string): string {
-  return html.replace(CONFIDENCE_HTML_RE, (_m, pre: string, ws: string, digits: string) => {
+  // A line inside a fence or a code span is code, and stays as written (F71).
+  const code = renderedCodeRegions(html);
+  return html.replace(CONFIDENCE_HTML_RE, (m, pre: string, ws: string, digits: string, offset: number) => {
+    if (inRenderedCode(code, offset + pre.length + ws.length)) return m;
     const n = Math.max(0, Math.min(100, parseInt(digits, 10)));
     const band = n >= 80 ? "hi" : n >= 50 ? "mid" : "lo";
     return (

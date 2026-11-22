@@ -186,6 +186,12 @@ inside code it becomes the source text, escaped. That restore is TEXT-exact, not
 render-exact: `code.textContent` is byte-identical to what an unparked render
 produces — which is the acceptance — but the restored run is not tokenized, so a
 `[[Page]]` inside a `ts` fence is uncoloured where the surrounding code is not.
+A sentinel inside an attribute value goes back as the source text too. Both
+passes share one restore, `restoreParkedSentinels` (`src/format/rendered-code.ts`),
+since F55 (architecture review 2026-11-16): the Ask tab had no attribute rule,
+so a `[1]` in a link URL or a Question id cut the value. These caller sentinels
+are `\x00…\x00`; `Placeholders`' own are `\x00…\x01` (F29), so a marker word
+between two of them cannot spell a third.
 
 The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
 button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the

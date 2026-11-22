@@ -100,15 +100,21 @@ function field(name: string, v: unknown, notes: Notes): string {
   return t;
 }
 
+/** A field as one inline run, its NULs (a YAML `\0` escape) dropped. */
+const oneLine = (s: string) => s.replace(/\s*[\r\n]\s*/g, " ").replaceAll("\0", "");
+
 /** One list entry as a case; `"skip"` when it is not a mapping with an `id`
  *  key, `"empty"` when that id is empty. */
 function toCase(entry: unknown, notes: Notes): Omit<BoardCase, "anchor"> | "skip" | "empty" {
   if (!isMapping(entry) || !("id" in entry)) return "skip";
   const idNotes: Notes = { coerced: [], dropped: 0 };
-  const id = field("id", entry.id, idNotes);
+  // A YAML scalar keeps its line ends; every field is one inline run. The id,
+  // status and owner also land in attribute values (title, aria-label), where
+  // the reader's paragraph pass would write `<br><br>` for a blank line (F56).
+  const id = oneLine(field("id", entry.id, idNotes));
   if (!id) return idNotes.dropped ? "skip" : "empty";
   notes.coerced.push(...idNotes.coerced);
-  const rawStatus = scalarText(entry.status) ?? "";
+  const rawStatus = oneLine(scalarText(entry.status) ?? "");
   const s = rawStatus.toLowerCase();
   const status = (CASE_STATUSES as readonly string[]).includes(s) ? (s as CaseStatus) : "unknown";
   const refsRaw = Array.isArray(entry.refs) ? entry.refs : entry.refs === undefined ? [] : [entry.refs];
@@ -116,11 +122,10 @@ function toCase(entry: unknown, notes: Notes): Omit<BoardCase, "anchor"> | "skip
     id,
     status,
     rawStatus,
-    owner: field("owner", entry.owner, notes),
-    // A YAML block scalar keeps its line ends; a note is one inline run.
-    note: field("note", entry.note, notes).replace(/\s*\n\s*/g, " "),
-    kort: field("kort", entry.kort, notes).replace(/\s*\n\s*/g, " "),
-    refs: refsRaw.map((r) => field("refs", r, notes)).filter(Boolean),
+    owner: oneLine(field("owner", entry.owner, notes)),
+    note: oneLine(field("note", entry.note, notes)),
+    kort: oneLine(field("kort", entry.kort, notes)),
+    refs: refsRaw.map((r) => oneLine(field("refs", r, notes))).filter(Boolean),
   };
 }
 

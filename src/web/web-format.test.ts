@@ -823,3 +823,31 @@ describe("formatWebHtml — inline code-span runs", () => {
     expect(formatWebHtml("a \\` b")).toBe("a \\` b");
   });
 });
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  test("F53: a link's href is never re-read by the emphasis or code passes, in both branches", () => {
+    const html = formatWebHtml("see [x](https://example.com/**b**_e_/file.ts:12) and [y](#frag_a_b_) end");
+    expect(html).toContain('<a href="https://example.com/**b**_e_/file.ts:12" target="_blank" rel="noopener">x</a>');
+    expect(html).toContain('<a href="#frag_a_b_">y</a>');
+    // The label still takes emphasis.
+    expect(formatWebHtml("[**b** _e_](https://example.com/a)")).toBe('<a href="https://example.com/a" target="_blank" rel="noopener"><strong>b</strong> <em>e</em></a>');
+    // A code span or an inline component in the URL makes no link: the text stays as written.
+    expect(formatWebHtml("see [x](https://e.com/`c`/d)")).toBe("see [x](https://e.com/<code>c</code>/d)");
+    expect(formatWebHtml('[x](#a<Pill tone="good">p</Pill>)')).not.toContain("<a ");
+  });
+
+  test("F54: blank lines inside fenced code survive", () => {
+    expect(formatWebHtml("```\na\n\n\n\nb\n```")).toBe("<pre><code>a\n\n\n\nb</code></pre>");
+    // Prose around it still folds.
+    expect(formatWebHtml("a\n\n\n\nb")).toBe("a\n\nb");
+  });
+
+  test("F29: a marker word between two sentinels forges no third", () => {
+    expect(formatWebHtml("<Pill>p</Pill>INLINE0`c`")).toBe('<span class="pill">p</span>INLINE0<code>c</code>');
+  });
+
+  test("a Query id holding a wikilink puts no link inside the id's anchor", () => {
+    const html = formatWebHtml('<Query id="\x00WIKIPAGELINK0\x00">\n\nx\n\n</Query>', { wikiLinkTexts: ["Page"] });
+    expect(html).toContain('<a class="query-id" href="#page">Page</a>');
+  });
+});

@@ -31,6 +31,7 @@ import { ordinals, renderBlocks, type BlockRenderer, type ListNest, type Rendere
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { beforeAfterChipsHtml, htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
+import { renderedCodeRegions } from "../format/rendered-code.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchors, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
@@ -476,7 +477,7 @@ export function formatWebHtml(
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
-    const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim()))));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
@@ -814,6 +815,17 @@ const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query
  *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
  *  `-3`, and its id link follows. A pass over the OUTPUT, because some
  *  components render a body twice and keep one copy (`foldBodyHtml`). */
+/** A Query id's parked wikilink as its link text inside the id's own anchor:
+ *  restored as a link it would nest an `<a>` in an `<a>`, which the browser
+ *  closes early. After `uniqueAnchors`, which reads the sentinel to rank the
+ *  card's anchor last. */
+function unlinkQueryIds(html: string): string {
+  if (!html.includes('<a class="query-id"')) return html;
+  return html.replace(/(<a class="query-id" href="#[^"]*">)([^<]*)(<\/a>)/g, (m, open: string, text: string, close: string) =>
+    text.includes("\x00") ? open + text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_s, i: string) => escapeHtml(currentLinkTexts?.[Number(i)] ?? "")) + close : m,
+  );
+}
+
 function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
   const others = [...html.replace(ANCHOR_RE, "$2").replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!);
@@ -2819,11 +2831,18 @@ function renderInlineWith(text: string, chips: boolean): string {
   // Markdown links → <a>. Only http/https to prevent javascript: injection,
   // plus an in-page `#fragment` (no quote or space can reach the attribute:
   // the text is escaped above and the class below excludes whitespace).
-  result = replaceMarkdownLinks(result, (_m, label, url) => {
+  // The finished open tag is parked (F53): the emphasis, chip and line-ref
+  // passes below never see the href, and a URL holding a parked code span or
+  // inline component makes no link, so no tag is ever restored into it. (A
+  // caller's own `\x00…\x00` sentinel there, a wikilink or a citation, goes
+  // back as its source text through `restoreParkedSentinels`.)
+  result = replaceMarkdownLinks(result, (m, label, url) => {
+    const linkable = /^https?:\/\//.test(url) || /^#[^\s#]+$/.test(url);
+    if (linkable && /\x00[^\x00\x01]*\x01/.test(url)) return m;
     if (/^https?:\/\//.test(url)) {
-      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+      return `${ph.add("LINKOPEN", `<a href="${url}" target="_blank" rel="noopener">`)}${label}</a>`;
     }
-    if (/^#[^\s#]+$/.test(url)) return `<a href="${url}">${label}</a>`;
+    if (/^#[^\s#]+$/.test(url)) return `${ph.add("LINKOPEN", `<a href="${url}">`)}${label}</a>`;
     return label;
   });
 
@@ -2843,10 +2862,15 @@ const BLOCK_TAG = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
 const NL_BEFORE_BLOCK = new RegExp(`\\n+(</?${BLOCK_TAG}[>\\s])`, "g");
 const NL_AFTER_BLOCK = new RegExp(`(</${BLOCK_TAG}>|<hr>)\\n+`, "g");
 
-/** Collapse excess blank lines, especially around block-level elements. */
+/** Collapse excess blank lines, especially around block-level elements,
+ *  outside rendered code: a fence's blank lines are its text (F54). */
 function collapseBlockSpacing(text: string): string {
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(NL_BEFORE_BLOCK, "\n$1")
-    .replace(NL_AFTER_BLOCK, "$1\n");
+  const collapse = (s: string) => s.replace(/\n{3,}/g, "\n\n").replace(NL_BEFORE_BLOCK, "\n$1").replace(NL_AFTER_BLOCK, "$1\n");
+  let out = "";
+  let from = 0;
+  for (const r of renderedCodeRegions(text)) {
+    out += collapse(text.slice(from, r.start)) + text.slice(r.start, r.end);
+    from = r.end;
+  }
+  return out + collapse(text.slice(from));
 }

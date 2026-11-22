@@ -32,6 +32,7 @@ const F53_FILL = `[x](https://example.com/**b**_e_/file.ts:12)`;
 const F55_FILL = "**bold** _em_ `code` [1] Hold";
 const F56_FILL = "x\n\ny";
 const F29_FILL = "<Pill>p</Pill>INLINE0`c`";
+const NUL_FILL = "a\0b";
 /** What every hostile render is compared with: the same setup's elements. */
 const BENIGN_FILL = "Benign Hold";
 
@@ -58,6 +59,8 @@ const FILLS = [
   `x&quot; data-pwn=&quot;1`,
   // A lone `<`, one before a letter.
   `x <y and 1 < 2`,
+  // A raw NUL: the page body drops it, the sibling files and an Ask answer must too.
+  NUL_FILL,
 ] as const;
 
 type Mode = "views" | "plain" | "ask";
@@ -470,16 +473,16 @@ const FILL_MARKDOWN_ELEMENTS = new Set(["a", "strong", "em", "code", "sup", "spa
 // ── Known gaps ──────────────────────────────────────────────────────────────
 
 /**
- * Findings the next PR (A2) fixes. A violation is excused only by a gap whose
+ * Known findings a later PR fixes. A violation is excused only by a gap whose
  * fill, mode and component match and whose kind, element, class and attribute
  * are the violation's own, so a gap never excuses another element or another
  * attribute of the same case; and each gap must still match on every component
  * it names, so its fix fails the last test until the entry (or that component)
- * is deleted. Only F53, F55, F56 and F29 belong here: any other failure is a
- * new finding.
+ * is deleted. A2 fixed the four it held (F53, F55, F56, F29) and the list is
+ * empty: any failure now is a new finding, to fix rather than excuse.
  */
 interface KnownGap {
-  finding: "F53" | "F55" | "F56" | "F29";
+  finding: string;
   fill: string;
   modes: readonly Mode[];
   components: readonly ComponentName[];
@@ -495,42 +498,7 @@ interface KnownGap {
    *  `>`, matched up to and including it). */
   near?: RegExp;
 }
-/** The components whose body, cells or file fields render the fill as inline
- *  markdown, where F53 and F29 trip (measured on this guard's pages). */
-const F53_COMPONENTS: readonly ComponentName[] = [
-  "AnnotatedCode", "Callout", "CaseBoard", "Chart", "Checklist", "ComparisonTable", "DecisionLog", "DeltaTable",
-  "FactCheck", "Figure", "FileTree", "Fold", "Glossary", "Historic", "Meter", "More", "Query", "Question", "RuleTree",
-  "RunChecklist", "StatusRows", "Steps", "SystemMap", "Timeline", "Tldr",
-];
-const F29_COMPONENTS: readonly ComponentName[] = [...F53_COMPONENTS, "Lane", "NextMoves"];
-
-const KNOWN_GAPS: KnownGap[] = [
-  // A markdown link's href re-processed by the emphasis pass (web-format.ts): a plain `<a>`'s href only.
-  {
-    finding: "F53", fill: F53_FILL, modes: ["views", "plain", "ask"], components: F53_COMPONENTS,
-    kind: "value-lt-gt", tag: "a", cls: /^$/, attrs: ["href"], value: /^https:\/\/example\.com\/<\/?strong>b<\/?strong><em>e<\/em>\/file\.ts:12$/,
-  },
-  // The Ask tab restores a citation's `<sup>` inside an attribute value (ask-render.ts): these three values.
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question"], kind: "unparsable", tag: "section", cls: /^question\b/, attrs: ["data-question-id"] },
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Lane", "NextMoves"], kind: "unparsable", tag: "div", cls: /^nm-lane\b/, attrs: ["data-who"] },
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Embed"], kind: "unparsable", tag: "figure", cls: /^embed$/, attrs: ["data-embed-title"] },
-  // The same restore into a fence's `language-` class, which a `lang=` reaches (its broken value hides the class).
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["AnnotatedCode"], kind: "unparsable", tag: "code", cls: /^$/, attrs: ["class"] },
-  // The broken value's own `" Hold">` tail, which then reads as text after the restored `</sup>`.
-  {
-    finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question", "Lane", "NextMoves", "Embed", "AnnotatedCode"],
-    kind: "raw-gt", tag: "sup", cls: /^wiki-ask-cite$/, near: /\[1\]<\/sup> Hold">$/,
-  },
-  // `paragraphGaps` writes `<br><br>` into a value holding a blank line (render.ts): CaseBoard's status pill
-  // and, in dots view, the square's three values.
-  { finding: "F56", fill: F56_FILL, modes: ["views", "plain"], components: ["CaseBoard"], kind: "value-lt-gt", tag: "span", cls: /^cb-pill\b/, attrs: ["title"], value: /^status: x<br><br>y$/ },
-  {
-    finding: "F56", fill: F56_FILL, modes: ["views"], components: ["CaseBoard"],
-    kind: "value-lt-gt", tag: "button", cls: /^cb-dot cb-dot-unknown$/, attrs: ["title", "aria-label", "data-cb-say"], value: /^x<br><br>y(: | — )/,
-  },
-  // Two adjacent sentinels with a marker word between forge a third (markdown-core.ts): a NUL at the forged pair's edge.
-  { finding: "F29", fill: F29_FILL, modes: ["views", "plain", "ask"], components: F29_COMPONENTS, kind: "nul", near: /\0INLINECMP0<code>c<\/code>|<code>c<\/code>INLINE0\0/ },
-];
+const KNOWN_GAPS: KnownGap[] = [];
 
 interface Case {
   component: ComponentName;

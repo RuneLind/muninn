@@ -584,3 +584,25 @@ describe("renderWikiHtml on a long line of `[` (architecture review 2026-11-16, 
     }
   });
 });
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  const yaml = '- id: "x\\n\\ny"\n  status: "a\\n\\nb"\n- id: "n\\0ul"\n  status: "s\\0t"\n';
+  const files = {
+    get: (ref: string) =>
+      ref.endsWith(".yaml") ? { ok: true as const, text: yaml } : ref.endsWith(".csv") ? { ok: true as const, text: "a\0b,c\n1,2\n" } : undefined,
+  };
+  test("F56: a CaseBoard value holding a blank line takes no <br> in an attribute", () => {
+    for (const view of ["", ' view="dots"']) {
+      const html = renderWikiHtml(`<CaseBoard src="cases.yaml"${view} />\n`, () => undefined, { files, views: true });
+      expect(html).not.toMatch(/="[^"]*<br>/);
+      expect(html).toContain('title="status: a b"');
+    }
+  });
+
+  test("a NUL in a sibling file is never served", () => {
+    const md = '<CaseBoard src="cases.yaml" />\n\n<Query id="Q-1" csv="q.csv">\n\nx\n\n</Query>\n';
+    const html = renderWikiHtml(md, () => undefined, { files, views: true });
+    expect(html).not.toContain("\0");
+    expect(html).toContain('<th scope="col">ab</th>');
+  });
+});

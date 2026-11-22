@@ -39,7 +39,8 @@ export function escapeHtml(text: string): string {
  *  italicized on Slack and stayed literal on email, because only the email column
  *  had escaped its `"` to `&quot;` by the time the pattern ran. Quotes stay in the
  *  CONTENT-edge sets, so `*"quoted phrase"*` still emphasizes on both. */
-const ITALIC_PRECEDER = "(?<![^\\s\\x00«([\\-])";
+// `\x01` is a placeholder's close, `\x00` its open (and the reader's wikilink sentinels).
+const ITALIC_PRECEDER = "(?<![^\\s\\x00\\x01«([\\-])";
 
 /** Content may OPEN on a letter, digit or emoji… */
 const ITALIC_EDGE_WORD = "[\\p{L}\\p{N}\\p{Extended_Pictographic}]";
@@ -269,9 +270,14 @@ export function parkLeftoverStarRuns(text: string, ph: Placeholders): string {
 export const LINKABLE_TARGET_RE = /^(?:https?:\/\/|mailto:)/i;
 
 /**
- * Placeholder store using `\x00<MARKER><idx>\x00` sentinels. Use to protect
+ * Placeholder store using `\x00<MARKER><idx>\x01` sentinels. Use to protect
  * regions (code blocks, inline code, links) from further markdown processing,
  * then restore them at the end.
+ *
+ * The open and close delimiters differ (F29, architecture review 2026-11-16):
+ * with one delimiter for both, a sentinel's close plus a literal `INLINE0` plus
+ * the next sentinel's open spelled a third sentinel, so a restore consumed it,
+ * lost the real ones and served NULs.
  */
 export class Placeholders {
   private stores = new Map<string, string[]>();
@@ -285,7 +291,7 @@ export class Placeholders {
     }
     const idx = arr.length;
     arr.push(rendered);
-    return `\x00${marker}${idx}\x00`;
+    return `\x00${marker}${idx}\x01`;
   }
 
   /**
@@ -319,7 +325,7 @@ const restoreRegexCache = new Map<string, RegExp>();
 function restoreRegex(marker: string): RegExp {
   let re = restoreRegexCache.get(marker);
   if (!re) {
-    re = new RegExp(`\\x00${marker}(\\d+)\\x00`, "g");
+    re = new RegExp(`\\x00${marker}(\\d+)\\x01`, "g");
     restoreRegexCache.set(marker, re);
   }
   return re;

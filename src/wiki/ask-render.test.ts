@@ -254,3 +254,19 @@ describe("an [n] marker inside code is CODE", () => {
     expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
   });
 });
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  const cites = [{ n: 1, pageName: "P", title: "T" } as Citation];
+  test("F55: a citation inside an attribute value comes back as its source text", () => {
+    const html = renderAskAnswerHtml('<Question id="Q [1]">\n\nq?\n\n</Question>\n\n[t](https://e.com/x[1]y) and [1]', cites);
+    expect(html).toContain('data-question-id="Q [1]"');
+    expect(html).toContain('<a href="https://e.com/x[1]y" target="_blank" rel="noopener">t</a>');
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(2);
+  });
+
+  test("an answer's NUL is never served", () => {
+    const html = renderAskAnswerHtml('<Question id="a\0b">\n\nq?\n\n</Question>\n\nx\0y', []);
+    expect(html).not.toContain("\0");
+    expect(html).toContain('data-question-id="ab"');
+  });
+});

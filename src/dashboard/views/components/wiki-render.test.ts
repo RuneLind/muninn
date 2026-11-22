@@ -226,6 +226,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 409): 923,349, so the pin moves to 923,500.
 // 2026-11-22, architecture review A4 (F30: one linear wikilink matcher, linear code-span closers),
 // rebased on B4 and B6: 926,663, so the pin moves to 926,800.
+// 2026-11-22, architecture review A2 (F29/F53/F54/F71: distinct sentinel delimiters, the parked link
+// tag, and the formatter and the Ask confidence pass skipping rendered code): 923,243 (316,290 gzipped), so the pin moves to 923,400.
 const WIKI_CLIENT_MAX_BYTES = 926_800;
 
 test("wikiClientScript stays under its size pin", async () => {
