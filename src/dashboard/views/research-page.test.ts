@@ -213,4 +213,21 @@ test("Browse renders values into data-* attributes and the delegated listeners r
   // A click outside a row or chip does nothing.
   els.documentsGrid!.handlers[0]!({ target: { closest: () => null } });
   expect(opened).toHaveLength(1);
+
+  // A non-string url (stored JSON of any shape) must not throw inside docs.map:
+  // the page's own injected gate copy, so the whole grid still renders.
+  const injected = /var docPanelSafeHref = (function[\s\S]*?\n\s*\});?\n/.exec(html);
+  expect(injected).not.toBeNull();
+  const pageGate = new Function(`return (${injected![1]});`)();
+  const api2 = new Function(
+    "document", "esc", "docPanelSafeHref", "openDocPanel",
+    `var activeTag = null; var allTags = []; var allDocuments = [];\n${browse}\n` +
+      "return { renderDocuments, set: function(d) { allDocuments = d; } };",
+  )({ getElementById: el }, escHtml, pageGate, () => {}) as { renderDocuments(): void; set(d: unknown[]): void };
+  api2.set([{ id: "e2e/numeric.md", url: 123 }, { id: "e2e/after.md", url: ["javascript:x"] }]);
+  expect(() => api2.renderDocuments()).not.toThrow();
+  const grid2 = els.documentsGrid!.innerHTML;
+  expect(grid2).toContain('data-doc-id="e2e/numeric.md" data-url=""');
+  expect(grid2).toContain('data-doc-id="e2e/after.md" data-url=""');
+  expect(grid2).not.toContain("Open &rarr;");
 });

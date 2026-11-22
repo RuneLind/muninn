@@ -26,8 +26,13 @@
  *  3. Anything else — a fragment, a relative path resolved inside the folder,
  *     or an absolute path resolved against the local filesystem root (no
  *     host, no network; measured `/local/p` → `file:///local/p`).
+ *
+ * A non-string is refused before any of that.
  */
-export function isSafeLinkHref(href: string): boolean {
+export function isSafeLinkHref(href: unknown): boolean {
+  // Callers pass stored JSON fields: a number, array or object is no link, and
+  // must not throw inside a client render loop (`.trim` is string-only).
+  if (typeof href !== "string") return false;
   if (/[\u0000-\u001f\u007f]/.test(href)) return false;
   const trimmed = href.trim();
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed)?.[1]?.toLowerCase();
