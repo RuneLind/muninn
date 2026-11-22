@@ -16,6 +16,7 @@ import {
   SYNC_QUIET_MS,
   SYNC_REASON_MAX,
   SYNC_STALE_SUCCESS_MS,
+  syncLoopOutlook,
   syncTone,
   type DirtyItem,
   type SyncLedgerEntry,
@@ -433,5 +434,45 @@ describe("card state", () => {
       "deferred: active edits (3 files < 5 min)",
     );
     expect(describeSyncState("ok")).toBe("in sync");
+  });
+});
+
+// F36 fix round 1: Done names the loop as a committer only as far as the
+// ledger's last tick is evidence.
+describe("syncLoopOutlook", () => {
+  const tick = (over: Partial<SyncLedgerEntry>): SyncLedgerEntry => ({
+    state: "ok",
+    consecutiveDeferrals: 0,
+    lastSuccessMs: NOW - 60_000,
+    lastRunMs: NOW - 60_000,
+    lastLocalSectionMs: NOW - 60_000,
+    ...over,
+  });
+  test("a cold ledger has never run", () => {
+    expect(syncLoopOutlook(tick({ state: "unknown", lastRunMs: null, lastLocalSectionMs: null }), NOW)).toEqual({ kind: "never-run" });
+  });
+  test("ok, deferred, transient and retrying ticks are healthy, stamped or not", () => {
+    for (const state of ["ok", "deferred", "transient", "retrying"] as const) {
+      expect(syncLoopOutlook(tick({ state }), NOW)).toEqual({ kind: "healthy" });
+      // A young index.lock or a held wiki lock stops before the commit path and stamps nothing.
+      expect(syncLoopOutlook(tick({ state, lastLocalSectionMs: null }), NOW)).toEqual({ kind: "healthy" });
+    }
+  });
+  test("a failed push after a commit pass in the same tick is healthy; a failed fetch is stopped", () => {
+    expect(syncLoopOutlook(tick({ state: "error", reason: "push failed" }), NOW)).toEqual({ kind: "healthy" });
+    expect(syncLoopOutlook(tick({ state: "error", reason: "git fetch failed: x", lastLocalSectionMs: NOW - 86_400_000 }), NOW)).toEqual({
+      kind: "stopped",
+      state: "error",
+      reason: "git fetch failed: x",
+      stopsSweeper: false,
+    });
+  });
+  test("paused and pre-flight blocked stop the sweeper too", () => {
+    expect(syncLoopOutlook(tick({ state: "paused", reason: "off default branch (f)", lastLocalSectionMs: null }), NOW)).toMatchObject({ kind: "stopped", stopsSweeper: true });
+    expect(syncLoopOutlook(tick({ state: "blocked", reason: "r", lastLocalSectionMs: null }), NOW)).toMatchObject({ kind: "stopped", stopsSweeper: true });
+  });
+  test("a healthy tick older than SYNC_STALE_SUCCESS_MS is idle", () => {
+    const at = NOW - SYNC_STALE_SUCCESS_MS - 3_600_000;
+    expect(syncLoopOutlook(tick({ lastRunMs: at, lastLocalSectionMs: at }), NOW)).toEqual({ kind: "idle", lastRunHoursAgo: 3 });
   });
 });

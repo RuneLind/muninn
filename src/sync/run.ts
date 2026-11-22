@@ -195,6 +195,11 @@ export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
   );
 }
 
+/** Test-only: seed one repo's ledger entry, as a past tick would have left it. */
+export function __setSyncLedgerEntryForTest(name: string, entry: SyncLedgerEntry): void {
+  ledger.set(name, entry);
+}
+
 /** Test-only: clear the ledger + in-flight set between cases. */
 export function __resetSyncStateForTest(): void {
   ledger.clear();
@@ -284,6 +289,20 @@ const IN_PROGRESS_GIT_ENTRIES = [
   "BISECT_LOG",
 ] as const;
 
+/** What clears each entry: the reason names the remedy, so a forgotten bisect
+ *  or an abandoned `.git/sequencer` reads as something to do, not a marker
+ *  name (F37 fix round 1). `sequencer` is a multi-commit cherry-pick or revert;
+ *  `--quit` drops it and keeps the commits already made. */
+const IN_PROGRESS_REMEDY: Record<(typeof IN_PROGRESS_GIT_ENTRIES)[number], string> = {
+  "rebase-merge": "finish it with `git rebase --continue` or drop it with `git rebase --abort`",
+  "rebase-apply": "finish it with `git rebase --continue` (`git am --continue`) or drop it with `git rebase --abort` (`git am --abort`)",
+  MERGE_HEAD: "finish it with `git merge --continue` or drop it with `git merge --abort`",
+  CHERRY_PICK_HEAD: "finish it with `git cherry-pick --continue` or drop it with `git cherry-pick --abort`",
+  REVERT_HEAD: "finish it with `git revert --continue` or drop it with `git revert --abort`",
+  sequencer: "finish it with `git cherry-pick --continue` / `git revert --continue`, or leave it with `git cherry-pick --quit` / `git revert --quit`",
+  BISECT_LOG: "end the bisect with `git bisect reset`",
+};
+
 /**
  * Is a git operation already in progress? An in-progress rebase / merge /
  * cherry-pick / revert / bisect means a human is mid-something and the tree
@@ -301,7 +320,7 @@ async function preflight(top: string, now: number): Promise<Preflight> {
   for (const name of IN_PROGRESS_GIT_ENTRIES) {
     const p = await gitPath(top, name);
     if (p && (await pathExists(p))) {
-      return { kind: "blocked", reason: `a git operation is in progress (${name})` };
+      return { kind: "blocked", reason: `a git operation is in progress (${name}) — ${IN_PROGRESS_REMEDY[name]}` };
     }
   }
   const lock = await gitPath(top, "index.lock");
@@ -316,14 +335,14 @@ async function preflight(top: string, now: number): Promise<Preflight> {
       return {
         kind: "blocked",
         staleLock: true,
-        reason: `a stale .git/index.lock (${Math.round(ageMs / 60000)} min old) — remove it by hand`,
+        reason: `a stale .git/index.lock (${Math.round(ageMs / 60000)} min old) — remove it by hand once no git process is running`,
       };
     }
     if (ageMs < -INDEX_LOCK_STALE_MS) {
       return {
         kind: "blocked",
         staleLock: true,
-        reason: `a .git/index.lock dated ${Math.round(-ageMs / 60000)} min in the future — remove it by hand`,
+        reason: `a .git/index.lock dated ${Math.round(-ageMs / 60000)} min in the future — remove it by hand once no git process is running`,
       };
     }
     return { kind: "transient", reason: "another git process holds .git/index.lock" };
@@ -1152,22 +1171,29 @@ export async function syncRepo(
     const top = await gitToplevel(repo.path);
     if (!top) return finish(blank, "error", { reason: `not a git repo: ${repo.path}` });
 
-    // 1. Pre-flight — never touch a tree mid-operation.
-    const pre = await preflight(top, deps.now());
-    if (pre.kind !== "clear") {
-      const card = await readCard(repo, top);
-      return finish(card, pre.kind === "blocked" ? "blocked" : "transient", {
-        reason: pre.reason,
-        actions: ["pre-flight stopped the tick"],
-      });
-    }
-
-    // 2. Fetch — NO lock held (network I/O never holds a lock).
+    // 1. Fetch — NO lock held (network I/O never holds a lock). It runs BEFORE
+    //    the pre-flight: a fetch writes only remote-tracking refs, FETCH_HEAD and
+    //    objects, never the index, HEAD or the work tree, so it is safe under
+    //    every state the pre-flight blocks on (a rebase, merge, cherry-pick,
+    //    revert or sequence keeps its own onto/HEAD files; a bisect checks out
+    //    nothing; `index.lock` is not one fetch takes). Pre-flight first froze
+    //    ahead/behind and the last fetch on the card for the whole of a bisect
+    //    (F37 fix round 1).
     const fetched = await runGit(top, ["fetch", "--quiet"], {
       timeoutMs: GIT_NETWORK_TIMEOUT_MS,
     });
     const fetchFailed = fetched.code !== 0;
     const card = await readCard(repo, top);
+
+    // 2. Pre-flight — never touch a tree mid-operation. It outranks a failed
+    //    fetch: the block needs a human whatever the network does.
+    const pre = await preflight(top, deps.now());
+    if (pre.kind !== "clear") {
+      return finish(card, pre.kind === "blocked" ? "blocked" : "transient", {
+        reason: pre.reason,
+        actions: [fetchFailed ? "fetch failed; pre-flight stopped the tick" : "fetched; pre-flight stopped the tick"],
+      });
+    }
     if (fetchFailed) {
       // A failed fetch is five lines of stderr; the card's state chip is one
       // line. Clamped for display, verbatim on `lastError`.
@@ -1530,8 +1556,8 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * `fresh(lastLocalSectionMs)` before the stamp was narrowed to a commit path
  * that WORKED. `state` is a one-tick SAMPLE, not a claim about the window.
  * `paused` falling through is harmless: the sweeper applies the same
- * off-default-branch rule to itself (`onDefaultBranch(top)` guard,
- * `src/watchers/wiki-committer.ts:154`) and no-ops.
+ * off-default-branch rule to itself (the `onDefaultBranch(top)` guard in
+ * `checkWikiCommitter`, `src/watchers/wiki-committer.ts`) and no-ops.
  *
  * `configuredButIdle` is DECOUPLED from `subsumed`: it is simply "no commit pass
  * inside the window", so a repo that subsumes on `blocked` for a week still

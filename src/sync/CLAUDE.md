@@ -11,7 +11,7 @@ Three files, one job:
 |---|---|
 | `config.ts` | `SYNC_REPOS` parsing (pure — no git spawn, no env reads). Modes, path resolution, the same-repo dedup, the plain-over-a-wiki warning. |
 | `decide.ts` | The PURE decision layer: what to stage, what to hold, what the card says. No git, no fs, no clock read (`now` is a parameter). |
-| `run.ts` | The per-repo state machine: fetch → (locked) status → commit → rebase → (unlocked) push → refresh the reader cache. Plus the in-memory ledger the card reads. |
+| `run.ts` | The per-repo state machine: fetch → pre-flight → (locked) status → commit → rebase → (unlocked) push → refresh the reader cache. Plus the in-memory ledger the card reads. |
 
 Surface: `POST /api/sync/run` (the ONE code path both triggers use — a 15-minute
 launchd `curl` and the `/models` **Repo sync** card) and `GET /api/sync/status`
@@ -220,7 +220,12 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   after a resolved conflict (`sequencer`), a bisect (`BISECT_LOG`) and an
   `index.lock` young (transient), old or dated in the future (blocked) — the last
   three entries and the future-dated lock are F37's, and they block `syncRepo`'s
-  own tick too. The
+  own tick too. Each block reason names its remedy (`git bisect reset`,
+  `git cherry-pick --quit` / `git revert --quit`, `--continue`/`--abort`, removing
+  the lock). In `syncRepo` the fetch runs FIRST and the pre-flight after it: a
+  fetch writes only remote-tracking refs, `FETCH_HEAD` and objects, so it is safe
+  in every blocked state, and the card's ahead/behind and last fetch stay live
+  through a bisect; a block outranks a failed fetch in the reported state. The
   conditions that produce `blocked` (a leftover `MERGE_HEAD`, a stale `index.lock`,
   conflict markers) persist across ticks until a human clears them, which is what
   makes a one-tick sample sound there and nowhere else. Every OTHER state — `error`,

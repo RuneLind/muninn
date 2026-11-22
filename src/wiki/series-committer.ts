@@ -57,7 +57,13 @@ function contains(dir: string, root: string): boolean {
  *  never do (`src/sync/config.ts`). Also read by Done's refusal of a pending
  *  plans-board write (`src/plans/board-dirt.ts`). */
 export function syncLoopCommits(root: string, repos: readonly SyncRepo[]): boolean {
-  return repos.some(
+  return syncRepoCovering(root, repos) !== undefined;
+}
+
+/** The `wiki`-mode entry {@link syncLoopCommits} matches, so a caller can read
+ *  that repo's sync ledger by its name. */
+export function syncRepoCovering(root: string, repos: readonly SyncRepo[]): SyncRepo | undefined {
+  return repos.find(
     (r) => r.mode === "wiki" && ((r.wikiRoot && contains(r.wikiRoot, root)) || contains(r.path, root)),
   );
 }

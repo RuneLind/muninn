@@ -23,6 +23,8 @@ import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
 import { setPlanPriority, setPlanStatus } from "../../plans/frontmatter.ts";
 import { PLANS_WIKI_NAME } from "../../plans/source.ts";
 import { __resetSyncReposForTest } from "../../sync/config.ts";
+import { __resetSyncStateForTest, __setSyncLedgerEntryForTest } from "../../sync/run.ts";
+import type { SyncLedgerEntry } from "../../sync/decide.ts";
 import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
 import { saveWatcher, toggleWatcher } from "../../db/watchers.ts";
 
@@ -325,11 +327,52 @@ describe("/api/wiki/step-done", () => {
       expect(await pageText()).toBe(content);
     });
 
-    test("with the wiki in SYNC_REPOS in wiki mode, the refusal names the repo-sync loop", async () => {
-      syncRepos(`${PLANS}=${root}:wiki`);
-      const { status, body } = await doneAfter(flipped());
-      expect(status).toBe(409);
-      expect(body.error).toBe(`${BOARD} The repo-sync loop commits it after its quiet period, or commit it by hand. Then try again.`);
+    // F36 fix round 1: the loop is named only as far as its ledger is evidence —
+    // one test per ledger state the message tells apart.
+    describe("with the wiki in SYNC_REPOS in wiki mode, the loop is named from its ledger", () => {
+      const ticked = (over: Partial<SyncLedgerEntry>): SyncLedgerEntry => ({
+        state: "ok",
+        consecutiveDeferrals: 0,
+        lastSuccessMs: NOW - 60_000,
+        lastRunMs: NOW - 60_000,
+        lastLocalSectionMs: NOW - 60_000,
+        ...over,
+      });
+      afterAll(() => __resetSyncStateForTest());
+
+      test("the last tick was healthy: the loop commits it", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __setSyncLedgerEntryForTest(PLANS, ticked({}));
+        const { status, body } = await doneAfter(flipped());
+        expect(status).toBe(409);
+        expect(body.error).toBe(`${BOARD} The repo-sync loop commits it after its quiet period, or commit it by hand. Then try again.`);
+      });
+
+      test("paused on a feature branch: it will not commit until that is cleared", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "paused", reason: "off default branch (feature)", lastLocalSectionMs: NOW - 86_400_000 }));
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(
+          `${BOARD} The repo-sync loop is paused and will not commit it until that is cleared: off default branch (feature). Clear that, or commit it by hand. Then try again.`,
+        );
+      });
+
+      test("blocked by a bisect: it will not commit until the bisect is reset", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        const reason = "a git operation is in progress (BISECT_LOG) — end the bisect with `git bisect reset`";
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "blocked", reason, lastLocalSectionMs: null }));
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(`${BOARD} The repo-sync loop is blocked and will not commit it until that is cleared: ${reason}. Clear that, or commit it by hand. Then try again.`);
+      });
+
+      test("never run since boot: the promise is conditional", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __resetSyncStateForTest();
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(
+          `${BOARD} The repo-sync loop commits it after its quiet period if it is running (it has not run since muninn started), or commit it by hand. Then try again.`,
+        );
+      });
     });
 
     test("a plain-mode SYNC_REPOS entry commits nothing, so it is not named", async () => {

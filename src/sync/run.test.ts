@@ -559,6 +559,41 @@ describe("syncRepo", () => {
     expect(await Bun.file(lock).exists()).toBe(true);
   });
 
+  // F37 fix round 1: the fetch runs before the pre-flight, so ahead/behind stay
+  // live through a bisect or an abandoned sequence, and the reason names the
+  // command that clears the block.
+  test("a bisect in progress: the fetch still runs and the reason says `git bisect reset`", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await git(f.A, ["bisect", "start"]);
+    expect(await Bun.file(path.join(f.A, ".git", "BISECT_LOG")).exists()).toBe(true);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.behind).toBe(1);
+    expect(r.lastFetchMs).not.toBeNull();
+    expect(r.reason).toContain("git bisect reset");
+    expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
+  });
+
+  test("an abandoned sequencer: the fetch still runs and the reason names `--quit`", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await mkdir(path.join(f.A, ".git", "sequencer"), { recursive: true });
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.behind).toBe(1);
+    expect(r.reason).toContain("git cherry-pick --quit");
+    expect(r.reason).toContain("git revert --quit");
+  });
+
   test("a YOUNG index.lock is transient, a STALE one needs a human", async () => {
     const f = await makeFixture(base);
     const lock = path.join(f.A, ".git", "index.lock");
@@ -1195,7 +1230,7 @@ describe("syncRepo", () => {
   });
 
   test("a PRE-FLIGHT blocked tick subsumes too — and still reports the loop idle", async () => {
-    // The pre-flight stop happens BEFORE the fetch, so on a cold ledger it is the
+    // The pre-flight stop happens BEFORE the local section, so on a cold ledger it is the
     // only thing the ledger knows: no local section has ever run. It must still
     // subsume (a sweep there would stage a human's half-finished merge), and
     // must still WARN, because "nobody is

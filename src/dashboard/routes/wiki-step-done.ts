@@ -35,7 +35,9 @@ import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-pr
 import { dirtIsPendingBoardWrite, pendingBoardWriteMessage } from "../../plans/board-dirt.ts";
 import { PLANS_WIKI_NAME } from "../../plans/source.ts";
 import { getSyncRepos } from "../../sync/config.ts";
-import { sweeperCommits, syncLoopCommits } from "../../wiki/series-committer.ts";
+import { syncLoopOutlook, type SyncLoopOutlook } from "../../sync/decide.ts";
+import { getSyncLedgerEntry } from "../../sync/run.ts";
+import { sweeperCommits, syncRepoCovering } from "../../wiki/series-committer.ts";
 import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
@@ -79,6 +81,14 @@ async function sweptDirsOrNone(deps: StepDoneDeps): Promise<string[]> {
     log.warn("Step done: the wiki-committer watcher rows could not be read: {error}", { error: err instanceof Error ? err.message : String(err) });
     return [];
   }
+}
+
+/** The repo-sync loop as Done may name it: `null` when no `wiki`-mode entry
+ *  covers the root, otherwise read off that repo's ledger, since configuration
+ *  is not evidence that the loop runs or can commit (F36 fix round 1). */
+function syncLoopOutlookFor(root: string, now: number): SyncLoopOutlook | null {
+  const repo = syncRepoCovering(root, getSyncRepos().repos);
+  return repo ? syncLoopOutlook(getSyncLedgerEntry(repo.name), now) : null;
 }
 
 /** What {@link stepWikiScope} reads: the owner-step checks route resolves through it too. */
@@ -286,7 +296,7 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
             ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
             : entry.name.toLowerCase() === PLANS_WIKI_NAME && (await dirtIsPendingBoardWrite(entry.root, target.relPath))
               ? pendingBoardWriteMessage(target.relPath, {
-                  syncLoop: syncLoopCommits(entry.root, getSyncRepos().repos),
+                  syncLoop: syncLoopOutlookFor(entry.root, deps.now()),
                   // Named only when an enabled sweeper's bot wikiDir contains this root, never off the
                   // registry's `source` (a bot wiki is named after its bot, and names de-duplicate).
                   sweeper: sweeperCommits(entry.root, await sweptDirsOrNone(deps)),

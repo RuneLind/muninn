@@ -422,3 +422,43 @@ export function describeSyncState(state: SyncState, reason?: string): string {
   };
   return reason ? `${base[state]}: ${reason}` : base[state];
 }
+
+/**
+ * What the ledger says about whether the loop will commit a page left dirty
+ * now — for a writer that names the loop as a page's committer (Done's refusal
+ * of a pending plans-board write, F36 fix round 1). Configuration is not
+ * evidence (`syncSubsumesSweeper`), so this reads the last tick:
+ *
+ *  - `never-run`: no tick since boot (`unknown`) — the launchd tick may not be
+ *    installed, so the promise is conditional.
+ *  - `healthy`: the last tick got through its commit path (`lastLocalSectionMs`
+ *    equals `lastRunMs`: a failed push or the no-upstream `blocked` still
+ *    committed), or ended in a state the next tick resolves on its own
+ *    (`ok`, `deferred`, `transient`, `retrying`).
+ *  - `idle`: healthy, but the last tick is older than `SYNC_STALE_SUCCESS_MS`
+ *    (eight missed 15-minute ticks), so the loop may no longer be running.
+ *  - `stopped`: `paused`, `blocked` or `error` before or inside the commit
+ *    path. `stopsSweeper` is true for `paused` and `blocked`: the sweeper runs
+ *    the same branch and tree checks on the same repo and stands down too.
+ */
+export type SyncLoopOutlook =
+  | { kind: "healthy" }
+  | { kind: "never-run" }
+  | { kind: "idle"; lastRunHoursAgo: number }
+  | { kind: "stopped"; state: "paused" | "blocked" | "error"; reason: string; stopsSweeper: boolean };
+
+export function syncLoopOutlook(entry: SyncLedgerEntry, now: number): SyncLoopOutlook {
+  if (entry.state === "unknown" || entry.lastRunMs === null) return { kind: "never-run" };
+  const committedLastTick = entry.lastLocalSectionMs !== null && entry.lastLocalSectionMs === entry.lastRunMs;
+  if (!committedLastTick && (entry.state === "paused" || entry.state === "blocked" || entry.state === "error")) {
+    return {
+      kind: "stopped",
+      state: entry.state,
+      reason: entry.reason ?? entry.state,
+      stopsSweeper: entry.state !== "error",
+    };
+  }
+  const age = now - entry.lastRunMs;
+  if (age > SYNC_STALE_SUCCESS_MS) return { kind: "idle", lastRunHoursAgo: Math.round(age / 3_600_000) };
+  return { kind: "healthy" };
+}
