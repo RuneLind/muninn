@@ -73,7 +73,7 @@ const MODEL_ANSWER = '{"verdict":"stale","reason":"E2E: the pin moved on","edit"
 const LEAVE_ROUTES = ["ask", "graph", "fail"] as const;
 /** How a page left behind answers late (R2B4 1a): an error payload, a rejected
  *  fetch, a page after all, and an explainer's error payload, rejected fetch
- *  and page after all (each one of `loadExplainer`'s two `pageViewSeq` guards). */
+ *  and page after all (each one of `loadExplainer`'s two `viewIsLive(view)` guards). */
 const LATE_KINDS = ["error", "abort", "load", "explainer", "explainer-abort", "explainer-load"] as const;
 /** Every way to change what the article pane shows, but a failed load (R2B4 1b). */
 const VIEW_ROUTES = ["ask", "graph", "start", "explainer", "page"] as const;

@@ -240,6 +240,9 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (typeof t.toolSourceUrls !== "undefined") {
     if (!isValidUrlMap(t.toolSourceUrls)) delete t.toolSourceUrls;
   }
+  // Remember's saved summary: rendered on the turn's bar, so a non-string is
+  // dropped (the turn shows "Remember this" again), not fatal.
+  if (typeof t.remembered !== "undefined" && typeof t.remembered !== "string") delete t.remembered;
   // `wrote` is a two-value union, and BOTH values gate a write button. An unknown
   // string would fall through every branch and silently re-enable both actions
   // against a baseHash the real write already staled — so validate the union, not

@@ -13,8 +13,8 @@
  * shape. Ask owns its turn state (`askTurns`, `askShownTurn`, `integratePreview`)
  * and exports getters for the first two, so the port carries no
  * `getShownTurn()` or `repaintBody()`: those flow the other way. Leaf imports
- * (`wiki-ask-render.ts`, `wiki-ask-session.ts`, `wiki-shell-state.ts`'s
- * `setCurrentName`, the rail's `renderList`) are imported directly and are not
+ * (`wiki-ask-render.ts`, `wiki-ask-session.ts`, `wiki-pane-view.ts`'s
+ * `enterView`, the rail's `renderList`) are imported directly and are not
  * port members.
  */
 import { escHtml as esc } from "./escape.ts";
@@ -95,21 +95,13 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import { renderList } from "./wiki-rail-controller.ts";
-import { setCurrentName } from "./wiki-shell-state.ts";
+import { enterView, viewIsShown } from "./wiki-pane-view.ts";
 
 /** What Ask reads and calls on the shell, read live through a function so a
  *  value the shell reassigns is never a stale copy. */
 export interface AskTurnPort {
   /** The shell's `WIKI` let (the active wiki's name), read for every Ask URL. */
   WIKI(): string;
-  /** The shell's `clearShownPage()`: an Ask answer replaces the page, so
-   *  `showAskAnswer` clears `currentRelPath`, `currentPageHash`, graph mode and
-   *  the breadcrumb, the C3 command `renderEffort` already uses. Its
-   *  `removeGraph()` aborts the graph fetch and drops its section, and its
-   *  `hideBreadcrumb()` does more than its name says: `abortProvLoad()`,
-   *  `unmountAnswerExport()`, `closeWalkthroughOnNavigate(null)` and
-   *  `currentArticle = null` (with `clearOutgoingTitles()`) run inside it. */
-  clearShownPage(): void;
   /** The article controller's `switchConnTab()`, relayed by the shell (right-rail tabs, C5): `runAskStream` shows the Ask tab. */
   switchConnTab(tab: string): void;
   /** The shell's `reloadPageInPlace()` (page loading; the walkthrough's Reload
@@ -225,6 +217,12 @@ export interface AskTurn {
   // singleton node owned by whichever turn is painted, so holding the outcome on
   // the TURN is what stops a late fetch painting turn A's result onto turn B.
   chatEsc?: ChatEscState;
+  // The summary `POST /api/wiki/remember` returned for THIS turn, once saved.
+  // `submitRemember` stores the session when it lands, so it rides into
+  // localStorage through `serializeAskSession` (`isValidTurn` drops a
+  // non-string). It is held on the turn because `#wikiRememberBar` is a
+  // singleton node owned by whichever turn is painted.
+  remembered?: string;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -233,13 +231,22 @@ export interface AskTurn {
 interface ClaimRow { index: number; title: string; status: string; block: string; outcome?: string; }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
-let askActive: AskTurn | null = null; // the turn currently streaming, or null
-let askShownTurn: AskTurn | null = null; // the turn currently painted in the pane
-let askBuffer = ""; // streamed plain-text accumulator for askActive
+let askShownTurn: AskTurn | null = null; // the turn painted in the pane last
+const rememberSaving = new WeakSet<AskTurn>(); // turns whose Remember POST is in flight
+let askView = 0; // its `enterView` token: the pane shows it while `viewIsShown` holds
+let askBuffer = ""; // streamed plain-text accumulator for the streaming turn
 let composeText = ""; // fact-check compose lede accumulator (Phase 3 deltas)
 let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
 const ASK_ANSWER_CHARS = 700;
+
+/** Is `turn` the one painted in the article pane right now? Every stream paint
+ *  site asks this, because the answer's nodes are found by id: a history item
+ *  clicked mid-stream (or a page opened) leaves the live turn's handlers running,
+ *  and they must update the TURN without writing into another view's nodes. */
+function paneShows(turn: AskTurn): boolean {
+  return turn === askShownTurn && viewIsShown(askView);
+}
 
 /** Throttle progressive markdown renders of the streaming buffer to one per
  *  animation frame (as the web chat does), coalescing bursts of deltas. The
@@ -252,6 +259,7 @@ function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
     askRenderRaf = 0;
     if (askConn !== conn) return; // superseded by a newer ask
     if (turn.html) return; // final article already swapped in
+    if (!paneShows(turn)) return; // another view is on screen
     const b = document.getElementById("askAnswerBody");
     if (b) { b.innerHTML = renderStreamingBody(askBuffer); } // confidence chip baked into renderStreamingBody
   });
@@ -399,15 +407,34 @@ function askFollowupHtml(turn: AskTurn): string {
 /** "Remember this" button rendered under the follow-up bar. Persists the shown
  *  turn's Q&A as a durable memory (POST /api/wiki/remember). Gated on the turn
  *  being committed (same `turn.answer` gate as the follow-up bar) and bound via
- *  document-level delegation. One save per render — a re-render resets it. */
+ *  document-level delegation. Rendered from the TURN (`turn.remembered`, the
+ *  save in flight), so a save that lands while another turn is shown paints
+ *  nothing there and shows when its own turn is opened again. */
 function askRememberHtml(turn: AskTurn): string {
-  const disabled = turn.answer ? "" : " disabled";
+  return '<div class="wiki-remember" id="wikiRememberBar">' + askRememberInner(turn) + "</div>";
+}
+
+function askRememberInner(turn: AskTurn): string {
+  if (turn.remembered !== undefined) {
+    return '<span class="wiki-remember-done">✓ Remembered: ' + esc(turn.remembered) + "</span>";
+  }
+  const saving = rememberSaving.has(turn);
+  const disabled = turn.answer && !saving ? "" : " disabled";
   return (
-    '<div class="wiki-remember" id="wikiRememberBar">' +
-    '<button id="wikiRememberBtn" class="wiki-remember-btn"' + disabled + ">Remember this</button>" +
-    '<span class="wiki-remember-msg" id="wikiRememberMsg"></span>' +
-    "</div>"
+    '<button id="wikiRememberBtn" class="wiki-remember-btn"' + disabled + ">" +
+    (saving ? "Saving…" : "Remember this") + "</button>" +
+    '<span class="wiki-remember-msg" id="wikiRememberMsg"></span>'
   );
+}
+
+/** Repaint the Remember bar from `turn`, only while `turn` is on screen. */
+function refreshRememberBar(turn: AskTurn, error?: string): void {
+  if (!paneShows(turn)) return;
+  const bar = document.getElementById("wikiRememberBar");
+  if (!bar) return;
+  bar.innerHTML = askRememberInner(turn);
+  const msg = document.getElementById("wikiRememberMsg");
+  if (msg && error) { msg.textContent = error; msg.className = "wiki-remember-msg error"; }
 }
 
 /** "Continue in chat →" bar, a sibling of Remember. Escalates the shown turn into
@@ -429,7 +456,7 @@ function askChatEscalateHtml(turn: AskTurn): string {
  *  turn is on screen. Nothing is lost by skipping — `showAskAnswer` renders the
  *  bar from the newly shown turn's own `chatEsc`. */
 export function refreshChatEscalateBar(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const bar = document.getElementById("wikiChatEscBar");
   if (bar) bar.innerHTML = chatEscBarHtml(turn);
 }
@@ -565,7 +592,7 @@ let integrateProposing: AskTurn | null = null;
  *  of bar state is held off the DOM (`turn.wrote`, `integrateBarMsgs`,
  *  `integratedNotes`, `integrateProposing`) so re-opening the turn reproduces it. */
 function refreshWriteActionBars(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const appendBar = document.getElementById("wikiFactcheckAppendBar");
   if (appendBar) appendBar.innerHTML = factcheckAppendInnerHtml(turn);
   const intBar = document.getElementById("wikiFactcheckIntegrateBar");
@@ -717,7 +744,7 @@ function claimRetryRowInnerHtml(turn: AskTurn, claim: RetryableClaim): string {
  * than no ↻ at all.
  */
 function applyRetryAffordances(bodyEl: HTMLElement | null, turn: AskTurn): void {
-  if (!bodyEl || turn !== askShownTurn) return;
+  if (!bodyEl || !paneShows(turn)) return;
   bodyEl.querySelectorAll(".wiki-fc-retry").forEach((n) => n.remove());
   if (turn.kind !== "factcheck" || !turn.answer || !turn.page) return;
   const claims = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes);
@@ -750,7 +777,7 @@ function applyRetryAffordances(bodyEl: HTMLElement | null, turn: AskTurn): void 
  *  Scoped to the answer body: `data-claim-retry` is unique THERE, but a bare
  *  `document.querySelector` would happily pick up a same-keyed node anywhere. */
 function paintClaimRetryRow(turn: AskTurn, index: number): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const body = document.getElementById("askAnswerBody");
   const row = body?.querySelector('.wiki-fc-retry[data-claim-retry="' + index + '"]');
   if (!row) return;
@@ -765,7 +792,7 @@ function paintClaimRetryRow(turn: AskTurn, index: number): void {
  *  row's `busy` disable, and repainting only the running row left the others
  *  looking enabled while their clicks no-opped. */
 function paintAllClaimRetryRows(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const body = document.getElementById("askAnswerBody");
   if (!body) return;
   body.querySelectorAll(".wiki-fc-retry[data-claim-retry]").forEach((row) => {
@@ -831,7 +858,7 @@ function claimRetryBarInnerHtml(turn: AskTurn): string {
  *  `refreshWriteActionBars` is — it is a singleton node owned by whichever turn is
  *  painted. */
 function refreshClaimRetryBar(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const bar = document.getElementById("wikiClaimRetryBar");
   if (bar) bar.innerHTML = claimRetryBarInnerHtml(turn);
 }
@@ -846,7 +873,7 @@ function refreshClaimRetryBar(turn: AskTurn): void {
  *  `renderStreamingBody` wraps (plus the confidence enhancement the client applies
  *  on every paint anyway). */
 function repaintAskAnswerBody(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const b = document.getElementById("askAnswerBody");
   if (!b) return;
   b.innerHTML = renderStreamingBody(turn.answer);
@@ -1037,7 +1064,7 @@ function applyClaimRetryResult(
   // EVERY path (it also has to persist the tool chips a failed retry grew), so a
   // second call was one write of the same session per success.
   // Everything above is turn-scoped. Everything below touches singleton DOM nodes.
-  if (turn !== askShownTurn) return true;
+  if (!paneShows(turn)) return true;
   setClaimRetryMsg(turn, claim.index, "");
   repaintAskAnswerBody(turn);
   refreshAskSources(turn); // the meta line reads claimOutcomes / claimCount
@@ -1157,14 +1184,12 @@ async function driveClaimRetry(
   }
 }
 
-/** True while the ↻ bar this batch is driving is still in the document. Navigating
- *  away does NOT clear `askShownTurn` (see `currentViewState`), so without a DOM
- *  liveness test a batch kept launching claims — up to ~24 minutes of model spend —
- *  with the Cancel button long since destroyed. */
+/** True while the Ask view this batch is driving is still on screen (through a
+ *  pending page fetch, as its Cancel is). Navigating away does NOT clear
+ *  `askShownTurn`, so without this a batch kept launching claims — up to ~24
+ *  minutes of model spend — with Cancel long since destroyed. */
 function claimRetryPaneAlive(): boolean {
-  const bar = document.getElementById("wikiClaimRetryBar");
-  const body = document.getElementById("askAnswerBody");
-  return !!(bar?.isConnected && body?.isConnected);
+  return viewIsShown(askView);
 }
 
 /** Retry every unverified claim on the shown turn, SEQUENTIALLY (concurrency 1):
@@ -1348,6 +1373,7 @@ function askToolLogHtml(turn: AskTurn): string {
  *  auto-scroll to the newest row (same as /agents' mini-log). The article body
  *  still streams separately, so only this container is repainted. */
 function refreshAskToolLog(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const el = document.getElementById("askToolLog");
   if (!el) return;
   el.innerHTML = toolLogRows(turn);
@@ -1358,6 +1384,7 @@ function refreshAskToolLog(turn: AskTurn): void {
 /** Update the on-screen "Consulting" chip row in place as WebFetch hosts arrive
  *  (the article body still streams, so re-render just this container). */
 function refreshAskToolSources(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const el = document.getElementById("askToolSources");
   if (!el) return;
   el.innerHTML = toolSourceChips(turn);
@@ -1393,11 +1420,13 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
   );
 }
 
-/** Enable/disable the follow-up + Remember controls by id (they may not exist yet
- *  at boot, and the article pane is re-rendered per turn — always look up
- *  fresh). The Remember button rides the same commit gate as the follow-up bar.
+/** Enable/disable the follow-up controls by id (they may not exist yet at boot,
+ *  and the article pane is re-rendered per turn — always look up fresh).
  *
- *  The two WRITE buttons are deliberately NOT here. Their state is derived from
+ *  Remember is NOT here: its button is derived from the turn and the in-flight
+ *  set (`refreshRememberBar`), and a blanket enable after `done` left a button
+ *  reading "Saving…" clickable while its POST ran. The two WRITE buttons are
+ *  deliberately NOT here either. Their state is derived from
  *  `turn.wrote` + the in-flight propose flag (`refreshWriteActionBars`), and a
  *  blanket `setFollowupDisabled(false)` from an SSE drop or the `end` fallback
  *  would force-enable a button the derivation had correctly retired — reviving a
@@ -1408,8 +1437,6 @@ function setFollowupDisabled(disabled: boolean): void {
   const btn = document.getElementById("wikiFollowupBtn") as HTMLButtonElement | null;
   if (input) input.disabled = disabled;
   if (btn) btn.disabled = disabled;
-  const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
-  if (remember) remember.disabled = disabled;
   // "Continue in chat →" is deliberately NOT here, for the same reason the two
   // write buttons aren't: every terminal path (app_error / end / onerror) called
   // `setFollowupDisabled(false)`, which force-enabled the button on turns that
@@ -1419,10 +1446,9 @@ function setFollowupDisabled(disabled: boolean): void {
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 export function showAskAnswer(turn: AskTurn, buffer: string): void {
-  setCurrentName(null);
-  // An answer replaces the article pane: graph mode ends with it, so a citation
-  // clicked below opens its page for reading.
-  deps.clearShownPage(); // an Ask answer replaces the page — no breadcrumb
+  // An answer replaces the article pane: no page, no breadcrumb, and graph mode
+  // ends with it, so a citation clicked below opens its page for reading.
+  askView = enterView("ask");
   askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
   // The preview is TURN-KEYED, not "whatever was last proposed": nulling it here
@@ -1452,6 +1478,7 @@ export function showAskAnswer(turn: AskTurn, buffer: string): void {
 /** Refresh the meta count + sources block of the on-screen answer in place
  *  (used when the `sources`/`done` events land while the body still streams). */
 function refreshAskSources(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const meta = document.getElementById("askAnswerMeta");
   if (meta) meta.textContent = askMetaText(turn);
   const s = document.getElementById("askAnswerSources");
@@ -1494,7 +1521,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
   // for the reveal to mean anything: un-collapse it and leave focus mode first.
   revealRightPane();
   deps.switchConnTab("ask");
-  askActive = turn;
   askBuffer = "";
   composeText = "";
   showAskAnswer(turn, "");
@@ -1624,7 +1650,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); } // chip baked into renderStreamingBody
+      if (b && !turn.html && paneShows(turn)) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); } // chip baked into renderStreamingBody
       refreshAskSources(turn);
       let statusText: string;
       // NB the ↻ rows are applied further down, AFTER `claimOutcomeByIndex` is
@@ -1681,7 +1707,8 @@ export function runAskStream(url: string, turn: AskTurn): void {
       renderAskHistory();
       persistAskSession();
       btn.disabled = false;
-      setFollowupDisabled(false); // committed — the follow-up bar is now usable
+      if (paneShows(turn)) setFollowupDisabled(false); // committed — the follow-up bar is now usable
+      refreshRememberBar(turn); // and Remember, which reads the committed answer
       // The pane was painted before the answer existed, so neither write-action
       // gate could run (both read the committed answer). Re-derive them now.
       refreshWriteActionBars(turn);
@@ -1702,12 +1729,11 @@ export function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); applyRetryAffordances(b, turn); }
+      if (b && turn.html && paneShows(turn)) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); applyRetryAffordances(b, turn); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
-      setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
+      if (paneShows(turn)) setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
-      askActive = null;
       conn.close();
       askConn = null;
     },
@@ -1716,9 +1742,8 @@ export function runAskStream(url: string, turn: AskTurn): void {
       let msg = "Something went wrong.";
       try { msg = JSON.parse((e as MessageEvent).data).message || msg; } catch {}
       setAskStatus(msg, "error");
-      askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
       conn.close();
@@ -1730,18 +1755,16 @@ export function runAskStream(url: string, turn: AskTurn): void {
       if (askConn !== conn) return;
       askConn.close();
       askConn = null;
-      askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
     },
     onerror: () => {
       if (askConn !== conn) return;
       conn.close();
       askConn = null;
-      askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       const wrap = document.getElementById("wikiAskStatus");
       if (wrap && !wrap.classList.contains("done") && !wrap.classList.contains("error")) {
@@ -1808,18 +1831,18 @@ export function submitFollowup(): void {
 }
 
 /** Persist the shown answer as a durable memory (POST /api/wiki/remember).
- *  Pending → success swaps the bar to a non-interactive "✓ Remembered: …" line;
- *  a failure re-enables the button and shows an inline error. Acts on
- *  `askShownTurn` (set by `showAskAnswer`), sending its plain-markdown answer. */
+ *  Acts on `askShownTurn` (set by `showAskAnswer`), sending its plain-markdown
+ *  answer. The outcome lands on THAT turn (`turn.remembered`) and repaints the
+ *  bar only while it is still the one on screen: another turn opened before the
+ *  POST returns keeps its own bar. A failure re-enables the button and shows an
+ *  inline error on the turn's own bar. */
 export async function submitRemember(): Promise<void> {
   const btn = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
-  const msg = document.getElementById("wikiRememberMsg");
   const turn = askShownTurn;
-  if (!btn || btn.disabled || !turn || !turn.answer) return;
-  btn.disabled = true;
-  const prevLabel = btn.textContent || "Remember this";
-  btn.textContent = "Saving…";
-  if (msg) { msg.textContent = ""; msg.className = "wiki-remember-msg"; }
+  if (!btn || btn.disabled || !turn || !turn.answer || rememberSaving.has(turn)) return;
+  rememberSaving.add(turn);
+  refreshRememberBar(turn);
+  let error: string | undefined;
   try {
     const res = await fetch("/api/wiki/remember", {
       method: "POST",
@@ -1834,19 +1857,13 @@ export async function submitRemember(): Promise<void> {
     if (!res.ok || !data.saved) {
       throw new Error(data.error || ("HTTP " + res.status));
     }
-    const bar = document.getElementById("wikiRememberBar");
-    if (bar) {
-      bar.innerHTML =
-        '<span class="wiki-remember-done">✓ Remembered: ' + esc(data.summary || "") + "</span>";
-    }
+    turn.remembered = data.summary || "";
+    persistAskSession(); // a reload shows "✓ Remembered", never a second save
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = prevLabel;
-    if (msg) {
-      msg.textContent =
-        "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
-      msg.className = "wiki-remember-msg error";
-    }
+    error = "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
+  } finally {
+    rememberSaving.delete(turn);
+    refreshRememberBar(turn, error);
   }
 }
 

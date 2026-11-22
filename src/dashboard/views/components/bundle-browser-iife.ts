@@ -1,7 +1,9 @@
 /** Shared `Bun.build → IIFE → memoize` wrapper. Each browser entrypoint
  *  (helpers-browser, web-format-browser, traces-waterfall-browser) gets its
  *  own memoized accessor — concurrent first-request callers share one build,
- *  and subsequent requests return the cached Promise.
+ *  and subsequent requests return the cached Promise. A failed build is not
+ *  kept: the next request builds again, so a fixed client file is picked up
+ *  without a restart.
  *
  *  Usage:
  *      const getScript = makeBundledClientScript("traces-waterfall-browser.ts", import.meta.dir);
@@ -19,7 +21,15 @@ export function makeBundledClientScript(
   opts: { minify?: boolean } = {},
 ): () => Promise<string> {
   let cached: Promise<string> | null = null;
-  return () => (cached ??= build(entryFilename, callerDir, opts.minify ?? false));
+  return () => {
+    if (cached) return cached;
+    const p = build(entryFilename, callerDir, opts.minify ?? false);
+    cached = p;
+    p.catch(() => {
+      if (cached === p) cached = null;
+    });
+    return p;
+  };
 }
 
 async function build(entryFilename: string, callerDir: string, minify: boolean): Promise<string> {
@@ -28,6 +38,8 @@ async function build(entryFilename: string, callerDir: string, minify: boolean):
     target: "browser",
     format: "iife",
     minify,
+    // Return the failure rather than throw it, so the message below names the entry.
+    throw: false,
   });
   if (!result.success) {
     throw new Error(`${entryFilename} bundle failed:\n${result.logs.join("\n")}`);

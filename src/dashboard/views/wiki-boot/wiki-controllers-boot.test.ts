@@ -111,10 +111,23 @@ const fetched: { method: string; url: string }[] = [];
 /** What `/api/wiki/work-map` answers; the effort tests set it. */
 let workMapStatus = 200;
 
+/** Requests held until the test releases them, by path. */
+const holds = new Map<string, Promise<void>>();
+function hold(path: string): () => void {
+  let release!: () => void;
+  holds.set(path, new Promise<void>((r) => (release = r)));
+  return () => {
+    holds.delete(path);
+    release();
+  };
+}
+
 async function stubFetch(input: unknown, init?: { method?: string }): Promise<unknown> {
   const raw = String(input);
   fetched.push({ method: init?.method ?? "GET", url: raw });
   const url = new URL(raw, "http://localhost:3011");
+  const held = holds.get(url.pathname);
+  if (held) await held;
   let body: unknown = {};
   let status = 200;
   if (url.pathname === "/api/wiki/pages") body = LISTING;
@@ -236,6 +249,34 @@ describe("the effort page (wiki-effort-controller.ts)", () => {
     expect(doc().getElementById("wikiEffortRetry")!.hasAttribute("data-old-pane")).toBe(false);
     setWorkMapRunAt(null);
     workMapStatus = 200;
+  });
+
+  test("a map GET that fails after a page replaced the effort paints no error pane over the page (F22)", async () => {
+    const { setWorkMapRunAt } = await import("../components/wiki-shell-state.ts");
+    setWorkMapRunAt(NOW);
+    workMapStatus = 500;
+    const release = hold("/api/wiki/work-map");
+    clickEffortLink("drift");
+    expect(!!doc().getElementById("wikiEffortPage")).toBe(true);
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="q.md"]')!.click();
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#qmd"), "q.md to render");
+    release();
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+    expect(doc().getElementById("wikiEffortRetry")).toBe(null);
+    expect(!!doc().querySelector("#articleWrap .wiki-article h1#qmd")).toBe(true);
+    setWorkMapRunAt(null);
+    workMapStatus = 200;
+  });
+
+  test("a page response that lands after an effort replaced its view paints nothing (F22)", async () => {
+    const release = hold("/api/wiki/page");
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="u.md"]')!.click();
+    await until(() => fetched.some((f) => f.url.includes("relPath=u.md")), "the u.md fetch");
+    clickEffortLink("drift");
+    release();
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+    expect(!!doc().getElementById("wikiEffortPage")).toBe(true);
+    expect(doc().querySelector("#articleWrap h1#umd")).toBe(null);
   });
 });
 
