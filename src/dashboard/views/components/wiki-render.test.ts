@@ -222,7 +222,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves to 920,600.
 // 2026-11-22, architecture review A1 (F26/F57: the one anchor resolver and the HTML tokenizer the
 // glossary pass uses): 921,852, so the pin moves to 922,000.
-const WIKI_CLIENT_MAX_BYTES = 922_000;
+// 2026-11-22, architecture review B4 (F49: inbox answers carry a questionHash; the note survives a
+// 409): 923,349, so the pin moves to 923,500.
+const WIKI_CLIENT_MAX_BYTES = 923_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
