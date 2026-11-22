@@ -333,7 +333,9 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // 2026-11-22, architecture review B6 (F21): the Ask controller 2,503 → 2,516, for
 // `paneShows` and its guard at each stream paint site that had none. F22 in the
 // same PR: 2,498 (the dead `askActive` let gone, `askView` in its place, the
-// port's `clearShownPage` gone); the effort controller 237 → 229.
+// port's `clearShownPage` gone); the effort controller 237 → 229. Its fix round 1
+// batch 2: the Ask controller 2,498 → 2,516, Remember's outcome held on its turn
+// and painted only while that turn is shown.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
@@ -342,7 +344,7 @@ const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][]
   ["wiki-effort-controller.ts", 229, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
-  ["wiki-ask-controller.ts", 2_498, 10],
+  ["wiki-ask-controller.ts", 2_516, 10],
   ["wiki-article-controller.ts", 1_185, 10],
   ["wiki-series-controller.ts", 548, 3],
 ];

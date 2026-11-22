@@ -217,6 +217,11 @@ export interface AskTurn {
   // singleton node owned by whichever turn is painted, so holding the outcome on
   // the TURN is what stops a late fetch painting turn A's result onto turn B.
   chatEsc?: ChatEscState;
+  // The summary `POST /api/wiki/remember` returned for THIS turn, once saved.
+  // Like `chatEsc`, it rides along into localStorage through
+  // `serializeAskSession`. It is held on the turn because `#wikiRememberBar` is
+  // a singleton node owned by whichever turn is painted.
+  remembered?: string;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -226,6 +231,7 @@ interface ClaimRow { index: number; title: string; status: string; block: string
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askShownTurn: AskTurn | null = null; // the turn painted in the pane last
+const rememberSaving = new WeakSet<AskTurn>(); // turns whose Remember POST is in flight
 let askView = 0; // its `enterView` token: the pane shows it while the token is live
 let askBuffer = ""; // streamed plain-text accumulator for the streaming turn
 let composeText = ""; // fact-check compose lede accumulator (Phase 3 deltas)
@@ -400,15 +406,34 @@ function askFollowupHtml(turn: AskTurn): string {
 /** "Remember this" button rendered under the follow-up bar. Persists the shown
  *  turn's Q&A as a durable memory (POST /api/wiki/remember). Gated on the turn
  *  being committed (same `turn.answer` gate as the follow-up bar) and bound via
- *  document-level delegation. One save per render — a re-render resets it. */
+ *  document-level delegation. Rendered from the TURN (`turn.remembered`, the
+ *  save in flight), so a save that lands while another turn is shown paints
+ *  nothing there and shows when its own turn is opened again. */
 function askRememberHtml(turn: AskTurn): string {
-  const disabled = turn.answer ? "" : " disabled";
+  return '<div class="wiki-remember" id="wikiRememberBar">' + askRememberInner(turn) + "</div>";
+}
+
+function askRememberInner(turn: AskTurn): string {
+  if (turn.remembered !== undefined) {
+    return '<span class="wiki-remember-done">✓ Remembered: ' + esc(turn.remembered) + "</span>";
+  }
+  const saving = rememberSaving.has(turn);
+  const disabled = turn.answer && !saving ? "" : " disabled";
   return (
-    '<div class="wiki-remember" id="wikiRememberBar">' +
-    '<button id="wikiRememberBtn" class="wiki-remember-btn"' + disabled + ">Remember this</button>" +
-    '<span class="wiki-remember-msg" id="wikiRememberMsg"></span>' +
-    "</div>"
+    '<button id="wikiRememberBtn" class="wiki-remember-btn"' + disabled + ">" +
+    (saving ? "Saving…" : "Remember this") + "</button>" +
+    '<span class="wiki-remember-msg" id="wikiRememberMsg"></span>'
   );
+}
+
+/** Repaint the Remember bar from `turn`, only while `turn` is on screen. */
+function refreshRememberBar(turn: AskTurn, error?: string): void {
+  if (!paneShows(turn)) return;
+  const bar = document.getElementById("wikiRememberBar");
+  if (!bar) return;
+  bar.innerHTML = askRememberInner(turn);
+  const msg = document.getElementById("wikiRememberMsg");
+  if (msg && error) { msg.textContent = error; msg.className = "wiki-remember-msg error"; }
 }
 
 /** "Continue in chat →" bar, a sibling of Remember. Escalates the shown turn into
@@ -1803,18 +1828,18 @@ export function submitFollowup(): void {
 }
 
 /** Persist the shown answer as a durable memory (POST /api/wiki/remember).
- *  Pending → success swaps the bar to a non-interactive "✓ Remembered: …" line;
- *  a failure re-enables the button and shows an inline error. Acts on
- *  `askShownTurn` (set by `showAskAnswer`), sending its plain-markdown answer. */
+ *  Acts on `askShownTurn` (set by `showAskAnswer`), sending its plain-markdown
+ *  answer. The outcome lands on THAT turn (`turn.remembered`) and repaints the
+ *  bar only while it is still the one on screen: another turn opened before the
+ *  POST returns keeps its own bar. A failure re-enables the button and shows an
+ *  inline error on the turn's own bar. */
 export async function submitRemember(): Promise<void> {
   const btn = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
-  const msg = document.getElementById("wikiRememberMsg");
   const turn = askShownTurn;
-  if (!btn || btn.disabled || !turn || !turn.answer) return;
-  btn.disabled = true;
-  const prevLabel = btn.textContent || "Remember this";
-  btn.textContent = "Saving…";
-  if (msg) { msg.textContent = ""; msg.className = "wiki-remember-msg"; }
+  if (!btn || btn.disabled || !turn || !turn.answer || rememberSaving.has(turn)) return;
+  rememberSaving.add(turn);
+  refreshRememberBar(turn);
+  let error: string | undefined;
   try {
     const res = await fetch("/api/wiki/remember", {
       method: "POST",
@@ -1829,19 +1854,12 @@ export async function submitRemember(): Promise<void> {
     if (!res.ok || !data.saved) {
       throw new Error(data.error || ("HTTP " + res.status));
     }
-    const bar = document.getElementById("wikiRememberBar");
-    if (bar) {
-      bar.innerHTML =
-        '<span class="wiki-remember-done">✓ Remembered: ' + esc(data.summary || "") + "</span>";
-    }
+    turn.remembered = data.summary || "";
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = prevLabel;
-    if (msg) {
-      msg.textContent =
-        "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
-      msg.className = "wiki-remember-msg error";
-    }
+    error = "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
+  } finally {
+    rememberSaving.delete(turn);
+    refreshRememberBar(turn, error);
   }
 }
 

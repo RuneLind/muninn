@@ -2,7 +2,7 @@
  * The /wiki reader's Ask tab (`wiki-ask-controller.ts`, C4) driven through the
  * booted shell: a stored session rehydrates at boot, an Ask turn streamed over a
  * stubbed `EventSource` paints progressively into the article pane and clears
- * the shown page through `AskTurnPort.clearShownPage`, and the follow-up bar and
+ * the shown page through `enterView("ask")`'s teardown (`leaveView`), and the follow-up bar and
  * the history list reach the controller's exports through `boot()`'s
  * delegates. The page opens in graph mode, so "the shown page is cleared" is
  * checked on graph mode too: a page opened after the answer reads as an article.
@@ -91,7 +91,7 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: unknow
   else if (url.pathname === "/api/wiki/factcheck/append") body = { written: true };
   else if (url.pathname === "/api/wiki/remember" && init?.method === "POST") {
     rememberPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-    body = { saved: true, summary: "ok" };
+    body = { saved: true, summary: "sum:" + String(rememberPosts.at(-1)!.question) };
   }
   else if (url.pathname === "/api/wiki/series" && init?.method === "POST") {
     seriesPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -280,7 +280,7 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     doc().querySelector<HTMLElement>('#wikiAskHistory [data-ask-idx="0"]')!.click();
     expect(!!doc().getElementById("askAnswerBody")).toBe(true);
     // `setCurrentName(null)` (showAskAnswer) and `setCurrentRelPath(null)`
-    // (clearShownPage): the rail's active test keys on the relPath and falls back
+    // (`leaveView`, run by `enterView`): the rail's active test keys on the relPath and falls back
     // to the name, so either one left set keeps k.md's row lit.
     expect(getCurrentName()).toBe(null);
     expect(activeRows()).toBe("");
@@ -306,7 +306,7 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     // `reloadCheckedPage` → `AskTurnPort.reloadPageInPlace` → the shell refetches the page.
     await until(() => fetched.some((u) => u.startsWith("/api/wiki/page?") && u.includes("relPath=k.md")), "the page refetch");
     await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#kmd"), "k.md to render again");
-    // The answer cleared `graphIssue` (clearShownPage), and the in-place reload
+    // The answer cleared `graphIssue` (`leaveView`), and the in-place reload
     // does not re-read the URL: graph mode turned on here roots at the page.
     fetched.length = 0;
     doc().getElementById("wikiGraphToggle")!.click();
@@ -321,7 +321,7 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#pmd"), "p.md to render");
     expect(getCurrentName()).toBe("p");
     expect(fetched.some((u) => u.startsWith("/api/wiki/page?") && u.includes("relPath=p.md"))).toBe(true);
-    // An Ask answer replaces it (`clearShownPage`).
+    // An Ask answer replaces it (`enterView("ask")` → `leaveView`).
     doc().querySelector<HTMLElement>('#wikiAskHistory [data-ask-idx="0"]')!.click();
     expect(!!doc().getElementById("askAnswerBody")).toBe(true);
     expect(getCurrentName()).toBe(null);
@@ -436,5 +436,32 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     // The held page still lands once released.
     release();
     await until(() => !!doc().querySelector("#articleWrap h1#kmd"), "k.md to render");
+  });
+
+  test("a Remember that returns after another turn was opened lands on its own turn, not the one on screen (fix round 1 batch 2)", async () => {
+    const histItem = (q: string) =>
+      Array.from(doc().querySelectorAll<HTMLElement>("#wikiAskHistory [data-ask-idx]")).find((el) => el.textContent === q)!;
+    const bar = () => doc().getElementById("wikiRememberBar")!;
+    histItem("Held question?").click();
+    const release = hold("/api/wiki/remember?relPath=null");
+    rememberPosts.length = 0;
+    fetched.length = 0;
+    doc().getElementById("wikiRememberBtn")!.click();
+    await until(() => fetched.some((u) => u.includes("/api/wiki/remember")), "the remember POST to go out");
+    // Before it returns, the reader opens another turn.
+    histItem("Live question?").click();
+    const shown = bar().innerHTML;
+    expect(shown).toContain("Remember this");
+    release();
+    await until(() => rememberPosts.length > 0, "the remember POST");
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+    expect(rememberPosts.map((b) => b.question)).toEqual(["Held question?"]);
+    expect(bar().innerHTML).toBe(shown);
+    expect(bar().textContent).not.toContain("Remembered");
+    expect((doc().getElementById("wikiRememberBtn") as HTMLButtonElement).disabled).toBe(false);
+    // The saved turn shows it once opened again.
+    histItem("Held question?").click();
+    expect(bar().textContent).toBe("✓ Remembered: sum:Held question?");
+    expect(doc().getElementById("wikiRememberBtn")).toBe(null);
   });
 });
