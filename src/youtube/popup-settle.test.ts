@@ -93,7 +93,7 @@ interface StubEl {
 function makeEl(id: string): StubEl {
   // The ids `popup.html` renders with `class="hidden"`.
   const classes = new Set<string>(
-    ["video-info", "not-video", "lbl-visual"].includes(id) ? ["hidden"] : [],
+    ["video-info", "not-video", "lbl-visual", "lbl-connector"].includes(id) ? ["hidden"] : [],
   );
   const el: StubEl = {
     id,
@@ -132,6 +132,8 @@ const NODE_IDS = [
   "btn-summarize",
   "open-options",
   "sel-kind",
+  "lbl-connector",
+  "sel-connector",
   "chk-frames",
   "lbl-frames",
   "sel-visual",
@@ -157,6 +159,8 @@ interface DriveOptions {
   noVisualDetail?: boolean;
   /** Ids to leave OFF the page. */
   missing?: string[];
+  /** The `connectors` field of the options answer, when the instance lists any. */
+  connectors?: unknown;
   /**
    * Which `document.createElement` calls throw, 1-based, counting EVERY option
    * element a paint builds — the kind rows and then the visual-detail rows. The
@@ -251,6 +255,7 @@ async function drivePopup(opts: DriveOptions): Promise<Driven> {
     frames: { supported: opts.framesSupported ?? true },
   };
   if (opts.noVisualDetail) delete serverPayload.visual_detail;
+  if (opts.connectors !== undefined) serverPayload.connectors = opts.connectors;
 
   installGlobal("chrome", {
     runtime: {
@@ -635,6 +640,108 @@ describe("the popup settles onto controls that match what a click submits", () =
     d.node("sel-visual").fire("change");
     await d.microtasks();
     expect(d.saved).toEqual([{ visualDetail: "detailed" }]);
+  });
+});
+
+describe("the connector picker", () => {
+  const SDK_ID = "11111111-1111-4111-8111-111111111111";
+  const COPILOT_ID = "22222222-2222-4222-8222-222222222222";
+  const CONNECTORS = {
+    default_label: "Default: jarvis (claude-cli · opus)",
+    options: [
+      {
+        id: SDK_ID,
+        label: "claude-sdk sonnet",
+        kinds: [
+          { id: "standard", label: "Standard" },
+          { id: "deep", label: "Deep (full thinking)" },
+        ],
+        frames: { supported: true },
+      },
+      {
+        id: COPILOT_ID,
+        label: "copilot opus",
+        kinds: [{ id: "standard", label: "Standard" }],
+        frames: { supported: false },
+      },
+    ],
+  };
+
+  test("a remembered connector is restored with ITS kinds, and submitted", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      connectors: CONNECTORS,
+      stored: { captureConnector: SDK_ID, summaryKind: "deep", frames: true },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+
+    expect(d.node("lbl-connector").classList.contains("hidden")).toBe(false);
+    expect(d.node("sel-connector").children.map((o) => o.value)).toEqual(["", SDK_ID, COPILOT_ID]);
+    expect(d.node("sel-connector").children[0]!.textContent).toBe("Default: jarvis (claude-cli · opus)");
+    expect(d.node("sel-connector").value).toBe(SDK_ID);
+    expect(d.node("sel-kind").children.map((o) => o.textContent)).toEqual(["Standard", "Deep (full thinking)"]);
+    expect(d.node("sel-kind").value).toBe("deep");
+    expect(noteText(d)).toBe("");
+
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({ connectorId: SDK_ID, kind: "deep", frames: true });
+  });
+
+  test("switching connector narrows the kind and Slides to it, says so, and remembers only the connector", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      connectors: CONNECTORS,
+      stored: { summaryKind: "deep", frames: true },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+    expect(d.node("sel-connector").value).toBe("");
+
+    d.node("sel-connector").value = COPILOT_ID;
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+
+    expect(offered(d)).toEqual(["standard"]);
+    expect(d.node("sel-kind").value).toBe("standard");
+    expect(noteText(d)).toContain("deep");
+    expect(d.node("chk-frames").disabled).toBe(true);
+    expect(d.node("chk-frames").checked).toBe(false);
+    expect(d.saved).toEqual([{ captureConnector: COPILOT_ID }]);
+
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({
+      connectorId: COPILOT_ID,
+      kind: "standard",
+      frames: false,
+    });
+  });
+
+  test("a remembered connector that is gone falls back to the default WITH a note", async () => {
+    const d = await drivePopup({
+      options: "server",
+      storage: "answers",
+      connectors: CONNECTORS,
+      stored: { captureConnector: "33333333-3333-4333-8333-333333333333" },
+    });
+    d.fireDomReady();
+    await d.settleTimers();
+    expect(d.node("sel-connector").value).toBe("");
+    expect(noteText(d)).toContain("connector is not offered here");
+  });
+
+  test("an instance that lists no connectors shows no picker and submits the default", async () => {
+    const d = await drivePopup({ options: "server", storage: "answers", stored: { captureConnector: SDK_ID } });
+    d.fireDomReady();
+    await d.settleTimers();
+    expect(d.node("lbl-connector").classList.contains("hidden")).toBe(true);
+    d.node("btn-summarize").fire("click");
+    await d.settleTimers();
+    expect(d.sent.find((m) => m.type === "SUMMARIZE")).toMatchObject({ connectorId: "" });
   });
 });
 

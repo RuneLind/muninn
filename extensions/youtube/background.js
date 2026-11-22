@@ -85,7 +85,7 @@ async function handleGetOptions() {
   return { options: await response.json() };
 }
 
-async function handleSummarize({ title, url, videoId, kind, frames, visualDetail }) {
+async function handleSummarize({ title, url, videoId, kind, frames, visualDetail, connectorId }) {
   const settings = await getSettings();
 
   // Submit to Muninn — it handles transcript, summarization, indexing
@@ -98,7 +98,7 @@ async function handleSummarize({ title, url, videoId, kind, frames, visualDetail
     // with 400 `bad_visual_detail`. An older popup sends none of them — which is
     // today's transcript-only Standard capture, exactly as before.
     body: JSON.stringify(
-      buildSummarizeBody({ title, url, videoId, kind, frames, visualDetail }),
+      buildSummarizeBody({ title, url, videoId, kind, frames, visualDetail, connectorId }),
     ),
   });
 

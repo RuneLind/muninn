@@ -28,6 +28,17 @@ import { youtubeCaptureKinds } from "../../youtube/kinds.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { registerRecentIngestSink } from "../../summaries/recent-ingests.ts";
 import { requireJsonRequest } from "./json-request.ts";
+import {
+  DEFAULT_CAPTURE_CONNECTOR_DEPS,
+  applyCaptureConnector,
+  captureConnectorLabel,
+  defaultCaptureConnectorLabel,
+  kindsForPick,
+  listCaptureConnectors,
+  resolveCaptureConnector,
+  type CaptureConnectorDeps,
+} from "./capture-connector.ts";
+import type { ConnectorType } from "../../bots/config.ts";
 
 const log = getLog("dashboard");
 
@@ -79,6 +90,8 @@ export interface YouTubeRouteOptions {
    * on the next test that fires the signal.
    */
   framesRoot?: string;
+  /** The `connectors` table reads behind the connector picker; default the DB. */
+  connectors?: CaptureConnectorDeps;
 }
 
 /**
@@ -169,6 +182,7 @@ export function registerYouTubeRoutes(
 ): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
   const now = opts.now ?? Date.now;
+  const connectorDeps = opts.connectors ?? DEFAULT_CAPTURE_CONNECTOR_DEPS;
 
   /**
    * ONE map per REGISTRATION, not one per module — the truthful scope, since a
@@ -399,6 +413,29 @@ export function registerYouTubeRoutes(
     if (!summarizerBot) {
       return c.json({ error: "No bots configured", code: "no_bot" }, 500);
     }
+    // The connector picker: each named connector with the kinds and Slides
+    // availability it would get, so switching connector in the popup needs no
+    // second request. Rows that offer no kind are impossible (`standard`
+    // always survives); a failed listing omits the picker, it does not 500.
+    // `framesBlock` depends only on the connector TYPE, so it runs once per type.
+    const framesByType = new Map<ConnectorType, Promise<boolean>>();
+    const framesFor = (type: ConnectorType) => {
+      let p = framesByType.get(type);
+      if (!p) framesByType.set(type, (p = framesBlock({ connector: type }).then((b) => b === null)));
+      return p;
+    };
+    const rows = await listCaptureConnectors(connectorDeps);
+    const connectorOptions = await Promise.all(
+      rows.map(async (row) => {
+        const bot = applyCaptureConnector(summarizerBot, row);
+        return {
+          id: row.id,
+          label: captureConnectorLabel(row),
+          kinds: capturePresetOptions(kindsForPick(youtubeCaptureKinds(bot), row)),
+          frames: { supported: await framesFor(bot.connector ?? "claude-cli") },
+        };
+      }),
+    );
     return c.json({
       kinds: capturePresetOptions(youtubeCaptureKinds(summarizerBot)),
       // The id a client sends when the reader picks nothing. Named rather than
@@ -420,6 +457,11 @@ export function registerYouTubeRoutes(
         // that had to name them would be a second catalog nobody updates.
         options: visualDetailOptions(),
       },
+      // Absent when there are no named connectors (or the listing failed): the
+      // popup then shows no picker and every capture runs on the default.
+      ...(connectorOptions.length > 0
+        ? { connectors: { default_label: defaultCaptureConnectorLabel(summarizerBot), options: connectorOptions } }
+        : {}),
     });
   });
 
@@ -448,6 +490,7 @@ export function registerYouTubeRoutes(
       frames?: unknown;
       kind?: unknown;
       visual_detail?: unknown;
+      connector_id?: unknown;
     };
     const body = await c.req.json<Body>().catch(() => ({} as Body));
     const { title, url, video_id } = body;
@@ -521,10 +564,16 @@ export function registerYouTubeRoutes(
     // /summaries (see the same ordering in tiktok-routes.ts /
     // x-article-routes.ts); above the dedup, because a 503 must not cost a
     // huginn listing read either — the Vimeo ordering.
-    const summarizerBot = resolveSummarizerBot(discoverAllBots());
-    if (!summarizerBot) {
+    const configuredBot = resolveSummarizerBot(discoverAllBots());
+    if (!configuredBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
+
+    // The connector the reader picked, applied over the summarizer bot before
+    // the kind and Slides checks below, because both depend on the connector.
+    const pick = await resolveCaptureConnector(configuredBot, body.connector_id, connectorDeps);
+    if (!pick.ok) return c.json(pick.body, pick.status);
+    const summarizerBot = pick.bot;
 
     // The summary KIND, validated before the duplicate lookup and before
     // `createJob` — the Vimeo ordering, for the Vimeo reason: a picker value
@@ -548,7 +597,7 @@ export function registerYouTubeRoutes(
         400,
       );
     }
-    const preset = findCapturePreset(youtubeCaptureKinds(summarizerBot), body.kind);
+    const preset = findCapturePreset(kindsForPick(youtubeCaptureKinds(summarizerBot), pick.picked), body.kind);
     if (!preset) {
       return c.json(
         { error: `Unknown summary kind: ${body.kind}`, code: "bad_kind", kind: body.kind },
@@ -565,10 +614,12 @@ export function registerYouTubeRoutes(
         {
           error: "Slides are not available on this summarizer bot's connector.",
           code: "frames_unsupported",
-          detail:
-            `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
-            `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
-            `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
+          detail: pick.picked
+            ? `Connector "${pick.picked.name}" (${summarizerBot.connector ?? "claude-cli"}) cannot read the extracted ` +
+              `slide frames (no extra-dirs support). Untick Slides, or pick a claude-cli or claude-sdk connector.`
+            : `Summarizer bot "${summarizerBot.name}" uses connector "${summarizerBot.connector ?? "claude-cli"}", ` +
+              `which cannot read the extracted slide frames (no extra-dirs support). Untick Slides, or set ` +
+              `SUMMARIZER_BOT to a claude-cli or claude-sdk bot.`,
         },
         503,
       );

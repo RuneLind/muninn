@@ -770,6 +770,18 @@ short summary's neighbours are ranked partly on image markdown and captions.
 
 ## The options endpoint, and the picker
 
+**The connector pick.** The options answer also carries `connectors:
+{default_label, options: [{id, label, kinds, frames: {supported}}…]}` — every
+`connectors` row with the kinds and Slides it would get, so the popup switches
+connector without a second request; absent when there are none or the listing
+fails. The POST's `connector_id` is applied over the summarizer bot by
+`src/dashboard/routes/capture-connector.ts` (the chat thread merge,
+`applyThreadConnector`) BEFORE the kind and Slides checks, which therefore run
+against the picked connector; `kindsForPick` makes `deep` keep a picked row's
+own model (`presetsForPickedModel` in `src/summaries/presets.ts`). Only YouTube
+takes the field today; the helper lives with the routes so another capture
+route can. A re-run from `/summaries` still runs on the default bot.
+
 **`GET /api/youtube/options`** answers `{kinds: [{id, label}…], default_kind,
 frames: {supported}, visual_detail: {supported, default, options: [{id,
 label}…]}}` — the same resolution the POST validates against, so the extension
