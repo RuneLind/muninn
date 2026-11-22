@@ -60,9 +60,10 @@ const log = getLog("watchers", "wiki-committer");
  * The `wikiDir`s this sweeper covers: the bot's, for every ENABLED
  * `wiki-committer` watcher row (the opt-in `scripts/setup-wiki-committer.ts`
  * creates). A tick sweeps that dir's whole subtree in the dir's own repo, so a
- * wiki root inside one that shares its git toplevel (`sweeperCommits`,
- * `src/wiki/series-committer.ts`) is committed by it, whatever name the
- * registry gave that wiki; a nested repo is only a gitlink there. Rows read off `getAllWatchers`
+ * wiki root inside one that shares its git toplevel and that git does not
+ * ignore there (`sweeperCommits`, `src/wiki/series-committer.ts`) is
+ * committed by it, whatever name the registry gave that wiki; a nested repo
+ * is only a gitlink there. Rows read off `getAllWatchers`
  * unless `listWatchers` is given.
  */
 export async function sweptWikiDirs(

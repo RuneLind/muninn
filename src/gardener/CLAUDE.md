@@ -307,8 +307,8 @@ questions are asked of them):
    whose page already IS its draft `applied` (logged and committed, as Dismiss
    does) and marks every other live row, `draft` and stranded `approved` alike,
    `stale`. Its lease is not renewed, so every write is fenced on it (next
-   section): a lease that lapsed and was claimed elsewhere answers `held` with
-   nothing logged or moved, and a `log.md` entry it cannot write leaves the
+   section, cells S1–S6): a lease found gone answers `held` with its
+   unsettled rows live, and a `log.md` entry it cannot write leaves the
    whole group live for the next pass. A group an Accept
    or Dismiss holds is left whole and keeps its key and pages (`held`); the
    next pass retires it. The weekly watcher therefore calls the seeder
@@ -376,41 +376,29 @@ ran SQL. Now:
 - **Dismiss settles a written row only after logging it, inside the write
   section.** A live row whose page already IS its draft is settled `applied`,
   not `rejected`, and named in `alreadyWritten`. `settleWrittenGroupRows`
-  (`apply.ts`) reads each page, compares, writes the group's `log.md` entry for
-  the pages still uncommitted and runs the settle CAS, all in ONE
-  `runWikiWriteExclusive` section; the commit runs right after it, and only then
-  are the other rows rejected. So a queued writer cannot change a page between
-  the read and the settle, and a throw (in the reject, a later step, or the
-  settle step itself) never leaves an `applied` row over a page nobody logged:
-  what was not settled stays live for the next verb. A log entry that is not
-  written (the append threw, or `log.md` is unreadable and so skipped) throws
-  `GroupLogWriteError` before any settle: Dismiss answers 500 and rejects
-  nothing, so the written row is not rejected either. The first cut swallowed
-  that failure and settled anyway (`[applied, rejected]` over an unlogged page,
-  measured with `log.md` chmod 000). Residual: a crash between
-  the settle and the commit leaves the page logged and uncommitted, for the
-  sweeper.
-- **Every write a lease holder makes is fenced on its lease** (fix round 2).
-  The lease only held off a verb that tried to CLAIM: a holder whose lease had
-  lapsed went on writing, so with two processes an Accept gated before its
-  write wrote, logged and committed both pages after a Dismiss elsewhere had
-  rejected them (rows `rejected`, pages edited), and the self-heal settled and
-  logged after its unrenewed lease lapsed. Now each row CAS takes the lease
-  (`GroupLeaseRef`) and joins it in the same statement (`leaseFence`:
-  `token` matches and `expires_at > now()`): the group claim, the terminal
-  marks, the revert to `draft`, the settle to `applied`, the reject, and the
-  self-heal's `stale`. The writes that are not a row CAS ask
-  (`wikiProposalGroupLeaseHeld`, or `lost` after a renewal answered false)
-  first: the apply before its preflight and before each page write, the
-  Dismiss and self-heal settle at the start of their write section (before
-  the log entry), and every Stale check verdict write. A lease found gone
-  throws `GroupLeaseLostError`: the verb answers 409 `{outcome: "conflict"}`
-  with no further page written and no row moved, and the self-heal answers
-  `held`. Residuals: the check before a page write is not atomic with it, so
-  a lease that lapses in that gap (its renewals failing for 90 s while the
-  section runs) still lets that one page land; the log entry and commit for
-  pages already written run without a check, because they record a write
-  that happened.
+  (`apply.ts`) reads each page, compares, logs the pages still uncommitted
+  and runs the settle CAS, all in ONE `runWikiWriteExclusive` section; the
+  commit runs right after it, and only then are the other rows rejected. A
+  queued writer cannot change a page between the read and the settle.
+- **Every write a lease holder makes is fenced on its lease.** Each row CAS
+  takes the lease (`GroupLeaseRef`) and checks it in the same statement
+  (`leaseFence`: `token` matches and `expires_at > now()`): the claim, the
+  terminal marks, the revert, the settle, the reject, the self-heal's
+  `stale`. The other writes ask `held()` (a DB check) first: each page write,
+  the log entry, each Stale check verdict write. An expired lease is never
+  renewed (`renewWikiProposalGroupLease` requires `expires_at > now()`), so a
+  lease found gone stays gone; a renewal that answers false stops the timer.
+- **The log entry and the commit pass ONE gate** (`logGroupPages`, F35 class
+  check): inside the write section, the lease is checked right before the
+  append, and the append must succeed (`writeGroupLogEntry` answers false for
+  an unreadable `log.md` and for an append that throws). Either failing throws
+  (`GroupLeaseLostError`, `GroupLogWriteError`) with nothing logged and
+  nothing committed; once the entry is written the commit always runs. An
+  Accept marks a row `applied` only when its page was logged (`onLogged`) or
+  needed no entry (a no-op over a committed page, `markableApplied`); an
+  unlogged written row goes back to `draft`. The single-row apply keeps its
+  best-effort log (`applyInner` step 4): its re-run is a no-op that logs
+  nothing, so a row left live there would never be logged either.
 - **An Accept that loses a terminal CAS says so.** A `markProposal` or
   revert that moves nothing (another verb moved the row, or the lease lapsed,
   while this one applied it) answers 409 `{outcome: "conflict", lost,
@@ -418,20 +406,67 @@ ran SQL. Now:
   re-read refuses (`mixed`, rejected row) a group a Dismiss elsewhere settled
   between its first read and the claim.
 - **Every claimed row is protected from before the claim.** On any throw, the
-  Accept's `finally` marks a row the apply REPORTED written (`onRowOutcome`, so
-  a throw after the write still knows) `applied`, and puts every other claimed
-  row back to `draft`. A row is never reverted over a page it wrote. A Stale
-  check group writes its `fixed` verdicts before the status marks, and for the
-  landed rows on a throw. For a page a dead pass already wrote (recovered,
-  no-op, `alreadyWritten`) the verdict carry's before-copy is the committed
-  copy matching the row's `base_hash` (`committedPageWithHash`).
-- **The apply is safe to re-run.** A row that throws still gets the group's log
-  entry and commit for every page written before it (and its own, when its
-  write landed). A re-run's no-op row whose page carries uncommitted changes is
-  an earlier pass's write: it is staged and named in the log entry
-  (`recovered`). Residuals: a crash between the log append and the commit logs
-  that page twice; a dead pass's page the sync loop or the sweeper committed
-  first gets no group log entry; a wiki outside git recovers nothing.
+  Accept's `finally` marks `applied` a row whose page landed and was logged
+  (`onRowOutcome` + `onLogged`, so a throw after the write still knows), and
+  puts every other claimed row back to `draft`, an unlogged written one
+  included (R3; a later Dismiss settles it `applied`, never `rejected`). A
+  Stale check group writes its `fixed` verdicts before the status marks.
+- **The apply is safe to re-run.** A page an earlier pass wrote is a no-op
+  (2a); when it carries uncommitted changes, this pass stages it and names it
+  in its entry (`recovered`). That is the path every lost-lease or failed-log
+  cell below relies on. A Stale check verdict carry's before-copy is the
+  committed copy matching the row's `base_hash` (`committedPageWithHash`).
+
+#### The group verbs × lease × log table
+
+Rules: **R1** a holder logs and commits a written page only while its lease
+holds, checked right before the entry; found gone, it logs and commits
+nothing, and the next verb logs and commits the page once through
+`recovered`/`alreadyWritten`. **R2** 200 only when every row it answered for
+reached `applied`/`rejected`/`stale`/`error` in this call; a lease lost after
+the claim answers 409 `conflict`. **R3** no row `applied` over an unlogged
+page, no unlogged page committed: a log failure answers 500 `logFailed` with
+the rows live. **R4** a lease gone at a verdict write is a 409 like any other.
+Every cell ends with each written page logged once and committed once, now or
+after the next verb. Pinned in `wiki-gardener-routes.test.ts` («F35 class
+check», A* and D* by id) and `src/db/wiki-proposals.test.ts` (S*).
+
+| Cell | Verb · lease found gone · log | Rows after | Log/commit now | Answer |
+|---|---|---|---|---|
+| A1 | Accept · never · writable or missing (created) | `applied` | 1/1 | 200 `applied` |
+| A2/A3 | Accept · never · unreadable / append throws | `draft` | 0/0, next Accept 1/1 (`recovered`) | 500 `logFailed`, `unlogged` |
+| A4 | Accept · before the claim | unchanged | 0/0 | 409 `conflict` (claimed no row) |
+| A5 | Accept · before the claim, rows already `approved` | unchanged | 0/0 | 409 `conflict`, `applied: []` |
+| A6 | Accept · after the claim, before the first write | `approved` (or the competitor's) | 0/0 | 409 `conflict`, `applied: []` |
+| A7 | Accept · between page writes, no competitor | `approved` | 0/0, next Accept 1/1 | 409 `conflict`, `unlogged` |
+| A8 | Accept · between page writes, a Dismiss takes the group | Dismiss: `applied` + `rejected` | Dismiss 1/1, Accept 0/0 | 409; Dismiss 200 `alreadyWritten` |
+| A9 | Accept · after the last write, at the log check | `approved` | 0/0, next Accept 1/1 | 409 `conflict`, `unlogged` |
+| A10/A12 | Accept · after the log check (append, commit or marks) | `approved` | 1/1; next verb settles, logs nothing | 409 `conflict`, `lost` |
+| A11 | Accept (Stale check) · at the `fixed` verdict write | `approved` | 1/1, no verdict | 409 `conflict` |
+| D1–D3 | Dismiss · never · no written row / written committed / written uncommitted | `applied` + `rejected` | 0/0 / 0/0 / 1/1 | 200 `rejected` |
+| D4 | Dismiss · never · unreadable / append throws | unchanged | 0/0, next verb 1/1 | 500 `logFailed` |
+| D6 | Dismiss · after the claim, before the entry | unchanged | 0/0, next verb 1/1 | 409 `conflict` |
+| D7 | Dismiss · after the entry, before the settle CAS | unchanged | 1/1; next verb settles, logs nothing | 409 `conflict` |
+| D8 | Dismiss · between the settle and the reject | `applied` + live | 1/1 | 409 `conflict`, `alreadyWritten` |
+| D9 | Dismiss (Stale check) · at the verdict write | `applied`/`rejected` | as D1–D3, no verdict | 409 `conflict`, `verdictsWritten: false` |
+| S1 | self-heal · never | `applied` (written) + `stale` | 1/1 for uncommitted pages | `held: false` |
+| S2 | self-heal · never · unreadable / append throws | unchanged | 0/0 | throws `GroupLogWriteError`; next pass retries |
+| S3 | self-heal · claim refused | unchanged | 0/0 | `held: true` |
+| S4 | self-heal · before the entry | unchanged | 0/0 | `held: true` |
+| S5 | self-heal · after the entry, before the settle CAS | unchanged | 1/1; next pass settles, logs nothing | `held: true` |
+| S6 | self-heal · before the `stale` CAS | settled rows `applied`, rest live | as S1 | `held: true` (rows moved < live rows) |
+
+A competitor that takes the group after expiry is its own row from its own
+start: it sees the pages on disk and logs them through its `recovered` path.
+"After the log entry, before the commit" is not a separate cell: the commit
+is not checked (a logged page that stayed uncommitted would be logged again by
+the next verb), so a loss there surfaces at the marks (A10) or the settle
+(D7/S5). Residuals: the check is not atomic with the append, so a lease that
+expires in that gap (its renewals failing for 90 s) lets one entry land, and
+the competitor may log the page again; a commit that fails after the entry
+leaves a logged, uncommitted page the next verb logs a second time; a dead
+pass's page the sync loop or the sweeper committed first gets no group log
+entry; a wiki outside git recovers nothing.
 
 ## Stale check fixes (`kind: "stale-check"`, `src/gardener/stale-proposals.ts`)
 

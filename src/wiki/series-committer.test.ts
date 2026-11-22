@@ -17,6 +17,7 @@ import {
   sweeperCommits,
   type SeriesCommitterWiki,
 } from "./series-committer.ts";
+import { gitToplevel, listWikiSubtreeDirty } from "./commit.ts";
 import type { SyncRepo } from "../sync/config.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
@@ -199,4 +200,237 @@ describe("seriesUncommittedReason", () => {
     // The route never tried: the blocker IS the reason.
     expect(seriesUncommittedReason("not a git repo", undefined)).toBe("not a git repo");
   });
+});
+
+/**
+ * F35 class check, surface 2: `sweeperCommits` over every kind of root, each
+ * cell checked against the sweeper's real staging. The ground truth is what
+ * the sweeper itself would stage: a new page is written under the root and
+ * looked for in `listWikiSubtreeDirty(<swept dir's toplevel>, <swept dir>)`,
+ * the exact listing `checkWikiCommitter` commits. A cell passes only when
+ * `sweeperCommits` agrees with that listing AND with the expected column.
+ */
+describe("sweeperCommits — the root classification table", () => {
+  async function git(cwd: string, ...args: string[]): Promise<void> {
+    const proc = Bun.spawn(["git", "-C", cwd, "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`);
+  }
+
+  /** What one cell sets up under `base`: the swept dir and the wiki root. */
+  type Cell = { name: string; expected: boolean; setup: (base: string) => Promise<{ dir: string; root: string }> };
+
+  /** `base/repo` is a git repo with one commit; `base/repo/wiki` the swept dir. */
+  async function sweptRepo(base: string): Promise<string> {
+    const top = path.join(base, "repo");
+    await mkdir(path.join(top, "wiki"), { recursive: true });
+    await git(top, "init", "-q", "-b", "main");
+    await Bun.write(path.join(top, "wiki", "seed.md"), "seed\n");
+    await git(top, "add", "-A");
+    await git(top, "commit", "-q", "-m", "seed");
+    return path.join(top, "wiki");
+  }
+
+  const CELLS: Cell[] = [
+    {
+      name: "root outside the swept dir",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const root = path.join(base, "repo", "elsewhere");
+        await mkdir(root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, same toplevel, tracked and clean",
+      expected: true,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        return { dir, root: dir };
+      },
+    },
+    {
+      name: "inside, same toplevel, an untracked (not ignored) subfolder",
+      expected: true,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const root = path.join(dir, "fresh");
+        await mkdir(root);
+        await Bun.write(path.join(root, "draft.md"), "x\n");
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, the root itself ignored by .gitignore",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        await Bun.write(path.join(base, "repo", ".gitignore"), "wiki/private/\n");
+        const root = path.join(dir, "private");
+        await mkdir(root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, a parent of the root ignored by .gitignore (the bots/* shape)",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        await Bun.write(path.join(base, "repo", ".gitignore"), "wiki/bots/*\n");
+        const root = path.join(dir, "bots", "jarvis", "wiki");
+        await mkdir(root, { recursive: true });
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, ignored by .git/info/exclude",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        await Bun.write(path.join(base, "repo", ".git", "info", "exclude"), "wiki/excluded/\n");
+        const root = path.join(dir, "excluded");
+        await mkdir(root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, ignored by a core.excludesFile (the global excludes mechanism)",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const excludes = path.join(base, "global-excludes");
+        await Bun.write(excludes, "scratch/\n");
+        await git(path.join(base, "repo"), "config", "core.excludesFile", excludes);
+        const root = path.join(dir, "scratch");
+        await mkdir(root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "inside, one page extension ignored (*.mdx)",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        await Bun.write(path.join(base, "repo", ".gitignore"), "*.mdx\n");
+        return { dir, root: dir };
+      },
+    },
+    {
+      name: "a nested repo inside the swept dir",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const root = path.join(dir, "nested");
+        await mkdir(root);
+        await git(root, "init", "-q", "-b", "main");
+        return { dir, root };
+      },
+    },
+    {
+      name: "the swept dir inside a linked worktree (.git file), root under it",
+      expected: true,
+      setup: async (base) => {
+        await sweptRepo(base);
+        const wt = path.join(base, "wt");
+        await git(path.join(base, "repo"), "worktree", "add", "-q", "-b", "side", wt);
+        const dir = path.join(wt, "wiki");
+        const root = path.join(dir, "notes");
+        await mkdir(root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "a separate linked worktree nested inside the swept dir",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const root = path.join(dir, "wt");
+        await git(path.join(base, "repo"), "worktree", "add", "-q", "-b", "side2", root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "the root reached through a symlink into the swept dir",
+      expected: true,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        await mkdir(path.join(dir, "real"));
+        const root = path.join(base, "link-to-real");
+        await symlink(path.join(dir, "real"), root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "the swept dir reached through a symlink",
+      expected: true,
+      setup: async (base) => {
+        const real = await sweptRepo(base);
+        const dir = path.join(base, "link-to-wiki");
+        await symlink(real, dir);
+        return { dir, root: dir };
+      },
+    },
+    {
+      name: "a symlink inside the swept dir pointing outside it",
+      expected: false,
+      setup: async (base) => {
+        const dir = await sweptRepo(base);
+        const outside = path.join(base, "outside");
+        await mkdir(outside);
+        const root = path.join(dir, "out-link");
+        await symlink(outside, root);
+        return { dir, root };
+      },
+    },
+    {
+      name: "a non-git dir",
+      expected: false,
+      setup: async (base) => {
+        const dir = path.join(base, "plain");
+        await mkdir(dir);
+        return { dir, root: dir };
+      },
+    },
+    {
+      name: "a bare repo as the swept dir",
+      expected: false,
+      setup: async (base) => {
+        const dir = path.join(base, "bare.git");
+        await mkdir(dir);
+        await git(dir, "init", "-q", "--bare");
+        return { dir, root: dir };
+      },
+    },
+  ];
+
+  /** Would the sweeper of `dir` stage a new page, `.md` AND `.mdx`, written under `root`? */
+  async function sweeperStages(dir: string, root: string): Promise<boolean> {
+    const top = await gitToplevel(dir);
+    if (!top) return false;
+    const pages = [".md", ".mdx"].map((ext) => path.join(root, `probe-${crypto.randomUUID()}${ext}`));
+    for (const page of pages) await Bun.write(page, "new page\n");
+    const { dirty } = await listWikiSubtreeDirty(top, dir);
+    const canonicalDir = await realpath(dir);
+    const rels = await Promise.all(pages.map(async (p) => path.relative(canonicalDir, await realpath(p)).split(path.sep).join("/")));
+    for (const page of pages) await rm(page, { force: true });
+    return rels.every((rel) => dirty.includes(rel));
+  }
+
+  for (const cell of CELLS) {
+    test(cell.name, async () => {
+      const base = await realpath(await testTempDir(path.join(tmpdir(), "muninn-sweep-cell-")));
+      try {
+        const { dir, root } = await cell.setup(base);
+        const answer = await sweeperCommits(root, [dir]);
+        const truth = await sweeperStages(dir, root);
+        expect({ answer, truth }).toEqual({ answer: cell.expected, truth: cell.expected });
+      } finally {
+        await rm(base, { recursive: true, force: true });
+      }
+    });
+  }
 });

@@ -29,9 +29,9 @@ import {
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
-import { applyWikiProposalGroup } from "../../gardener/apply.ts";
+import { applyWikiProposalGroup, settleWrittenGroupRows } from "../../gardener/apply.ts";
 import { runGit } from "../../wiki/commit.ts";
-import { runWikiWriteExclusive } from "../../wiki/queue.ts";
+import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
@@ -3655,6 +3655,371 @@ describe("lint proposals — seeding and the group verbs", () => {
     });
   });
 
+  /**
+   * F35 class check (round 3): the group verbs × the point the lease is found
+   * gone × `log.md` × a competitor, as enumerated in `src/gardener/CLAUDE.md`
+   * («The group verbs × lease × log table»). Cell ids (A1…, D1…) match it.
+   * Every cell ends with each written page logged once and committed once,
+   * now or after the next verb, which each test runs. The store's lease map
+   * stands in for the DB lease: deleting the key is the lease expiring with no
+   * competitor; setting another token is a competitor that claimed it.
+   */
+  describe("F35 class check — group verbs × lease × log", () => {
+    const g = (...args: string[]) =>
+      runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+    const ACCEPT = `/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`;
+    const DISMISS = `/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`;
+    const LEASE = `lintwiki\0${GROUP}`;
+    const logPath = () => path.join(root, "log.md");
+
+    /** A committed git wiki with a `# Log` and the group's two draft rows. */
+    async function gitWiki(): Promise<unknown[]> {
+      await Bun.write(logPath(), "# Log\n");
+      await g("init", "-q", "-b", "main");
+      await g("config", "user.email", "t@example.invalid");
+      await g("config", "user.name", "t");
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      return [await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")];
+    }
+    /** `log.md` lines naming `page` (one per entry: each entry names a page once). */
+    const entries = async (page: string) => (await Bun.file(logPath()).text()).split(page).length - 1;
+    /** Commits after the seed that touch `page`. */
+    const commits = async (page: string) =>
+      (await g("log", "--format=%s", "--", page)).stdout.split("\n").filter((l) => l && l !== "seed").length;
+    const clean = async () => (await g("status", "--porcelain")).stdout === "";
+    const statusesOf = (store: ReturnType<typeof groupStore>) => store.rows().map((r) => r.status);
+    const fresh = (store: ReturnType<typeof groupStore>, over: Record<string, unknown> = {}) => {
+      const other = new Hono();
+      registerWikiGardenerRoutes(other, deps({ ...store.deps, ...over }));
+      return other;
+    };
+    /** Which of the group's pages carry their draft right now. */
+    const wikiState = async (): Promise<"none" | "a" | "both"> => {
+      const a = (await Bun.file(path.join(root, PAGE_A)).text()).includes("series: prov");
+      const b = (await Bun.file(path.join(root, PAGE_B)).text()).includes("series: prov");
+      return a && b ? "both" : a ? "a" : "none";
+    };
+    /** The real group apply, with `hook` run once at the first lease check it
+     *  makes in wiki state `at`: "a" is between the two page writes, "both"
+     *  after the last one (the check right before the log entry). Keyed on the
+     *  wiki, not on a call count, so it fires at the same point on any build. */
+    const hookedApply = (at: "a" | "both", hook: () => Promise<void> | void) =>
+      (async (rows, applyDeps, opts) => {
+        let fired = false;
+        return applyWikiProposalGroup(rows, applyDeps, {
+          ...opts,
+          leaseHeld: async () => {
+            if (!fired && (await wikiState()) === at) {
+              fired = true;
+              await hook();
+            }
+            return opts!.leaseHeld!();
+          },
+        });
+      }) as typeof applyWikiProposalGroup;
+
+    // A2, A3 — a log entry Accept cannot write: unreadable (skipped, never
+    // overwritten) and unwritable (the append throws).
+    for (const [cell, mode] of [["A2 unreadable", 0o000], ["A3 unwritable (append throws)", 0o444]] as const) {
+      test(`${cell}: Accept marks no row applied over unlogged pages and commits nothing; the next Accept logs them once`, async () => {
+        const store = groupStore(await gitWiki());
+        registerWikiGardenerRoutes(app, deps(store.deps));
+        await chmod(logPath(), mode);
+        let res: Response;
+        try {
+          res = await app.request(ACCEPT, JSON_POST);
+        } finally {
+          await chmod(logPath(), 0o644);
+        }
+        // Never `applied` over an unlogged page, and nothing committed.
+        expect(statusesOf(store)).toEqual(["draft", "draft"]);
+        expect([await commits(PAGE_A), await commits(PAGE_B)]).toEqual([0, 0]);
+        expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+        expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ logFailed: true, unlogged: [PAGE_A, PAGE_B] });
+
+        const next = await fresh(store).request(ACCEPT, JSON_POST);
+        expect(next.status).toBe(200);
+        expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A, PAGE_B] });
+        expect(statusesOf(store)).toEqual(["applied", "applied"]);
+        expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+        expect(await clean()).toBe(true);
+      });
+    }
+
+    test("A4 lease gone before the claim: the fenced claim moves nothing and the Accept answers 409", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          approveProposalGroup: async (w: string, gk: string, lease?: { scope: string; groupKey: string; token: string }) => {
+            store.leases.delete(LEASE);
+            return store.deps.approveProposalGroup(w, gk, lease);
+          },
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(statusesOf(store)).toEqual(["draft", "draft"]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A5 lease gone before the claim over stranded `approved` rows: nothing written, rows left for the next verb", async () => {
+      const [r1, r2] = await gitWiki();
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, { ...(r2 as object), status: "approved" }]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          approveProposalGroup: async () => {
+            store.leases.delete(LEASE);
+            return [];
+          },
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect(await clean()).toBe(true);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(next.status).toBe(200);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("A7 lease gone between page writes, no competitor: nothing logged or committed, rows stay `approved`, the next Accept logs and commits each page once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("a", () => void store.leases.delete(LEASE)) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      // Written, not logged, not committed; the fenced revert and mark move nothing.
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+      expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+      expect(await commits(PAGE_A)).toBe(0);
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A], unlogged: [PAGE_A] });
+
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(next.status).toBe(200);
+      expect(await next.json()).toMatchObject({ outcome: "applied", applied: [PAGE_B], recovered: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "applied"]);
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A8 lease gone between page writes and a Dismiss claims the group: the Dismiss logs and commits the written page once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("a", () => void store.leases.set(LEASE, "competitor")) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([0, 0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A], unlogged: [PAGE_A] });
+      // The competitor's lease lapses in turn; its Dismiss settles what was written.
+      store.leases.delete(LEASE);
+      const dismissed = await fresh(store).request(DISMISS, JSON_POST);
+      expect(dismissed.status).toBe(200);
+      expect(await dismissed.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A8 interleaved (the measured double log): a Dismiss in another process settles the page while the Accept is paused; the Accept then logs and commits nothing", async () => {
+      const store = groupStore(await gitWiki());
+      let dismissed: Response | null = null;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: hookedApply("a", async () => {
+            // The Accept's lease expired; another process (its own write
+            // queue, its own in-flight set) dismisses the group now.
+            store.leases.delete(LEASE);
+            __resetWikiWriteQueueForTest();
+            __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+            dismissed = await fresh(store).request(DISMISS, JSON_POST);
+          }),
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(dismissed!.status).toBe(200);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      expect((await g("log", "--format=%s")).stdout.split("\n").filter((l) => l.startsWith("[lint]")).length).toBe(1);
+      expect(res.status).toBe(409);
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A9 lease gone after the last page write, at the log check: nothing logged or committed, the next Accept logs both pages once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("both", () => void store.leases.delete(LEASE)) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+      expect([await commits(PAGE_A), await commits(PAGE_B)]).toEqual([0, 0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A, PAGE_B], unlogged: [PAGE_A, PAGE_B] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A, PAGE_B] });
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+    });
+
+    test("A10/A12 lease gone after the log entry, before the terminal marks: logged and committed once, 409 naming the lost rows; the next Accept settles without logging again", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            const out = await applyWikiProposalGroup(rows, applyDeps, opts);
+            store.leases.delete(LEASE);
+            return out;
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", lost: [PAGE_A, PAGE_B] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", noop: [PAGE_A, PAGE_B], recovered: [] });
+      expect(statusesOf(store)).toEqual(["applied", "applied"]);
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+    });
+
+    test("a real renewal that answers false (a competitor took the expired lease) stops the renewals, and the Accept writes nothing", async () => {
+      const store = groupStore(await gitWiki());
+      let renewals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inApply = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          groupLeaseRenewMs: 5,
+          renewGroupLease: async (w: string, gk: string, token: string) => {
+            renewals += 1;
+            return store.deps.renewGroupLease(w, gk, token);
+          },
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            entered();
+            await gate;
+            return applyWikiProposalGroup(rows, applyDeps, opts);
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const first = app.request(ACCEPT, JSON_POST);
+      await inApply;
+      store.leases.set(LEASE, "competitor");
+      const before = renewals;
+      let after = -1;
+      try {
+        for (let i = 0; i < 100 && renewals === before; i++) await Bun.sleep(5);
+        expect(renewals).toBeGreaterThan(before);
+        // That renewal answered false: no further renewal runs.
+        after = renewals;
+        await Bun.sleep(40);
+      } finally {
+        release();
+      }
+      expect(renewals).toBe(after);
+      const res = await first;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(await clean()).toBe(true);
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+    });
+
+    test("D4 a log append that throws (log.md 0444): Dismiss settles and rejects nothing, commits nothing; the next Accept logs the page once", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      await chmod(logPath(), 0o444);
+      let res: Response;
+      try {
+        res = await app.request(DISMISS, JSON_POST);
+      } finally {
+        await chmod(logPath(), 0o644);
+      }
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ logFailed: true });
+      expect(statusesOf(store)).toEqual(["approved", "draft"]);
+      expect(await commits(PAGE_A)).toBe(0);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A], applied: [PAGE_B] });
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("D7 lease gone after the log entry, before the settle CAS: logged and committed once, nothing settled, 409; the next Dismiss settles without logging again", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleProposalApplied: async (id: string, lease?: { scope: string; groupKey: string; token: string }) => {
+            store.leases.delete(LEASE);
+            return store.deps.settleProposalApplied(id, lease);
+          },
+        }),
+      );
+      const res = await app.request(DISMISS, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 0 });
+      expect(statusesOf(store)).toEqual(["approved", "draft"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(DISMISS, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("D8 lease gone between the settle and the reject: 409 naming the settled page, never 200 with a live row", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleWrittenRows: (async (...args: Parameters<typeof settleWrittenGroupRows>) => {
+            const out = await settleWrittenGroupRows(...args);
+            store.leases.delete(LEASE);
+            return out;
+          }) as typeof settleWrittenGroupRows,
+        }),
+      );
+      const res = await app.request(DISMISS, JSON_POST);
+      expect(statusesOf(store)).toEqual(["applied", "draft"]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 0, alreadyWritten: [PAGE_A] });
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(DISMISS, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "rejected", rejected: 1 });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect(await entries(PAGE_A)).toBe(1);
+    });
+  });
+
   test("a second Accept after a stop applies the rows the stop put back to DRAFT", async () => {
     const stale = { ...((await lintRow("r2", PAGE_B, "prov")) as object), baseHash: "0".repeat(64) };
     await Bun.write(path.join(root, "plans/c.mdx"), body("C"));
@@ -4381,6 +4746,44 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(log.split("## [").length - 1).toBe(1);
     expect(log).toContain("update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
     expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  // F35 class check, cells A11 and D9: a lease found gone at a verdict write is
+  // a lost lease like any other (R4) — no verdict, 409, never a silent skip.
+  test("A11 an Accept whose lease is gone at the verdict write writes no `fixed` verdict and answers 409", async () => {
+    const s = store(await card());
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      applyProposalGroup: (async (rows, d, opts) => {
+        const out = await applyWikiProposalGroup(rows, d, opts);
+        held = false;
+        return out;
+      }) as typeof applyWikiProposalGroup,
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "conflict", applied: ["notes/a.md", "notes/b.md"], unlogged: [] });
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed")).toEqual([]);
+  });
+
+  test("D9 a Dismiss whose lease is gone at the verdict write writes no «kept as written» verdict and answers 409", async () => {
+    const s = store(await card());
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      rejectProposalGroup: async (...args: unknown[]) => {
+        const out = await (s.deps!.rejectProposalGroup as (...a: unknown[]) => Promise<WikiProposal[]>)(...args);
+        held = false;
+        return out;
+      },
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 2, verdictsWritten: false });
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader")).toEqual([]);
   });
 
   /** One-row card for `changed` with `linking`'s edit, sent as the tab sends it. */

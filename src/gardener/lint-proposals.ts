@@ -269,12 +269,14 @@ export async function retireVanishedLintGroup(
 /**
  * {@link retireVanishedLintGroup}'s work under the lease `token` holds. The
  * lease is not renewed here, so it can lapse mid-run. Every write is fenced on
- * that token (F35 fix round 2): the settle's section asks whether the lease is
- * still live before its log entry, each settle CAS and the `stale` CAS check it
- * in the same statement. A lease found gone answers `held`, with no row moved
- * and nothing logged. A `log.md` entry that cannot be written throws
- * (`GroupLogWriteError`) with every row still live; the seeder logs it and the
- * next pass retries.
+ * that token (F35): the settle's log entry passes `logGroupPages` (lease
+ * checked right before it), each settle CAS and the `stale` CAS check it in
+ * the same statement. A lease found gone answers `held`, with nothing logged
+ * after the loss and every unsettled row still live; a row the CASes left
+ * live (settled + staled short of the live rows) answers `held` too, so its
+ * key and page stay held this pass. A `log.md` entry that cannot be written
+ * throws (`GroupLogWriteError`) with every row still live; the seeder logs it
+ * and the next pass retries.
  */
 async function retireClaimedLintGroup(
   wikiName: string,
@@ -299,12 +301,7 @@ async function retireClaimedLintGroup(
     throw err;
   }
   const staled = await markLintGroupStale(wikiName, groupKey, token);
-  // A CAS that moved fewer rows than were live because the lease lapsed: the
-  // group is another verb's now, so its keys and pages stay held this pass.
-  if (settled.length + staled < live.length && !(await wikiProposalGroupLeaseHeld(wikiName, groupKey, token))) {
-    return { staled, settled: settled.length, held: true };
-  }
-  return { staled, settled: settled.length, held: false };
+  return { staled, settled: settled.length, held: settled.length + staled < live.length };
 }
 
 /** The apply seams `settleWrittenGroupRows` reads: page and `log.md` I/O, the

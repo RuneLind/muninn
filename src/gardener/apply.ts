@@ -420,24 +420,30 @@ export interface GroupApplyOptions {
   /** Called with each row's outcome the moment it is known, so a caller still
    *  learns which pages landed when a later row, or a later step, throws. */
   onRowOutcome?: (row: GroupRowOutcome) => void;
+  /** Called with the ids whose pages the group's `log.md` entry names, once
+   *  that entry is written. A row reported written and never named here was
+   *  not logged, and must not be marked `applied` (F35 rule R3). */
+  onLogged?: (ids: readonly string[]) => void;
   /** Does the caller still hold the group's lease (F35)? Asked inside the
-   *  write section before the preflight and before each row's page write; a
-   *  false answer throws {@link GroupLeaseLostError} with no further page
-   *  written. Absent ⇒ never asked. */
+   *  write section before each row's page write and right before the `log.md`
+   *  entry; a false answer throws {@link GroupLeaseLostError} with no further
+   *  page written, nothing logged and nothing committed. Absent ⇒ never asked. */
   leaseHeld?: () => Promise<boolean>;
 }
 
-/** A group verb found its lease gone before a write (it expired and another
- *  verb may have claimed the group): nothing more is written. */
+/** A group verb found its lease gone (it expired, and another verb may have
+ *  claimed the group): nothing more is written, logged or committed, and its
+ *  fenced row CASes move nothing. */
 export class GroupLeaseLostError extends Error {
   constructor(groupKey: string) {
-    super(`lost the lease on group ${groupKey} before writing`);
+    super(`lost the lease on group ${groupKey}`);
     this.name = "GroupLeaseLostError";
   }
 }
 
-/** The group's `log.md` entry could not be written, so no row was settled
- *  `applied` over the page it names. */
+/** The group's `log.md` entry could not be written (unreadable, or the append
+ *  threw): no row is settled or marked `applied` over the pages it would have
+ *  named, and none of them is committed. */
 export class GroupLogWriteError extends Error {
   constructor(groupKey: string) {
     super(`log.md entry for group ${groupKey} could not be written`);
@@ -447,6 +453,37 @@ export class GroupLogWriteError extends Error {
 
 async function assertLeaseHeld(leaseHeld: (() => Promise<boolean>) | undefined, groupKey: string): Promise<void> {
   if (leaseHeld && !(await leaseHeld())) throw new GroupLeaseLostError(groupKey);
+}
+
+/**
+ * The ONE gate in front of a group's `log.md` entry and commit (F35 rules R1
+ * and R3), run inside the write section: the lease must still hold, checked
+ * right before the append, and the append must succeed. Either failing throws
+ * with nothing logged, and the caller commits nothing: the pages stay on disk,
+ * uncommitted, and the next verb logs and commits them once through its
+ * `recovered` path. Once the entry is written the caller always commits, so a
+ * page is never logged and left for a later verb to log again.
+ */
+async function logGroupPages(
+  rows: readonly WikiProposal[],
+  deps: ApplyDeps,
+  leaseHeld: (() => Promise<boolean>) | undefined,
+  groupKey: string,
+): Promise<void> {
+  await assertLeaseHeld(leaseHeld, groupKey);
+  if (!(await writeGroupLogEntry(rows, deps))) throw new GroupLogWriteError(groupKey);
+}
+
+/** Commit a group's paths outside the write section; non-fatal. */
+async function commitGroupTail(paths: readonly string[], deps: ApplyDeps, groupKey: string, kind: WikiProposal["kind"] | undefined): Promise<void> {
+  if (!deps.commit || paths.length === 0) return;
+  const unique = [...new Set(paths)];
+  const pages = unique.filter((p) => p !== WIKI_LOG_FILE).length;
+  try {
+    await deps.commit(unique, groupCommitMessageFor(groupKey, pages, kind));
+  } catch (err) {
+    log.warn("Wiki-gardener group: commit failed for {group}: {error}", { group: groupKey, error: errMsg(err) });
+  }
 }
 
 /**
@@ -474,9 +511,13 @@ async function assertLeaseHeld(leaseHeld: (() => Promise<boolean>) | undefined, 
  * still gets the log entry and the commit for every page written before it,
  * and for its own page when its write had landed; then the throw goes on.
  *
+ * **The log entry and the commit pass {@link logGroupPages}** (F35 class
+ * check): a lease found gone, or an entry that cannot be written, throws with
+ * nothing logged and nothing committed, and that error replaces any row error
+ * already in flight (it decides what the caller may do with the rows).
+ *
  * The per-row work is the SAME `applyInner` a single approve runs — the
- * confinement, staleness, write, `log.md` and reindex steps are not re-spelled
- * here.
+ * confinement, staleness, write and reindex steps are not re-spelled here.
  */
 export async function applyWikiProposalGroup(
   rows: readonly WikiProposal[],
@@ -497,6 +538,8 @@ export async function applyWikiProposalGroup(
   const groupKey = rows[0]?.groupKey ?? "(no group)";
   // Read before the section, so this adds no git status inside it.
   const recoverable = await uncommittedDraftPages(rows, deps);
+  // Filled only once the log entry is written: a group commits nothing it did
+  // not log.
   const tail: { paths: string[] } = { paths: [] };
   try {
     return await runWikiWriteExclusive(deps.wikiDir, async () => {
@@ -505,7 +548,6 @@ export async function applyWikiProposalGroup(
         out.results.push(entry);
         opts.onRowOutcome?.(entry);
       };
-      await assertLeaseHeld(opts.leaseHeld, groupKey);
       // Every member's pre-write checks BEFORE the first write, so a stale or
       // refused member stops the group with nothing written (finding 61). The section serializes the
       // in-process writers, so the check holds until the loop below runs.
@@ -516,13 +558,14 @@ export async function applyWikiProposalGroup(
         return out;
       }
       const written: WikiProposal[] = [];
+      const pending: string[] = [];
       try {
         for (const row of rows) {
           // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
           // twelve-member series otherwise files twelve entries whose only
           // difference is which frontmatter line moved, burying the curated ones the
           // log is for. The entry is written below, still inside this section.
-          // Re-asked before each page write: a lease lost mid-group stops it.
+          // Asked before each page write: a lease lost mid-group stops it.
           await assertLeaseHeld(opts.leaseHeld, groupKey);
           let rowPaths: string[] = [];
           const write = { failed: false, landed: false };
@@ -544,28 +587,23 @@ export async function applyWikiProposalGroup(
             // The page landed before the throw: it is this group's write, so it
             // is logged and committed with the others and reported as applied.
             if (write.landed) {
-              tail.paths.push(...commitPaths(row, new Set()));
+              pending.push(...commitPaths(row, new Set()));
               written.push(row);
               report({ id: row.id, targetPath: row.targetPath, outcome: { outcome: "applied", writtenPath: row.targetPath } });
             }
             throw err;
           }
           // A NOOP row wrote nothing — `applyInner` short-circuited at step 2a
-          // because the page already WAS the draft — so staging its own path (and
-          // the wiki-global `log.md`, which only a row that WROTE causes an entry
-          // in) makes the one commit claim a page it never touched: the subject
-          // counts the staged paths, and a group of one written page plus one noop
-          // said "2 pages". Whatever the WIRE stage modified is a real change and
-          // stays staged. The exception is a page an earlier pass wrote and never
-          // committed (`recovered`): that write is this group's, and nothing else
-          // logs or commits it under the group's name.
+          // because the page already WAS the draft — so it stages nothing: the
+          // commit subject counts the staged paths, and a group of one written
+          // page plus one noop said "2 pages". (Its wire stage modifies nothing:
+          // group rows are mechanical update rows with no related pages.) The
+          // exception is a page an earlier pass wrote and never committed
+          // (`recovered`): that write is this group's, and nothing else logs or
+          // commits it under the group's name.
           const noopPath = outcome.outcome === "applied" && !!outcome.noop;
           const recovered = noopPath && recoverable.has(row.targetPath);
-          tail.paths.push(
-            ...(noopPath && !recovered
-              ? rowPaths.filter((p) => p !== row.targetPath && p !== WIKI_LOG_FILE)
-              : rowPaths),
-          );
+          if (outcome.outcome === "applied" && (!noopPath || recovered)) pending.push(...rowPaths);
           const entry: GroupRowOutcome = {
             id: row.id,
             targetPath: row.targetPath,
@@ -581,23 +619,16 @@ export async function applyWikiProposalGroup(
           if (!outcome.noop || recovered) written.push(row);
         }
       } finally {
-        if (written.length > 0) await writeGroupLogEntry(written, deps);
+        if (written.length > 0) {
+          await logGroupPages(written, deps, opts.leaseHeld, groupKey);
+          tail.paths = pending;
+          opts.onLogged?.(written.map((r) => r.id));
+        }
       }
       return out;
     });
   } finally {
-    if (deps.commit && tail.paths.length > 0) {
-      const paths = [...new Set(tail.paths)];
-      const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
-      try {
-        await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
-      } catch (err) {
-        log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
-          group: groupKey,
-          error: errMsg(err),
-        });
-      }
-    }
+    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind);
   }
 }
 
@@ -611,11 +642,13 @@ export async function applyWikiProposalGroup(
  *
  * Read, compare, log and settle share the section so a queued writer cannot
  * change the page between the read and the settle, and a row is never
- * `applied` over a page that was not logged first. A throw anywhere leaves the
- * unsettled rows live, which a later Accept or Dismiss takes: a log entry that
- * could not be written throws {@link GroupLogWriteError} before any settle, and
- * `opts.leaseHeld` answering false at the section's start throws
- * {@link GroupLeaseLostError} before any write. Returns the rows it settled.
+ * `applied` over a page that was not logged first. The entry passes
+ * {@link logGroupPages}: a lease found gone throws {@link GroupLeaseLostError}
+ * and an entry that cannot be written {@link GroupLogWriteError}, each with
+ * nothing logged, committed or settled. A settle CAS that moves nothing (the
+ * fenced CAS found the lease gone) leaves its row out of the answer; the
+ * logged pages are committed all the same, and the caller, finding a row
+ * neither settled nor rejected, answers the loss. Returns the rows it settled.
  */
 export async function settleWrittenGroupRows(
   rows: readonly WikiProposal[],
@@ -630,8 +663,6 @@ export async function settleWrittenGroupRows(
   const tail: { paths: string[] } = { paths: [] };
   try {
     return await runWikiWriteExclusive(deps.wikiDir, async () => {
-      // Before the first write (the log entry, then the settle CASes).
-      await assertLeaseHeld(opts.leaseHeld, groupKey);
       const carried: WikiProposal[] = [];
       for (const row of rows) {
         const current = await deps.readFile(path.join(deps.wikiDir, row.targetPath));
@@ -639,24 +670,15 @@ export async function settleWrittenGroupRows(
       }
       const recovered = carried.filter((r) => recoverable.has(r.targetPath));
       if (recovered.length > 0) {
-        // A failed entry settles nothing: every row stays live for the next verb.
-        if (!(await writeGroupLogEntry(recovered, deps))) throw new GroupLogWriteError(groupKey);
-        for (const r of recovered) tail.paths.push(r.targetPath, WIKI_LOG_FILE);
+        await logGroupPages(recovered, deps, opts.leaseHeld, groupKey);
+        tail.paths = recovered.flatMap((r) => [r.targetPath, WIKI_LOG_FILE]);
       }
       const settled: WikiProposal[] = [];
       for (const row of carried) if (await settle(row)) settled.push(row);
       return settled;
     });
   } finally {
-    if (deps.commit && tail.paths.length > 0) {
-      const paths = [...new Set(tail.paths)];
-      const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
-      try {
-        await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
-      } catch (err) {
-        log.warn("Wiki-gardener group Dismiss: commit failed for {group}: {error}", { group: groupKey, error: errMsg(err) });
-      }
-    }
+    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind);
   }
 }
 
@@ -686,13 +708,13 @@ async function uncommittedDraftPages(rows: readonly WikiProposal[], deps: ApplyD
  * ONE `log.md` entry for a whole group apply, naming every page it wrote and
  * the SEEDER that proposed it.
  *
- * Same shape and same degrade as the per-row entry in `applyInner` step 4 — a
- * log hiccup must never undo a page write — and written inside the group's write
- * section, because `log.md` is wiki-global and the section is what keeps the
- * fact-check and integrate writers out from between the rows. Answers whether
- * the entry was written (an unreadable `log.md` is skipped, not overwritten):
- * Dismiss and the self-heal settle no row on false; the Accept, whose pages are
- * already written, marks its rows anyway.
+ * Written inside the group's write section, because `log.md` is wiki-global
+ * and the section is what keeps the fact-check and integrate writers out from
+ * between the rows. Answers whether the entry was written: false for an
+ * unreadable `log.md` (skipped, not overwritten) and for an append that threw.
+ * Every caller goes through {@link logGroupPages}, which turns false into
+ * {@link GroupLogWriteError}: no verb marks or settles a row `applied` over a
+ * page this entry did not name (F35 rule R3).
  *
  * The headline is the FINDING's page (the one the lint filed the finding
  * against), not `rows[0]`: the rows are sorted by `target_path`, so the first
@@ -1088,7 +1110,10 @@ async function applyInner(
 
   // 4. log.md entry (reverse-chron). A log-write hiccup must not undo the page
   //    write — the page is the source of truth — so it degrades to a warning.
-  //    Skipped for a GROUP apply, which files one entry for every row it wrote.
+  //    Skipped for a GROUP apply, which files one entry for every row it wrote
+  //    and refuses to mark a row over an unlogged page (`logGroupPages`). The
+  //    single-row route keeps this degrade: its re-run is a no-op (2a) that
+  //    logs nothing, so a row left live here would never be logged either.
   if (!opts.skipLog) try {
     const entry = `## [${todayOslo(deps.now())}] ${proposal.mode} | ${draftTitle(proposal)}\n- via ${logWriterFor(proposal)}, ${proposal.sourceDocs.length} sources`;
     await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);

@@ -759,7 +759,9 @@ export async function claimWikiProposalGroupLease(
 }
 
 /** Push a held lease's expiry out by the TTL. False when the token no longer
- *  holds it (it expired and another verb took it). */
+ *  holds a LIVE lease: another verb took it, or it expired. An expired lease
+ *  is never revived, so a lease found gone stays gone (the F35 state table
+ *  relies on it: a verb that saw it lost cannot have it back mid-run). */
 export async function renewWikiProposalGroupLease(
   scope: string,
   groupKey: string,
@@ -769,7 +771,7 @@ export async function renewWikiProposalGroupLease(
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposal_group_leases SET expires_at = now() + ${ttlMs} * interval '1 millisecond'
-    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token}
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token} AND expires_at > now()
     RETURNING 1
   `;
   return rows.length > 0;

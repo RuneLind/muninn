@@ -40,6 +40,7 @@ import {
   settleWikiProposalApplied,
   claimWikiProposalGroupLease,
   renewWikiProposalGroupLease,
+  wikiProposalGroupLeaseHeld,
   releaseWikiProposalGroupLease,
   listLintGroupRowsByWiki,
   markLintGroupStale,
@@ -821,6 +822,13 @@ describe("group leases (F35, migration 092)", () => {
     expect((await rejectWikiProposalGroup(W, G, [], live)).map((r) => r.id)).toEqual([b!.id]);
   });
 
+  test("an expired lease no verb took is never renewed: a lease found gone stays gone", async () => {
+    const t = await claimWikiProposalGroupLease("lintwiki", G, "accept", 1);
+    await Bun.sleep(20);
+    expect(await renewWikiProposalGroupLease("lintwiki", G, t!)).toBe(false);
+    expect(await wikiProposalGroupLeaseHeld("lintwiki", G, t!)).toBe(false);
+  });
+
   test("release by the holder frees the group at once", async () => {
     const t = await claimWikiProposalGroupLease("lintwiki", G, "accept");
     await releaseWikiProposalGroupLease("lintwiki", G, t!);
@@ -959,6 +967,72 @@ describe("the lint self-heal retires a stranded group (F35)", () => {
     const old = await claimWikiProposalGroupLease(W, G, "self-heal", 1);
     await Bun.sleep(20);
     expect(await markLintGroupStale(W, G, old!)).toBe(0);
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+  });
+
+  // F35 class check: the self-heal rows of the group verbs × lease × log table
+  // (`src/gardener/CLAUDE.md`). `lapse` expires the self-heal's lease in the DB.
+  const lapse = () => getDb()`UPDATE wiki_proposal_group_leases SET expires_at = now() - interval '1 second' WHERE scope = ${W} AND group_key = ${G}`;
+  const logEntries = async (page: string) => (await Bun.file(path.join(root, "log.md")).text()).split(page).length - 1;
+  const commitsOf = async (page: string) =>
+    (await g("log", "--format=%s", "--", page)).stdout.split("\n").filter((l) => l && l !== "seed").length;
+
+  test("S2 a log append that throws (log.md 0444): nothing settled, retired or committed; the group keeps its rows live", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), DRAFT_A);
+    const logPath = path.join(root, "log.md");
+    await chmod(logPath, 0o444);
+    try {
+      const out = await heal();
+      expect(out).toMatchObject({ staled: 0, settled: 0 });
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+    expect(await commitsOf("plans/a.mdx")).toBe(0);
+  });
+
+  test("S5 lease gone after the log entry, before the settle CAS: logged and committed once, nothing settled (held); the next pass settles without logging again", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), DRAFT_A);
+    let lapsed = false;
+    const out = await seedLintProposals([], {
+      wikiDir: root,
+      wikiName: W,
+      push: false,
+      readFile: async (abs) => {
+        // The append reads log.md after the lease check passed.
+        if (!lapsed && abs.endsWith("log.md")) {
+          lapsed = true;
+          await lapse();
+        }
+        return Bun.file(abs).text().catch(() => null);
+      },
+    });
+    expect(lapsed).toBe(true);
+    expect(out).toMatchObject({ staled: 0, settled: 0, held: 1 });
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+    expect([await logEntries("plans/a.mdx"), await commitsOf("plans/a.mdx")]).toEqual([1, 1]);
+    const again = await heal();
+    expect(again).toMatchObject({ staled: 1, settled: 1, held: 0 });
+    expect(await statuses()).toEqual([["plans/a.mdx", "applied"], ["plans/b.mdx", "stale"]]);
+    expect([await logEntries("plans/a.mdx"), await commitsOf("plans/a.mdx")]).toEqual([1, 1]);
+  });
+
+  test("S6 lease gone before the stale CAS with nothing to settle: no row moves and the group answers held", async () => {
+    let lapsed = false;
+    const out = await seedLintProposals([], {
+      wikiDir: root,
+      wikiName: W,
+      push: false,
+      readFile: async (abs) => {
+        if (!lapsed && abs.endsWith("plans/b.mdx")) {
+          lapsed = true;
+          await lapse();
+        }
+        return Bun.file(abs).text().catch(() => null);
+      },
+    });
+    expect(lapsed).toBe(true);
+    expect(out).toMatchObject({ staled: 0, settled: 0, held: 1 });
     expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
   });
 });

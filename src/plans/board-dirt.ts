@@ -9,8 +9,9 @@
  * Which committer that is depends on the instance: the repo-sync loop only when
  * `SYNC_REPOS` covers that wiki in `wiki` mode, worded from its ledger's last
  * tick (healthy, not run since boot, idle, or stopped with its reason), the daily `wiki-committer`
- * sweeper only when the wiki root lies inside the `wikiDir` of a bot with an
- * enabled sweeper row (`sweeperCommits`; it sweeps nothing else), and otherwise
+ * sweeper only when `sweeperCommits` says it stages a page under the wiki root
+ * (inside a swept bot `wikiDir`, in that dir's own repo, and not gitignored
+ * there; it sweeps nothing else), and otherwise
  * nobody — the message then says to commit it by hand.
  *
  * The answer compares the page with its `HEAD` blob through the wiki's own
@@ -49,7 +50,8 @@ export interface BoardWriteCommitters {
   /** `null` when no `wiki`-mode `SYNC_REPOS` entry covers the wiki; otherwise
    *  what the loop's ledger says about it (`syncLoopOutlook`). */
   syncLoop: SyncLoopOutlook | null;
-  /** The wiki root lies inside a swept bot `wikiDir` (`sweeperCommits`). */
+  /** The daily sweeper stages a page under the wiki root (`sweeperCommits`:
+   *  inside a swept bot `wikiDir`, same git toplevel, not gitignored). */
   sweeper: boolean;
 }
 

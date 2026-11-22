@@ -75,11 +75,18 @@ export function syncRepoCovering(root: string, repos: readonly SyncRepo[]): Sync
  *  this: a `WIKI_EXTRA` wiki at a swept bot's root is swept, and a bot wiki
  *  with no sweeper row is not.
  *
- *  The sweeper commits the dirty files under its `wikiDir` in that dir's own
- *  repo, so the root must lie under the dir AND share its git toplevel
- *  (symlinks resolved): a wiki that is its own repo nested inside the dir is
- *  only a gitlink to the outer repo, and nothing is ever committed inside it.
- *  A dir outside git is swept by nobody. */
+ *  True exactly when the sweeper's staging would commit a new page written
+ *  under the root. It stages what `listWikiSubtreeDirty` lists: porcelain
+ *  status of the dir, in the dir's own repo, without `--ignored`. So the root
+ *  must (1) lie under a swept dir (symlinks resolved), (2) share that dir's git
+ *  toplevel (a nested repo, or a separate worktree, is only a gitlink or
+ *  nothing there; a dir outside git or a bare repo has no toplevel), and
+ *  (3) not be ignored there: a page under a root git ignores (`.gitignore` at
+ *  any level, `.git/info/exclude`, `core.excludesFile`) is never listed. (3)
+ *  is asked of a probe path under the root (`git check-ignore`), so a root
+ *  whose pages git tracks despite an ignore rule answers false: those tracked
+ *  pages ARE swept, but a new page there is not, and the callers word the
+ *  "nobody commits this" case. */
 export async function sweeperCommits(root: string, sweptDirs: readonly string[]): Promise<boolean> {
   const under = sweptDirs.filter((dir) => contains(dir, root));
   if (under.length === 0) return false;
@@ -87,7 +94,18 @@ export async function sweeperCommits(root: string, sweptDirs: readonly string[])
   if (!rootTop) return false;
   for (const dir of under) {
     const dirTop = await gitToplevel(dir);
-    if (dirTop && norm(dirTop) === norm(rootTop)) return true;
+    if (dirTop && norm(dirTop) === norm(rootTop)) return !(await newPageIgnored(root));
+  }
+  return false;
+}
+
+/** Would git ignore a new `.md`/`.mdx` page written directly under `root`?
+ *  `check-ignore` exits 0 for ignored and 1 for not; anything else (an error)
+ *  counts as ignored, so the answer never promises a sweep it cannot see. */
+async function newPageIgnored(root: string): Promise<boolean> {
+  for (const probe of ["__sweeper_probe__.md", "__sweeper_probe__.mdx"]) {
+    const r = await runGit(root, ["check-ignore", "-q", "--", path.join(norm(root), probe)]);
+    if (r.code !== 1) return true;
   }
   return false;
 }

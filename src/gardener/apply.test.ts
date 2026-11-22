@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   applyWikiProposal,
   applyWikiProposalGroup,
+  GroupLogWriteError,
   insertLogEntry,
   reindexCollectionFor,
   draftTitle,
@@ -969,11 +970,15 @@ describe("applyWikiProposalGroup", () => {
     await writeFile(logPath, original);
     await chmod(logPath, 0o200);
     try {
-      const res = await applyWikiProposalGroup(
-        [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))],
-        deps(),
-      );
-      expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+      const seen: string[] = [];
+      // F35 R3: an entry that cannot be written throws, so the caller marks no
+      // row `applied` over the pages it would have named.
+      await expect(
+        applyWikiProposalGroup([lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))], deps(), {
+          onRowOutcome: (o) => seen.push(o.outcome.outcome),
+        }),
+      ).rejects.toBeInstanceOf(GroupLogWriteError);
+      expect(seen).toEqual(["applied", "applied"]);
     } finally {
       await chmod(logPath, 0o644);
     }

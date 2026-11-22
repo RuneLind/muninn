@@ -54,6 +54,7 @@ import {
   applyWikiProposalGroup,
   settleWrittenGroupRows,
   GroupLeaseLostError,
+  GroupLogWriteError,
   type GroupApplyResult,
   type GroupRowOutcome,
 } from "../../gardener/apply.ts";
@@ -529,6 +530,9 @@ export interface BacklogRouteDeps extends CoverageDeps {
   /** Does the token still hold a live lease? Asked before every write that is
    *  not a row CAS: the page writes, `log.md`, the Stale check verdicts. */
   groupLeaseHeld: (wikiName: string, groupKey: string, token: string) => Promise<boolean>;
+  /** How often a held lease is renewed; tests shorten it. Default
+   *  `GROUP_LEASE_RENEW_MS`. */
+  groupLeaseRenewMs?: number;
   /** Group Dismiss's settle of the already-written rows; absent ⇒
    *  `settleWrittenGroupRows`. Injectable so a test can make it throw. */
   settleWrittenRows?: typeof settleWrittenGroupRows;
@@ -3187,10 +3191,15 @@ export function registerWikiGardenerRoutes(
     // untouched by the revert (it CASes on `approved`).
     const unsettled = new Set(existing.filter(isLiveGroupRow).map((r) => r.id));
     // Each row's outcome as the apply reports it, so a throw after a page write
-    // still knows that page landed.
+    // still knows that page landed; and the rows whose page the group's
+    // `log.md` entry named (F35 R3: only those may be marked `applied`).
     const outcomes = new Map<string, GroupRowOutcome>();
+    const logged = new Set<string>();
     let rows: WikiProposal[] = [];
     let snapshots: PassageKeySnapshot[] = [];
+    /** The pages this request wrote (or recovered) whose log entry it did not write. */
+    const unlogged = () => rows.filter((r) => needsGroupLog(outcomes.get(r.id)) && !logged.has(r.id)).map((r) => r.targetPath);
+    const landed = () => rows.filter((r) => outcomes.get(r.id)?.outcome.outcome === "applied").map((r) => r.targetPath);
     try {
       await backlogDeps.approveProposalGroup(wikiName, groupKey, lease.ref);
       // Re-read rather than trusting the CAS's own RETURNING set: it does not
@@ -3204,20 +3213,26 @@ export function registerWikiGardenerRoutes(
         return c.json({ outcome: "mixed", error: "a rejected row blocks the group", statuses: statusCounts(reread) }, 409);
       }
       rows = reread.filter((r) => r.status === "approved" && unsettled.has(r.id));
+      // The fenced claim moved nothing this request may apply: its lease was
+      // already gone, or another verb moved the rows between the first read and
+      // the claim. Either way the rows are someone else's (R2).
       if (rows.length === 0) {
-        if (!(await lease.held())) throw new GroupLeaseLostError(groupKey);
-        return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
+        return c.json(
+          { outcome: "conflict", error: "this Accept claimed no row: its lease was gone or another verb moved the group first", applied: [], statuses: statusCounts(reread) },
+          409,
+        );
       }
 
       const deps = applyDepsForWiki(wikiEntry, bot);
       // A Stale check group: the written pages' linking passage keys before the
       // write, so their verdicts follow the new content hashes after it.
       snapshots = await staleCheckSnapshots(wikiEntry, rows);
-      // The apply asks for the lease inside its write section, before the
-      // preflight and before each page write, and stops (GroupLeaseLostError)
-      // with no further page written when it is gone.
+      // The apply asks for the lease inside its write section, before each page
+      // write and right before the log entry, and throws GroupLeaseLostError
+      // with nothing further written, logged or committed when it is gone.
       const result = await (backlogDeps.applyProposalGroup ?? applyWikiProposalGroup)(rows, deps, {
         onRowOutcome: (o) => outcomes.set(o.id, o),
+        onLogged: (ids) => ids.forEach((id) => logged.add(id)),
         leaseHeld: lease.held,
       });
 
@@ -3227,11 +3242,13 @@ export function registerWikiGardenerRoutes(
       // status marks, so a mark that throws does not lose them. A no-op row's
       // page already carries its edit (a dead pass wrote it and something
       // committed it): it gets them too, as Dismiss's `alreadyWritten` does.
-      // Verdicts only while the lease holds: with it gone another verb owns
-      // the group, and the marks below lose too.
-      const fixed = (await lease.held())
-        ? await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered, ...noop], snapshots)
-        : null;
+      // Only while the lease holds (R4): a lease gone here is a lost lease like
+      // any other, and the answer is 409.
+      let fixed: number | null = null;
+      if (rows.some((r) => r.kind === "stale-check")) {
+        if (!(await lease.held())) throw new GroupLeaseLostError(groupKey);
+        fixed = await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered, ...noop], snapshots);
+      }
       // A terminal CAS this request loses means another verb moved the row, or
       // the lease lapsed, while this one applied it: every CAS is fenced on the
       // lease, and the answer reports the loss rather than "applied".
@@ -3300,28 +3317,39 @@ export function registerWikiGardenerRoutes(
       return c.json({ outcome: "applied", applied, noop, recovered, skipped, ...(fixed !== null ? { fixed } : {}) });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      const landed = rows.filter((r) => outcomes.get(r.id)?.outcome.outcome === "applied").map((r) => r.targetPath);
       if (err instanceof GroupLeaseLostError) {
-        // The lease lapsed (and another verb may hold the group): no page was
-        // written after the check, and no row is moved by this request.
-        log.error("Lint group {group}: the Accept lost its lease before writing", { group: groupKey });
+        // The lease lapsed (and another verb may hold the group): nothing was
+        // written after the check, nothing this request had not logged is
+        // logged or committed, and its fenced row CASes move nothing. `unlogged`
+        // names the pages it wrote that the next verb logs and commits once
+        // (through its `recovered` / `alreadyWritten` path).
+        log.error("Lint group {group}: the Accept lost its lease", { group: groupKey });
         return c.json(
           {
             outcome: "conflict",
-            error: "this Accept lost the group's lease before writing; another Accept or Dismiss may hold the group",
-            applied: landed,
+            error: "this Accept lost the group's lease; another Accept or Dismiss may hold the group",
+            applied: landed(),
+            unlogged: unlogged(),
             statuses: statusCounts(await backlogDeps.listProposalsByGroup(wikiName, groupKey)),
           },
           409,
         );
       }
+      if (err instanceof GroupLogWriteError) {
+        // R3: the written pages are not logged, so no row is marked `applied`
+        // over them and nothing was committed; the `finally` puts the rows back
+        // to `draft`, and the next verb logs and commits the pages once.
+        log.error("Lint group {group} Accept: {error}", { group: groupKey, error: reason });
+        return c.json({ error: `group apply failed: ${reason}`, logFailed: true, unlogged: unlogged() }, 500);
+      }
       log.error("Lint group {group} Accept failed: {error}", { group: groupKey, error: reason });
-      // The pages that landed before the throw still get their `fixed` verdicts,
-      // while the lease holds.
-      if (landed.length > 0 && (await lease.held())) await staleCheckFixedVerdicts(wikiEntry, rows, landed, snapshots);
+      // The pages that landed (and were logged) before the throw still get
+      // their `fixed` verdicts, while the lease holds; this answer is a 500.
+      const done = rows.filter((r) => logged.has(r.id)).map((r) => r.targetPath);
+      if (done.length > 0 && (await lease.held())) await staleCheckFixedVerdicts(wikiEntry, rows, done, snapshots);
       return c.json({ error: `group apply failed: ${reason}` }, 500);
     } finally {
-      await settleUnsettledGroupRows(unsettled, outcomes, groupKey, lease.ref);
+      await settleUnsettledGroupRows(unsettled, (id) => markableApplied(outcomes.get(id), logged.has(id)), groupKey, lease.ref);
       await lease.release();
       groupVerbsInFlight.delete(flightKey);
     }
@@ -3343,6 +3371,10 @@ export function registerWikiGardenerRoutes(
    * uncommitted) and the settle run inside one write section and the commit
    * after it (`settleWrittenGroupRows`), all before the rest are rejected; a
    * Stale check row then gets its `fixed` verdict.
+   *
+   * It answers 200 `rejected` only when every live row it read reached
+   * `applied` or `rejected` in this call (F35 R2); a lease lost anywhere after
+   * the claim answers 409 `conflict` naming what it settled and rejected.
    *
    * It carries BOTH read-only refusals, unlike its single-row sibling
    * (`proposals/:id/reject`, a DB status flip that mutates no wiki). A dismissal
@@ -3370,6 +3402,11 @@ export function registerWikiGardenerRoutes(
     }
     groupVerbsInFlight.add(flightKey);
     let lease: GroupLease | null = null;
+    const conflict = async (error: string, extra: Record<string, unknown>) =>
+      c.json(
+        { outcome: "conflict", error, ...extra, statuses: statusCounts(await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey)) },
+        409,
+      );
     try {
       lease = await holdGroupLease(backlogDeps, scope.wikiName, groupKey, "dismiss");
       if (!lease) return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
@@ -3377,6 +3414,7 @@ export function registerWikiGardenerRoutes(
       // between the first read and the claim.
       const current = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
       const live = current.filter(isLiveGroupRow);
+      if (live.length === 0) return c.json({ error: "group is no longer a draft", statuses: statusCounts(current) }, 409);
       // A Stale check row an earlier Accept wrote: its page's linking passage
       // keys from before that write, so its verdicts follow it below.
       const snapshots = await staleCheckSnapshots(scope.wikiEntry, live);
@@ -3384,8 +3422,9 @@ export function registerWikiGardenerRoutes(
       // settled `applied` inside ONE write section, committed after it, so a
       // row is `applied` only over a page that carried its draft when settled
       // and was logged first. A throw leaves the rest live for a later verb.
-      // Every write is fenced on the lease: the section asks for it before its
-      // log entry, and each settle and the reject check it in their own CAS.
+      // Every write is fenced on the lease: the section asks for it right
+      // before its log entry, and each settle and the reject check it in their
+      // own CAS.
       const held = lease.held;
       const ref = lease.ref;
       const written = await (backlogDeps.settleWrittenRows ?? settleWrittenGroupRows)(
@@ -3395,41 +3434,51 @@ export function registerWikiGardenerRoutes(
         { leaseHeld: held },
       );
       const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey, written.map((r) => r.id), ref);
-      if (rejected.length === 0 && written.length === 0) {
-        if (!(await held())) throw new GroupLeaseLostError(groupKey);
-        return c.json({ error: "group is no longer a draft", statuses: statusCounts(current) }, 409);
+      const alreadyWritten = written.length > 0 ? { alreadyWritten: written.map((r) => r.targetPath) } : {};
+      // R2: 200 only when every live row it read is now terminal. The reject
+      // is fenced, so a lease lost after the settle rejects nothing.
+      const done = new Set([...written, ...rejected].map((r) => r.id));
+      if (live.some((r) => !done.has(r.id))) {
+        log.error("Lint group {group}: the Dismiss lost its lease before every row was settled", { group: groupKey });
+        return await conflict("this Dismiss lost the group's lease before every row was settled; another Accept or Dismiss may hold the group", {
+          rejected: rejected.length,
+          ...alreadyWritten,
+        });
       }
-      // The verdict writes below are not row CASes: each asks for the lease
-      // first and is skipped once it is gone.
+      // R4: the verdict writes are not row CASes, so a Stale check card asks
+      // for the lease first; a lease gone here is a 409 like any other loss.
+      if (live.some((r) => r.kind === "stale-check") && !(await held())) {
+        log.error("Lint group {group}: the Dismiss lost its lease before its verdicts", { group: groupKey });
+        return await conflict("this Dismiss settled every row but lost the group's lease before writing its verdicts", {
+          rejected: rejected.length,
+          ...alreadyWritten,
+          verdictsWritten: false,
+        });
+      }
       // A Stale check row an earlier Accept wrote gets its `fixed` verdict and
       // the carry of its linking verdicts (best effort, logged inside).
-      if (written.length > 0 && (await held())) {
+      if (written.length > 0) {
         await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), snapshots);
       }
       // D20: a rejected Stale check card's edits are «kept as written»: reader
       // «still true» rows where the stored verdict still carries the edit.
-      const kept = rejected.length > 0 && (await held()) ? await staleCheckKeptVerdicts(scope.wikiEntry, rejected) : null;
+      const kept = rejected.length > 0 ? await staleCheckKeptVerdicts(scope.wikiEntry, rejected) : null;
       return c.json({
         outcome: "rejected",
         rejected: rejected.length,
-        ...(written.length > 0 ? { alreadyWritten: written.map((r) => r.targetPath) } : {}),
+        ...alreadyWritten,
         ...(kept ?? {}),
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       if (err instanceof GroupLeaseLostError) {
-        log.error("Lint group {group}: the Dismiss lost its lease before writing", { group: groupKey });
-        return c.json(
-          {
-            outcome: "conflict",
-            error: "this Dismiss lost the group's lease before writing; another Accept or Dismiss may hold the group",
-            statuses: statusCounts(await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey)),
-          },
-          409,
-        );
+        // Found gone right before the log entry: nothing logged, committed,
+        // settled or rejected.
+        log.error("Lint group {group}: the Dismiss lost its lease", { group: groupKey });
+        return await conflict("this Dismiss lost the group's lease; another Accept or Dismiss may hold the group", { rejected: 0 });
       }
       log.error("Lint group {group} Dismiss failed: {error}", { group: groupKey, error: reason });
-      return c.json({ error: `group dismiss failed: ${reason}` }, 500);
+      return c.json({ error: `group dismiss failed: ${reason}`, ...(err instanceof GroupLogWriteError ? { logFailed: true } : {}) }, 500);
     } finally {
       await lease?.release();
       groupVerbsInFlight.delete(flightKey);
@@ -3438,21 +3487,24 @@ export function registerWikiGardenerRoutes(
 
   /**
    * The group Accept's `finally`: every claimed row the request did not move to
-   * a status of its own. A row the apply reported `applied` (written, or a
-   * no-op) is marked `applied`, never put back to `draft` over a page it wrote;
-   * every other row goes back to `draft` (a CAS on `approved`, so a row still
-   * `draft` is untouched). Both CASes are fenced on the lease, so after it
-   * lapsed they move nothing another verb now owns. A mark that throws is logged and leaves the row
-   * `approved`, which the next Accept or Dismiss takes as stranded.
+   * a status of its own. A row `markable` answers true for (its page landed and
+   * was logged, or a no-op over a committed page) is marked `applied`, never
+   * put back to `draft` over a logged page; every other row goes back to
+   * `draft` (a CAS on `approved`, so a row still `draft` is untouched),
+   * including a written row whose log entry was not written (R3: the next
+   * verb logs it once, through its `recovered` path). Both CASes are fenced
+   * on the lease, so after it lapsed they move nothing. A mark that throws is
+   * logged and leaves the row `approved`, which the next Accept or Dismiss
+   * takes as stranded.
    */
   async function settleUnsettledGroupRows(
     unsettled: ReadonlySet<string>,
-    outcomes: ReadonlyMap<string, GroupRowOutcome>,
+    markable: (id: string) => boolean,
     groupKey: string,
     lease: GroupLeaseRef,
   ): Promise<void> {
     for (const id of unsettled) {
-      const landed = outcomes.get(id)?.outcome.outcome === "applied";
+      const landed = markable(id);
       try {
         if (landed) await backlogDeps.markProposal(id, "applied", lease);
         else await backlogDeps.revertProposal(id, lease);
@@ -3754,11 +3806,24 @@ function groupMemberRefusal(c: Context, row: WikiProposal): Response | null {
 
 const IN_FLIGHT = "another Accept or Dismiss of this group is in flight";
 
+/** Did this row write (or recover) a page the group's `log.md` entry must
+ *  name? A no-op over a page already committed needs none. */
+function needsGroupLog(o: GroupRowOutcome | undefined): boolean {
+  return o?.outcome.outcome === "applied" && (!o.outcome.noop || !!o.recovered);
+}
+
+/** May the Accept's `finally` mark this row `applied` (F35 R3)? Only when its
+ *  page landed and, if the page needed a log entry, that entry was written. */
+function markableApplied(o: GroupRowOutcome | undefined, logged: boolean): boolean {
+  return o?.outcome.outcome === "applied" && (logged || !needsGroupLog(o));
+}
+
 interface GroupLease {
   /** What the fenced row CASes take. */
   ref: GroupLeaseRef;
-  /** Is the lease still live? False at once after a renewal found it gone;
-   *  otherwise a DB check. Asked before every write that is not a row CAS. */
+  /** Is the lease still live? A DB check (token and `expires_at`), asked
+   *  before every write that is not a row CAS. A lease found gone stays gone:
+   *  an expired lease is never renewed (`renewWikiProposalGroupLease`). */
   held: () => Promise<boolean>;
   release: () => Promise<void>;
 }
@@ -3766,34 +3831,34 @@ interface GroupLease {
 /**
  * Claim the group's cross-process lease for one verb and keep it renewed
  * until `release`; null when another verb holds a live one. Every write the
- * verb makes is fenced on it (F35 fix round 2): the row CASes check the token
- * and `expires_at` in their own statement (`ref`), and the page, `log.md` and
- * verdict writes ask `held()` first. A renewal that finds the lease gone is
- * logged and makes `held()` answer false from then on.
+ * verb makes is fenced on it (F35): the row CASes check the token and
+ * `expires_at` in their own statement (`ref`), and the page, `log.md` and
+ * verdict writes ask `held()` first. A renewal that answers false (the lease
+ * expired, or another verb took it) is logged and stops the renewals; `held()`
+ * answers false from then on because the DB says so, so no flag is kept here.
  */
 async function holdGroupLease(
-  deps: Pick<BacklogRouteDeps, "claimGroupLease" | "renewGroupLease" | "releaseGroupLease" | "groupLeaseHeld">,
+  deps: Pick<BacklogRouteDeps, "claimGroupLease" | "renewGroupLease" | "releaseGroupLease" | "groupLeaseHeld" | "groupLeaseRenewMs">,
   wikiName: string,
   groupKey: string,
   verb: "accept" | "dismiss",
 ): Promise<GroupLease | null> {
   const token = await deps.claimGroupLease(wikiName, groupKey, verb);
   if (!token) return null;
-  let lost = false;
   const timer = setInterval(() => {
     deps.renewGroupLease(wikiName, groupKey, token).then(
       (held) => {
         if (held) return;
-        lost = true;
+        clearInterval(timer);
         log.error("Lint group {group}: the {verb} lost its lease while running", { group: groupKey, verb });
       },
       (err) => log.warn("Lint group {group}: lease renewal failed: {error}", { group: groupKey, error: err instanceof Error ? err.message : String(err) }),
     );
-  }, GROUP_LEASE_RENEW_MS);
+  }, deps.groupLeaseRenewMs ?? GROUP_LEASE_RENEW_MS);
   timer.unref?.();
   return {
     ref: { scope: wikiName, groupKey, token },
-    held: async () => !lost && (await deps.groupLeaseHeld(wikiName, groupKey, token)),
+    held: () => deps.groupLeaseHeld(wikiName, groupKey, token),
     release: async () => {
       clearInterval(timer);
       try {
