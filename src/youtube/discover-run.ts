@@ -71,6 +71,8 @@ export type DiscoverRunOutcome =
       results: DiscoverResult[];
       searched: number;
       known: number;
+      /** Searches that failed (answered `null` or threw); a search that found nothing is not one. */
+      failed: number;
     }
   | {
       ok: false;
@@ -81,6 +83,8 @@ export type DiscoverRunOutcome =
       cause?: string;
       /** The step that failed: the watcher's health keys judge each step on its own. */
       stage: "read" | "queries" | "search" | "rank";
+      /** On a `search` failure: how many searches ran (every one failed). */
+      searches?: number;
     };
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -153,7 +157,7 @@ export async function runDiscovery(
   tracer?.end("search", { failed }, failed === answers.length ? "error" : "ok");
   if (failed === answers.length) {
     tracer?.finish("error", { error: "every search failed" });
-    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search" };
+    return { ok: false, status: 503, code: "search_failed", error: "Every YouTube search failed. Is yt-dlp installed and up to date?", stage: "search", searches: answers.length };
   }
   const union = new Map<string, { hit: YouTubeHit; query: string }>();
   answers.forEach((hits, i) => {
@@ -173,7 +177,7 @@ export async function runDiscovery(
   const known = searched - fresh.length;
   if (fresh.length === 0) {
     tracer?.finish("ok", { searched, known, shown: 0 });
-    return { ok: true, seed, queries: qs, results: [], searched, known };
+    return { ok: true, seed, queries: qs, results: [], searched, known, failed };
   }
 
   // 4. Rank (the YouTube gate), profile last.
@@ -206,5 +210,5 @@ export async function runDiscovery(
     .slice(0, DISCOVER_MAX_SHOWN)
     .map(({ f, s }) => ({ ...f.hit, score: s.score, why: s.why, query: f.query }));
   tracer?.finish("ok", { searched, known, shown: results.length });
-  return { ok: true, seed, queries: qs, results, searched, known };
+  return { ok: true, seed, queries: qs, results, searched, known, failed };
 }

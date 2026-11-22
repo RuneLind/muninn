@@ -15,6 +15,8 @@ import type { DiscoverShelf } from "../../db/youtube-discover.ts";
 
 export interface DiscoverPageData {
   shelves: DiscoverShelf[];
+  /** Older shelves the page's read left out (`listDiscoverShelfPage`). */
+  hidden: number;
   error?: string;
 }
 
@@ -77,7 +79,7 @@ export async function renderSummariesDiscoverPage(data: DiscoverPageData): Promi
   <aside class="dsc-drawer" id="dscDrawer" role="dialog" aria-modal="true" aria-labelledby="dscDrawerTitle" hidden></aside>
   <div class="dsc-toast" id="dscToast" role="status" aria-live="polite"></div>
   <div class="dsc-sr" id="dscAnnounce" role="status" aria-live="polite"></div>
-  <script type="application/json" id="dscData">${escJsonScript({ shelves: data.shelves })}</script>
+  <script type="application/json" id="dscData">${escJsonScript({ shelves: data.shelves, hidden: data.hidden })}</script>
   <script>${client}</script>
 </body>
 </html>`;

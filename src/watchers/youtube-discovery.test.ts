@@ -18,6 +18,7 @@ import {
   HEALTH_SEARCH,
   HEALTH_STORE,
   resolveMaxSeeds,
+  type DiscoveryState,
   type YouTubeDiscoveryDeps,
 } from "./youtube-discovery.ts";
 
@@ -46,6 +47,7 @@ let marks: Map<string, { outcome: SourceOutcome; detail?: string }>;
 let carried: string[];
 let rankPrompts: string[];
 let lastWatcherRun: number | null;
+let state: DiscoveryState | null;
 
 function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
   return {
@@ -73,6 +75,8 @@ function deps(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
     storedKnownIds: async () => stored,
     latestRunTimes: async (ids) => new Map([...recent].filter(([id]) => ids.includes(id))),
     lastWatcherRunAt: async () => lastWatcherRun,
+    loadState: async () => state,
+    saveState: async (_id, next) => void (state = structuredClone(next)),
     profile: async (userId, botName) => {
       profileCalls.push(`${userId}|${botName}`);
       return null;
@@ -102,6 +106,7 @@ beforeEach(() => {
   carried = [];
   rankPrompts = [];
   lastWatcherRun = null;
+  state = null;
 });
 
 describe("checkYouTubeDiscovery", () => {
@@ -180,7 +185,7 @@ describe("checkYouTubeDiscovery", () => {
       throw new Error("429 overloaded");
     };
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
-    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "rank call: 429 overloaded" });
+    expect(marks.get(HEALTH_MODEL)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: rank call: 429 overloaded" });
     expect(marks.get(HEALTH_SEARCH)?.outcome).toBe("ok");
   });
 
@@ -269,7 +274,7 @@ describe("fix round 1 batch 1", () => {
         },
       }),
     );
-    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "relation youtube_discover_runs does not exist" });
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: relation youtube_discover_runs does not exist" });
 
     marks = new Map();
     await checkYouTubeDiscovery(watcher(), bot, undefined, deps());
@@ -383,7 +388,7 @@ describe("fix round 2 batch 5 (pins)", () => {
         },
       }),
     );
-    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "failure 1" });
+    expect(marks.get(HEALTH_STORE)).toEqual({ outcome: "error", detail: "3 of 3 seeds failed: failure 1" });
   });
 });
 
@@ -408,5 +413,211 @@ describe("fix round 2 batch 6 (pins)", () => {
     await checkYouTubeDiscovery(watcher(), bot, undefined, d);
     expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 2.md"]);
     expect(marks.get(HEALTH_STORE)?.outcome).toBe("ok");
+  });
+});
+
+describe("F14: failed seeds, retries and the carried window (architecture review 2026-11-16)", () => {
+  const DAY = 86_400_000;
+  const day = (t: number) => new Date(t).toISOString().slice(0, 10);
+  /** Queries name their seed (`q<n>`), so a search can fail per seed. */
+  let failing: Set<string>;
+  let searched: string[];
+  let clock: number;
+  /** One run per week: the store keeps `recent` and the watcher anchor the way the real DB does. */
+  function weekly(over: Partial<YouTubeDiscoveryDeps> = {}): YouTubeDiscoveryDeps {
+    return deps({
+      now: () => clock,
+      saveRun: async (run, hits) => {
+        saved.push({ run, hits });
+        recent.set(run.seedDocId, clock);
+        lastWatcherRun = clock;
+        return `run-${saved.length}`;
+      },
+      ...over,
+    });
+  }
+  beforeEach(() => {
+    failing = new Set();
+    searched = [];
+    clock = NOW;
+    queriesAnswer = async (p) => {
+      const n = /Title: Seed (\d+)/.exec(p)?.[1];
+      return JSON.stringify([{ query: `q${n}`, why: "same topic" }]);
+    };
+    searchAnswer = async (q) => {
+      searched.push(q);
+      return failing.has(q) ? null : [hit(vid(Number(q.slice(1)) * 10 + 1))];
+    };
+  });
+  const setDocs = (ns: number[], date: (n: number) => string) => {
+    for (const n of ns) {
+      if (!(listed as CapturedDoc[]).some((d) => d.id === `ai/Seed ${n}.md`)) (listed as CapturedDoc[]).push(doc(n, date(n)));
+      raws.set(`ai/Seed ${n}.md`, raw(n));
+    }
+  };
+
+  test("3 of 5 seeds failing every search: no row for them, search error (partial), and a retry record each", async () => {
+    listed = [];
+    setDocs([1, 2, 3, 4, 5], () => day(NOW - DAY));
+    failing = new Set(["q3", "q4", "q5"]);
+    let partial: boolean | undefined;
+    const d = weekly({
+      health: async () => ({
+        mark: (key, outcome, detail, o) => {
+          marks.set(key, { outcome, detail });
+          if (key === HEALTH_SEARCH) partial = o?.partial;
+        },
+        carry: (key) => void carried.push(key),
+        finish: async () => [],
+      }),
+    });
+    await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 1.md", "ai/Seed 2.md"]);
+    expect(marks.get(HEALTH_SEARCH)).toEqual({
+      outcome: "error",
+      detail: "3 of 5 seeds failed: Every YouTube search failed. Is yt-dlp installed and up to date?; 3 of 5 searches failed",
+    });
+    expect(partial).toBe(true);
+    expect(Object.keys(state!.retry).sort()).toEqual(["ai/Seed 3.md", "ai/Seed 4.md", "ai/Seed 5.md"]);
+    expect(Object.values(state!.retry).every((r) => r.attempts === 1 && !r.exhausted)).toBe(true);
+  });
+
+  test("retries take only the slots this week's seeds leave; nothing in the window is skipped over three weeks", async () => {
+    listed = [];
+    setDocs([1, 2, 3, 4, 5], () => day(NOW - DAY));
+    failing = new Set(["q3", "q4", "q5"]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    // Week 2: yt-dlp healthy, 3 new captures, maxSeeds 5 ⇒ the 3 new first, then 2 retries.
+    clock = NOW + 7 * DAY;
+    failing = new Set();
+    setDocs([6, 7, 8], () => day(clock - DAY));
+    saved = [];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 6.md", "ai/Seed 7.md", "ai/Seed 8.md", "ai/Seed 3.md", "ai/Seed 4.md"]);
+    // Week 3: two more captures, then the last retry.
+    clock = NOW + 14 * DAY;
+    setDocs([9, 10], () => day(clock - DAY));
+    saved = [];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(saved.map((s) => s.run.seedDocId)).toEqual(["ai/Seed 10.md", "ai/Seed 9.md", "ai/Seed 5.md"]);
+    expect([...recent.keys()].sort()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => `ai/Seed ${n}.md`).sort());
+    expect(state!.retry).toEqual({});
+  });
+
+  test("seeds the cap leaves stay seeds next run, even past the 14-day window", async () => {
+    listed = [];
+    setDocs([1, 2, 3, 4, 5, 6, 7], (n) => day(NOW - (n - 1) * DAY));
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(saved).toHaveLength(5);
+    expect(state!.carryFrom).toBe(day(NOW - 6 * DAY));
+    clock = NOW + 7 * DAY;
+    setDocs([11, 12, 13, 14], () => day(clock - DAY));
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    clock = NOW + 14 * DAY;
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    // Seed 7 is 20 days old by week 3: searched, not dropped.
+    expect(saved.map((s) => s.run.seedDocId).sort()).toEqual([1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14].map((n) => `ai/Seed ${n}.md`).sort());
+    expect(state!.carryFrom).toBeNull();
+  });
+
+  test("a deadline that stops the run leaves its unstarted seeds for the next run", async () => {
+    listed = [];
+    setDocs([1, 2, 3, 4, 5], () => day(NOW - DAY));
+    const d = weekly();
+    d.services.queriesCall = async (p) => {
+      clock += 100_000;
+      return queriesAnswer(p);
+    };
+    await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, d);
+    expect(saved).toHaveLength(3);
+    expect(state!.carryFrom).toBe(day(NOW - DAY));
+    clock = NOW + 8 * DAY;
+    await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, d);
+    expect(saved.map((s) => s.run.seedDocId).sort()).toEqual([1, 2, 3, 4, 5].map((n) => `ai/Seed ${n}.md`));
+  });
+
+  test("a partly failed seed keeps its shelf with its failed count; it is not retried; health ok with the count", async () => {
+    listed = [];
+    setDocs([1, 2, 3, 4, 5], () => day(NOW - DAY));
+    queriesAnswer = async (p) => {
+      const n = /Title: Seed (\d+)/.exec(p)?.[1];
+      return JSON.stringify([1, 2, 3, 4].map((k) => ({ query: `q${n}${k}`, why: "x" })));
+    };
+    failing = new Set(["q32"]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(saved).toHaveLength(5);
+    expect(saved.find((s) => s.run.seedDocId === "ai/Seed 3.md")!.run.failed).toBe(1);
+    expect(saved.filter((s) => s.run.failed === 0)).toHaveLength(4);
+    expect(marks.get(HEALTH_SEARCH)).toEqual({ outcome: "ok", detail: "1 of 20 searches failed" });
+    expect(state!.retry).toEqual({});
+  });
+
+  test("a search that finds nothing is a success: failed 0", async () => {
+    listed = [];
+    setDocs([1], () => day(NOW - DAY));
+    searchAnswer = async () => [];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(saved[0]!.run.failed).toBe(0);
+    expect(marks.get(HEALTH_SEARCH)).toEqual({ outcome: "ok", detail: undefined });
+  });
+
+  test("a seed failing every week: 3 attempts, then exhausted and left alone", async () => {
+    listed = [];
+    setDocs([1], () => day(NOW - DAY));
+    failing = new Set(["q1"]);
+    const attempts: number[] = [];
+    for (let w = 0; w < 4; w++) {
+      clock = NOW + w * 7 * DAY;
+      searched = [];
+      await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+      attempts.push(searched.length);
+    }
+    expect(attempts).toEqual([1, 1, 1, 0]);
+    expect(state!.retry["ai/Seed 1.md"]).toMatchObject({ attempts: 3, exhausted: true });
+    expect(saved).toEqual([]);
+  });
+
+  test("a retry whose read answers not_found is dropped", async () => {
+    listed = [];
+    setDocs([1], () => day(NOW - DAY));
+    failing = new Set(["q1"]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(state!.retry["ai/Seed 1.md"]?.attempts).toBe(1);
+    raws.delete("ai/Seed 1.md");
+    clock = NOW + 7 * DAY;
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(state!.retry).toEqual({});
+  });
+
+  test("a run of the seed stored after its failure (the reader's Find) ends the retry", async () => {
+    listed = [];
+    setDocs([1], () => day(NOW - DAY));
+    failing = new Set(["q1"]);
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    recent.set("ai/Seed 1.md", NOW + DAY);
+    clock = NOW + 7 * DAY;
+    searched = [];
+    await checkYouTubeDiscovery(watcher(), bot, undefined, weekly());
+    expect(searched).toEqual([]);
+    expect(state!.retry).toEqual({});
+  });
+
+  test("an unreadable state is not overwritten", async () => {
+    listed = [];
+    setDocs([1], () => day(NOW - DAY));
+    failing = new Set(["q1"]);
+    let writes = 0;
+    await checkYouTubeDiscovery(
+      watcher(),
+      bot,
+      undefined,
+      weekly({
+        loadState: async () => {
+          throw new Error("db down");
+        },
+        saveState: async () => void writes++,
+      }),
+    );
+    expect(writes).toBe(0);
   });
 });

@@ -306,7 +306,8 @@
       "src/dashboard/views/wiki-boot/wiki-discuss-parity.test.ts",
       "src/dashboard/views/wiki-boot/wiki-discuss-cases.test.ts",
       "src/dashboard/routes/wiki-discuss-db.test.ts",
-      "src/dashboard/routes/wiki-discuss-apply-db.test.ts"
+      "src/dashboard/routes/wiki-discuss-apply-db.test.ts",
+      "src/dashboard/views/discover-boot/discover-page-summarize.test.ts"
     ]
   ]
 }

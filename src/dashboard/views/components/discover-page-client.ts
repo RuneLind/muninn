@@ -5,8 +5,14 @@
  * JSON (`#dscData`) and this file renders them: one shelf per seed, cards in a
  * row, a details drawer, sort and length filters.
  *
- * Actions: Summarize posts the existing `POST /api/youtube/summarize` and then
- * marks the video `queued`; ☆ Later toggles `later`; ✕ dismisses with an Undo.
+ * Actions: Summarize posts the existing `POST /api/youtube/summarize`, marks the
+ * video `queued` and follows the capture job through ONE page-wide poll of
+ * `GET /api/youtube/jobs` (`createJobFollower`; no stream per click): a capture
+ * that fails puts the video back to its earlier state, but only while it is
+ * still `queued` (`ifState`), and shows the job's error (`summarizeFlow`).
+ * ☆ Later toggles `later`; ✕ dismisses with an Undo.
+ * The page shows at most 40 shelves plus every older one holding a Later video,
+ * and says how many it left out (`dscHiddenNote`).
  * Every state write is `POST /api/summaries/discover/state` and applies to the
  * video on every shelf. Opening a card asks `POST /api/summaries/discover/details`
  * once per video (the server probes one at a time and caches).
@@ -75,8 +81,120 @@ const thumb = (id: string, q = "mqdefault") => (VIDEO_ID_RE.test(id) ? `https://
 const watchUrl = (id: string) => `https://www.youtube.com/watch?v=${id}`;
 const pct = (score: number) => Math.round(Math.max(0, Math.min(1, score)) * 100);
 
+/** How a followed capture job ended: done, failed (with the job's error), or unknown (the job is gone, or the polls kept failing). */
+export type CaptureEnd = { end: "complete" } | { end: "error"; message: string } | { end: "lost" };
+
+export interface JobFollowerDeps {
+  /** The vertical's recent jobs (`GET /api/youtube/jobs`); throws when the read fails. */
+  fetchJobs: () => Promise<{ id: string; status: string; error?: string }[]>;
+  setTimer: (fn: () => void, ms: number) => void;
+}
+
+/** How often the page polls while a capture it started is running. */
+export const DSC_JOB_POLL_MS = 4000;
+/** Failed polls in a row after which the page stops following (the video stays queued). */
+export const DSC_JOB_POLL_MAX_FAILS = 15;
+
+/**
+ * Follow capture jobs to their end with ONE poll loop for the whole page, and
+ * only while a job is followed: the dashboard is HTTP/1.1, where a browser
+ * holds 6 connections per host, so a stream per Summarize click would starve
+ * the page (architecture review 2026-11-16, F17).
+ */
+export function createJobFollower(deps: JobFollowerDeps, pollMs = DSC_JOB_POLL_MS): { follow: (jobId: string) => Promise<CaptureEnd> } {
+  const followed = new Map<string, ((end: CaptureEnd) => void)[]>();
+  let scheduled = false;
+  let fails = 0;
+  const settle = (jobId: string, end: CaptureEnd) => {
+    for (const done of followed.get(jobId) ?? []) done(end);
+    followed.delete(jobId);
+  };
+  const schedule = () => {
+    if (scheduled || followed.size === 0) return;
+    scheduled = true;
+    deps.setTimer(() => void tick(), pollMs);
+  };
+  const tick = async () => {
+    scheduled = false;
+    let jobs: Awaited<ReturnType<JobFollowerDeps["fetchJobs"]>>;
+    try {
+      jobs = await deps.fetchJobs();
+      fails = 0;
+    } catch {
+      if (++fails >= DSC_JOB_POLL_MAX_FAILS) for (const id of [...followed.keys()]) settle(id, { end: "lost" });
+      return schedule();
+    }
+    const byId = new Map(jobs.map((j) => [j.id, j]));
+    for (const id of [...followed.keys()]) {
+      const job = byId.get(id);
+      // A job the store no longer has (a restart, the TTL) says nothing about the capture.
+      if (!job) settle(id, { end: "lost" });
+      else if (job.status === "complete") settle(id, { end: "complete" });
+      else if (job.status === "error") settle(id, { end: "error", message: job.error || "the capture failed" });
+    }
+    schedule();
+  };
+  return {
+    follow: (jobId) =>
+      new Promise<CaptureEnd>((resolve) => {
+        followed.set(jobId, [...(followed.get(jobId) ?? []), resolve]);
+        schedule();
+      }),
+  };
+}
+
+export interface SummarizeFlowDeps {
+  start: () => Promise<{ ok: boolean; status: number; data: Record<string, unknown> }>;
+  /** Write a state; null when it stuck, else the error text. */
+  setState: (state: DiscoverHitState) => Promise<string | null>;
+  /** Write `state` only while the video is `queued`: null when it stuck, "changed" when it was no longer queued. */
+  putBack: (state: DiscoverHitState) => Promise<string | null>;
+  follow: (jobId: string) => Promise<CaptureEnd>;
+  toast: (msg: string) => void;
+  /** Called once the video is marked queued (or the start failed), before the job is followed. */
+  settled: () => void;
+}
+
+/**
+ * Summarize one video: start the capture, mark it `queued`, then follow the job;
+ * when the capture fails, put the video back to `before` (only while it is still
+ * `queued`) with the job's error in a toast. A duplicate is already captured and
+ * is not followed.
+ */
+export async function summarizeFlow(before: DiscoverHitState, deps: SummarizeFlowDeps): Promise<void> {
+  let r: Awaited<ReturnType<SummarizeFlowDeps["start"]>>;
+  try {
+    r = await deps.start();
+  } catch {
+    deps.settled();
+    return deps.toast("Could not start: the server did not answer.");
+  }
+  if (!r.ok) {
+    deps.settled();
+    return deps.toast(typeof r.data.error === "string" ? r.data.error : `Could not start (HTTP ${r.status}).`);
+  }
+  const started = r.data.duplicate ? "Already summarized." : r.data.in_flight ? "Already running." : "Summary started.";
+  const err = await deps.setState("queued");
+  deps.settled();
+  deps.toast(err ? `${started} Marking it queued failed: ${err}` : started);
+  const jobId = typeof r.data.job_id === "string" ? r.data.job_id : null;
+  if (err || r.data.duplicate || !jobId) return;
+  const end = await deps.follow(jobId);
+  if (end.end !== "error") return;
+  const undo = await deps.putBack(before);
+  deps.toast(
+    undo === null
+      ? `The summary failed: ${end.message}. You can try again.`
+      : undo === "changed"
+        ? `The summary failed: ${end.message}.`
+        : `The summary failed: ${end.message}. It is still marked queued: ${undo}`,
+  );
+}
+
 interface PageState {
   shelves: DiscoverShelf[];
+  /** Older shelves the server left out. */
+  hidden: number;
   sort: DiscoverSort;
   minLen: number;
   /** The drawer's video and shelf, or null when closed. */
@@ -88,6 +206,7 @@ interface PageState {
 
 const st: PageState = {
   shelves: [],
+  hidden: 0,
   sort: "score",
   minLen: 0,
   open: null,
@@ -145,10 +264,14 @@ async function postJson(
   return { ok: res.ok, status: res.status, data };
 }
 
-/** Write a state; on success apply it to every shelf. Answers the error text, or null when it stuck. */
-async function setState(videoId: string, state: DiscoverHitState): Promise<string | null> {
+/**
+ * Write a state; on success apply it to every shelf. Answers the error text, or null when it stuck.
+ * With `ifState` the server writes only while the video is in that state, and "changed" answers that it was not.
+ */
+async function setState(videoId: string, state: DiscoverHitState, ifState?: DiscoverHitState): Promise<string | null> {
   try {
-    const r = await postJson("/api/summaries/discover/state", { videoId, state });
+    const r = await postJson("/api/summaries/discover/state", ifState ? { videoId, state, ifState } : { videoId, state });
+    if (ifState && r.status === 409 && r.data.code === "state_changed") return "changed";
     if (!r.ok) return typeof r.data.error === "string" ? r.data.error : `Could not save (HTTP ${r.status}).`;
   } catch {
     return "Could not save: the server did not answer.";
@@ -161,7 +284,7 @@ async function setState(videoId: string, state: DiscoverHitState): Promise<strin
 /** When each video's last state write committed: laid over shelves read before it (see `applyShelves`). */
 const writes = new Map<string, { state: DiscoverHitState; at: number }>();
 /** Shelves a seed run delivered while the drawer was open: applied when it closes. */
-let pendingShelves: { shelves: DiscoverShelf[]; requestedAt: number } | null = null;
+let pendingShelves: { shelves: DiscoverShelf[]; requestedAt: number; hidden: number } | null = null;
 
 /** A replaced shelf's run id → the run of the same seed that replaced it, for focus and Undo. */
 const runAlias = new Map<string, string>();
@@ -172,7 +295,7 @@ const liveRun = (runId: string): string => {
 };
 
 /** Replace the shelves with a fresh read; a write that committed after the read was asked wins over it. */
-function applyShelves(shelves: DiscoverShelf[], requestedAt: number): void {
+function applyShelves(shelves: DiscoverShelf[], requestedAt: number, hidden: number): void {
   const seedKey = (s: DiscoverShelf) => `${s.seedSource}\u0000${s.seedDocId}`;
   const bySeed = new Map(shelves.map((s) => [seedKey(s), s.runId]));
   for (const old of st.shelves) {
@@ -185,6 +308,7 @@ function applyShelves(shelves: DiscoverShelf[], requestedAt: number): void {
       if (w && w.at >= requestedAt) h.state = w.state;
     }
   st.shelves = shelves;
+  st.hidden = hidden;
 }
 
 /** Videos with a Later or Dismiss write in flight: a second click waits for the first. */
@@ -222,6 +346,7 @@ function cardHtml(h: DiscoverHit, shelf: DiscoverShelf): string {
     `<button type="button" class="dsc-x" data-act="dismiss" title="Not interested" aria-label="Not interested">✕</button></div>` +
     `<div class="dsc-body"><div class="dsc-title">${escHtml(h.title || h.videoId)}</div>` +
     (meta ? `<div class="dsc-meta">${escHtml(meta)}</div>` : "") +
+    (h.earlierRunAt ? `<div class="dsc-meta">Found by an earlier search (${escHtml(new Date(h.earlierRunAt).toISOString().slice(0, 10))})</div>` : "") +
     scoreHtml(h) +
     (h.why ? `<div class="dsc-why">${escHtml(h.why)}</div>` : "") +
     actionsHtml(h, false) +
@@ -246,12 +371,20 @@ function shelfHtml(shelf: DiscoverShelf): string {
     (shelf.seedVideoId ? `<img src="${escHtml(thumb(shelf.seedVideoId))}" alt="">` : "") +
     `<div><div class="dsc-because">${escHtml(because)}</div>` +
     `<h3><a data-fk="seed" href="${escHtml(seedHref)}">${escHtml(shelf.seedTitle)}</a></h3>` +
-    `<div class="dsc-meta">${shelf.searched} videos searched · ${shelf.known} you already have · ${rows.length} shown · ${escHtml(new Date(shelf.createdAt).toISOString().slice(0, 10))}</div>` +
+    `<div class="dsc-meta">${shelf.searched} videos searched · ${shelf.known} you already have · ${rows.length} shown` +
+    (shelf.failed > 0 ? ` · ${shelf.failed} search${shelf.failed === 1 ? "" : "es"} failed` : "") +
+    ` · ${escHtml(new Date(shelf.createdAt).toISOString().slice(0, 10))}</div>` +
     `<div class="dsc-qs">${shelf.queries.map((q) => `<span class="dsc-q" title="${escHtml(q.why)}">${escHtml(q.query)}</span>`).join("")}</div>` +
     `</div></div>` +
     (rows.length ? `<div class="dsc-row">${rows.map((h) => cardHtml(h, shelf)).join("")}</div>` : `<div class="dsc-empty">${empty}</div>`) +
     `</section>`
   );
+}
+
+/** The line under the shelves when the read left older ones out (F18); empty when none. */
+export function dscHiddenNote(hidden: number): string {
+  if (hidden <= 0) return "";
+  return `${hidden} older shel${hidden === 1 ? "f" : "ves"} not shown. Videos saved for Later stay shown whatever shelf they are on.`;
 }
 
 /** What has focus, by identity rather than node: a render replaces the nodes. */
@@ -324,11 +457,14 @@ function render(): void {
   if (!st.open && pendingShelves) {
     const p = pendingShelves;
     pendingShelves = null;
-    applyShelves(p.shelves, p.requestedAt);
+    applyShelves(p.shelves, p.requestedAt, p.hidden);
   }
   const shown = st.shelves.reduce((n, s) => n + dscVisibleHits(s.hits, st.sort, st.minLen).length, 0);
   const count = $("dscCount");
-  if (count) count.textContent = `${shown} suggestion${shown === 1 ? "" : "s"} on ${st.shelves.length} shel${st.shelves.length === 1 ? "f" : "ves"}`;
+  if (count)
+    count.textContent =
+      `${shown} suggestion${shown === 1 ? "" : "s"} on ${st.shelves.length} shel${st.shelves.length === 1 ? "f" : "ves"}` +
+      (st.hidden > 0 ? ` · ${st.hidden} older not shown` : "");
   const focus = focusKey();
   const scroll = new Map<string, number>();
   main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
@@ -338,7 +474,7 @@ function render(): void {
   main.innerHTML =
     st.shelves.length === 0
       ? `<div class="dsc-empty">No shelves yet. Use Search from above, or open a YouTube summary on <a href="/summaries">Summaries</a> and press ▶ Find on YouTube: each search is kept here as a shelf.</div>`
-      : st.shelves.map(shelfHtml).join("");
+      : st.shelves.map(shelfHtml).join("") + (st.hidden > 0 ? `<div class="dsc-empty" data-older>${escHtml(dscHiddenNote(st.hidden))}</div>` : "");
   main.querySelectorAll<HTMLElement>(".dsc-shelf").forEach((sh) => {
     const left = sh.dataset.run ? scroll.get(sh.dataset.run) : undefined;
     const row = sh.querySelector<HTMLElement>(".dsc-row");
@@ -494,19 +630,40 @@ async function summarize(videoId: string): Promise<void> {
   if (!found || st.summarizing.has(videoId) || found.hit.state === "queued") return;
   st.summarizing.add(videoId);
   render();
-  try {
-    const r = await postJson("/api/youtube/summarize", { title: found.hit.title, url: watchUrl(videoId), video_id: videoId });
-    if (!r.ok) toast(typeof r.data.error === "string" ? r.data.error : `Could not start (HTTP ${r.status}).`);
-    else {
-      const started = r.data.duplicate ? "Already summarized." : r.data.in_flight ? "Already running." : "Summary started.";
-      const err = await setState(videoId, "queued");
-      toast(err ? `${started} Marking it queued failed: ${err}` : started);
-    }
-  } catch {
-    toast("Could not start: the server did not answer.");
-  }
-  st.summarizing.delete(videoId);
+  const title = found.hit.title;
+  await summarizeFlow(found.hit.state, {
+    start: () => postJson("/api/youtube/summarize", { title, url: watchUrl(videoId), video_id: videoId }),
+    setState: (state) => setState(videoId, state),
+    putBack: (state) => setState(videoId, state, "queued"),
+    follow: (jobId) => jobFollower().follow(jobId),
+    toast,
+    settled: () => {
+      st.summarizing.delete(videoId);
+      render();
+    },
+  });
   render();
+}
+
+let pollMs = DSC_JOB_POLL_MS;
+/** Test seam: the page's poll interval. */
+export function __setDiscoverJobPollMsForTest(ms: number): void {
+  pollMs = ms;
+}
+let follower: ReturnType<typeof createJobFollower> | null = null;
+function jobFollower(): ReturnType<typeof createJobFollower> {
+  return (follower ??= createJobFollower(
+    {
+      fetchJobs: async () => {
+        const res = await fetch("/api/youtube/jobs?limit=100");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { jobs?: { id: string; status: string; error?: string }[] };
+        return Array.isArray(data.jobs) ? data.jobs : [];
+      },
+      setTimer: (fn, ms) => void setTimeout(fn, ms),
+    },
+    pollMs,
+  ));
 }
 
 async function dismiss(videoId: string, fromRun?: string): Promise<void> {
@@ -583,8 +740,9 @@ function focusHashShelf(): void {
 
 export function bootDiscoverPage(): void {
   try {
-    const data = JSON.parse($("dscData")?.textContent ?? "{}") as { shelves?: DiscoverShelf[] };
+    const data = JSON.parse($("dscData")?.textContent ?? "{}") as { shelves?: DiscoverShelf[]; hidden?: number };
     st.shelves = Array.isArray(data.shelves) ? data.shelves : [];
+    st.hidden = typeof data.hidden === "number" ? data.hidden : 0;
   } catch {
     st.shelves = [];
   }
@@ -628,13 +786,13 @@ export function bootDiscoverPage(): void {
   });
   window.addEventListener("hashchange", focusHashShelf);
   bootSeedBar(
-    (shelves, requestedAt) => {
+    (shelves, requestedAt, hidden) => {
     // The drawer is a modal over the shelves: swap them in when it closes, not under it.
     if (st.open) {
-      pendingShelves = { shelves, requestedAt };
+      pendingShelves = { shelves, requestedAt, hidden };
       return;
     }
-    applyShelves(shelves, requestedAt);
+    applyShelves(shelves, requestedAt, hidden);
     render();
     },
     (msg) => {

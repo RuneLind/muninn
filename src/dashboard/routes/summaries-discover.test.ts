@@ -83,10 +83,10 @@ function store(): SummariesDiscoverDeps["store"] {
       return `00000000-0000-4000-8000-${String(saved.length).padStart(12, "0")}`;
     },
     knownIds: async () => new Set([...states].filter(([, st]) => st === "dismissed" || st === "queued").map(([id]) => id)),
-    setState: async (id, st) => (states.has(id) ? (states.set(id, st), 1) : 0),
+    setState: async (id, st, ifState) => (states.has(id) && (!ifState || states.get(id) === ifState) ? (states.set(id, st), 1) : 0),
     getDetails: async (id) => (detailsCache.has(id) ? detailsCache.get(id)! : undefined),
     saveDetails: async (id, d) => void detailsCache.set(id, d),
-    listShelves: async () => [] as DiscoverShelf[],
+    listShelves: async () => ({ shelves: [] as DiscoverShelf[], hidden: 0 }),
   };
 }
 
@@ -414,6 +414,7 @@ describe("stored runs (PR 2)", () => {
       known: 3,
       origin: "reader",
       botName: "summarizer",
+      failed: 0,
     });
     expect(run.queries.map((q) => q.query)).toEqual(["agent evals", "eval harness talk"]);
     expect(hits.map((h) => [h.videoId, h.score])).toEqual([
@@ -481,6 +482,20 @@ describe("POST /api/summaries/discover/state", () => {
     expect(await res.json()).toEqual({ videoId: ID(1), state: "dismissed" });
     expect(states.get(ID(1))).toBe("dismissed");
   });
+  test("ifState writes only while the video is in that state: 409 state_changed otherwise (F17)", async () => {
+    const a = app();
+    states.set(ID(1), "queued");
+    const back = await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "new", ifState: "queued" });
+    expect(back.status).toBe(200);
+    expect(states.get(ID(1))).toBe("new");
+    states.set(ID(1), "dismissed");
+    const late = await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "new", ifState: "queued" });
+    expect(late.status).toBe(409);
+    expect(((await late.json()) as { code: string }).code).toBe("state_changed");
+    expect(states.get(ID(1))).toBe("dismissed");
+    const bad = await postTo(a, "/api/summaries/discover/state", { videoId: ID(1), state: "new", ifState: "gone" });
+    expect(bad.status).toBe(400);
+  });
 });
 
 describe("POST /api/summaries/discover/details", () => {
@@ -537,17 +552,20 @@ describe("GET /summaries/discover", () => {
       searched: 5,
       known: 1,
       origin: "reader",
+      failed: 0,
       createdAt: 0,
       hits: [],
     };
     const d = deps();
-    d.store = { ...d.store, listShelves: async () => [shelf] };
+    d.store = { ...d.store, listShelves: async () => ({ shelves: [shelf], hidden: 3 }) };
     const res = await app(d).request("/summaries/discover");
     expect(res.status).toBe(200);
     const html = await res.text();
     const json = /<script type="application\/json" id="dscData">([^<]*)<\/script>/.exec(html)?.[1];
     expect(json).toBeDefined();
     expect(JSON.parse(json!).shelves[0].seedTitle).toBe("Invented </script><b>seed</b>");
+    // F18: the count of older shelves left out rides the page's JSON.
+    expect(JSON.parse(json!).hidden).toBe(3);
     expect(html).not.toContain("</script><b>seed");
   });
 });
@@ -711,10 +729,10 @@ describe("GET /api/summaries/discover/shelves (PR 3)", () => {
   test("answers the stored shelves", async () => {
     const shelf = { runId: "r1" } as unknown as DiscoverShelf;
     const d = deps();
-    d.store.listShelves = async () => [shelf];
+    d.store.listShelves = async () => ({ shelves: [shelf], hidden: 2 });
     const res = await app(d).request("/api/summaries/discover/shelves");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ shelves: [shelf] });
+    expect(await res.json()).toEqual({ shelves: [shelf], hidden: 2 });
   });
 
   test("a failed read is 500", async () => {
