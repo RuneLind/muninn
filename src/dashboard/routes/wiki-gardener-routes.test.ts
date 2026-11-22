@@ -22,12 +22,15 @@ import {
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   __setBotsForTest,
+  __setGroupVerbInFlightForTest,
   type BacklogRouteDeps,
   type GardenerWatcherRef,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
+import { applyWikiProposalGroup } from "../../gardener/apply.ts";
+import { runGit } from "../../wiki/commit.ts";
 import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
@@ -325,6 +328,7 @@ const lintGroupStubs = {
   listProposalsByGroup: async () => [],
   approveProposalGroup: async () => [],
   rejectProposalGroup: async () => [],
+  settleProposalApplied: async () => null,
   markProposal: async () => true,
   seedLintProposals: async () => ({
     proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [],
@@ -334,6 +338,7 @@ const lintGroupStubs = {
     | "listProposalsByGroup"
   | "approveProposalGroup"
   | "rejectProposalGroup"
+  | "settleProposalApplied"
   | "markProposal"
   | "seedLintProposals"
 >;
@@ -3007,17 +3012,29 @@ describe("lint proposals — seeding and the group verbs", () => {
           state = state.map((r) => (r.status === "draft" ? { ...r, status: "approved" } : r));
           return state.filter((r) => r.status === "approved");
         },
-        rejectProposalGroup: async () => {
-          const taken = state.filter((r) => r.status === "draft");
-          state = state.map((r) => (r.status === "draft" ? { ...r, status: "rejected" } : r));
+        // `draft` and `approved`, except the given ids — the DB verb's predicate.
+        rejectProposalGroup: async (_w: string, _g: string, exceptIds: readonly string[] = []) => {
+          const takes = (r: Row) => (r.status === "draft" || r.status === "approved") && !exceptIds.includes(r.id);
+          const taken = state.filter(takes);
+          state = state.map((r) => (takes(r) ? { ...r, status: "rejected" } : r));
           return taken;
         },
+        settleProposalApplied: async (id: string) => {
+          const row = state.find((r) => r.id === id && (r.status === "draft" || r.status === "approved"));
+          if (!row) return null;
+          set(id, "applied");
+          return row as never;
+        },
+        getProposalById: async (id: string) => state.find((r) => r.id === id) ?? null,
+        // Both CAS on `approved`, as the DB verbs do.
         markProposal: async (id: string, status: string) => {
+          if (state.find((r) => r.id === id)?.status !== "approved") return false;
           marked.push([id, status]);
           set(id, status);
           return true;
         },
         revertProposal: async (id: string) => {
+          if (state.find((r) => r.id === id)?.status !== "approved") return null;
           reverted.push(id);
           set(id, "draft");
           return { id } as never;
@@ -3084,31 +3101,258 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(log).toContain(`- via lint-proposals, 2 pages: ${PAGE_A}, ${PAGE_B}`);
   });
 
-  test("group approve REFUSES a group holding an approved or rejected row", async () => {
-    for (const blocking of ["approved", "rejected"]) {
-      await Bun.write(path.join(root, PAGE_B), body("B"));
-      const half = [
-        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: blocking },
-        await lintRow("r2", PAGE_B, "prov"),
-      ];
-      const store = groupStore(half);
-      const one = new Hono();
-      registerWikiGardenerRoutes(one, deps(store.deps));
+  test("group approve REFUSES a group holding a rejected row", async () => {
+    const half = [
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "rejected" },
+      await lintRow("r2", PAGE_B, "prov"),
+    ];
+    const store = groupStore(half);
+    registerWikiGardenerRoutes(app, deps(store.deps));
 
-      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
-      expect([blocking, res.status]).toEqual([blocking, 409]);
-      // A reviewer who dismissed one member cannot then accept the group, and an
-      // `approved` row means another apply is mid-flight over these same pages.
-      // The message names what BLOCKS: `applied`/`stale` rows are not draft
-      // either and are skipped, so "not all draft" described another condition.
-      expect(await res.json()).toMatchObject({
-        outcome: "mixed",
-        error: "an approved or rejected row blocks the group",
-        statuses: { [blocking]: 1, draft: 1 },
-      });
-      expect(store.marked).toEqual([]);
-      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(res.status).toBe(409);
+    // A reviewer who dismissed one member cannot then accept the group. The
+    // message names what BLOCKS: `applied`/`stale` rows are skipped, and an
+    // `approved` one with no Accept in flight is claimed (F35, below).
+    expect(await res.json()).toMatchObject({
+      outcome: "mixed",
+      error: "a rejected row blocks the group",
+      statuses: { rejected: 1, draft: 1 },
+    });
+    expect(store.marked).toEqual([]);
+    expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+  });
+
+  /**
+   * F35 (arch review 2026-11-16) — the whole state space of a two-row group:
+   * the rows' statuses × whether an Accept/Dismiss of the group is in flight in
+   * this process × the request. What the cells pin together: with no verb in
+   * flight, Dismiss settles every group that has a live row, so no row is left
+   * `approved` without a verb that works; a 200 leaves no row `approved`; with
+   * a verb in flight, nothing moves. Mirrored as a table in the PR body.
+   */
+  describe("F35 — group state space", () => {
+    type Verb = "accept" | "dismiss" | "approve-one" | "reject-one";
+    const GROUPS: [string, string][] = [
+      ["draft", "draft"],
+      ["approved", "approved"],
+      ["approved", "draft"],
+      ["draft", "rejected"],
+      ["approved", "rejected"],
+      ["applied", "draft"],
+      ["applied", "stale"],
+      ["rejected", "rejected"],
+    ];
+    const live = (s: string) => s === "draft" || s === "approved";
+
+    /** What each cell must answer, and the statuses it must leave. */
+    function expected(statuses: [string, string], inFlight: boolean, verb: Verb): { status: number; body: Record<string, unknown>; after: string[] } {
+      const unchanged = [...statuses];
+      if (verb === "approve-one" || verb === "reject-one") return { status: 409, body: { group: true, groupKey: GROUP }, after: unchanged };
+      const anyLive = statuses.some(live);
+      if (verb === "accept") {
+        if (!anyLive) return { status: 409, body: { outcome: "nothing-to-apply" }, after: unchanged };
+        if (inFlight) return { status: 409, body: { outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" }, after: unchanged };
+        if (statuses.includes("rejected")) return { status: 409, body: { outcome: "mixed", error: "a rejected row blocks the group" }, after: unchanged };
+        return { status: 200, body: { outcome: "applied" }, after: statuses.map((s) => (live(s) ? "applied" : s)) };
+      }
+      if (inFlight) return { status: 409, body: { outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" }, after: unchanged };
+      if (!anyLive) return { status: 409, body: { error: "group is no longer a draft" }, after: unchanged };
+      return { status: 200, body: { outcome: "rejected", rejected: statuses.filter(live).length }, after: statuses.map((s) => (live(s) ? "rejected" : s)) };
     }
+
+    const url = (verb: Verb) =>
+      verb === "accept"
+        ? `/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`
+        : verb === "dismiss"
+          ? `/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`
+          : `/api/wiki/proposals/r1/${verb === "approve-one" ? "approve" : "reject"}`;
+
+    for (const statuses of GROUPS) {
+      for (const inFlight of [false, true]) {
+        for (const verb of ["accept", "dismiss", "approve-one", "reject-one"] as const) {
+          test(`${statuses.join("+")} · ${inFlight ? "verb in flight" : "none in flight"} · ${verb}`, async () => {
+            const rows = [
+              { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: statuses[0] },
+              { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: statuses[1] },
+            ];
+            const store = groupStore(rows);
+            registerWikiGardenerRoutes(app, deps(store.deps));
+            __setGroupVerbInFlightForTest("lintwiki", GROUP, inFlight);
+            try {
+              const res = await app.request(url(verb), JSON_POST);
+              const want = expected(statuses, inFlight, verb);
+              expect(res.status).toBe(want.status);
+              expect(await res.json()).toMatchObject(want.body);
+              expect(store.rows().map((r) => r.status)).toEqual(want.after);
+              if (want.status === 200) expect(store.rows().map((r) => r.status)).not.toContain("approved");
+              const wrote = (await Bun.file(path.join(root, PAGE_A)).text()).includes("series:");
+              expect(wrote).toBe(want.status === 200 && verb === "accept" && live(statuses[0]));
+            } finally {
+              __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+            }
+          });
+        }
+      }
+    }
+  });
+
+  describe("F35 — a failed Accept strands no row and the next verb completes", () => {
+    /** A group apply that throws on the second row, after the first row's page
+     *  write — through the real `applyWikiProposalGroup` on the real wiki. */
+    const throwOnSecondRow = (async (rows, applyDeps, opts) => {
+      let calls = 0;
+      return applyWikiProposalGroup(
+        rows,
+        {
+          ...applyDeps,
+          getWikiIndex: async () => {
+            // 1: the preflight, 2: row 1's own read, 3: row 2's.
+            if (++calls === 3) throw new Error("injected: index read failed on row 2");
+            return applyDeps.getWikiIndex();
+          },
+        },
+        opts,
+      );
+    }) as typeof applyWikiProposalGroup;
+
+    test("a throw after the first page write: the written row is `applied`, the unwritten one `draft`, and a second Accept finishes", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, applyProposalGroup: throwOnSecondRow }));
+      const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(first.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "draft"]);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+
+      const again = new Hono();
+      registerWikiGardenerRoutes(again, deps(store.deps));
+      const second = await again.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(second.status).toBe(200);
+      expect(await second.json()).toMatchObject({ outcome: "applied", applied: [PAGE_B], skipped: { applied: 1 } });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split("## [").length - 1).toBe(2);
+      expect(log.split(PAGE_A).length - 1).toBe(1);
+      expect(log.split(PAGE_B).length - 1).toBe(1);
+    });
+
+    test("a Dismiss after that failure cannot reject the edit that landed", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, applyProposalGroup: throwOnSecondRow }));
+      await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+    });
+
+    test("a throw between the claim and the re-read leaves no row `approved`", async () => {
+      const store = groupStore([
+        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "approved" },
+        await lintRow("r2", PAGE_B, "prov"),
+      ]);
+      let reads = 0;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          listProposalsByGroup: async () => {
+            if (++reads === 2) throw new Error("injected: connection reset on the re-read");
+            return store.rows();
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+    });
+
+    test("terminal marks that throw: written rows stay `approved` (never `draft`), and the next Accept settles them", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let failMarks = true;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          markProposal: async (id: string, status: string) => {
+            if (failMarks) throw new Error("injected: connection reset");
+            return store.deps.markProposal(id, status);
+          },
+        }),
+      );
+      const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(first.status).toBe(500);
+      // Both pages landed; the marks could not be written, so the rows wait in
+      // `approved`, which the card offers verbs on and the next verb takes.
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+      failMarks = false;
+      const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(second.status).toBe(200);
+      expect(await second.json()).toMatchObject({ outcome: "applied", applied: [], noop: [PAGE_A, PAGE_B] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split("## [").length - 1).toBe(1);
+    });
+
+    test("rows a restart left `approved` over pages already written: Dismiss settles them `applied`, not `rejected`", async () => {
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+    });
+
+    test("Dismiss over a page a dead pass wrote and never committed: settled `applied`, logged and committed once", async () => {
+      const g = (...args: string[]) => runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+      await g("init", "-q", "-b", "main");
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(await res.json()).toMatchObject({ rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe(`[lint] fix: 1 page (${GROUP})`);
+      expect((await g("status", "--porcelain")).stdout).toBe("");
+    });
+
+    test("a second Accept while the first is in flight answers `mixed` and writes nothing twice", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inMark = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          markProposal: async (id: string, status: string) => {
+            entered();
+            await gate;
+            return store.deps.markProposal(id, status);
+          },
+        }),
+      );
+      const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      await inMark;
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+      for (const verb of ["approve", "reject"]) {
+        const second = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=lintwiki`, JSON_POST);
+        expect([verb, second.status]).toEqual([verb, 409]);
+        expect(await second.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      }
+      release();
+      expect((await first).status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      expect((await Bun.file(path.join(root, "log.md")).text()).split("## [").length - 1).toBe(1);
+    });
   });
 
   test("a second Accept after a stop applies the rows the stop put back to DRAFT", async () => {

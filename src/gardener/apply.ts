@@ -400,16 +400,26 @@ export interface GroupRowOutcome {
   /** The pre-write checks passed and the page write threw. Every other `error`
    *  is a refusal that the next apply would make again. */
   writeFailed?: true;
+  /** A no-op row (step 2a) whose page an earlier pass of this group wrote and
+   *  never committed: this pass stages the page and names it in its `log.md`
+   *  entry. */
+  recovered?: true;
 }
 
 export interface GroupApplyResult {
   /** Every row the apply REACHED, in the order it ran them. A row after the one
-   *  that stopped the group is absent — it was never attempted and keeps its
-   *  `approved` status, which is re-runnable by design. */
+   *  that stopped the group is absent: it was never attempted. */
   results: GroupRowOutcome[];
   /** The row that stopped the group, when one did. Rows before it are already
    *  written and stay written. */
   stoppedAt?: GroupRowOutcome;
+}
+
+/** Per-call switches for {@link applyWikiProposalGroup}. */
+export interface GroupApplyOptions {
+  /** Called with each row's outcome the moment it is known, so a caller still
+   *  learns which pages landed when a later row, or a later step, throws. */
+  onRowOutcome?: (row: GroupRowOutcome) => void;
 }
 
 /**
@@ -430,6 +440,13 @@ export interface GroupApplyResult {
  * group and says which; rows already written by then stay written, since there
  * is no rollback.
  *
+ * **Safe to re-run after a pass that died** (F35, arch review 2026-11-16). A
+ * page an earlier pass wrote is a no-op now (step 2a). When it still carries
+ * uncommitted changes, that pass never reached its commit, so this pass stages
+ * the page and names it in its `log.md` entry (`recovered`). A row that throws
+ * still gets the log entry and the commit for every page written before it,
+ * and for its own page when its write had landed; then the throw goes on.
+ *
  * The per-row work is the SAME `applyInner` a single approve runs — the
  * confinement, staleness, write, `log.md` and reindex steps are not re-spelled
  * here.
@@ -437,6 +454,7 @@ export interface GroupApplyResult {
 export async function applyWikiProposalGroup(
   rows: readonly WikiProposal[],
   deps: ApplyDeps,
+  opts: GroupApplyOptions = {},
 ): Promise<GroupApplyResult> {
   const refusal = readonlyRefusalFor(deps, rows[0]?.targetPath ?? "(group)");
   if (refusal) {
@@ -445,76 +463,134 @@ export async function applyWikiProposalGroup(
     // success shape — `{outcome: "applied", applied: []}` — and the card said
     // the fix had landed on a read-only instance that wrote nothing.
     const results = rows.map((r) => ({ id: r.id, targetPath: r.targetPath, outcome: refusal }));
+    for (const r of results) opts.onRowOutcome?.(r);
     return { results, ...(results[0] ? { stoppedAt: results[0] } : {}) };
   }
 
   const groupKey = rows[0]?.groupKey ?? "(no group)";
+  // Read before the section, so this adds no git status inside it.
+  const recoverable = await uncommittedDraftPages(rows, deps);
   const tail: { paths: string[] } = { paths: [] };
-  const result = await runWikiWriteExclusive(deps.wikiDir, async () => {
-    const out: GroupApplyResult = { results: [] };
-    // Every member's pre-write checks BEFORE the first write, so a stale or
-    // refused member stops the group with nothing written (finding 61). The section serializes the
-    // in-process writers, so the check holds until the loop below runs.
-    const blocked = await preflightGroupRows(rows, deps);
-    if (blocked) {
-      out.results.push(blocked);
-      out.stoppedAt = blocked;
-      return out;
-    }
-    const written: WikiProposal[] = [];
-    for (const row of rows) {
-      // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
-      // twelve-member series otherwise files twelve entries whose only
-      // difference is which frontmatter line moved, burying the curated ones the
-      // log is for. The entry is written below, still inside this section.
-      let rowPaths: string[] = [];
-      const write = { failed: false };
-      const outcome = await applyInner(
-        row,
-        deps,
-        (_commit, paths) => {
-          rowPaths = paths;
-        },
-        { skipLog: true, onWriteFailed: () => (write.failed = true) },
-      );
-      // A NOOP row wrote nothing — `applyInner` short-circuited at step 2a
-      // because the page already WAS the draft — so staging its own path (and
-      // the wiki-global `log.md`, which only a row that WROTE causes an entry
-      // in) makes the one commit claim a page it never touched: the subject
-      // counts the staged paths, and a group of one written page plus one noop
-      // said "2 pages". Whatever the WIRE stage modified is a real change and
-      // stays staged.
-      const noopPath = outcome.outcome === "applied" && outcome.noop;
-      tail.paths.push(
-        ...(noopPath
-          ? rowPaths.filter((p) => p !== row.targetPath && p !== WIKI_LOG_FILE)
-          : rowPaths),
-      );
-      const entry: GroupRowOutcome = { id: row.id, targetPath: row.targetPath, outcome, ...(write.failed ? { writeFailed: true as const } : {}) };
-      out.results.push(entry);
-      if (outcome.outcome !== "applied") {
-        out.stoppedAt = entry;
-        break;
+  try {
+    return await runWikiWriteExclusive(deps.wikiDir, async () => {
+      const out: GroupApplyResult = { results: [] };
+      const report = (entry: GroupRowOutcome) => {
+        out.results.push(entry);
+        opts.onRowOutcome?.(entry);
+      };
+      // Every member's pre-write checks BEFORE the first write, so a stale or
+      // refused member stops the group with nothing written (finding 61). The section serializes the
+      // in-process writers, so the check holds until the loop below runs.
+      const blocked = await preflightGroupRows(rows, deps);
+      if (blocked) {
+        report(blocked);
+        out.stoppedAt = blocked;
+        return out;
       }
-      if (!outcome.noop) written.push(row);
+      const written: WikiProposal[] = [];
+      try {
+        for (const row of rows) {
+          // `skipLog: true` — a group writes ONE log.md entry, not one per row. A
+          // twelve-member series otherwise files twelve entries whose only
+          // difference is which frontmatter line moved, burying the curated ones the
+          // log is for. The entry is written below, still inside this section.
+          let rowPaths: string[] = [];
+          const write = { failed: false, landed: false };
+          let outcome: ApplyOutcome;
+          try {
+            outcome = await applyInner(
+              row,
+              deps,
+              (_commit, paths) => {
+                rowPaths = paths;
+              },
+              {
+                skipLog: true,
+                onWriteFailed: () => (write.failed = true),
+                onWritten: () => (write.landed = true),
+              },
+            );
+          } catch (err) {
+            // The page landed before the throw: it is this group's write, so it
+            // is logged and committed with the others and reported as applied.
+            if (write.landed) {
+              tail.paths.push(...commitPaths(row, new Set()));
+              written.push(row);
+              report({ id: row.id, targetPath: row.targetPath, outcome: { outcome: "applied", writtenPath: row.targetPath } });
+            }
+            throw err;
+          }
+          // A NOOP row wrote nothing — `applyInner` short-circuited at step 2a
+          // because the page already WAS the draft — so staging its own path (and
+          // the wiki-global `log.md`, which only a row that WROTE causes an entry
+          // in) makes the one commit claim a page it never touched: the subject
+          // counts the staged paths, and a group of one written page plus one noop
+          // said "2 pages". Whatever the WIRE stage modified is a real change and
+          // stays staged. The exception is a page an earlier pass wrote and never
+          // committed (`recovered`): that write is this group's, and nothing else
+          // logs or commits it under the group's name.
+          const noopPath = outcome.outcome === "applied" && !!outcome.noop;
+          const recovered = noopPath && recoverable.has(row.targetPath);
+          tail.paths.push(
+            ...(noopPath && !recovered
+              ? rowPaths.filter((p) => p !== row.targetPath && p !== WIKI_LOG_FILE)
+              : rowPaths),
+          );
+          const entry: GroupRowOutcome = {
+            id: row.id,
+            targetPath: row.targetPath,
+            outcome,
+            ...(write.failed ? { writeFailed: true as const } : {}),
+            ...(recovered ? { recovered: true as const } : {}),
+          };
+          report(entry);
+          if (outcome.outcome !== "applied") {
+            out.stoppedAt = entry;
+            break;
+          }
+          if (!outcome.noop || recovered) written.push(row);
+        }
+      } finally {
+        if (written.length > 0) await writeGroupLogEntry(written, deps);
+      }
+      return out;
+    });
+  } finally {
+    if (deps.commit && tail.paths.length > 0) {
+      const paths = [...new Set(tail.paths)];
+      const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
+      try {
+        await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      } catch (err) {
+        log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
+          group: groupKey,
+          error: errMsg(err),
+        });
+      }
     }
-    if (written.length > 0) await writeGroupLogEntry(written, deps);
-    return out;
-  });
+  }
+}
 
-  if (deps.commit && tail.paths.length > 0) {
-    const paths = [...new Set(tail.paths)];
-    const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
+/** The rows whose page on disk already IS their draft and carries uncommitted
+ *  changes: what an earlier pass of the group leaves when it dies before its
+ *  commit. A status that cannot be read counts as uncommitted (the page is then
+ *  staged, harmless when it is clean). No `hasUncommittedChanges` seam ⇒ none. */
+async function uncommittedDraftPages(rows: readonly WikiProposal[], deps: ApplyDeps): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!deps.hasUncommittedChanges) return out;
+  for (const row of rows) {
     try {
-      await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      const current = await deps.readFile(path.join(deps.wikiDir, row.targetPath));
+      if (current === null || current !== row.draft) continue;
+      if ((await deps.hasUncommittedChanges(row.targetPath)) !== false) out.add(row.targetPath);
     } catch (err) {
-      log.warn("Wiki-gardener group apply: commit failed for {group}: {error}", {
-        group: groupKey,
+      log.warn("Wiki-gardener group apply: re-run check failed for {path}: {error}", {
+        path: row.targetPath,
         error: errMsg(err),
       });
     }
   }
-  return result;
+  return out;
 }
 
 /**
@@ -610,6 +686,8 @@ interface ApplyInnerOptions {
   skipLog?: boolean;
   /** Called when the pre-write checks passed and the page write threw. */
   onWriteFailed?: () => void;
+  /** Called the moment the page write has landed. */
+  onWritten?: () => void;
 }
 
 /** What the pre-write checks decided for one row (`checkBeforeWrite`). */
@@ -913,6 +991,7 @@ async function applyInner(
     opts.onWriteFailed?.();
     return { outcome: "error", reason: `write failed: ${errMsg(err)}` };
   }
+  opts.onWritten?.();
 
   // 4. log.md entry (reverse-chron). A log-write hiccup must not undo the page
   //    write — the page is the source of truth — so it degrades to a warning.

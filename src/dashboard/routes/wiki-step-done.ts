@@ -32,6 +32,10 @@ import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import { commitWikiChange, pageHasUncommittedChanges, type CommitWikiResult } from "../../wiki/commit.ts";
 import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
+import { dirtIsPendingBoardWrite, pendingBoardWriteMessage } from "../../plans/board-dirt.ts";
+import { PLANS_WIKI_NAME } from "../../plans/source.ts";
+import { getSyncRepos } from "../../sync/config.ts";
+import { syncLoopCommits } from "../../wiki/series-committer.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
 import { discoverAllBots } from "../../bots/config.ts";
@@ -260,10 +264,17 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
         if (has === false) return true;
         // Git cannot tell a session's edits from an earlier Done whose commit failed, so the text names both.
+        // A plans-board priority/status flip passes no committer, so dirt that is only that is named as the
+        // board's, with the committers this instance runs (F36, arch review 2026-11-16).
         dirty =
           has === null
             ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
-            : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
+            : entry.name.toLowerCase() === PLANS_WIKI_NAME && (await dirtIsPendingBoardWrite(entry.root, target.relPath))
+              ? pendingBoardWriteMessage(target.relPath, {
+                  syncLoop: syncLoopCommits(entry.root, getSyncRepos().repos),
+                  sweeper: entry.source === "bot",
+                })
+              : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
         return false;
       },
       transform: (raw) => {

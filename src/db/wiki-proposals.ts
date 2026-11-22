@@ -685,22 +685,44 @@ export async function approveWikiProposalGroup(
   return rows.map(mapRow);
 }
 
-/** CAS every `draft` row of a group to `rejected` (+ resolved_at). The rejected
- *  rows are what makes the group's key a SKIP LIST: `lint-proposals.ts` refuses
- *  to re-propose a group any row of which exists in any status, so a dismissal
- *  is remembered by leaving these rows in place. */
+/** CAS every live (`draft` or `approved`) row of a group to `rejected`
+ *  (+ resolved_at), except `exceptIds`. The rejected rows are what makes the
+ *  group's key a SKIP LIST: `lint-proposals.ts` refuses to re-propose a group
+ *  any row of which exists in any status, so a dismissal is remembered by
+ *  leaving these rows in place.
+ *
+ *  `approved` is taken too (F35, arch review 2026-11-16): the route calls this
+ *  only when no Accept of the group is in flight in its process, so an
+ *  `approved` row there is one a failed or restarted Accept stranded, and a
+ *  Dismiss that skipped it left the group wedged as `approved` + `rejected`. */
 export async function rejectWikiProposalGroup(
   wikiName: string,
   groupKey: string,
+  exceptIds: readonly string[] = [],
 ): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposals SET status = 'rejected', resolved_at = now()
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
+      AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+      AND NOT (id = ANY(${exceptIds as string[]}::uuid[]))
     RETURNING *
   `;
   return rows.map(mapRow);
+}
+
+/** CAS a live (`draft` or `approved`) row to `applied` (+ resolved_at): a group
+ *  row whose page already carries its draft when the reviewer dismisses the
+ *  group (an earlier Accept wrote it). Rejecting it would record a dismissal of
+ *  an edit that is on the page. */
+export async function settleWikiProposalApplied(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
+    WHERE id = ${id} AND status IN ('draft', 'approved')
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
 }
 
 /** One lint row, reduced to what the seeder decides with: which group it is in,

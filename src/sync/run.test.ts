@@ -530,6 +530,35 @@ describe("syncRepo", () => {
     }
   });
 
+  // F37 (arch review 2026-11-16): a revert (`--no-commit` included), a sequence
+  // paused after a resolved conflict and a bisect are operations in progress too.
+  test("REVERT_HEAD, a paused sequencer and BISECT_LOG block it too", async () => {
+    for (const marker of ["REVERT_HEAD", "sequencer", "BISECT_LOG"]) {
+      const f = await makeFixture(await testTempDir(path.join(base, "s-")));
+      if (marker === "sequencer") await mkdir(path.join(f.A, ".git", marker), { recursive: true });
+      else await writeFile(path.join(f.A, ".git", marker), "deadbeef\n");
+      const page = path.join(f.wikiA, "concepts", "Settled.md");
+      await writeFile(page, "# Settled\n");
+      await ageFile(page);
+      const r = await syncRepo(wikiRepo(f), deps());
+      expect([marker, r.state]).toEqual([marker, "blocked"]);
+      expect(r.reason).toContain(marker);
+      expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
+    }
+  });
+
+  test("a FUTURE-dated index.lock is blocked, not transient on every tick", async () => {
+    const f = await makeFixture(base);
+    const lock = path.join(f.A, ".git", "index.lock");
+    await writeFile(lock, "");
+    const future = new Date(Date.now() + INDEX_LOCK_STALE_MS + 60_000);
+    await utimes(lock, future, future);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.reason).toContain("in the future");
+    expect(await Bun.file(lock).exists()).toBe(true);
+  });
+
   test("a YOUNG index.lock is transient, a STALE one needs a human", async () => {
     const f = await makeFixture(base);
     const lock = path.join(f.A, ".git", "index.lock");
@@ -1126,10 +1155,9 @@ describe("syncRepo", () => {
   });
 
   test("a BLOCKED tick still subsumes — the sweeper would commit the half-finished merge", async () => {
-    // `blocked` is the unmerged-paths refusal, and the sweeper has no pre-flight
-    // of its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt),
-    // so routing a blocked tick to it would stage and commit a human's conflict
-    // markers. Only `error`-shaped ticks that never reached the local section
+    // `blocked` is the unmerged-paths refusal, and a sweep there would stage and
+    // commit a human's conflict markers (the sweeper's own `treeOperationBlock`
+    // check refuses the same tree when the ledger is cold, F37). Only `error`-shaped ticks that never reached the local section
     // may fall through.
     const f = await makeFixture(base);
     const repos = [wikiRepo(f)];
@@ -1169,9 +1197,8 @@ describe("syncRepo", () => {
   test("a PRE-FLIGHT blocked tick subsumes too — and still reports the loop idle", async () => {
     // The pre-flight stop happens BEFORE the fetch, so on a cold ledger it is the
     // only thing the ledger knows: no local section has ever run. It must still
-    // subsume (the sweeper has no unmerged-paths pre-flight of its own —
-    // `listWikiSubtreeDirty` treats `UU` as ordinary dirt — so it would stage a
-    // human's half-finished merge), and must still WARN, because "nobody is
+    // subsume (a sweep there would stage a human's half-finished merge), and
+    // must still WARN, because "nobody is
     // committing this wiki" is true regardless of whose fault it is.
     const f = await makeFixture(base);
     const repos = [wikiRepo(f)];

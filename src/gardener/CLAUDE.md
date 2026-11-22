@@ -214,7 +214,7 @@ and CASes each reached row through its own terminal verb.
 ⚠️ **Every row left in `approved` goes back to `draft`** — the ones the apply
 never reached, and a `forbidden` one, which it reached and refused. The first cut
 left them `approved` and called that "re-runnable by a second click", and nothing
-rendered the click: the gate draws Accept/Reject on `draft` and on nothing else,
+rendered the click: the gate drew Accept/Reject on `draft` and on nothing else,
 so after a stop the card showed one chip reading `applied`, three pages, and no
 buttons at all. The second cut reverted only the UNREACHED ones plus the stopped
 row, which strands the read-only refusal's other rows: that path hands back a
@@ -225,15 +225,14 @@ both read-only refusals the route makes fire before the apply is ever called.
 
 Four more rules on that route, each a measured defect:
 
-- **The gate refuses a decision in flight and SKIPS what is settled.** An
-  `approved` row (another apply mid-flight over these pages) or a `rejected` one
-  (a dismissal) refuses the request, 409
-  `{outcome: "mixed", error: "an approved or rejected row blocks the group",
-  statuses}` — the message names what blocks, since `applied` and `stale` rows
-  are not draft either and are skipped rather than refused;
-  `applied` and `stale` rows are skipped and reported as
-  `skipped: {applied: n, stale: n}`, and the `draft` rows are approved and
-  applied. A group with no `draft` row left answers 409
+- **The gate refuses a decision in flight and SKIPS what is settled.** Another
+  Accept or Dismiss of the group in flight in this process (`groupVerbsInFlight`,
+  checked and set with no `await` between) answers 409 `{outcome: "mixed",
+  error: "another Accept or Dismiss of this group is in flight"}`, and a
+  `rejected` row (a dismissal) 409 `{outcome: "mixed", error: "a rejected row
+  blocks the group", statuses}`; `applied` and `stale` rows are skipped and
+  reported as `skipped: {applied: n, stale: n}`, and the `draft` rows are
+  claimed and applied. A group with no `draft` or `approved` row left answers 409
   `{outcome: "nothing-to-apply", statuses}` — a different fact and a different
   remedy — and **that check runs FIRST**, so an all-`rejected` group is reported
   as settled rather than as blocked: with no draft to block there is no other
@@ -341,7 +340,43 @@ A finding every page of which REFUSES the edit is counted once per pass
 (`refused`), not once per page.
 
 Single-row Approve/Reject keep working unchanged for rows with `group_key IS
-NULL`, which is every other kind.
+NULL`, which is every other kind, and answer 409 `{group: true, groupKey}` for a
+grouped row (F35): a group is accepted or dismissed whole, and a single-row verb
+honoured neither the in-flight set nor the rest of the group.
+
+### No row stays `approved` without a verb (F35, arch review 2026-11-16)
+
+An Accept that threw after its claim, or a restart mid-apply, left rows
+`approved`: Accept and Dismiss both 409'd, the card showed no buttons, and the
+rows kept holding their pages against Done, Close and Stale Apply until someone
+ran SQL. Now:
+
+- **With no Accept or Dismiss of the group in flight in this process, an
+  `approved` row is stranded, and both verbs take it.** Accept claims `draft` and
+  stranded rows; Dismiss rejects both (`rejectWikiProposalGroup` takes
+  `approved`), so a half-stranded group settles whole, never as `approved` +
+  `rejected`. A live row whose page already IS its draft is settled `applied` by
+  Dismiss, not `rejected`, named in `alreadyWritten`, and logged and committed
+  by a re-run of the apply over just those rows. The card shows Accept
+  and Dismiss while any row is `draft` or `approved`, and "Accept all N" counts
+  both (`groupAcceptCount`).
+- **Every claimed row is protected from before the claim.** On any throw, the
+  Accept's `finally` marks a row the apply REPORTED written (`onRowOutcome`, so
+  a throw after the write still knows) `applied`, and puts every other claimed
+  row back to `draft`. A row is never reverted over a page it wrote. A Stale
+  check group writes its `fixed` verdicts before the status marks, and for the
+  landed rows on a throw.
+- **The apply is safe to re-run.** A row that throws still gets the group's log
+  entry and commit for every page written before it (and its own, when its
+  write landed). A re-run's no-op row whose page carries uncommitted changes is
+  an earlier pass's write: it is staged and named in the log entry
+  (`recovered`). Residuals: a crash between the log append and the commit logs
+  that page twice; a dead pass's page the sync loop or the sweeper committed
+  first gets no group log entry; a wiki outside git recovers nothing.
+- **Single writer.** The in-flight set is per process. `bun run dev:chat`
+  registers the same routes on the same DB and wikis with its own set, so an
+  Accept there while one runs here reads this one's rows as stranded and
+  applies them a second time (each page a no-op, but two passes).
 
 ## Stale check fixes (`kind: "stale-check"`, `src/gardener/stale-proposals.ts`)
 

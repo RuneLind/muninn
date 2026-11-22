@@ -31,6 +31,8 @@ import {
   listWikiProposalsByGroup,
   approveWikiProposalGroup,
   rejectWikiProposalGroup,
+  revertWikiProposalToDraft,
+  settleWikiProposalApplied,
   listLintGroupRowsByWiki,
   markLintGroupStale,
   listLivePageHolders,
@@ -466,6 +468,25 @@ describe("lint groups", () => {
     const rejected = await rejectWikiProposalGroup("lintwiki", GROUP);
     expect(rejected).toHaveLength(2);
     expect(rejected.every((r) => r.status === "rejected" && r.resolvedAt !== null)).toBe(true);
+    expect(await rejectWikiProposalGroup("lintwiki", GROUP)).toEqual([]);
+  });
+
+  // F35 (arch review 2026-11-16): a Dismiss that skipped a stranded `approved`
+  // row wedged the group as `approved` + `rejected`.
+  test("reject takes stranded `approved` rows too, except the ids it is told to leave", async () => {
+    await insertWikiProposal(lintRow("plans/a.mdx"));
+    await insertWikiProposal(lintRow("plans/b.mdx"));
+    await insertWikiProposal(lintRow("plans/c.mdx"));
+    await approveWikiProposalGroup("lintwiki", GROUP);
+    const [a, b, c] = await listWikiProposalsByGroup("lintwiki", GROUP);
+    await revertWikiProposalToDraft(c!.id);
+
+    expect(await settleWikiProposalApplied(a!.id)).toMatchObject({ status: "applied" });
+    const rejected = await rejectWikiProposalGroup("lintwiki", GROUP, [a!.id]);
+    expect(rejected.map((r) => r.targetPath).sort()).toEqual(["plans/b.mdx", "plans/c.mdx"]);
+    expect((await listWikiProposalsByGroup("lintwiki", GROUP)).map((r) => r.status)).toEqual(["applied", "rejected", "rejected"]);
+    // Settled rows are not live: neither verb moves them again.
+    expect(await settleWikiProposalApplied(b!.id)).toBeNull();
     expect(await rejectWikiProposalGroup("lintwiki", GROUP)).toEqual([]);
   });
 

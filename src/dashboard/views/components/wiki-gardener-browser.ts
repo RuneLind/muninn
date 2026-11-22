@@ -35,7 +35,7 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
-import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
+import { groupAcceptCount, isLiveGroupStatus, groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
 import {
   BATCH_SECTIONS,
@@ -268,7 +268,7 @@ function groupCardHtml(rows: ProposalView[]): string {
   const findingPath = rows.find((r) => r.findingPath)?.findingPath;
   const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
   const key = head.groupKey!;
-  const reviewable = rows.some((r) => r.status === "draft");
+  const reviewable = rows.some((r) => isLiveGroupStatus(r.status));
   let html = `<div class="gard-card" data-group="${esc(key)}">`;
 
   html += '<div class="gard-card-head"><div class="gard-title-row">';
@@ -298,13 +298,13 @@ function groupCardHtml(rows: ProposalView[]): string {
   }
   html += "</div>";
 
-  // Buttons render while ANY row is a draft — which, after a stop, is every row
-  // the apply did not reach. A group that renders no verb is a card a reviewer
-  // can only reload past.
+  // Buttons render while ANY row is live — `draft` (after a stop, every row the
+  // apply did not reach) or `approved` (an Accept a throw or a restart
+  // stranded, which both verbs take; F35). A group that renders no verb is a
+  // card a reviewer can only reload past.
   html += '<div class="gard-actions">';
   if (reviewable) {
-    const drafts = rows.filter((r) => r.status === "draft").length;
-    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${drafts}</button>`;
+    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${groupAcceptCount(rows.map((r) => r.status))}</button>`;
     html += `<button class="gard-btn gard-reject" data-group-action="reject">Dismiss</button>`;
   }
   html += '<span class="gard-outcome"></span>';
@@ -743,10 +743,12 @@ async function actOnGroup(
       }
       return;
     }
-    const next = action === "approve" ? "applied" : "rejected";
+    // Dismiss settles a row whose page already carries its draft as `applied`
+    // (`alreadyWritten`), every other live row as `rejected`.
+    const written = new Set<string>(action === "reject" ? data.alreadyWritten || [] : []);
     allProposals.forEach((p) => {
-      if (p.groupKey === groupKey && p.status === "draft") {
-        p.status = next;
+      if (p.groupKey === groupKey && isLiveGroupStatus(p.status)) {
+        p.status = action === "approve" || written.has(p.targetPath) ? "applied" : "rejected";
         p.resolvedAt = null; // server time unknown; see postAction
       }
     });

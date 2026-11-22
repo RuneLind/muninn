@@ -257,20 +257,48 @@ async function lastFetchMs(top: string): Promise<number | null> {
   }
 }
 
-type Preflight =
+export type Preflight =
   | { kind: "clear" }
-  | { kind: "blocked"; reason: string }
+  | { kind: "blocked"; reason: string; staleLock?: true; conflicts?: string[] }
   | { kind: "transient"; reason: string };
 
 /**
+ * The `.git` entries that say an operation is paused mid-way, each a reason to
+ * leave the tree alone: a rebase (`rebase-merge`; `rebase-apply` is also
+ * `git am`), a merge, a cherry-pick or a revert (`CHERRY_PICK_HEAD`,
+ * `REVERT_HEAD`, `git revert --no-commit` included), a multi-commit cherry-pick
+ * or revert paused after a conflict was resolved and committed (`sequencer`),
+ * and a bisect (`BISECT_LOG`: the work tree is a commit bisect checked out, not
+ * the branch). A commit in any of these concludes or corrupts the operation.
+ * The last three were added for F37 (arch review 2026-11-16); before that a
+ * tick in those states went on to commit, or to `paused` on bisect's detached
+ * HEAD.
+ */
+const IN_PROGRESS_GIT_ENTRIES = [
+  "rebase-merge",
+  "rebase-apply",
+  "MERGE_HEAD",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "sequencer",
+  "BISECT_LOG",
+] as const;
+
+/**
  * Is a git operation already in progress? An in-progress rebase / merge /
- * cherry-pick means a human is mid-something and the tree must not be touched.
- * An `index.lock` is judged by AGE: a young one is a live concurrent git op
- * (transient, retry next tick), an old one is a crash leftover a human must
- * clear — auto-removing it is exactly how two git processes corrupt an index.
+ * cherry-pick / revert / bisect means a human is mid-something and the tree
+ * must not be touched. An `index.lock` is judged by AGE: a young one is a live
+ * concurrent git op (transient, retry next tick), an old one is a crash
+ * leftover a human must clear — auto-removing it is exactly how two git
+ * processes corrupt an index. A lock dated more than `INDEX_LOCK_STALE_MS` in
+ * the FUTURE is blocked too: its age stays negative, so it read as `transient`
+ * on every tick for as long as the clock stayed behind it.
+ *
+ * Repo-wide, never scoped to a nested wiki's subtree: a commit during any of
+ * these states acts on the whole repo, whatever paths it stages.
  */
 async function preflight(top: string, now: number): Promise<Preflight> {
-  for (const name of ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"]) {
+  for (const name of IN_PROGRESS_GIT_ENTRIES) {
     const p = await gitPath(top, name);
     if (p && (await pathExists(p))) {
       return { kind: "blocked", reason: `a git operation is in progress (${name})` };
@@ -287,12 +315,41 @@ async function preflight(top: string, now: number): Promise<Preflight> {
     if (ageMs > INDEX_LOCK_STALE_MS) {
       return {
         kind: "blocked",
+        staleLock: true,
         reason: `a stale .git/index.lock (${Math.round(ageMs / 60000)} min old) — remove it by hand`,
+      };
+    }
+    if (ageMs < -INDEX_LOCK_STALE_MS) {
+      return {
+        kind: "blocked",
+        staleLock: true,
+        reason: `a .git/index.lock dated ${Math.round(-ageMs / 60000)} min in the future — remove it by hand`,
       };
     }
     return { kind: "transient", reason: "another git process holds .git/index.lock" };
   }
   return { kind: "clear" };
+}
+
+/**
+ * The loop's whole "never touch this tree" check, shared with a committer that
+ * runs outside the loop: {@link preflight}, then unmerged paths anywhere in the
+ * repo (a stash-pop conflict leaves those and no `.git` marker). The daily
+ * `wiki-committer` sweeper runs it on every tick, because its only other guard
+ * is the in-memory ledger's `blocked` state, which a restart empties (F37, arch
+ * review 2026-11-16). Takes no lock: it runs before any section, as the loop's
+ * own pre-flight does.
+ */
+export async function treeOperationBlock(top: string, now: number = Date.now()): Promise<Preflight> {
+  const pre = await preflight(top, now);
+  if (pre.kind !== "clear") return pre;
+  const conflicts = await conflictPaths(top);
+  if (conflicts.length > 0) return { kind: "blocked", reason: unmergedReason(conflicts), conflicts };
+  return pre;
+}
+
+function unmergedReason(paths: readonly string[]): string {
+  return `unmerged paths (${paths.slice(0, 5).join(", ")})`;
 }
 
 /** True when a rebase is actually in progress — the ONLY condition under which
@@ -533,8 +590,8 @@ interface LocalSectionOutcome {
   actions: string[];
 }
 
-/** Parse the conflicting paths out of a failed rebase (best-effort — the list is
- *  for the card, the blocked state does not depend on it). */
+/** The unmerged paths anywhere in the repo: after a failed rebase (for the
+ *  card), before the local section, and in {@link treeOperationBlock}. */
 async function conflictPaths(top: string): Promise<string[]> {
   const entries = await listDirtyEntries(top);
   return entries.filter((e) => isUnmergedStatus(e.xy)).map((e) => e.path);
@@ -1122,12 +1179,9 @@ export async function syncRepo(
 
     // Unmerged paths anywhere ⇒ a human's half-finished merge. Never auto-commit
     // over one.
-    const unmerged = (await listDirtyEntries(top)).filter((e) => isUnmergedStatus(e.xy));
+    const unmerged = await conflictPaths(top);
     if (unmerged.length > 0) {
-      return finish(card, "blocked", {
-        reason: `unmerged paths (${unmerged.map((e) => e.path).slice(0, 5).join(", ")})`,
-        conflicts: unmerged.map((e) => e.path),
-      });
+      return finish(card, "blocked", { reason: unmergedReason(unmerged), conflicts: unmerged });
     }
 
     // 3. status-only: fetch + report, nothing else. Ever.
@@ -1455,12 +1509,13 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  *    path inside the window; sweeping on top of it would fight it.
  *  - `state === "blocked"` — subsumes REGARDLESS of freshness, because the
  *    sweeper is not a safe substitute there at all: `blocked` is the
- *    unmerged-paths / interrupted-operation refusal and the sweeper has no
- *    pre-flight of its own (`listWikiSubtreeDirty` treats a `UU` entry as
- *    ordinary dirt), so it would stage and commit a human's half-finished merge.
- *    A one-tick sample is sound here only because the conditions that produce
- *    `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict markers)
- *    persist across ticks until a human clears them.
+ *    unmerged-paths / interrupted-operation refusal, and a sweep would stage and
+ *    commit a human's half-finished merge. The sweeper also runs this loop's own
+ *    check itself on every tick (`treeOperationBlock`), because this ledger is
+ *    in memory and a restart empties that `blocked` (F37, arch review
+ *    2026-11-16). A one-tick sample is sound here only because the conditions
+ *    that produce `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict
+ *    markers) persist across ticks until a human clears them.
  *
  * Everything else — `error`, `transient`, `paused`, no-upstream, not-a-repo, a
  * cold ledger, and a rebase conflict that never converges — falls through to the

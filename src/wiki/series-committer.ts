@@ -52,6 +52,16 @@ function contains(dir: string, root: string): boolean {
   return d === "/" || r === d || r.startsWith(`${d}/`);
 }
 
+/** Does a `wiki`-mode `SYNC_REPOS` entry cover this wiki root, i.e. does the
+ *  repo-sync loop commit it? Only `wiki` mode commits: `plain` and `status-only`
+ *  never do (`src/sync/config.ts`). Also read by Done's refusal of a pending
+ *  plans-board write (`src/plans/board-dirt.ts`). */
+export function syncLoopCommits(root: string, repos: readonly SyncRepo[]): boolean {
+  return repos.some(
+    (r) => r.mode === "wiki" && ((r.wikiRoot && contains(r.wikiRoot, root)) || contains(r.path, root)),
+  );
+}
+
 /**
  * The line to log when this write stays uncommitted, or `null` when the wiki
  * has a committer of its own. Only a `wiki`-mode entry is one: `plain` and
@@ -65,12 +75,7 @@ export function seriesCommitterWarning(
   repos: readonly SyncRepo[],
 ): string | null {
   if (!entry || entry.source !== "extra") return null;
-  const covered = repos.some(
-    (r) =>
-      r.mode === "wiki" &&
-      ((r.wikiRoot && contains(r.wikiRoot, entry.root)) || contains(r.path, entry.root)),
-  );
-  if (covered) return null;
+  if (syncLoopCommits(entry.root, repos)) return null;
   return (
     `wiki "${entry.name}" has NO committer: no wiki-mode SYNC_REPOS entry covers it and the ` +
     `daily wiki-committer sweeper covers bot wikis only, so this series edit stays uncommitted ` +
