@@ -771,16 +771,19 @@ short summary's neighbours are ranked partly on image markdown and captions.
 ## The options endpoint, and the picker
 
 **The connector pick.** The options answer also carries `connectors:
-{default_label, options: [{id, label, kinds, frames: {supported}}…]}` — every
-`connectors` row with the kinds and Slides it would get, so the popup switches
-connector without a second request; absent when there are none or the listing
-fails. The POST's `connector_id` is applied over the summarizer bot by
-`src/dashboard/routes/capture-connector.ts` (the chat thread merge,
-`applyThreadConnector`) BEFORE the kind and Slides checks, which therefore run
-against the picked connector; `kindsForPick` makes `deep` keep a picked row's
-own model (`presetsForPickedModel` in `src/summaries/presets.ts`). Only YouTube
-takes the field today; the helper lives with the routes so another capture
-route can. A re-run from `/summaries` still runs on the default bot.
+{default_label, options: [{id, label, kinds, frames: {supported}}…]}` — each
+`connectors` row that can run over the summarizer bot, with the kinds and Slides
+it would get, so the popup switches connector without a second request; absent
+when none can or the listing fails. The POST's `connector_id` is applied by
+`src/dashboard/routes/capture-connector.ts` BEFORE the kind and Slides checks,
+which therefore run against the pick. Within a model family (claude-cli +
+claude-sdk; copilot-sdk; openai-compat) that is the chat thread merge; a row of
+another family takes only its own model fields and must name a model (an
+openai-compat one also a base URL), else it is unlisted and the POST answers 400
+`connector_incomplete` (`captureConnectorGap`): an unset model falls back to
+`CLAUDE_MODEL` on every connector. `kindsForPick` makes `deep` keep a picked
+row's own model. Only YouTube takes the field; a re-run from `/summaries` still
+runs on the default bot.
 
 **`GET /api/youtube/options`** answers `{kinds: [{id, label}…], default_kind,
 frames: {supported}, visual_detail: {supported, default, options: [{id,
