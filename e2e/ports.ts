@@ -429,6 +429,8 @@ export const E2E_PORTS = {
   "wiki-discuss-apply": 3254,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
+  // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.
+  "wiki-ask-pane-view": 3277,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
