@@ -46,7 +46,7 @@ import {
   listWikiSubtreeDirty,
   commitWikiChange,
 } from "../wiki/commit.ts";
-import { syncSubsumesSweeper } from "../sync/run.ts";
+import { syncSubsumesSweeper, treeOperationBlock } from "../sync/run.ts";
 import { todayOslo } from "../utils/date-hash.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
@@ -128,8 +128,8 @@ export async function checkWikiCommitter(
   //
   // The WARN is deliberately decoupled from the stand-down and emitted FIRST.
   // `blocked` subsumes regardless of freshness (the loop refused an unmerged
-  // tree and this sweeper, having no pre-flight of its own, would commit the
-  // half-finished merge) — but "nobody has committed this wiki in ~26h" is still
+  // tree; this sweeper's own `treeOperationBlock` check below refuses the same
+  // tree) — but "nobody has committed this wiki in ~26h" is still
   // true, and the one thing that must never happen is a silent stand-down over a
   // wiki nothing is committing.
   const subsumption = await syncSubsumesSweeper(top);
@@ -152,6 +152,19 @@ export async function checkWikiCommitter(
       { botName: name, top },
     );
     health.mark(SRC, "ok");
+    return health.finish();
+  }
+
+  // The sync loop's own "never touch this tree" check (F37, arch review
+  // 2026-11-16). The `blocked` subsumption above reads the in-memory ledger,
+  // which a restart empties, so after one this sweeper used to stage a human's
+  // half-finished merge, conflict markers and all. Read from the tree itself,
+  // so a cold ledger neither stands the sweep down on a clean tree nor lets it
+  // through a dirty one.
+  const block = await treeOperationBlock(top);
+  if (block.kind !== "clear") {
+    log.warn("Wiki-committer: {top} — not sweeping: {reason}", { botName: name, top, reason: block.reason });
+    health.mark(SRC, "skipped", `not sweeping: ${block.reason}`);
     return health.finish();
   }
 

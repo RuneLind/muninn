@@ -30,7 +30,9 @@
  *     confinement admits `.md`/`.mdx` only.
  *
  * **Neither passes a `commit`.** mimir is in the repo-sync loop in `wiki` mode;
- * the sync loop is the committer, behind its 5-minute quiet period.
+ * the sync loop is the committer, behind its 5-minute quiet period. Until it
+ * commits, the page is dirty and Done refuses it; Done's refusal names the
+ * board's pending write (`src/plans/board-dirt.ts`) rather than a session.
  *
  * ── The wire contract the board's client is written against ─────────────────
  *

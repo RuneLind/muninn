@@ -119,6 +119,46 @@ describe("checkWikiCommitter (sweep core)", () => {
     expect(status.out).toContain("data/wiki/concepts/New.md");
   });
 
+  // F37 (arch review 2026-11-16): the only guard against this was the sync
+  // ledger's `blocked` state, which lives in memory — a fresh process has none.
+  test("a half-finished merge (MERGE_HEAD + unmerged wiki page) → stands down, markers never staged", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    const page = path.join(wikiDir, "concepts", "Old.md");
+    await git(repo, ["checkout", "-q", "-b", "other"]);
+    await writeFile(page, "# Old\nfrom other\n");
+    await git(repo, ["commit", "-q", "-am", "other"]);
+    await git(repo, ["checkout", "-q", "main"]);
+    await writeFile(page, "# Old\nfrom main\n");
+    await git(repo, ["commit", "-q", "-am", "main"]);
+    expect((await git(repo, ["merge", "other"])).code).not.toBe(0);
+    expect(await Bun.file(page).text()).toContain("<<<<<<<");
+    const head = (await git(repo, ["rev-parse", "HEAD"])).out;
+
+    const alerts = await checkWikiCommitter(watcher, botConfig(wikiDir));
+
+    expect(alerts.filter((a) => a.source === "wiki-committer")).toEqual([]);
+    expect((await git(repo, ["rev-parse", "HEAD"])).out).toBe(head);
+    // Still the human's merge: unmerged, MERGE_HEAD in place.
+    expect((await git(repo, ["status", "--porcelain"])).out).toContain("UU data/wiki/concepts/Old.md");
+    expect((await git(repo, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])).code).toBe(0);
+  });
+
+  test("unmerged paths with no MERGE_HEAD (a stash-pop conflict) → stands down", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    const page = path.join(wikiDir, "concepts", "Old.md");
+    await writeFile(page, "# Old\nstashed\n");
+    await git(repo, ["stash", "push", "-q"]);
+    await writeFile(page, "# Old\ncommitted\n");
+    await git(repo, ["commit", "-q", "-am", "c"]);
+    expect((await git(repo, ["stash", "pop", "-q"])).code).not.toBe(0);
+    const head = (await git(repo, ["rev-parse", "HEAD"])).out;
+
+    await checkWikiCommitter(watcher, botConfig(wikiDir));
+
+    expect((await git(repo, ["rev-parse", "HEAD"])).out).toBe(head);
+    expect((await git(repo, ["status", "--porcelain"])).out).toContain("UU data/wiki/concepts/Old.md");
+  });
+
   test("clean wiki subtree → no-op, no alert", async () => {
     const { wikiDir } = await makeRepo(base);
     const alerts = await checkWikiCommitter(watcher, botConfig(wikiDir));

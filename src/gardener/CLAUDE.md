@@ -225,15 +225,27 @@ both read-only refusals the route makes fire before the apply is ever called.
 
 Four more rules on that route, each a measured defect:
 
-- **The gate refuses a decision in flight and SKIPS what is settled.** An
-  `approved` row (another apply mid-flight over these pages) or a `rejected` one
-  (a dismissal) refuses the request, 409
-  `{outcome: "mixed", error: "an approved or rejected row blocks the group",
-  statuses}` — the message names what blocks, since `applied` and `stale` rows
-  are not draft either and are skipped rather than refused;
+- **The gate refuses a decision in flight and SKIPS what is settled.** Another
+  Accept of the group in flight in this process (`groupApplyInFlight`, checked
+  and set with no `await` between) answers 409 `{outcome: "mixed", error:
+  "another Accept of this group is in flight"}`, and a `rejected` row (a
+  dismissal) answers 409 `{outcome: "mixed", error: "a rejected row blocks the
+  group", statuses}`;
   `applied` and `stale` rows are skipped and reported as
   `skipped: {applied: n, stale: n}`, and the `draft` rows are approved and
-  applied. A group with no `draft` row left answers 409
+  applied. **An `approved` row with no Accept in flight is STRANDED and claimed
+  again** (F35, arch review 2026-11-16): a throw after the claim or a restart
+  after the page writes left rows there, Accept and Dismiss both 409'd, and the
+  rows held their pages against Done, Close and Stale Apply until someone ran
+  SQL. Re-running is safe because a page that already IS its draft is a no-op
+  (`judgeAgainstDisk` 2a): no second write and no second `log.md` entry. Its
+  residuals: a re-run's no-op rows stage nothing, so pages written by a pass that
+  died before its commit tail are left to the sync loop or the sweeper, and a
+  Stale check row settled as a no-op gets no `fixed` verdict. The route also
+  reverts, in a `finally`, every claimed row still `approved` when the request
+  ends, a throw included, so the stranded state now needs a crash. The flight
+  set is per process: two muninn processes writing one DB could both re-claim.
+  A group with no `draft` or `approved` row left answers 409
   `{outcome: "nothing-to-apply", statuses}` — a different fact and a different
   remedy — and **that check runs FIRST**, so an all-`rejected` group is reported
   as settled rather than as blocked: with no draft to block there is no other

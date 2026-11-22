@@ -32,6 +32,7 @@ import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import { commitWikiChange, pageHasUncommittedChanges, type CommitWikiResult } from "../../wiki/commit.ts";
 import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
+import { dirtIsPendingBoardWrite } from "../../plans/board-dirt.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
 import { discoverAllBots } from "../../bots/config.ts";
@@ -260,10 +261,13 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
         if (has === false) return true;
         // Git cannot tell a session's edits from an earlier Done whose commit failed, so the text names both.
+        // The /plans board's priority or status flip passes no committer, so its dirt is named as that (F36).
         dirty =
           has === null
             ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
-            : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
+            : (await dirtIsPendingBoardWrite(entry.root, target.relPath))
+              ? `${target.relPath} carries a priority or status change from the plans board that is not committed yet. The repo-sync loop (after its quiet period) or the daily wiki sweep commits it; or commit it by hand. Then try again.`
+              : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
         return false;
       },
       transform: (raw) => {

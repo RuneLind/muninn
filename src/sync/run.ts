@@ -257,7 +257,7 @@ async function lastFetchMs(top: string): Promise<number | null> {
   }
 }
 
-type Preflight =
+export type Preflight =
   | { kind: "clear" }
   | { kind: "blocked"; reason: string }
   | { kind: "transient"; reason: string };
@@ -293,6 +293,29 @@ async function preflight(top: string, now: number): Promise<Preflight> {
     return { kind: "transient", reason: "another git process holds .git/index.lock" };
   }
   return { kind: "clear" };
+}
+
+/**
+ * The loop's whole "never touch this tree" check, for a committer that runs
+ * outside the loop: {@link preflight} (an operation in progress, an
+ * `index.lock`), then unmerged paths. The daily `wiki-committer` sweeper calls
+ * it on every tick, because its only other pre-flight is the in-memory ledger's
+ * `blocked` state, which a restart empties (F37, arch review 2026-11-16). Takes
+ * no lock: like the loop's own pre-flight, it runs before any section.
+ */
+export async function treeOperationBlock(
+  top: string,
+  now: number = Date.now(),
+): Promise<Preflight & { conflicts?: string[] }> {
+  const pre = await preflight(top, now);
+  if (pre.kind !== "clear") return pre;
+  const conflicts = await conflictPaths(top);
+  if (conflicts.length > 0) return { kind: "blocked", reason: unmergedReason(conflicts), conflicts };
+  return pre;
+}
+
+function unmergedReason(paths: string[]): string {
+  return `unmerged paths (${paths.slice(0, 5).join(", ")})`;
 }
 
 /** True when a rebase is actually in progress — the ONLY condition under which
@@ -1122,12 +1145,9 @@ export async function syncRepo(
 
     // Unmerged paths anywhere ⇒ a human's half-finished merge. Never auto-commit
     // over one.
-    const unmerged = (await listDirtyEntries(top)).filter((e) => isUnmergedStatus(e.xy));
+    const unmerged = await conflictPaths(top);
     if (unmerged.length > 0) {
-      return finish(card, "blocked", {
-        reason: `unmerged paths (${unmerged.map((e) => e.path).slice(0, 5).join(", ")})`,
-        conflicts: unmerged.map((e) => e.path),
-      });
+      return finish(card, "blocked", { reason: unmergedReason(unmerged), conflicts: unmerged });
     }
 
     // 3. status-only: fetch + report, nothing else. Ever.

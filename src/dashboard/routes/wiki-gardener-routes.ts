@@ -576,6 +576,11 @@ async function readRunJournal(deps: BacklogRouteDeps, watcherId: string): Promis
  * can render the "run finished — nothing clustered" / "drafted N" line.
  */
 const lastBacklogRuns = new Map<string, LastBacklogRun>();
+
+/** Group Accepts in flight in this process, keyed `<wiki lowercased>\0<group key>`:
+ *  what tells a concurrent Accept (409 `mixed`) from a stranded `approved` row,
+ *  which the group approve route claims again. */
+const groupApplyInFlight = new Set<string>();
 function setLastBacklogRun(botName: string, r: LastBacklogRun): void {
   lastBacklogRuns.set(botName, r);
 }
@@ -3028,14 +3033,17 @@ export function registerWikiGardenerRoutes(
    * them in ONE write section (`applyWikiProposalGroup`).
    *
    * **The gate refuses a group somebody else is mid-decision on, and SKIPS the
-   * rows that are already settled.** A row in `approved` means another apply is
-   * in flight over these same pages, and a `rejected` one is a dismissal the
-   * reviewer made — either refuses the whole request, 409
-   * `{outcome: "mixed", statuses}`. `applied` and `stale` rows are skipped and
-   * reported (`skipped`), and the `draft` rows are approved and applied. A group
-   * with no `draft` row left answers 409 `{outcome: "nothing-to-apply"}`, which
-   * is a different fact and a different remedy — and that check runs FIRST, so a
-   * fully-dismissed group is reported as settled rather than as blocked.
+   * rows that are already settled.** Another Accept of the group in flight in
+   * this process, or a `rejected` row (a dismissal the reviewer made), refuses
+   * the whole request, 409 `{outcome: "mixed", statuses}`. `applied` and `stale`
+   * rows are skipped and reported (`skipped`), and the `draft` rows are approved
+   * and applied, together with any `approved` row no Accept is running: a throw
+   * after the claim or a restart strands rows there, and this claims them again
+   * (F35). A group with no `draft` or `approved` row left answers 409
+   * `{outcome: "nothing-to-apply"}`, which is a different fact and a different
+   * remedy — and that check runs FIRST, so a fully-dismissed group is reported
+   * as settled rather than as blocked. Any row still `approved` when the request
+   * ends, on a throw too, goes back to `draft`.
    *
    * It used to refuse on ANY non-draft row, which made the stop path below a
    * dead end: after a stop the group is `applied` + `stale` + `draft`, so the
@@ -3067,13 +3075,17 @@ export function registerWikiGardenerRoutes(
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
 
     // NOTHING TO APPLY outranks MIXED, and the order is the whole difference for
-    // an all-`rejected` group: there is no draft for an `approved`/`rejected` row
-    // to block, so "somebody else is mid-decision, try again" is false — the
-    // dismissal IS the decision, and the honest answer is that this click has
-    // nothing to do. Judged the other way round, a dismissed group answered
-    // `mixed`, whose remedy ("wait for the other apply") never arrives.
-    const skipped = statusCounts(existing.filter((r) => r.status !== "draft"));
-    if (existing.every((r) => r.status !== "draft")) {
+    // an all-`rejected` group: there is no draft for a `rejected` row to block,
+    // so "somebody else is mid-decision, try again" is false — the dismissal IS
+    // the decision, and the honest answer is that this click has nothing to do.
+    // Judged the other way round, a dismissed group answered `mixed`, whose
+    // remedy ("wait for the other apply") never arrives. An `approved` row is
+    // not settled: it is another Accept in flight (MIXED below) or one a failed
+    // or restarted Accept stranded, which this click re-claims (F35, arch
+    // review 2026-11-16).
+    const reclaimable = (r: WikiProposal) => r.status === "draft" || r.status === "approved";
+    const skipped = statusCounts(existing.filter((r) => !reclaimable(r)));
+    if (!existing.some(reclaimable)) {
       return c.json(
         {
           outcome: "nothing-to-apply",
@@ -3083,82 +3095,116 @@ export function registerWikiGardenerRoutes(
         409,
       );
     }
-    // MIXED: with a draft still live, only a row somebody else is deciding on
-    // blocks the request — an `approved` one (another apply is mid-flight over
-    // these pages) or a `rejected` one (a dismissal this click must not
-    // overrule). The message names what blocks: `applied` and `stale` rows are
-    // not draft either and are skipped rather than refused, so "the group is not
-    // all draft" described a condition this branch does not test.
-    const blocking = existing.filter((r) => r.status === "approved" || r.status === "rejected");
-    if (blocking.length > 0) {
+    // MIXED: only a decision somebody else is making blocks the request — an
+    // Accept of this group still in flight in this process, or a `rejected` row
+    // (a dismissal this click must not overrule). `applied` and `stale` rows are
+    // skipped rather than refused. An `approved` row with no Accept in flight is
+    // stranded (a throw after the claim, a restart after the page writes) and is
+    // claimed again: re-running the apply is safe, because a page that already
+    // IS its draft is a no-op (`judgeAgainstDisk` step 2a). No `await` sits
+    // between the flight check and the `add`, so two clicks cannot both pass.
+    const flightKey = `${wikiName.toLowerCase()}\0${groupKey}`;
+    const inFlight = groupApplyInFlight.has(flightKey);
+    if (inFlight || existing.some((r) => r.status === "rejected")) {
       return c.json(
         {
           outcome: "mixed",
-          error: "an approved or rejected row blocks the group",
+          error: inFlight
+            ? "another Accept of this group is in flight"
+            : "a rejected row blocks the group",
           statuses: statusCounts(existing),
         },
         409,
       );
     }
+    groupApplyInFlight.add(flightKey);
 
-    await backlogDeps.approveProposalGroup(wikiName, groupKey);
-    // Re-read rather than trusting the CAS's own RETURNING set: a concurrent
-    // click may have taken half of them.
-    const rows = (await backlogDeps.listProposalsByGroup(wikiName, groupKey)).filter(
-      (r) => r.status === "approved",
-    );
-    if (rows.length === 0) {
-      return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
-    }
-
-    const deps = applyDepsForWiki(wikiEntry, bot);
-    // A Stale check group: the written pages' linking passage keys before the
-    // write, so their verdicts follow the new content hashes after it.
-    const snapshots = await staleCheckSnapshots(wikiEntry, rows);
-    const result = await applyWikiProposalGroup(rows, deps);
-
-    const { actions, applied, noop } = groupApplyActions(rows, result);
-    for (const action of actions) {
-      if (action.status === "draft") await backlogDeps.revertProposal(action.id);
-      else await backlogDeps.markProposal(action.id, action.status);
-    }
-
-    const stopped = result.stoppedAt;
-    if (stopped) {
-      const outcome = stopped.outcome;
-      const reason = "reason" in outcome ? outcome.reason : "";
-      log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
-        group: groupKey,
-        path: stopped.targetPath,
-        outcome: outcome.outcome,
-        reason,
-      });
-      // A Stale check card: `fixed` for the rows written before the stop, and
-      // the edits that did not land, each with the status its row now has.
-      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
-      const notLanded = staleCheckNotLanded(rows, actions);
-      return c.json(
-        {
-          outcome: "stopped",
-          // The preflight refuses a stale member before any write; a later
-          // failure leaves earlier pages written, so the answer names both.
-          applied,
-          noop,
-          skipped,
-          stoppedAt: stopped.targetPath,
-          stoppedOutcome: outcome.outcome,
-          error: reason,
-          ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
-          ...(fixed !== null ? { fixed, notLanded } : {}),
-        },
-        outcome.outcome === "forbidden" ? 403 : 409,
+    // Every row this request claimed and has not yet moved to a status of its
+    // own. The `finally` puts what is left back to `draft`: a throw from the
+    // apply or a terminal mark must not strand rows in `approved`, where the
+    // gate offers no verb and the rows keep holding their pages.
+    const unsettled = new Set<string>();
+    try {
+      await backlogDeps.approveProposalGroup(wikiName, groupKey);
+      // Re-read rather than trusting the CAS's own RETURNING set: it does not
+      // carry the stranded `approved` rows this click claims again.
+      const rows = (await backlogDeps.listProposalsByGroup(wikiName, groupKey)).filter(
+        (r) => r.status === "approved",
       );
+      for (const r of rows) unsettled.add(r.id);
+      if (rows.length === 0) {
+        return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
+      }
+
+      const deps = applyDepsForWiki(wikiEntry, bot);
+      // A Stale check group: the written pages' linking passage keys before the
+      // write, so their verdicts follow the new content hashes after it.
+      const snapshots = await staleCheckSnapshots(wikiEntry, rows);
+      const result = await applyWikiProposalGroup(rows, deps);
+
+      const { actions, applied, noop } = groupApplyActions(rows, result);
+      for (const action of actions) {
+        if (action.status === "draft") await backlogDeps.revertProposal(action.id);
+        else await backlogDeps.markProposal(action.id, action.status);
+        unsettled.delete(action.id);
+      }
+
+      const stopped = result.stoppedAt;
+      if (stopped) {
+        const outcome = stopped.outcome;
+        const reason = "reason" in outcome ? outcome.reason : "";
+        log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
+          group: groupKey,
+          path: stopped.targetPath,
+          outcome: outcome.outcome,
+          reason,
+        });
+        // A Stale check card: `fixed` for the rows written before the stop, and
+        // the edits that did not land, each with the status its row now has.
+        const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
+        const notLanded = staleCheckNotLanded(rows, actions);
+        return c.json(
+          {
+            outcome: "stopped",
+            // The preflight refuses a stale member before any write; a later
+            // failure leaves earlier pages written, so the answer names both.
+            applied,
+            noop,
+            skipped,
+            stoppedAt: stopped.targetPath,
+            stoppedOutcome: outcome.outcome,
+            error: reason,
+            ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
+            ...(fixed !== null ? { fixed, notLanded } : {}),
+          },
+          outcome.outcome === "forbidden" ? 403 : 409,
+        );
+      }
+      log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
+      // D29: a Stale check Accept writes a `fixed` verdict on each written
+      // linking page's new passage, on the index the apply refreshed.
+      const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
+      return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log.error("Lint group {group} Accept failed: {error}", { group: groupKey, error: reason });
+      return c.json({ error: `group apply failed: ${reason}` }, 500);
+    } finally {
+      // A CAS on `approved`, so a row that did move is left alone. A page this
+      // request already wrote comes back as a no-op on the next Accept.
+      for (const id of unsettled) {
+        try {
+          await backlogDeps.revertProposal(id);
+        } catch (err) {
+          log.error("Lint group {group}: revert of {id} to draft failed, the next Accept claims it again: {error}", {
+            group: groupKey,
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      groupApplyInFlight.delete(flightKey);
     }
-    log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-    // D29: a Stale check Accept writes a `fixed` verdict on each written
-    // linking page's new passage, on the index the apply refreshed.
-    const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, applied, snapshots);
-    return c.json({ outcome: "applied", applied, noop, skipped, ...(fixed !== null ? { fixed } : {}) });
   });
 
   /**

@@ -1683,9 +1683,11 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   evidence without ever invoking `git commit`, so a broken signing key is
   undetected in that state until in-subtree dirt appears.
   **One state subsumes without evidence:**
-  `blocked`, because the sweeper has no unmerged-paths pre-flight of its own
-  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt) and would commit a
-  human's half-finished merge; the conditions producing `blocked` persist across
+  `blocked`, because a sweep would commit a human's half-finished merge
+  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt). The ledger is in
+  memory, so after a restart this sweeper runs the loop's own tree check itself
+  (`treeOperationBlock`: an operation in progress, an `index.lock`, unmerged paths)
+  and marks `skipped` with the reason (F37); the conditions producing `blocked` persist across
   ticks until a human clears them, so a one-tick sample is sound there. Everything
   else — `error`, `transient`, `paused`, no-upstream, a cold ledger — falls through
   once evidence is stale; `paused` harmlessly, since this sweeper no-ops off the

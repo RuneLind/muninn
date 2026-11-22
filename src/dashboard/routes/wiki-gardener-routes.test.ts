@@ -3084,31 +3084,109 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(log).toContain(`- via lint-proposals, 2 pages: ${PAGE_A}, ${PAGE_B}`);
   });
 
-  test("group approve REFUSES a group holding an approved or rejected row", async () => {
-    for (const blocking of ["approved", "rejected"]) {
-      await Bun.write(path.join(root, PAGE_B), body("B"));
-      const half = [
-        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: blocking },
-        await lintRow("r2", PAGE_B, "prov"),
-      ];
-      const store = groupStore(half);
-      const one = new Hono();
-      registerWikiGardenerRoutes(one, deps(store.deps));
+  test("group approve REFUSES a group holding a rejected row", async () => {
+    const half = [
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "rejected" },
+      await lintRow("r2", PAGE_B, "prov"),
+    ];
+    const store = groupStore(half);
+    registerWikiGardenerRoutes(app, deps(store.deps));
 
-      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
-      expect([blocking, res.status]).toEqual([blocking, 409]);
-      // A reviewer who dismissed one member cannot then accept the group, and an
-      // `approved` row means another apply is mid-flight over these same pages.
-      // The message names what BLOCKS: `applied`/`stale` rows are not draft
-      // either and are skipped, so "not all draft" described another condition.
-      expect(await res.json()).toMatchObject({
-        outcome: "mixed",
-        error: "an approved or rejected row blocks the group",
-        statuses: { [blocking]: 1, draft: 1 },
-      });
-      expect(store.marked).toEqual([]);
-      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
-    }
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(res.status).toBe(409);
+    // A reviewer who dismissed one member cannot then accept the group. The
+    // message names what BLOCKS: `applied`/`stale` rows are not draft either and
+    // are skipped, and an `approved` one is claimed again (below).
+    expect(await res.json()).toMatchObject({
+      outcome: "mixed",
+      error: "a rejected row blocks the group",
+      statuses: { rejected: 1, draft: 1 },
+    });
+    expect(store.marked).toEqual([]);
+    expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+  });
+
+  // F35 (arch review 2026-11-16): a group Accept that threw after the claim, or a
+  // restart after the page writes, left rows `approved` — Accept and Dismiss
+  // then answered 409 and the rows held their pages until someone ran SQL.
+  test("rows a restart stranded in `approved` are claimed again and applied", async () => {
+    const store = groupStore([
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "approved" },
+      { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: "approved" },
+    ]);
+    registerWikiGardenerRoutes(app, deps(store.deps));
+
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: [PAGE_A, PAGE_B], skipped: {} });
+    expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+  });
+
+  test("a terminal mark that throws strands no row, and the next Accept settles the written pages as no-ops", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+    let failMarks = true;
+    registerWikiGardenerRoutes(
+      app,
+      deps({
+        ...store.deps,
+        markProposal: async (id: string, status: string) => {
+          if (failMarks) throw new Error("connection reset");
+          return store.deps.markProposal(id, status);
+        },
+      }),
+    );
+
+    const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(first.status).toBe(500);
+    // The pages were written before the mark threw; the rows are back in `draft`
+    // (the card has its buttons) rather than `approved` (no verb at all).
+    expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+    expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+
+    failMarks = false;
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ outcome: "applied", applied: [], noop: [PAGE_A, PAGE_B] });
+    expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+    // Re-running wrote nothing twice: one log entry, from the first pass.
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    expect(log.split("## [").length - 1).toBe(1);
+  });
+
+  test("a second Accept while the first is in flight still answers `mixed`", async () => {
+    const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inMark = new Promise<void>((r) => (entered = r));
+    registerWikiGardenerRoutes(
+      app,
+      deps({
+        ...store.deps,
+        markProposal: async (id: string, status: string) => {
+          entered();
+          await gate;
+          return store.deps.markProposal(id, status);
+        },
+      }),
+    );
+
+    const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    await inMark;
+    // The first click's rows are `approved` now: without the in-flight check the
+    // second click would read them as stranded and apply the group a second time.
+    expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+    const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(second.status).toBe(409);
+    expect(await second.json()).toMatchObject({
+      outcome: "mixed",
+      error: "another Accept of this group is in flight",
+      statuses: { approved: 2 },
+    });
+    release();
+    expect((await first).status).toBe(200);
+    expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
   });
 
   test("a second Accept after a stop applies the rows the stop put back to DRAFT", async () => {

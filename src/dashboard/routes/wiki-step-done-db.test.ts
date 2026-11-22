@@ -19,6 +19,7 @@ import { commitWikiChange, type CommitWikiResult } from "../../wiki/commit.ts";
 import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gardener/stale-proposals.ts";
 import type { LivePageHolder } from "../../db/wiki-proposals.ts";
 import { registerWikiStepDoneRoutes, type StepDoneDeps } from "./wiki-step-done.ts";
+import { setPlanPriority, setPlanStatus } from "../../plans/frontmatter.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
 
 setupTestDb();
@@ -267,6 +268,43 @@ describe("/api/wiki/step-done", () => {
     expect(body.dirty).toBe(true);
     expect(body.error).toBe(`${REL} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`);
     expect(await pageText()).toBe(dirty);
+  });
+
+  // F36 (arch review 2026-11-16): the /plans board's flips pass no committer.
+  async function doneAfter(content: string): Promise<{ status: number; body: Record<string, unknown> }> {
+    await Bun.write(path.join(root, REL), content);
+    __resetWikiCacheForTest();
+    const { body: p } = await previewOf("Read the second note.");
+    const { body: l } = await list();
+    const res = await post({ step: keyOf(l, "Read the second note."), baseHash: p.baseHash, previewHash: p.previewHash });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+  }
+  const flipped = () => {
+    const pri = setPlanPriority(PAGE, "p1");
+    if (pri.kind !== "changed") throw new Error("fixture: priority flip did not change the page");
+    const st = setPlanStatus(pri.content, "blocked", "2026-11-10");
+    if (st.kind !== "changed") throw new Error("fixture: status flip did not change the page");
+    return st.content;
+  };
+
+  test("a page whose only dirt is a board priority and status flip: the refusal names the board, not a session", async () => {
+    const content = flipped();
+    const { status, body } = await doneAfter(content);
+    expect(status).toBe(409);
+    expect(body.dirty).toBe(true);
+    expect(body.error).toBe(`${REL} carries a priority or status change from the plans board that is not committed yet. The repo-sync loop (after its quiet period) or the daily wiki sweep commits it; or commit it by hand. Then try again.`);
+    expect(await pageText()).toBe(content);
+  });
+
+  test("a board flip beside a body edit keeps the session refusal", async () => {
+    const { status, body } = await doneAfter(`${flipped()}\nA hand edit.\n`);
+    expect(status).toBe(409);
+    expect(String(body.error)).toContain("a session is editing it");
+  });
+
+  test("a frontmatter edit outside the board's keys keeps the session refusal", async () => {
+    const { body } = await doneAfter(PAGE.replace("title: Step fixture", "title: Renamed"));
+    expect(String(body.error)).toContain("a session is editing it");
   });
 
   test("after a failed commit, the next Done's refusal does not blame a session (fix round 2, finding 2)", async () => {

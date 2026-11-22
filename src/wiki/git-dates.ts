@@ -483,14 +483,24 @@ export type PageChangeVerdict = "identical" | "metadata-only" | "edit";
  * differ at all: there is no block a mechanical writer could have written into, so
  * every difference is body. (Equal texts answer `identical` before the split runs,
  * so a frontmatter-less page that did not change is still dropped.)
+ *
+ * `keys` narrows the metadata set for a caller asking a narrower question: Done
+ * asks whether a plan page's dirt is only the `/plans` board's pending write
+ * (`src/plans/board-dirt.ts`). The default is the whole set.
  */
-export function classifyPageChange(headText: string, workText: string): PageChangeVerdict {
+export function classifyPageChange(
+  headText: string,
+  workText: string,
+  keys: readonly string[] = METADATA_ONLY_FRONTMATTER_KEYS,
+): PageChangeVerdict {
   if (headText === workText) return "identical";
   const head = splitFrontmatter(headText);
   const work = splitFrontmatter(workText);
   if (head.frontmatter === null || work.frontmatter === null) return "edit";
   if (head.body !== work.body) return "edit";
-  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter)
+  const lineRe =
+    keys === METADATA_ONLY_FRONTMATTER_KEYS ? METADATA_FRONTMATTER_LINE_RE : new RegExp(`^(?:${keys.join("|")}):`);
+  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter, lineRe)
     ? "metadata-only"
     : "edit";
 }
@@ -512,11 +522,11 @@ export function classifyPageChange(headText: string, workText: string): PageChan
  * A trailing `\r` needs no trimming: the key regex is anchored at column 0 and
  * open at the end, so a CRLF page's metadata lines match with it in place.
  */
-function frontmatterDiffIsMetadataOnly(head: string, work: string): boolean {
+function frontmatterDiffIsMetadataOnly(head: string, work: string, lineRe: RegExp): boolean {
   const remainder = (block: string) =>
     block
       .split("\n")
-      .filter((line) => !METADATA_FRONTMATTER_LINE_RE.test(line))
+      .filter((line) => !lineRe.test(line))
       .join("\n");
   return remainder(head) === remainder(work);
 }
