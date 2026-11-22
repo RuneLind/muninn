@@ -12,6 +12,7 @@ import {
   getDiscoverVideoDetails,
   getLatestDiscoverRunTimes,
   getLatestDiscoverRunAt,
+  listDiscoverShelfPage,
   listDiscoverShelves,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
@@ -204,5 +205,79 @@ describe("getLatestDiscoverRunAt (fix round 2 batch 1)", () => {
     await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-11-10T12:00:00Z' WHERE id = ${other}`;
     expect(await getLatestDiscoverRunAt("watcher", "bot-a")).toBe(Date.parse("2026-11-07T12:00:00Z"));
     expect(await getLatestDiscoverRunAt("watcher", "bot-none")).toBeNull();
+  });
+});
+
+/** `n` seeds' runs, seed i stored i hours before 2026-11-20T12:00Z (seed 1 newest). */
+async function seedRuns(n: number) {
+  const ids: string[] = [];
+  for (let i = 1; i <= n; i++) {
+    const id = await saveDiscoverRun(run({ seedDocId: `s/Seed ${i}.md` }), [hit(`vid${String(i).padStart(8, "0")}`, 0.5)]);
+    const at = new Date(Date.parse("2026-11-20T12:00:00Z") - i * 3_600_000).toISOString();
+    await getDb()`UPDATE youtube_discover_runs SET created_at = ${at} WHERE id = ${id}`;
+    ids.push(id);
+  }
+  return ids;
+}
+
+describe("F18: listDiscoverShelfPage (architecture review 2026-11-16)", () => {
+  test("no shelves: none hidden", async () => {
+    expect(await listDiscoverShelfPage()).toEqual({ shelves: [], hidden: 0 });
+  });
+
+  test("40 shelves: all shown, none hidden", async () => {
+    await seedRuns(40);
+    const page = await listDiscoverShelfPage();
+    expect(page.shelves).toHaveLength(40);
+    expect(page.hidden).toBe(0);
+  });
+
+  test("45 shelves with a Later video on the 45th: 41 shown (the Later one last), 4 hidden", async () => {
+    await seedRuns(45);
+    await setDiscoverVideoState("vid00000045", "later");
+    const page = await listDiscoverShelfPage();
+    expect(page.shelves).toHaveLength(41);
+    expect(page.shelves.at(-1)!.seedDocId).toBe("s/Seed 45.md");
+    expect(page.shelves.at(-1)!.hits[0]).toMatchObject({ videoId: "vid00000045", state: "later" });
+    expect(page.hidden).toBe(4);
+  });
+
+  test("a Later video on an older run of a seed whose newest run has none is on that seed's shelf", async () => {
+    const old = await saveDiscoverRun(run({ seedDocId: "s/Twice.md" }), [hit("vidOLDOLD01", 0.7)]);
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-10-01T12:00:00Z' WHERE id = ${old}`;
+    await setDiscoverVideoState("vidOLDOLD01", "later");
+    const newest = await saveDiscoverRun(run({ seedDocId: "s/Twice.md" }), [hit("vidNEWNEW01", 0.9)]);
+    await getDb()`UPDATE youtube_discover_runs SET created_at = '2026-10-02T12:00:00Z' WHERE id = ${newest}`;
+    // 45 newer seeds push the twice-searched seed past the cap.
+    await seedRuns(45);
+    const page = await listDiscoverShelfPage();
+    const shelf = page.shelves.find((s) => s.seedDocId === "s/Twice.md")!;
+    expect(shelf.runId).toBe(newest);
+    expect(shelf.hits.map((h) => [h.videoId, h.state, h.earlierRunAt ?? null])).toEqual([
+      ["vidNEWNEW01", "new", null],
+      ["vidOLDOLD01", "later", Date.parse("2026-10-01T12:00:00Z")],
+    ]);
+    expect(page.shelves).toHaveLength(41);
+    expect(page.hidden).toBe(5);
+  });
+
+  test("failed is stored and read; absent is 0", async () => {
+    await saveDiscoverRun(run({ seedDocId: "f/One.md", failed: 2 }), [hit("vidFFFFFFF1", 0.5)]);
+    await saveDiscoverRun(run({ seedDocId: "f/Two.md" }), [hit("vidFFFFFFF2", 0.5)]);
+    const shelves = await listDiscoverShelves();
+    expect(Object.fromEntries(shelves.map((s) => [s.seedDocId, s.failed]))).toEqual({ "f/One.md": 2, "f/Two.md": 0 });
+  });
+});
+
+describe("F17: setDiscoverVideoState with ifState", () => {
+  test("writes only while the video is still in that state", async () => {
+    await saveDiscoverRun(run({ seedDocId: "q/One.md" }), [hit("vidQQQQQQQ1", 0.5)]);
+    await saveDiscoverRun(run({ seedDocId: "q/Two.md" }), [hit("vidQQQQQQQ1", 0.5)]);
+    await setDiscoverVideoState("vidQQQQQQQ1", "queued");
+    expect(await setDiscoverVideoState("vidQQQQQQQ1", "new", "queued")).toBe(2);
+    await setDiscoverVideoState("vidQQQQQQQ1", "dismissed");
+    expect(await setDiscoverVideoState("vidQQQQQQQ1", "new", "queued")).toBe(0);
+    const states = (await listDiscoverShelves()).flatMap((s) => s.hits.map((h) => h.state));
+    expect(states).toEqual(["dismissed", "dismissed"]);
   });
 });

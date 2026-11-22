@@ -113,6 +113,7 @@ describe("the live chain", () => {
   // here would leave its `ownProcessFiles` wiring unexercised.
   test("the wiki boot tests are own-process links: each alone, and in no other link", () => {
     const boots = [
+      "src/dashboard/views/discover-boot/discover-page-summarize.test.ts",
       "src/dashboard/views/wiki-boot/wiki-article-series-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-ask-boot.test.ts",
       "src/dashboard/views/wiki-boot/wiki-controllers-boot.test.ts",

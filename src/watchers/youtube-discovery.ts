@@ -1,28 +1,52 @@
 /**
- * The weekly `youtube-discovery` watcher (plan muninn-youtube-discovery, PR 3):
- * the last 7 days' YouTube summaries (widened back to the day of this bot's newest
- * stored watcher run, `seedWindowStart`), the newest not yet searched, at most `maxSeeds` (5), each searched as
- * its own discovery run and stored as a shelf on `/summaries/discover`
- * (`origin = 'watcher'`). It sends no alert of its own: the shelves are the
- * output (D5). Its failures go to `source-health.ts`, so a broken yt-dlp search
- * or a dead model raises one escalation after three bad weeks instead of
- * silence.
+ * The weekly `youtube-discovery` watcher (plan muninn-youtube-discovery, PR 3;
+ * outcomes reworked by architecture review 2026-11-16, F14/F16): the YouTube
+ * summaries captured in its window, the newest not yet searched first, at most
+ * `maxSeeds` (5), each searched as its own discovery run and stored as a shelf on
+ * `/summaries/discover` (`origin = 'watcher'`). It sends no alert of its own: the
+ * shelves are the output (D5). Its failures go to `source-health.ts`, which
+ * escalates after ONE failed weekly run (`runEscalateAfter`, shared with run health).
  *
- * Health keys, each judged only when a run reached its step:
+ * The window (`discoveryWindowStart`): the last 7 days, widened back to the day of
+ * this bot's newest stored watcher run (≤14 days), and further back to the oldest
+ * seed an earlier run left unsearched (its cap, its deadline; ≤28 days, `carryFrom`).
+ * A seed already searched (by any origin) is skipped.
+ *
+ * A seed whose run made no shelf (every search failed, a model call failed, the
+ * save failed) stores NO row: an earlier shelf of that seed stays as it was, and
+ * the watcher's window anchor (its newest stored run) does not move. It is
+ * recorded in `watcher_snapshots` (`youtube-discovery:state`, {@link DiscoveryState})
+ * and retried after this week's seeds, in the slots they left under `maxSeeds` plus
+ * {@link MAX_RETRIES_PER_RUN} of its own, fewest attempts first, up to
+ * {@link MAX_SEED_ATTEMPTS} failed attempts in all, each one saved by a finished run;
+ * the exhausted warning is logged once, when the state marking it is saved. Retries
+ * stand down once a failure of an `outage` class ({@link FAILURE_CLASS}) has come
+ * with no shelf yet this run (an attempt then would only spend the seed's cap); a
+ * seed-specific failure never stands them down. A shelf whose searches partly failed
+ * is kept, with its `failed` count, and is not retried. A record or a carried seed
+ * that falls past the 28-day floor with no run of it stored is warned about once and
+ * counted on `youtube:store`.
+ *
+ * The state is written BEFORE any seed runs (a checkpoint carrying every week seed, and
+ * every planned retry stamped `pending`, uncharged), so a run that dies or whose final
+ * save fails loses no seed and charges none; a run that cannot read or checkpoint the
+ * state stands down and searches nothing.
+ *
+ * Health keys, each judged only over the seeds that reached its step:
  *   - `youtube:huginn` — the listing, then each seed's raw read (ok when no read ran)
  *   - `youtube:model`  — the queries and rank calls
- *   - `youtube:search` — the yt-dlp searches
+ *   - `youtube:search` — the yt-dlp searches (a seed fails it when every search failed)
  *   - `youtube:store`  — saving each shelf (the watcher's only output)
- * A key is `ok` when at least one run passed its step, `error` when every run
- * that reached it failed there, carried when no run reached it.
- *
- * A seed already searched (by any origin) is skipped: the reader's own Find on
- * YouTube, or an earlier weekly run, already made its shelf. The window is
- * anchored on this bot's newest stored watcher run (`seedWindowStart`).
+ * A key is `error` when at least half of the seeds that reached its step failed it
+ * (`partial` when some passed and the run stored a shelf), `ok` otherwise with any failures counted in its
+ * detail, carried when no seed reached it.
  *
  * The run keeps inside the runner's net: every model call carries one run-wide
  * `deadlineAt` (min(net, tick) minus the net's margin, so `health.finish()` still runs), and
- * no seed starts with less than {@link MIN_SEED_MS} left.
+ * no seed starts with less than {@link MIN_SEED_MS} left. A seed whose model call the deadline
+ * cuts (started with under {@link CUT_START_MAX_MS} left) is no failure of the seed or the model:
+ * it is left for the next run uncharged, and `youtube:model` does not count it. A call started
+ * with more that rejects at the deadline hung, and is a model failure.
  */
 
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -33,7 +57,7 @@ import { Tracer } from "../tracing/tracer.ts";
 import { extractYouTubeVideoId } from "../youtube/url.ts";
 import { defaultDiscoverServices, YOUTUBE_SUMMARIES_COLLECTION, type DiscoverServices } from "../youtube/discover-deps.ts";
 import { runDiscovery, type DiscoverRunOutcome, type DiscoverTracer } from "../youtube/discover-run.ts";
-import { seedsSince, seedWindowStart, toSeedDocs, DISCOVER_SEED_CAP } from "../youtube/discover-seeds.ts";
+import { carryFloorDay, discoveryWindowStart, seedsSince, toSeedDocs, DISCOVER_MAX_CARRY_DAYS, DISCOVER_SEED_CAP, type SeedDoc } from "../youtube/discover-seeds.ts";
 import { readIntKnob } from "./config-knobs.ts";
 import {
   getDiscoverKnownVideoIds,
@@ -43,8 +67,10 @@ import {
   type DiscoverHitInput,
   type DiscoverRunInput,
 } from "../db/youtube-discover.ts";
+import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { openSourceHealth, type SourceHealthRecorder } from "./source-health.ts";
+import { effectiveCadenceMs, runEscalateAfter } from "./run-health.ts";
 import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import { getLog } from "../logging.ts";
 
@@ -57,6 +83,109 @@ export const HEALTH_STORE = "youtube:store";
 const MAX_SEEDS_LIMIT = 10;
 /** A seed needs this much of the run's budget left to start (a healthy run took 11–14 s in 4 live traces, 2026-11-14). */
 export const MIN_SEED_MS = 60_000;
+/**
+ * A model call that fails with less than this left before the run's deadline was cut by it: the
+ * router bounds its last attempt at the deadline itself, so such a call rejects at or after it.
+ */
+export const DEADLINE_CUT_SLACK_MS = 1_000;
+/**
+ * A model call started with at least this left had its chance, and one that still rejects at the
+ * deadline hung: a model failure, not a cut. The router sizes its attempts from the deadline (at
+ * most two, each at least half of this), and a whole healthy seed took 11–14 s (see MIN_SEED_MS).
+ * Only a call a slow earlier step left with less is cut. Every seed starts with MIN_SEED_MS left,
+ * so its queries call is judged unless the raw read ate half of it.
+ */
+export const CUT_START_MAX_MS = MIN_SEED_MS / 2;
+/** Failed attempts (the first one included) after which a seed is no longer retried. */
+export const MAX_SEED_ATTEMPTS = 3;
+/**
+ * Retries a run may make beyond `maxSeeds`: one default week's seeds, so any steady failure
+ * rate up to 5 a week clears every run; a larger backlog clears 5 a run, oldest seed first,
+ * and what passes the 28-day floor first is dropped and reported.
+ */
+export const MAX_RETRIES_PER_RUN = DISCOVER_SEED_CAP;
+/** The `watcher_snapshots` key holding {@link DiscoveryState}. */
+export const DISCOVERY_STATE_KEY = "youtube-discovery:state";
+
+/** A seed whose last attempt made no shelf. */
+export interface DiscoveryRetry {
+  /** Failed attempts in a row, the first one included. */
+  attempts: number;
+  /** Epoch ms of the last failed attempt: a run of the seed stored after it (any origin) ends the retry. */
+  lastAt: number;
+  error: string;
+  /** Set once attempts reach {@link MAX_SEED_ATTEMPTS}: not retried, and the warning is not logged again. */
+  exhausted?: true;
+  /**
+   * Only in a checkpoint: the start of the run that planned this retry. A run that reads it finds
+   * a run that never saved its outcome; the planned attempt is not charged (`attempts` counts only
+   * failures a finished run saved).
+   */
+  pending?: number;
+}
+
+type DiscoverFailureCode = Extract<DiscoverRunOutcome, { ok: false }>["code"];
+/**
+ * What a failed seed says about its dependencies. `outage`: a service the next seed needs too
+ * failed (a retry now would spend its cap on the same fault). `seed`: this document alone.
+ * A shelf whose searches only partly failed is no failure at all.
+ */
+export const FAILURE_CLASS: Record<DiscoverFailureCode | "save_failed", "outage" | "seed"> = {
+  upstream: "outage", // huginn's raw read failed
+  model_failed: "outage", // the queries or rank call failed in transport (a deadline cut is neither: it ends the run)
+  search_failed: "outage", // every yt-dlp search of the seed failed
+  save_failed: "outage", // Postgres refused the shelf
+  model_unparseable: "seed", // the model answered this document with nothing usable
+  not_found: "seed", // the document was deleted since the listing
+};
+
+/** The watcher's carried state between weekly runs. */
+export interface DiscoveryState {
+  /** The oldest seed day the last run left unsearched (cap or deadline), or null. */
+  carryFrom: string | null;
+  /** Doc id → its failed attempts. */
+  retry: Record<string, DiscoveryRetry>;
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseRetry(v: unknown): DiscoveryRetry | null {
+  if (!isObject(v)) return null;
+  const { attempts, lastAt, error, exhausted, pending } = v;
+  if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 1) return null;
+  if (typeof lastAt !== "number" || !Number.isFinite(lastAt)) return null;
+  return {
+    attempts,
+    lastAt,
+    error: typeof error === "string" ? error : "",
+    ...(exhausted === true ? { exhausted: true as const } : {}),
+    ...(typeof pending === "number" && Number.isFinite(pending) ? { pending } : {}),
+  };
+}
+
+/**
+ * The stored state, keeping every part that is well formed: a malformed `carryFrom` reads
+ * as null and a malformed retry entry is dropped, each named in `malformed`, so one bad
+ * entry never resets `carryFrom` and the other records.
+ */
+export function parseDiscoveryState(v: unknown): { state: DiscoveryState; malformed: string[] } {
+  const malformed: string[] = [];
+  if (v === null || v === undefined) return { state: { carryFrom: null, retry: {} }, malformed };
+  if (!isObject(v)) return { state: { carryFrom: null, retry: {} }, malformed: ["the whole state"] };
+  let carryFrom: string | null = null;
+  if (typeof v.carryFrom === "string" && DAY_RE.test(v.carryFrom)) carryFrom = v.carryFrom;
+  else if (v.carryFrom !== null && v.carryFrom !== undefined) malformed.push("carryFrom");
+  const retry: Record<string, DiscoveryRetry> = {};
+  if (isObject(v.retry)) {
+    for (const [id, r] of Object.entries(v.retry)) {
+      const ok = parseRetry(r);
+      if (ok) retry[id] = ok;
+      else malformed.push(`retry[${id}]`);
+    }
+  } else if (v.retry !== undefined) malformed.push("retry");
+  return { state: { carryFrom, retry }, malformed };
+}
 
 export interface YouTubeDiscoveryDeps {
   services: Pick<DiscoverServices, "readRaw" | "queriesCall" | "rankCall" | "search" | "listCaptured">;
@@ -65,6 +194,9 @@ export interface YouTubeDiscoveryDeps {
   latestRunTimes: (docIds: readonly string[]) => Promise<Map<string, number>>;
   /** When this bot's newest watcher run was stored, or null: the window's anchor. */
   lastWatcherRunAt: (botName: string) => Promise<number | null>;
+  /** The stored {@link DiscoveryState} (any value; validated by the caller), or null. */
+  loadState: (watcherId: string) => Promise<unknown>;
+  saveState: (watcherId: string, state: DiscoveryState) => Promise<void>;
   profile: (userId: string, botName: string) => Promise<string | null>;
   health: (watcher: Watcher) => Promise<SourceHealthRecorder>;
   tracer?: (bot: BotConfig) => DiscoverTracer | null;
@@ -78,8 +210,11 @@ export function defaultYouTubeDiscoveryDeps(): YouTubeDiscoveryDeps {
     storedKnownIds: getDiscoverKnownVideoIds,
     latestRunTimes: (ids) => getLatestDiscoverRunTimes(ids),
     lastWatcherRunAt: (botName) => getLatestDiscoverRunAt("watcher", botName),
+    loadState: (id) => getWatcherSnapshot(id, DISCOVERY_STATE_KEY),
+    saveState: (id, state) => setWatcherSnapshot(id, DISCOVERY_STATE_KEY, state),
     profile: (userId, botName) => loadInterestProfile(userId, botName),
-    health: (w) => openSourceHealth(w.id, w.name),
+    // Run health's rule (F16): a weekly row escalates after one failed run, not three weeks.
+    health: (w) => openSourceHealth(w.id, w.name, Date.now(), { escalateAfter: runEscalateAfter(effectiveCadenceMs(w)) }),
     tracer: (bot) => new Tracer("youtube-discover", { botName: bot.name, platform: "youtube-discovery" }),
   };
 }
@@ -99,27 +234,46 @@ export function resolveMaxSeeds(config: Record<string, unknown> | undefined, ctx
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** Each step's verdict over this week's runs: reached, and passed at least once. */
-interface StepTally {
+/** One step's tally over this run's seeds: how many reached it, how many failed it, the first failure. */
+export interface StepTally {
   reached: number;
-  passed: number;
+  failed: number;
   detail?: string;
 }
 
-/** Which steps one outcome reached and passed (`runDiscovery` runs read → queries → search → rank). */
-export function tallyOutcome(out: DiscoverRunOutcome, t: { huginn: StepTally; model: StepTally; search: StepTally }): void {
+export interface RunTally {
+  huginn: StepTally;
+  model: StepTally;
+  search: StepTally;
+  /** Searches run and failed across every seed that reached the search step. */
+  searches: { ran: number; failed: number };
+}
+
+export const emptyTally = (): RunTally => ({
+  huginn: { reached: 0, failed: 0 },
+  model: { reached: 0, failed: 0 },
+  search: { reached: 0, failed: 0 },
+  searches: { ran: 0, failed: 0 },
+});
+
+/**
+ * Which steps one outcome reached and failed (`runDiscovery` runs read → queries → search → rank).
+ * A seed's searches count whatever later step failed. `deadlineCut`: the model call was cut by the
+ * run's deadline, which says nothing about the model, so the model step is not counted at all.
+ */
+export function tallyOutcome(out: DiscoverRunOutcome, t: RunTally, deadlineCut = false): void {
   const fail = (s: StepTally, detail: string) => {
     s.reached++;
+    s.failed++;
     s.detail ??= detail;
   };
-  const pass = (s: StepTally) => {
-    s.reached++;
-    s.passed++;
-  };
+  const pass = (s: StepTally) => void s.reached++;
   if (out.ok) {
     pass(t.huginn);
     pass(t.model);
     pass(t.search);
+    t.searches.ran += out.queries.length;
+    t.searches.failed += out.failed;
     return;
   }
   const why = out.cause ?? out.error;
@@ -130,25 +284,43 @@ export function tallyOutcome(out: DiscoverRunOutcome, t: { huginn: StepTally; mo
       return;
     case "queries":
       pass(t.huginn);
-      fail(t.model, why);
+      if (!deadlineCut) fail(t.model, why);
       return;
     case "search":
       pass(t.huginn);
       pass(t.model);
       fail(t.search, why);
+      t.searches.ran += out.searches ?? 0;
+      t.searches.failed += out.failed ?? out.searches ?? 0;
       return;
     case "rank":
       pass(t.huginn);
       pass(t.search);
-      fail(t.model, why);
+      t.searches.ran += out.searches ?? 0;
+      t.searches.failed += out.failed ?? 0;
+      if (!deadlineCut) fail(t.model, why);
       return;
   }
 }
 
-function markStep(health: SourceHealthRecorder, key: string, s: StepTally): void {
-  if (s.reached === 0) health.carry(key);
-  else if (s.passed > 0) health.mark(key, "ok");
-  else health.mark(key, "error", s.detail);
+/**
+ * One key's verdict: `error` when at least half of the seeds that reached the step
+ * failed it, else `ok`, with the failures in the detail. The error is `partial` only
+ * when some seeds passed the step AND the run stored a shelf (`shelves`): the alert
+ * then says part of the run succeeded, which a run with no shelf would make false.
+ */
+export function markStep(health: SourceHealthRecorder, key: string, s: StepTally, shelves: number, extra?: string): void {
+  if (s.reached === 0) return health.carry(key);
+  const seeds = s.failed > 0 ? `${s.failed} of ${s.reached} seed${s.reached === 1 ? "" : "s"} failed: ${s.detail ?? "no detail"}` : "";
+  const detail = [seeds, extra ?? ""].filter(Boolean).join("; ");
+  if (s.failed * 2 >= s.reached) health.mark(key, "error", detail, { partial: s.failed < s.reached && shelves > 0 });
+  else health.mark(key, "ok", detail || undefined);
+}
+
+/** A seed this run will try: one of the window's, or a retry of one that failed. */
+interface Planned {
+  seed: SeedDoc;
+  retry: boolean;
 }
 
 export async function checkYouTubeDiscovery(
@@ -175,26 +347,133 @@ export async function checkYouTubeDiscovery(
     return health.finish();
   }
 
+  // A run that cannot record its seeds moves none of them: it searches nothing, stores no
+  // shelf (so the window anchor stays), and leaves the stored state as it was.
+  const standDown = (why: string) => {
+    log.warn("YouTube discovery: {why}; searching nothing this run", { botName, why });
+    health.mark(HEALTH_HUGINN, "ok");
+    health.carry(HEALTH_MODEL);
+    health.carry(HEALTH_SEARCH);
+    health.mark(HEALTH_STORE, "error", why);
+    return health.finish();
+  };
+
+  let rawState: unknown;
+  try {
+    rawState = await deps.loadState(watcher.id);
+  } catch (err) {
+    return standDown(`reading the retry state failed: ${errText(err)}`);
+  }
+  const { state: prior, malformed } = parseDiscoveryState(rawState);
+  if (malformed.length > 0)
+    log.warn("YouTube discovery: dropped malformed parts of the retry state: {parts}", { botName, parts: malformed.join(", ") });
+
   // Anchored on the newest STORED watcher run: the runner writes `last_success_at` for email only.
   const lastRun = await deps.lastWatcherRunAt(botName).catch((err) => {
     log.warn("YouTube discovery: reading the last watcher run failed, using the last 7 days: {error}", { botName, error: errText(err) });
     return null;
   });
-  const week = seedsSince(toSeedDocs(listed), seedWindowStart(now(), lastRun), Infinity);
+  const runStart = now();
+  const docs = toSeedDocs(listed);
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const floor = carryFloorDay(runStart);
+  // A retry record lasts while its seed is listed (with a date). A `pending` stamp is a planned
+  // attempt of a run that never saved its outcome (it died, or both final saves failed): whether
+  // the seed was searched is unknown, so the attempt is not charged and the seed is retried.
+  const records: Record<string, DiscoveryRetry> = {};
+  let unfinished = 0;
+  for (const [id, r] of Object.entries(prior.retry)) {
+    if (!byId.get(id)?.date) continue;
+    const { pending, ...rest } = r;
+    if (pending !== undefined) unfinished++;
+    records[id] = rest;
+  }
+  if (unfinished > 0)
+    log.warn("YouTube discovery: an earlier run planned {n} retries and never saved their outcome; they are not charged and run again", {
+      botName,
+      n: unfinished,
+    });
+  // Seeds the last run left (its cap, its deadline) that are now older than the floor.
+  const priorCarry = prior.carryFrom;
+  const carryBand =
+    priorCarry && priorCarry < floor
+      ? docs.filter((d) => d.date !== null && d.date >= priorCarry && d.date < floor && !prior.retry[d.id])
+      : [];
+  const window = seedsSince(docs, discoveryWindowStart(runStart, lastRun, prior.carryFrom), Infinity);
   let recent = new Map<string, number>();
+  let recentRead = true;
   try {
-    recent = await deps.latestRunTimes(week.map((s) => s.id));
+    recent = await deps.latestRunTimes([...new Set([...window.map((s) => s.id), ...Object.keys(records), ...carryBand.map((d) => d.id)])]);
   } catch (err) {
+    recentRead = false;
     log.warn("YouTube discovery: reading earlier runs failed, searching every seed: {error}", { botName, error: errText(err) });
   }
-  const seeds = week
-    // Searched once is enough: a doc in the window was captured inside it, so any search of it is
-    // this window's, and the band widened back to the last run is not searched twice.
-    .filter((s) => !recent.has(s.id))
-    .slice(0, resolveMaxSeeds(watcher.config, { botName, watcherId: watcher.id }));
+  // A seed searched (any origin) at or after its failed attempt has a shelf now: its retry is over.
+  // Decided before the floor, so a seed with a shelf is never reported lost there.
+  for (const [id, r] of Object.entries(records)) if ((recent.get(id) ?? -Infinity) >= r.lastAt) delete records[id];
+  // A record whose seed passed the floor before it was exhausted is a loss, reported below. Without
+  // the run times it cannot be told from one that ended, so it is kept (not retried) for the next
+  // run to decide; an exhausted one was warned about when it was saved.
+  const retry: Record<string, DiscoveryRetry> = {};
+  const held: Record<string, DiscoveryRetry> = {};
+  const floorDropped: SeedDoc[] = [];
+  for (const [id, r] of Object.entries(records)) {
+    const d = byId.get(id)!;
+    if (d.date! >= floor) retry[id] = r;
+    else if (r.exhausted) continue;
+    else if (!recentRead) held[id] = r;
+    else floorDropped.push(d);
+  }
+  // Without the run times a carried seed that was searched cannot be told from one that was not.
+  if (recentRead) floorDropped.push(...carryBand.filter((d) => !recent.has(d.id)));
 
-  const tally = { huginn: { reached: 0, passed: 0 } as StepTally, model: { reached: 0, passed: 0 } as StepTally, search: { reached: 0, passed: 0 } as StepTally };
-  const store: StepTally = { reached: 0, passed: 0 };
+  const maxSeeds = resolveMaxSeeds(watcher.config, { botName, watcherId: watcher.id });
+  // Searched once is enough: a doc in the window was captured inside it, so any search of it is this
+  // window's. A seed with a retry record is handled by the retry budget below, never as a week seed.
+  const week = window.filter((s) => !recent.has(s.id) && !retry[s.id]);
+  // Every record gets a turn before any gets a second: fewest attempts first, then the oldest
+  // seed (the nearest the floor), then the oldest failure.
+  const retries = Object.entries(retry)
+    .filter(([, r]) => !r.exhausted)
+    .sort(([a, ra], [b, rb]) => {
+      const da = byId.get(a)!.date!;
+      const db = byId.get(b)!.date!;
+      return ra.attempts - rb.attempts || (da < db ? -1 : da > db ? 1 : 0) || ra.lastAt - rb.lastAt || (a < b ? -1 : 1);
+    })
+    .map(([id]) => byId.get(id)!);
+  // This week's seeds first, under `maxSeeds`; retries take what they left plus a budget of their own.
+  const plannedRetries = retries.slice(0, Math.max(0, maxSeeds - week.length) + MAX_RETRIES_PER_RUN);
+  const plan: Planned[] = [
+    ...week.slice(0, maxSeeds).map((seed) => ({ seed, retry: false })),
+    ...plannedRetries.map((seed) => ({ seed, retry: true })),
+  ];
+
+  const oldestDay = (seeds: readonly SeedDoc[]) =>
+    seeds.reduce<string | null>((min, s) => (s.date && (!min || s.date < min) ? s.date : min), null);
+  // The checkpoint, written before any seed runs: every week seed is still carried, and every
+  // planned retry is stamped `pending` with its count unchanged. If the run dies or its final
+  // save fails, the next run reads this: no seed this run leaves is lost, and none is charged
+  // (or exhausted) for an attempt whose outcome was never saved.
+  const checkpoint: DiscoveryState = { carryFrom: oldestDay(week), retry: { ...held, ...retry } };
+  for (const seed of plannedRetries) checkpoint.retry[seed.id] = { ...retry[seed.id]!, pending: runStart };
+  try {
+    await deps.saveState(watcher.id, checkpoint);
+  } catch (err) {
+    return standDown(`saving the retry state failed: ${errText(err)}`);
+  }
+  for (const d of floorDropped) {
+    const r = prior.retry[d.id];
+    log.warn("YouTube discovery: {doc} ({date}) passed the {days}-day carry floor unsearched and is dropped: {why}", {
+      botName,
+      doc: d.id,
+      date: d.date,
+      days: DISCOVER_MAX_CARRY_DAYS,
+      why: r ? `${r.attempts} failed attempt(s), last: ${r.error}` : "left by an earlier run",
+    });
+  }
+
+  const tally = emptyTally();
+  const store: StepTally = { reached: 0, failed: 0 };
   const captured = new Set(listed.map((d) => extractYouTubeVideoId(d.url ?? "")).filter((id): id is string => !!id));
   // Videos this run already put on a shelf: one video lands on one shelf per run.
   const shelved = new Set<string>();
@@ -204,23 +483,58 @@ export async function checkYouTubeDiscovery(
     return new Set([...captured, ...stored, ...shelved]);
   };
   const opts = { deadlineAt };
+  // Set when a model call of the current seed, started with under CUT_START_MAX_MS left, rejects
+  // at the deadline (DEADLINE_CUT_SLACK_MS). One started with more that rejects there hung.
+  let cut = false;
+  const bounded =
+    <A extends unknown[]>(call: (...a: A) => Promise<string>) =>
+    async (...a: A): Promise<string> => {
+      const leftAtStart = deadlineAt - now();
+      try {
+        return await call(...a);
+      } catch (err) {
+        if (leftAtStart < CUT_START_MAX_MS && deadlineAt - now() < DEADLINE_CUT_SLACK_MS) cut = true;
+        throw err;
+      }
+    };
   // The owner's interest profile, read once per run (it changes weekly at most).
   let profile: Promise<string | null> | null = null;
   const loadProfile = () => (profile ??= deps.profile(watcher.userId, botName));
 
+  // Seeds this run exhausted: warned about only once the state that marks them is saved, so the
+  // warning is logged once, at the transition that lands (a lost save charges nothing, see above).
+  const exhaustedNow: { doc: string; attempts: number; error: string }[] = [];
+  // Failures of an `outage` class (FAILURE_CLASS) this run, whatever seed they came from.
+  let outages = 0;
+  const recordFailure = (seed: SeedDoc, code: keyof typeof FAILURE_CLASS, error: string) => {
+    if (FAILURE_CLASS[code] === "outage") outages++;
+    const attempts = (retry[seed.id]?.attempts ?? 0) + 1;
+    const exhausted = attempts >= MAX_SEED_ATTEMPTS;
+    retry[seed.id] = { attempts, lastAt: now(), error, ...(exhausted ? { exhausted: true as const } : {}) };
+    if (exhausted) exhaustedNow.push({ doc: seed.id, attempts, error });
+  };
+
   let shelves = 0;
-  let stoppedAt: number | null = null;
-  for (const [i, seed] of seeds.entries()) {
-    if (deadlineAt - now() < MIN_SEED_MS) {
-      stoppedAt = i;
+  let retried = 0;
+  let stoodDown = 0;
+  const started = new Set<string>();
+  for (const [i, { seed, retry: isRetry }] of plan.entries()) {
+    if (deadlineAt - now() < MIN_SEED_MS) break;
+    // A dependency failed this run and nothing has made a shelf since the run began: a retry now
+    // would only spend its cap on the same fault. A seed-specific failure says nothing about that.
+    if (isRetry && outages > 0 && shelves === 0) {
+      stoodDown = plan.length - i;
       break;
     }
+    started.add(seed.id);
+    if (isRetry) retried++;
+    cut = false;
     const tracer = deps.tracer?.(botConfig) ?? null;
     const out = await runDiscovery(
       {
         readRaw: deps.services.readRaw,
-        queriesCall: (p, b, t) => deps.services.queriesCall(p, b, t, opts),
-        rankCall: (p, b, t) => deps.services.rankCall(p, b, t, opts),
+        queriesCall: bounded((p, b, t) => deps.services.queriesCall(p, b, t, opts)),
+        rankCall: bounded((p, b, t) => deps.services.rankCall(p, b, t, opts)),
         search: deps.services.search,
         knownIds,
         profile: loadProfile,
@@ -229,9 +543,21 @@ export async function checkYouTubeDiscovery(
       tracer,
       { collection: YOUTUBE_SUMMARIES_COLLECTION, docId: seed.id },
     );
-    tallyOutcome(out, tally);
+    const deadlineCut = cut && !out.ok && out.code === "model_failed";
+    tallyOutcome(out, tally, deadlineCut);
+    if (deadlineCut) {
+      // The run ran out of time, not the seed: no attempt is charged, and a week seed stays a
+      // seed (carried). A retry keeps its record as it was.
+      log.warn("YouTube discovery: the run's deadline cut {doc}; left for the next run", { botName, doc: seed.id });
+      started.delete(seed.id);
+      if (isRetry) retried--;
+      break;
+    }
     if (!out.ok) {
       log.warn("YouTube discovery: {code} for {doc}: {error}", { botName, doc: seed.id, code: out.code, error: out.cause ?? out.error });
+      // A seed deleted since the listing is gone, not failed: nothing to retry.
+      if (out.code === "not_found") delete retry[seed.id];
+      else recordFailure(seed, out.code, out.cause ?? out.error);
       continue;
     }
     store.reached++;
@@ -249,31 +575,70 @@ export async function checkYouTubeDiscovery(
           known: out.known,
           origin: "watcher",
           botName,
+          failed: out.failed,
         },
         out.results,
       );
       shelves++;
-      store.passed++;
+      delete retry[seed.id];
       for (const r of out.results) shelved.add(r.videoId);
     } catch (err) {
+      store.failed++;
       store.detail ??= errText(err);
       log.warn("YouTube discovery: saving the run for {doc} failed: {error}", { botName, doc: seed.id, error: errText(err) });
+      recordFailure(seed, "save_failed", `save failed: ${errText(err)}`);
     }
   }
 
-  if (stoppedAt !== null)
-    log.warn("YouTube discovery: out of time, {left} of {seeds} seeds not searched", { botName, left: seeds.length - stoppedAt, seeds: seeds.length });
-  log.info("YouTube discovery: {shelves} shelves from {seeds} seeds ({week} in the window)", {
+  // Window seeds this run did not start (the cap, the deadline) stay seeds next run.
+  const left = week.filter((s) => !started.has(s.id));
+  const carryFrom = oldestDay(left);
+  if (left.length > 0) log.warn("YouTube discovery: {left} of {week} seeds left for the next run", { botName, left: left.length, week: week.length });
+  if (stoodDown > 0)
+    log.warn("YouTube discovery: a dependency failed and no seed made a shelf; {n} retries stood down until a run with a shelf", {
+      botName,
+      n: stoodDown,
+    });
+  log.info("YouTube discovery: {shelves} shelves from {started} seeds ({retried} retries; {week} new in the window)", {
     botName,
     shelves,
-    seeds: seeds.length,
+    started: started.size,
+    retried,
     week: week.length,
   });
-  // The listing answered: huginn is ok unless every raw read that ran failed.
+  // One retry of the save; if both fail, the checkpoint stands (nothing lost, nothing charged, see above).
+  let saveError: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await deps.saveState(watcher.id, { carryFrom, retry: { ...held, ...retry } });
+      saveError = null;
+      break;
+    } catch (err) {
+      saveError = errText(err);
+    }
+  }
+  if (saveError) log.warn("YouTube discovery: saving the retry state failed twice; the checkpoint stands: {error}", { botName, error: saveError });
+  else
+    for (const e of exhaustedNow)
+      log.warn("YouTube discovery: {doc} failed {attempts} times; not retried again: {error}", { botName, ...e });
+
+  // The listing answered: huginn is ok unless half the raw reads that ran failed.
   if (tally.huginn.reached === 0) health.mark(HEALTH_HUGINN, "ok");
-  else markStep(health, HEALTH_HUGINN, tally.huginn);
-  markStep(health, HEALTH_MODEL, tally.model);
-  markStep(health, HEALTH_SEARCH, tally.search);
-  markStep(health, HEALTH_STORE, store);
+  else markStep(health, HEALTH_HUGINN, tally.huginn, shelves);
+  markStep(health, HEALTH_MODEL, tally.model, shelves);
+  const s = tally.searches;
+  markStep(health, HEALTH_SEARCH, tally.search, shelves, s.failed > 0 ? `${s.failed} of ${s.ran} searches failed` : undefined);
+  // A seed dropped at the floor is output lost for good: it counts as a failed store.
+  const extras: string[] = [];
+  if (floorDropped.length > 0) {
+    store.reached += floorDropped.length;
+    store.failed += floorDropped.length;
+    store.detail ??= `passed the ${DISCOVER_MAX_CARRY_DAYS}-day carry floor unsearched`;
+    extras.push(`${floorDropped.length} seed${floorDropped.length === 1 ? "" : "s"} dropped unsearched at the ${DISCOVER_MAX_CARRY_DAYS}-day carry floor`);
+  }
+  if (saveError) {
+    extras.push(`saving the retry state failed: ${saveError}`);
+    health.mark(HEALTH_STORE, "error", extras.join("; "), { partial: shelves > 0 });
+  } else markStep(health, HEALTH_STORE, store, shelves, extras.join("; ") || undefined);
   return health.finish();
 }

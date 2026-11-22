@@ -204,19 +204,20 @@ function progress(html: string): void {
 }
 
 /** The stored shelves, and when they were asked for (`performance.now()`). */
-async function readShelves(): Promise<{ shelves: DiscoverShelf[]; requestedAt: number } | null> {
+async function readShelves(): Promise<{ shelves: DiscoverShelf[]; hidden: number; requestedAt: number } | null> {
   const requestedAt = performance.now();
   try {
     const res = await fetch("/api/summaries/discover/shelves");
     if (!res.ok) return null;
-    const data = (await res.json()) as { shelves?: DiscoverShelf[] };
-    return Array.isArray(data.shelves) ? { shelves: data.shelves, requestedAt } : null;
+    const data = (await res.json()) as { shelves?: DiscoverShelf[]; hidden?: number };
+    const hidden = typeof data.hidden === "number" ? data.hidden : 0;
+    return Array.isArray(data.shelves) ? { shelves: data.shelves, hidden, requestedAt } : null;
   } catch {
     return null;
   }
 }
 
-export type OnShelves = (shelves: DiscoverShelf[], requestedAt: number) => void;
+export type OnShelves = (shelves: DiscoverShelf[], requestedAt: number, hidden: number) => void;
 
 /** Search from each seed in turn; `onShelves` gets the stored shelves after each run that landed. */
 async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg: string) => void): Promise<void> {
@@ -254,7 +255,7 @@ async function runSeeds(seeds: SeedDoc[], onShelves: OnShelves, announce?: (msg:
       // A pick that landed is done; one that failed stays picked for a retry.
       if (runMode === "pick") bar.picked.delete(seed.id);
       const read = await readShelves();
-      if (read) onShelves(read.shelves, read.requestedAt);
+      if (read) onShelves(read.shelves, read.requestedAt, read.hidden);
       // Every read returns the newest run per seed: the last one holds this run's shelves, so it decides.
       unshown = !read;
     } catch {

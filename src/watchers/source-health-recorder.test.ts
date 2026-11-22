@@ -122,3 +122,36 @@ describe("openSourceHealth", () => {
     expect(alerts).toHaveLength(1);
   });
 });
+
+describe("escalateAfter (F16: a weekly row shares run health's rule)", () => {
+  test("escalateAfter 1 alerts on the first failed run, keeps one id through the episode, and a partial error says so", async () => {
+    const ids: string[] = [];
+    for (let run = 1; run <= 3; run++) {
+      const rec = await openSourceHealth("w1", "YouTube discovery", NOW + run * 7 * 24 * H, { escalateAfter: 1 });
+      rec.mark("youtube:search", "error", "3 of 5 seeds failed: yt-dlp", { partial: true });
+      const alerts = await rec.finish();
+      expect(alerts).toHaveLength(1);
+      ids.push(alerts[0]!.id);
+      expect(alerts[0]!.summary).toContain("part of the last run still succeeded");
+      expect(alerts[0]!.summary).toContain("failed for part of its work");
+      expect(alerts[0]!.summary).not.toContain("not producing data");
+      expect(alerts[0]!.summary).not.toContain("no successful run");
+    }
+    // One episode, one bucket: the runner's id-dedup delivers it once.
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  test("the default stays 3", async () => {
+    const rec = await openSourceHealth("w1", "Committer", NOW);
+    rec.mark("committer:jarvis", "error", "boom");
+    expect(await rec.finish()).toHaveLength(0);
+  });
+
+  test("an ok mark keeps its detail", async () => {
+    const rec = await openSourceHealth("w1", "YouTube discovery", NOW, { escalateAfter: 1 });
+    rec.mark("youtube:search", "ok", "1 of 20 searches failed");
+    expect(await rec.finish()).toHaveLength(0);
+    const stored = store.get(SOURCE_HEALTH_KEY) as Record<string, { outcome: string; detail?: string }>;
+    expect(stored["youtube:search"]).toMatchObject({ outcome: "ok", detail: "1 of 20 searches failed" });
+  });
+});

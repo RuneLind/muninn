@@ -13,6 +13,12 @@ export const DISCOVER_SEED_CAP = 5;
 export const DISCOVER_WEEK_DAYS = 7;
 /** The weekly watcher looks back at most this far, however long ago it last ran. */
 export const DISCOVER_MAX_WINDOW_DAYS = 14;
+/**
+ * How far back a seed an earlier run left unsearched (its cap or deadline) stays a seed:
+ * four weekly runs. Older ones are dropped, so a week that always captures more than
+ * `maxSeeds` cannot grow the window without bound.
+ */
+export const DISCOVER_MAX_CARRY_DAYS = 28;
 
 export interface SeedDoc {
   id: string;
@@ -86,4 +92,20 @@ export function seedWindowStart(now: number, lastRunAt: number | null): string {
   const last = new Date(lastRunAt).toISOString().slice(0, 10);
   const floor = dayMinus(now, DISCOVER_MAX_WINDOW_DAYS - 1);
   return last >= week ? week : last < floor ? floor : last;
+}
+
+/** The oldest day a carried seed (or a retry record) can be from: {@link DISCOVER_MAX_CARRY_DAYS} back, today included. */
+export function carryFloorDay(now: number): string {
+  return dayMinus(now, DISCOVER_MAX_CARRY_DAYS - 1);
+}
+
+/**
+ * The weekly watcher's first day: {@link seedWindowStart}, widened back to `carryFrom`
+ * (the oldest seed an earlier run left unsearched), at most {@link DISCOVER_MAX_CARRY_DAYS}.
+ */
+export function discoveryWindowStart(now: number, lastRunAt: number | null, carryFrom: string | null): string {
+  const base = seedWindowStart(now, lastRunAt);
+  if (!carryFrom || carryFrom >= base) return base;
+  const floor = carryFloorDay(now);
+  return carryFrom < floor ? floor : carryFrom;
 }

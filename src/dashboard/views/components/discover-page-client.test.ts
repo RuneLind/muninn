@@ -1,7 +1,17 @@
 /** The Discover page's pure helpers: lengths, counts, ages, and which cards a shelf shows in what order. */
 import { describe, expect, test } from "bun:test";
-import { dscAge, dscCount, dscDuration, dscVisibleHits } from "./discover-page-client.ts";
-import type { DiscoverHit } from "../../../db/youtube-discover.ts";
+import {
+  createJobFollower,
+  dscAge,
+  dscCount,
+  dscDuration,
+  dscHiddenNote,
+  dscUndoState,
+  dscVisibleHits,
+  DSC_JOB_POLL_MAX_FAILS,
+  type CaptureEnd,
+} from "./discover-page-client.ts";
+import type { DiscoverHit, DiscoverHitState } from "../../../db/youtube-discover.ts";
 import { dscFilterSeeds } from "./discover-seed-bar-client.ts";
 import type { SeedDoc } from "../../../youtube/discover-seeds.ts";
 
@@ -101,3 +111,104 @@ describe("dscFilterSeeds (PR 3 pick list)", () => {
     expect(dscFilterSeeds(docs, "", 2).map((d) => d.id)).toEqual(["ai/agents/1.md", "ai/claude/2.md"]);
   });
 });
+
+describe("dscHiddenNote (F18)", () => {
+  test("nothing when none hidden; the count otherwise", () => {
+    expect(dscHiddenNote(0)).toBe("");
+    expect(dscHiddenNote(1)).toStartWith("1 older shelf not shown.");
+    expect(dscHiddenNote(4)).toStartWith("4 older shelves not shown.");
+  });
+});
+
+describe("createJobFollower (F17)", () => {
+  /** A manual clock: each `run()` fires the pending poll. */
+  function harness(answer: () => Promise<{ id: string; status: string; error?: string }[]>) {
+    let pending: (() => void) | null = null;
+    let polls = 0;
+    const f = createJobFollower({
+      fetchJobs: () => {
+        polls++;
+        return answer();
+      },
+      setTimer: (fn) => void (pending = fn),
+    });
+    const run = async () => {
+      const fn = pending;
+      pending = null;
+      fn?.();
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    };
+    return { f, run, polls: () => polls, idle: () => pending === null };
+  }
+
+  test("one poll serves every followed job; it stops once none is followed", async () => {
+    let list = [{ id: "a", status: "summarizing" }, { id: "b", status: "summarizing" }];
+    const h = harness(async () => list);
+    const ends: string[] = [];
+    void h.f.follow("a").then((e) => ends.push(`a:${e.end}`));
+    void h.f.follow("b").then((e) => ends.push(`b:${e.end}`));
+    await h.run();
+    expect(h.polls()).toBe(1);
+    list = [{ id: "a", status: "error" }, { id: "b", status: "complete" }];
+    await h.run();
+    expect(ends.sort()).toEqual(["a:error", "b:complete"]);
+    expect(h.idle()).toBe(true);
+  });
+
+  test("a job followed while a poll is in flight is judged only by a later poll", async () => {
+    let answerHeld: (jobs: { id: string; status: string; error?: string }[]) => void = () => {};
+    let answer = () => new Promise<{ id: string; status: string; error?: string }[]>((r) => (answerHeld = r));
+    const h = harness(() => answer());
+    const ends: string[] = [];
+    void h.f.follow("a").then((e) => ends.push(`a:${e.end}`));
+    await h.run(); // poll 1 starts and holds
+    expect(h.polls()).toBe(1);
+    void h.f.follow("b").then((e) => ends.push(`b:${e.end}`));
+    answerHeld([{ id: "a", status: "summarizing" }]); // poll 1's answer, asked before b was followed
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(ends).toEqual([]);
+    answer = async () => [{ id: "a", status: "summarizing" }, { id: "b", status: "error", error: "no captions" }];
+    await h.run();
+    expect(h.polls()).toBe(2);
+    expect(ends).toEqual(["b:error"]);
+  });
+
+  test("a job the store no longer has is lost; failed polls give up after the bound", async () => {
+    const h = harness(async () => []);
+    const end = h.f.follow("gone");
+    await h.run();
+    expect(await end).toEqual({ end: "lost" });
+
+    const down = harness(async () => {
+      throw new Error("offline");
+    });
+    let settled: unknown = null;
+    void down.f.follow("x").then((e) => (settled = e));
+    for (let i = 0; i < DSC_JOB_POLL_MAX_FAILS - 1; i++) await down.run();
+    expect(settled).toBeNull();
+    await down.run();
+    expect(settled).toEqual({ end: "lost" });
+    expect(down.idle()).toBe(true);
+  });
+});
+
+describe("dscUndoState (F17 fix round 2 batch 2)", () => {
+  const capture = (end?: CaptureEnd) => ({ before: "later" as DiscoverHitState, ...(end ? { end } : {}) });
+  test("a video queued by this page: queued while the job runs, after it completed, and when no job was followed", () => {
+    expect(dscUndoState("queued", capture())).toBe("queued");
+    expect(dscUndoState("queued", capture({ end: "complete" }))).toBe("queued");
+  });
+  test("after a failed or a lost capture: the state before Summarize", () => {
+    expect(dscUndoState("queued", capture({ end: "error", message: "x" }))).toBe("later");
+    expect(dscUndoState("queued", capture({ end: "lost" }))).toBe("later");
+  });
+  test("a video queued before this page loaded, or any other state, is written back as it was", () => {
+    expect(dscUndoState("queued", undefined)).toBe("queued");
+    for (const s of ["new", "later", "dismissed"] as DiscoverHitState[]) {
+      expect(dscUndoState(s, capture({ end: "error", message: "x" }))).toBe(s);
+      expect(dscUndoState(s, capture({ end: "lost" }))).toBe(s);
+      expect(dscUndoState(s, capture({ end: "complete" }))).toBe(s);
+    }
+  });
+});
+

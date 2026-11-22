@@ -9,10 +9,13 @@
  * address. A failed save still answers the results, with `runId: null`.
  * Captures nothing (D2): Summarize is a click on `POST /api/youtube/summarize`.
  *
- * `GET /summaries/discover` — the page: the newest run of each seed as a shelf.
- * `POST /api/summaries/discover/state` `{videoId, state}` — Later, Dismiss, Undo,
- * and `queued` after a Summarize started; a dismissed or queued video joins the
- * known set and is never suggested again.
+ * `GET /summaries/discover` — the page: the newest run of each seed as a shelf,
+ * at most 40 plus every older one holding a Later video (`listDiscoverShelfPage`).
+ * `POST /api/summaries/discover/state` `{videoId, state, ifState?}` — Later,
+ * Dismiss, Undo, and `queued` after a Summarize started; a dismissed or queued
+ * video joins the known set and is never suggested again. With `ifState` the
+ * write applies only while the video is in that state (409 `state_changed`
+ * otherwise): a failed capture puts a video back only while it is still `queued`.
  * `POST /api/summaries/discover/details` `{videoId}` — the drawer's details: one
  * yt-dlp probe for a STORED video (a POST because it spawns a process), one at a
  * time process-wide, cached on its hit rows.
@@ -36,14 +39,14 @@ import {
   getDiscoverKnownVideoIds,
   getDiscoverVideoDetails,
   isDiscoverHitState,
-  listDiscoverShelves,
+  listDiscoverShelfPage,
   saveDiscoverRun,
   saveDiscoverVideoDetails,
   setDiscoverVideoState,
   type DiscoverHitInput,
   type DiscoverHitState,
   type DiscoverRunInput,
-  type DiscoverShelf,
+  type DiscoverShelfPage,
   type DiscoverVideoDetails,
 } from "../../db/youtube-discover.ts";
 import { renderSummariesDiscoverPage } from "../views/summaries-discover-page.ts";
@@ -87,10 +90,12 @@ export interface SummariesDiscoverDeps {
   store: {
     saveRun: (run: DiscoverRunInput, hits: readonly DiscoverHitInput[]) => Promise<string>;
     knownIds: () => Promise<Set<string>>;
-    setState: (videoId: string, state: DiscoverHitState) => Promise<number>;
+    /** Rows changed; with `ifState`, only rows still in that state change. */
+    setState: (videoId: string, state: DiscoverHitState, ifState?: DiscoverHitState) => Promise<number>;
     getDetails: (videoId: string) => Promise<DiscoverVideoDetails | null | undefined>;
     saveDetails: (videoId: string, details: DiscoverVideoDetails) => Promise<void>;
-    listShelves: () => Promise<DiscoverShelf[]>;
+    /** The page's shelves and how many older ones it left out. */
+    listShelves: () => Promise<DiscoverShelfPage>;
   };
   /** One details probe: details, `"unavailable"` when the video is gone, or `null` when it failed. `signal` aborts when no caller is left. */
   probeDetails: (videoId: string, signal?: AbortSignal) => Promise<DiscoverVideoDetails | "unavailable" | null>;
@@ -105,7 +110,7 @@ export const DISCOVER_STORE: SummariesDiscoverDeps["store"] = {
   setState: setDiscoverVideoState,
   getDetails: getDiscoverVideoDetails,
   saveDetails: saveDiscoverVideoDetails,
-  listShelves: () => listDiscoverShelves(),
+  listShelves: () => listDiscoverShelfPage(),
 };
 
 export function defaultSummariesDiscoverDeps(
@@ -197,14 +202,14 @@ export function registerSummariesDiscoverRoutes(
   }
 
   app.get("/summaries/discover", async (c) => {
-    let shelves: DiscoverShelf[];
+    let page: DiscoverShelfPage;
     try {
-      shelves = await deps.store.listShelves();
+      page = await deps.store.listShelves();
     } catch (err) {
       log.error("Discover page: shelves read failed: {error}", { error: errText(err) });
-      return c.html(await renderSummariesDiscoverPage({ shelves: [], error: "Could not read the stored shelves." }), 500);
+      return c.html(await renderSummariesDiscoverPage({ shelves: [], hidden: 0, error: "Could not read the stored shelves." }), 500);
     }
-    return c.html(await renderSummariesDiscoverPage({ shelves }));
+    return c.html(await renderSummariesDiscoverPage({ shelves: page.shelves, hidden: page.hidden }));
   });
 
   /** The seed bar's choices: every YouTube summary, newest first, and the categories. */
@@ -221,7 +226,8 @@ export function registerSummariesDiscoverRoutes(
   /** The stored shelves, for the page to re-render after a run. */
   app.get("/api/summaries/discover/shelves", async (c) => {
     try {
-      return c.json({ shelves: await deps.store.listShelves() });
+      const page = await deps.store.listShelves();
+      return c.json({ shelves: page.shelves, hidden: page.hidden });
     } catch (err) {
       log.error("Discover: shelves read failed: {error}", { error: errText(err) });
       return c.json({ error: "Could not read the stored shelves.", code: "internal" }, 500);
@@ -280,6 +286,7 @@ export function registerSummariesDiscoverRoutes(
             known: out.known,
             origin,
             botName: bot.name,
+            failed: out.failed,
           },
           out.results,
         );
@@ -311,8 +318,11 @@ export function registerSummariesDiscoverRoutes(
     const videoId = videoIdOf(body);
     if (!videoId) return fail(c, 400, "bad_video_id", "videoId is not a YouTube video id");
     if (!isDiscoverHitState(body.state)) return fail(c, 400, "bad_state", "state is new, later, dismissed or queued");
+    const ifState = body.ifState;
+    if (ifState !== undefined && !isDiscoverHitState(ifState)) return fail(c, 400, "bad_state", "ifState is new, later, dismissed or queued");
     try {
-      const changed = await deps.store.setState(videoId, body.state);
+      const changed = await deps.store.setState(videoId, body.state, ifState);
+      if (changed === 0 && ifState) return fail(c, 409, "state_changed", `The video is no longer ${ifState}.`);
       if (changed === 0) return fail(c, 404, "unknown_video", "No stored suggestion has this video.");
       return c.json({ videoId, state: body.state });
     } catch (err) {
