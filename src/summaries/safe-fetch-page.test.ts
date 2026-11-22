@@ -117,6 +117,42 @@ describe("F61: the body is decoded in the charset the answer declares", () => {
     expect(decodeBody(latin1('<meta charset="iso-8859-1">å'), "text/plain")).toBe('<meta charset="iso-8859-1">�');
   });
 
+  describe("only what the HTML prescan counts declares a charset (fix round 1)", () => {
+    const utf8 = (s: string) => new TextEncoder().encode(s);
+    const html = "text/html";
+    test("`charset=` inside a description's content is no declaration", () => {
+      const doc = '<meta name="description" content="How to set charset=iso-8859-1 in Apache"><p>Blåbær</p>';
+      expect(decodeBody(utf8(doc), html)).toBe(doc);
+    });
+    test("a commented-out <meta charset> is no declaration; the one after it is", () => {
+      // The `>` inside the comment ends no tag: only `-->` ends it.
+      const doc = '<!-- a > b <meta charset="iso-8859-1"> --><meta charset="utf-8"><p>Blåbær</p>';
+      expect(decodeBody(utf8(doc), html)).toBe(doc);
+      expect(decodeBody(latin1('<!-- x --><meta charset="iso-8859-1"><p>Blåbær</p>'), html)).toBe('<!-- x --><meta charset="iso-8859-1"><p>Blåbær</p>');
+    });
+    test("`data-charset=` is not the charset attribute", () => {
+      const doc = '<meta data-charset="iso-8859-1"><p>Blåbær</p>';
+      expect(decodeBody(utf8(doc), html)).toBe(doc);
+    });
+    test("a content charset counts only beside http-equiv=content-type", () => {
+      const doc = '<meta property="og:x" content="text/html; charset=iso-8859-1"><p>Blåbær</p>';
+      expect(decodeBody(utf8(doc), html)).toBe(doc);
+      const refresh = '<meta http-equiv="refresh" content="text/html; charset=iso-8859-1"><p>Blåbær</p>';
+      expect(decodeBody(utf8(refresh), html)).toBe(refresh);
+      const equiv ="<meta content='text/html; charset=iso-8859-1' http-equiv=CONTENT-TYPE><p>Blåbær</p>";
+      expect(decodeBody(latin1(equiv), html)).toBe(equiv);
+    });
+    test("a tag's attribute that spells a meta tag is no declaration", () => {
+      const doc = '<div title="<meta charset=iso-8859-1>"></div><p>Blåbær</p>';
+      expect(decodeBody(utf8(doc), html)).toBe(doc);
+    });
+    test("`charset=` inside a quoted content-type parameter is no charset", () => {
+      expect(decodeBody(utf8("<p>Blåbær</p>"), 'text/html; foo="a;charset=latin1"')).toBe("<p>Blåbær</p>");
+      expect(decodeBody(latin1("<p>Blåbær</p>"), 'text/html; foo="a;b"; Charset="ISO-8859-1"')).toBe("<p>Blåbær</p>");
+      expect(decodeBody(latin1("<p>Blåbær</p>"), "text/html;charset=iso-8859-1;charset=utf-8")).toBe("<p>Blåbær</p>");
+    });
+  });
+
   test("an unknown label and an undeclared body stay UTF-8", async () => {
     expect((await safeFetchPage("http://pub.test/utf8-unknown-label", opts()))?.text).toBe("<title>Blåbær</title>");
     expect(await safeFetchText("http://pub.test/utf8-plain", opts())).toBe("<title>Blåbær</title>");

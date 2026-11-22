@@ -121,7 +121,11 @@ const LD_JSON_TYPE_RE = /\btype\s*=\s*["']?application\/ld\+json/i;
  * The bodies `/<script\b[^>]*\btype\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script\s*>/gi`
  * captured: the type is read off the open tag (up to its first `>`), the
  * close is the first `</script>` after it, and an open tag that is not
- * JSON-LD or has no close resumes the scan one character on.
+ * JSON-LD or has no close resumes the scan after its `>`. The regex resumed
+ * one character on, but an opener inside the same tag reads a suffix of the
+ * same text up to the same `>` and the same close, so it fails too; testing
+ * each one re-read the tag (fix round 1: 23 s on 2 MB of `<script ` openers
+ * before one `>`).
  */
 export function ldJsonBodies(markup: string): string[] {
   const out: string[] = [];
@@ -134,7 +138,7 @@ export function ldJsonBodies(markup: string): string[] {
     if (gt < 0) break;
     const close = LD_JSON_TYPE_RE.test(markup.slice(opens.lastIndex, gt)) ? nextClose(gt + 1) : null;
     if (!close) {
-      opens.lastIndex = m.index + 1;
+      opens.lastIndex = gt + 1;
       continue;
     }
     out.push(markup.slice(gt + 1, close.index));

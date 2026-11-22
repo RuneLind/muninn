@@ -14,6 +14,7 @@ import {
   inlineAnchorTexts,
   insertFoundLinks,
   isSiteNameSuffix,
+  JUDGE_PAGE_MAX_CHARS,
   judgePage,
   lineTitleOf,
   linksBaseHash,
@@ -690,6 +691,22 @@ describe("F59: judgePage is linear on a hostile body", () => {
   }
 });
 
+describe("F59 fix round 1: JSON-LD openers sharing one >", () => {
+  test("a 2 MB body of `<script ` openers before one `>`, with an author to check, stays under 500 ms", () => {
+    // pageBylines reads JSON-LD only when the candidate names an author and the
+    // visible text reaches AUTHOR_CHECK_MIN_TEXT; each opener re-read the whole tag.
+    const prose = filler("Start with the defaults and adjust from there.");
+    // Within JUDGE_PAGE_MAX_CHARS, so the cut keeps the closing `>`.
+    const p = page(prose + "<script ".repeat(Math.floor((JUDGE_PAGE_MAX_CHARS - prose.length - 1) / 8)) + ">");
+    expect(p.text!.length).toBeGreaterThan(JUDGE_PAGE_MAX_CHARS - 9);
+    expect(p.text!.length).toBeLessThanOrEqual(JUDGE_PAGE_MAX_CHARS);
+    const t = performance.now();
+    const v = judgePage(LYDIA, p, "Start with the defaults and adjust from there.");
+    expect(performance.now() - t).toBeLessThan(500);
+    expect(v.authorCheck).toBe("failed");
+  });
+});
+
 describe("F62: a stored line's title and detail are clipped", () => {
   test("a megabyte og:title and og:site_name reach the line as 300 characters each", () => {
     const huge = "word ".repeat(200_000);
@@ -699,6 +716,22 @@ describe("F62: a stored line's title and detail are clipped", () => {
     expect(line?.label).toBe("reachable");
     expect(line!.title.length).toBe(300);
     expect(line!.detail.length).toBeLessThanOrEqual(300);
+  });
+
+  test("an emoji straddling the 300th character is dropped whole, never halved", () => {
+    const title = `${"a".repeat(299)}😀 tail`;
+    const site = `${"b".repeat(299)}😀 tail`;
+    const p = page(`<meta property="og:title" content="${title}"><meta property="og:site_name" content="${site}">${filler("Start with the defaults and adjust from there.")}`);
+    const line = foundLinkFrom(LYDIA, p, { url: p.finalUrl, title: "", quote: "" }, judgePage(LYDIA, p, "Start with the defaults and adjust from there."));
+    expect(line!.title).toBe("a".repeat(299));
+    expect(line!.detail).toBe("b".repeat(299));
+  });
+
+  test("a site name's line breaks and edge spaces are collapsed, as the title's are", () => {
+    // The panel row now carries what renderLinkLine writes (it collapsed white space already).
+    const p = page(`<title>Effort levels</title><meta property="og:site_name" content=" My\n  Site ">${filler("Start with the defaults and adjust from there.")}`);
+    const line = foundLinkFrom(LYDIA, p, { url: p.finalUrl, title: "", quote: "" }, judgePage(LYDIA, p, "Start with the defaults and adjust from there."));
+    expect(line).toMatchObject({ title: "Effort levels", detail: "My Site" });
   });
 
   test("an ordinary title is stored as it was", () => {

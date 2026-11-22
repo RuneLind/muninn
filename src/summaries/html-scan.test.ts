@@ -52,6 +52,10 @@ describe("each reader answers what its regex answered (random markup)", () => {
     const ld = ["<script", " type=", '"application/ld+json"', "application/ld+json", "'", ">", "</script>", "</script >", "x", " ", "<", "{}"];
     for (const h of randomInputs(ld, 5000, 42)) expect({ h, o: ldJsonBodies(h) }).toEqual({ h, o: ORACLE.ldJson(h) });
   });
+  test("ldJsonBodies, several openers inside one tag", () => {
+    const ld = ["<script", "<script ", " type=", '"application/ld+json"', "application/ld+json", ">", "</script>", "x", " "];
+    for (const h of randomInputs(ld, 5000, 1117)) expect({ h, o: ldJsonBodies(h) }).toEqual({ h, o: ORACLE.ldJson(h) });
+  });
   test("withoutLinkTargets", () => {
     const md = ["[", "]", "(", ")", "a", " ", " ", "\n", "]("];
     for (const t of randomInputs(md, 5000, 7)) expect({ t, o: withoutLinkTargets(t) }).toEqual({ t, o: ORACLE.linkTargets(t) });
@@ -70,6 +74,9 @@ describe("F59: each reader is linear on unclosed openers", () => {
     ["<meta without >", () => [...openTags(KB256("<meta "), /<meta\b/gi)]],
     ["<title> without </title>", () => firstElementText(KB256("<title>"), "title")],
     ["JSON-LD <script> without </script>", () => ldJsonBodies(KB256('<script type="application/ld+json">'))],
+    // Fix round 1: each `<script ` opener before the one `>` re-read the whole
+    // tag. 1 MB, since 256 KB took 347 ms: under the bound, quadratic or not.
+    ["<script openers sharing one >", () => ldJsonBodies(`${"<script ".repeat(131_072)}>`)],
     ["[ without ]( ", () => withoutLinkTargets(KB256("[a "))],
     ["[x]( without )", () => withoutLinkTargets(KB256("[x](a"))],
   ];

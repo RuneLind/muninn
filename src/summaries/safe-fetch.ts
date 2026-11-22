@@ -119,11 +119,174 @@ function decoderFor(label: string): TextDecoder | null {
 /** How far into an HTML body a `<meta charset>` is looked for (the HTML prescan's 1024 bytes). */
 const META_PRESCAN_BYTES = 1024;
 
+const isHttpSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\r";
+
+/**
+ * The `charset` parameter of a content-type, parsed as the WHATWG MIME type
+ * parser reads parameters: a quoted value is an HTTP quoted string (so
+ * `foo="a;charset=x"` names no charset), and the first `charset` wins.
+ */
+function contentTypeCharset(contentType: string | null): string | null {
+  const s = contentType ?? "";
+  let i = s.indexOf(";");
+  if (i < 0) return null;
+  while (i < s.length) {
+    i++; // past `;`
+    while (isHttpSpace(s[i])) i++;
+    let name = "";
+    while (i < s.length && s[i] !== ";" && s[i] !== "=") name += s[i++];
+    name = name.toLowerCase();
+    if (i >= s.length) break;
+    if (s[i] === ";") continue;
+    i++; // past `=`
+    let value = "";
+    if (s[i] === '"') {
+      i++;
+      while (i < s.length && s[i] !== '"') {
+        if (s[i] === "\\" && i + 1 < s.length) i++;
+        value += s[i++];
+      }
+      while (i < s.length && s[i] !== ";") i++;
+    } else {
+      while (i < s.length && s[i] !== ";") value += s[i++];
+      value = value.replace(/[ \t\n\r]+$/, "");
+      if (value === "") continue;
+    }
+    if (name === "charset") return value;
+  }
+  return null;
+}
+
+const isPrescanSpace = (c: string | undefined) => c === " " || c === "\t" || c === "\n" || c === "\f" || c === "\r";
+const isAsciiLetter = (c: string | undefined) => c !== undefined && /^[A-Za-z]$/.test(c);
+
+/** One attribute of a tag at `pos`, as the prescan's "get an attribute" reads it; `null` at the tag's `>` or the end. */
+function prescanAttribute(s: string, pos: number): { name: string; value: string; pos: number } | null {
+  while (isPrescanSpace(s[pos]) || s[pos] === "/") pos++;
+  if (pos >= s.length || s[pos] === ">") return null;
+  let name = "";
+  for (;;) {
+    if (pos >= s.length) return null;
+    const c = s[pos]!;
+    if (c === "=" && name !== "") break;
+    if (isPrescanSpace(c)) {
+      while (isPrescanSpace(s[pos])) pos++;
+      if (s[pos] !== "=") return { name, value: "", pos };
+      break;
+    }
+    if (c === "/" || c === ">") return { name, value: "", pos };
+    name += c.toLowerCase();
+    pos++;
+  }
+  pos++; // past `=`
+  while (isPrescanSpace(s[pos])) pos++;
+  const q = s[pos];
+  if (q === '"' || q === "'") {
+    const end = s.indexOf(q, pos + 1);
+    if (end < 0) return null;
+    return { name, value: s.slice(pos + 1, end).toLowerCase(), pos: end + 1 };
+  }
+  if (q === ">") return { name, value: "", pos };
+  let value = "";
+  while (pos < s.length && !isPrescanSpace(s[pos]) && s[pos] !== ">") value += s[pos++]!.toLowerCase();
+  if (pos >= s.length) return null;
+  return { name, value, pos };
+}
+
+/** The WHATWG "extracting a character encoding from a meta element" over a `content` value. */
+function charsetFromMetaContent(content: string): string | null {
+  let pos = 0;
+  for (;;) {
+    const at = content.indexOf("charset", pos);
+    if (at < 0) return null;
+    pos = at + 7;
+    while (isPrescanSpace(content[pos])) pos++;
+    if (content[pos] !== "=") continue;
+    pos++;
+    while (isPrescanSpace(content[pos])) pos++;
+    const c = content[pos];
+    if (c === undefined) return null;
+    if (c === '"' || c === "'") {
+      const end = content.indexOf(c, pos + 1);
+      return end < 0 ? null : content.slice(pos + 1, end);
+    }
+    let end = pos;
+    while (end < content.length && !isPrescanSpace(content[end]) && content[end] !== ";") end++;
+    return content.slice(pos, end);
+  }
+}
+
+/**
+ * The encoding a `<meta>` declares in `head`, by the WHATWG prescan (fix round
+ * 1): comments are skipped, every other tag's attributes are skipped whole,
+ * `charset` counts only as an attribute name, and a `content` charset only
+ * beside `http-equiv="content-type"`. A label the runtime does not know is
+ * passed over, as the prescan does; UTF-16 is read as UTF-8.
+ */
+function prescanMetaDecoder(head: string): TextDecoder | null {
+  let pos = 0;
+  while (pos < head.length) {
+    if (head.startsWith("<!--", pos)) {
+      const end = head.indexOf("-->", pos + 2);
+      if (end < 0) return null;
+      pos = end + 3;
+      continue;
+    }
+    if (/^<meta[ \t\n\f\r/]/i.test(head.slice(pos, pos + 6))) {
+      pos += 6;
+      const seen = new Set<string>();
+      let gotPragma = false;
+      let needPragma: boolean | null = null;
+      let charset: string | null = null;
+      for (let a = prescanAttribute(head, pos); a; a = prescanAttribute(head, pos)) {
+        pos = a.pos;
+        if (seen.has(a.name)) continue;
+        seen.add(a.name);
+        if (a.name === "http-equiv") {
+          if (a.value === "content-type") gotPragma = true;
+        } else if (a.name === "content") {
+          if (charset === null) {
+            const found = charsetFromMetaContent(a.value);
+            if (found !== null) {
+              charset = found;
+              needPragma = true;
+            }
+          }
+        } else if (a.name === "charset") {
+          charset = a.value;
+          needPragma = false;
+        }
+      }
+      if (needPragma !== null && !(needPragma && !gotPragma) && charset !== null) {
+        const found = decoderFor(charset);
+        if (found) return found.encoding.startsWith("utf-16") ? new TextDecoder("utf-8") : found;
+      }
+      pos++;
+      continue;
+    }
+    if (head[pos] === "<" && (isAsciiLetter(head[pos + 1]) || (head[pos + 1] === "/" && isAsciiLetter(head[pos + 2])))) {
+      while (pos < head.length && !isPrescanSpace(head[pos]) && head[pos] !== ">") pos++;
+      for (let a = prescanAttribute(head, pos); a; a = prescanAttribute(head, pos)) pos = a.pos;
+      pos++;
+      continue;
+    }
+    if (head.startsWith("<!", pos) || head.startsWith("</", pos) || head.startsWith("<?", pos)) {
+      const end = head.indexOf(">", pos);
+      if (end < 0) return null;
+      pos = end + 1;
+      continue;
+    }
+    pos++;
+  }
+  return null;
+}
+
 /**
  * The body as text, in the encoding the answer declares (F61; a Latin-1 page
  * decoded as UTF-8 lost every non-ASCII letter to U+FFFD): a byte-order mark
  * first, then the content-type's `charset`, then — for HTML — a `<meta
- * charset>` or `http-equiv` content-type in the first 1024 bytes, else UTF-8.
+ * charset>` or `http-equiv` content-type in the first 1024 bytes, read by the
+ * WHATWG prescan ({@link prescanMetaDecoder}), else UTF-8.
  * A label the runtime does not know is skipped. A meta tag naming UTF-16 is
  * read as UTF-8, as browsers do (the bytes that spelled the tag were ASCII).
  */
@@ -136,14 +299,11 @@ export function decodeBody(buf: Uint8Array, contentType: string | null): string 
         : buf[0] === 0xff && buf[1] === 0xfe
           ? "utf-16le"
           : null;
-  const declared = /;\s*charset\s*=\s*["']?([^"';\s]+)/i.exec(contentType ?? "")?.[1];
+  const declared = contentTypeCharset(contentType);
   let decoder = (bom && decoderFor(bom)) || (declared && decoderFor(declared)) || null;
   const type = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
   if (!decoder && (type === "text/html" || type === "application/xhtml+xml")) {
-    const head = new TextDecoder("windows-1252").decode(buf.subarray(0, META_PRESCAN_BYTES));
-    const meta = /<meta\b[^>]*?\bcharset\s*=\s*["']?\s*([\w.:-]+)/i.exec(head)?.[1];
-    const found = meta ? decoderFor(meta) : null;
-    decoder = found && found.encoding.startsWith("utf-16") ? null : found;
+    decoder = prescanMetaDecoder(new TextDecoder("windows-1252").decode(buf.subarray(0, META_PRESCAN_BYTES)));
   }
   // A UTF-16 decoder strips its own BOM; utf-8's `ignoreBOM: false` default does too.
   return (decoder ?? new TextDecoder("utf-8")).decode(buf);

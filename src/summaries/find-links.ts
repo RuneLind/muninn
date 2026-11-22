@@ -435,8 +435,13 @@ export function authorSurname(author: string | null): string | null {
 
 const KINDS = new Set(["post", "paper", "repo", "tool", "doc"]);
 
+/** White space collapsed, at most FIELD_MAX UTF-16 units, never ending in half of a surrogate pair the cut split. */
 function clip(value: unknown): string {
-  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, FIELD_MAX) : "";
+  if (typeof value !== "string") return "";
+  const s = value.replace(/\s+/g, " ").trim();
+  if (s.length <= FIELD_MAX) return s;
+  const last = s.charCodeAt(FIELD_MAX - 1);
+  return s.slice(0, last >= 0xd800 && last <= 0xdbff ? FIELD_MAX - 1 : FIELD_MAX);
 }
 
 /** One candidate from untrusted JSON, bounded; `null` when it carries neither topic nor title. */
@@ -783,8 +788,10 @@ export interface FoundLink {
  * candidate's, D19 8), and the site name alone (D22): a page's byline metadata
  * names commenters and cited authors and drops co-authors, so none is stored.
  * The agent's manifest title is never stored: it is untrusted text. `_entry`
- * stays in the signature for the route's call. Title and detail are clipped
- * to 300 characters (F62: a crafted page stored a 1.07M-character line).
+ * stays in the signature for the route's call. Title and detail have their
+ * white space collapsed (as `renderLinkLine` writes them, so the clip counts
+ * written characters) and are clipped to 300 characters (F62: a crafted page
+ * stored a 1.07M-character line).
  */
 export function foundLinkFrom(c: LinkCandidate, page: SafePage, _entry: ManifestEntry, verdict: PageVerdict): FoundLink | null {
   if (!verdict.label) return null;
