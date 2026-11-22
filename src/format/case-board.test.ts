@@ -374,7 +374,7 @@ describe("fix round 2: CaseBoard", () => {
 });
 
 /** Anchors `l0`…`l8`, each list holding 10 aliases of the one before, padded
- *  to 545 bytes: ~1.1·10^8 copies of the `l0` case when every alias is copied,
+ *  to 545 bytes: ~1.2·10^8 copies of the `l0` case when every alias is copied,
  *  a few dozen nodes when each anchor is. */
 function aliasBombYaml(): string {
   const lines = ["- &l0 {id: MEL-1, status: ok}"];
