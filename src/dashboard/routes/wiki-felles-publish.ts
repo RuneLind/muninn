@@ -69,7 +69,7 @@ import {
   type FellesPublishConfig,
 } from "../../wiki/felles-publish.ts";
 import { parseFellesStatus, type FellesStatus } from "../../wiki/felles-status.ts";
-import { fellesFjernVerdict, fellesRemoveDataFiles, type FellesFjernVerdict } from "../../wiki/felles-remove.ts";
+import { fellesFjernVerdict, fellesRemoveDataFiles, type FellesFjernVerdict, type IndexedPage } from "../../wiki/felles-remove.ts";
 import { readonlyRefusal } from "./route-utils.ts";
 import { decideStampRequest, originMatchesHost } from "./wiki-stamp.ts";
 import { ProcTimeoutError, runProc } from "../../utils/run-proc.ts";
@@ -316,13 +316,13 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
     if (target.refusal) return c.json(target.refusal.body, target.refusal.status);
     const { entry, bin } = target;
     let pageRel: string | undefined;
-    let pageRelPaths: string[] = [];
+    let indexPages: readonly IndexedPage[] = [];
     if (action !== "sync") {
       const index = await getWikiIndex({ root: entry.root });
       const meta = index?.resolveRelPath(relPath);
       if (!meta) return c.json({ error: `no page at "${relPath}"` }, 404);
       pageRel = meta.relPath;
-      if (action === "remove") pageRelPaths = index!.pages.map((p) => p.relPath);
+      if (action === "remove") indexPages = index!.pages;
     }
     if (!existsSync(bin)) {
       return c.json({ error: `${FELLES_PUBLISH_BIN_ENV} names a file that does not exist` }, 501);
@@ -338,7 +338,7 @@ export function registerWikiFellesPublishRoute(app: Hono, deps: FellesPublishRou
       // three lists ride the answer, so the dialog's confirm row names every
       // object the confirm deletes and every one it keeps.
       const removeFiles =
-        action === "remove" && pageRel ? await fellesRemoveDataFiles(entry.root, pageRel, pageRelPaths) : undefined;
+        action === "remove" && pageRel ? await fellesRemoveDataFiles(entry.root, pageRel, indexPages) : undefined;
       const dataFiles = removeFiles?.dataFiles ?? [];
       const goneKey = `${entry.name.toLowerCase()}\u0000${(pageRel ?? "").normalize("NFC")}`;
       if (dataFilesOnly) {

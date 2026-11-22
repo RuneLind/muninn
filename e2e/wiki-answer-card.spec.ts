@@ -297,6 +297,13 @@ const closeTerminal = async (id: string) => {
 };
 const CLOSED_MSG = "The answer was not saved: the question was closed while you were writing.";
 
+// Arch review 2026-11-16 F49: W1 is reworded under an open tab, same id and labels.
+const REWORD_REL = "plans/reword.mdx";
+const rewordPage = (text: string) =>
+  ["---", "title: Reword page", "type: plan", "---", "", ...q("W1", text, ' choices="A|B"')].join("\n");
+const CHANGED_MSG =
+  "The answer was not saved: the question was changed since this page loaded. Reload the page, read the new wording and answer again.";
+
 // WIKI_ANSWER_GROUPS: synthetic groups and idents (Z99xxxx). The answers are
 // seeded by SQL with an author ident — auth off has only the owner, no ident.
 const GROUPS_REL = "plans/groups.mdx";
@@ -345,6 +352,7 @@ test.beforeAll(async ({}, info) => {
   await writeFile(path.join(base, "a", REDACT_REL), REDACT_PAGE, "utf8");
   await writeFile(path.join(base, "a", SWEEP_REL), SWEEP_PAGE, "utf8");
   await writeFile(path.join(base, "a", GROUPS_REL), GROUPS_PAGE, "utf8");
+  await writeFile(path.join(base, "a", REWORD_REL), rewordPage("Ship on Monday?"), "utf8");
   await writeFile(path.join(base, "a", TERMINAL_REL), terminalPage(), "utf8");
   await writeFile(path.join(base, "ro", REL), PAGE, "utf8");
   await writeFile(path.join(base, "no", REL), PAGE_NO, "utf8");
@@ -1789,6 +1797,29 @@ test.describe("Wiki reader: a save the server refuses for good", () => {
     await expect(t2).not.toHaveClass(/\bq-open\b/);
     await expect(t2).toHaveAttribute("data-question-state", "closed");
     expect(await rowsFor("T2", TERMINAL_REL)).toHaveLength(0);
+    expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
+    expect(seen.errors).toEqual([]);
+  });
+
+  test("a save after the question was reworded (same id and labels) is refused with the reload line; nothing is stored", async ({ page }) => {
+    const seen = await openPage(page, WIKI, REWORD_REL);
+    const w1 = card(page, "W1");
+    const rendered = await w1.getAttribute("data-question-hash");
+    expect(rendered).toBe(qHash("Ship on Monday?", "A|B"));
+    const sent: unknown[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && r.url().endsWith("/api/wiki/answers")) sent.push(r.postDataJSON());
+    });
+    await w1.locator(".q-choice", { hasText: "A" }).click();
+    await w1.locator("textarea.q-text").fill("Monday works.");
+    await writeFile(path.join(base, "a", REWORD_REL), rewordPage("Ship on Friday?"), "utf8");
+    await w1.locator("button.q-save").click();
+
+    await expect(w1.locator(".q-msg-error")).toHaveText(CHANGED_MSG);
+    // The draft stays, so the reader can copy it before reloading.
+    await expect(w1.locator("textarea.q-text")).toHaveValue("Monday works.");
+    expect(sent).toEqual([expect.objectContaining({ questionId: "W1", choice: "A", questionHash: rendered })]);
+    expect(await rowsFor("W1", REWORD_REL)).toHaveLength(0);
     expect(seen.failed).toEqual(["409 /api/wiki/answers"]);
     expect(seen.errors).toEqual([]);
   });

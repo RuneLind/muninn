@@ -532,3 +532,31 @@ describe("fix round 2: a fact mark over the reopen phrase", () => {
     ]);
   });
 });
+
+// Arch review 2026-11-16 F49 fix round 1: the hash map is keyed by the raw
+// parse's id, the card by the render's, where a wikilink is a sentinel.
+describe("arch 11-16 F49: every answerable card carries its question hash", () => {
+  test("a wikilinked id gets the hash the answer route computes, beside a plain one", () => {
+    const md = [
+      '<Question id="[[Foo]]" choices="A|B">',
+      "",
+      "Linked?",
+      "",
+      "</Question>",
+      "",
+      '<Question id="O2" choices="A|B">',
+      "",
+      "Plain?",
+      "",
+      "</Question>",
+    ].join("\n");
+    const opts = questionRenderOptionsFor(md, null, true, "Test Owner");
+    const meta = (name: string) => ({ name, relPath: `${name.toLowerCase()}.md` }) as never;
+    const html = renderWikiHtml(md, (t) => (t === "Foo" ? meta(t) : undefined), { question: opts });
+    const answerable = [...html.matchAll(/<section class="question[^>]*data-wiki-answerable="true"[^>]*>/g)].map((m) => m[0]);
+    expect(answerable.length).toBe(2);
+    for (const tag of answerable) expect(tag).toMatch(/ data-question-hash="[0-9a-f]{64}"/);
+    const linked = answerable.find((t) => t.includes('data-question-id="[[Foo]]"'))!;
+    expect(linked).toContain(`data-question-hash="${opts.questionHashes!.get("[[Foo]]")}"`);
+  });
+});

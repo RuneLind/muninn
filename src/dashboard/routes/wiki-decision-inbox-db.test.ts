@@ -201,4 +201,26 @@ describe("GET /api/wiki/decision-inbox", () => {
     expect((await post({ questionId: "O1", choice: "A", body: "" })).status).toBe(201);
     expect(laneOf(await inbox(KODE)).O1).toBe("close");
   });
+
+  // Arch review 2026-11-16 F49 fix round 1: an inbox loaded before a reword
+  // must not save its answer against the new wording.
+  test("a card's question hash is the route's; reworded after the inbox loaded, its answer is 409 question_changed", async () => {
+    const card = (await inbox(KODE)).cards.find((c) => c.id === "O2")!;
+    expect(card.questionHash).toMatch(/^[0-9a-f]{64}$/);
+    const page = path.join(kodeRoot, REL);
+    const before = await Bun.file(page).text();
+    await Bun.write(page, before.replace("Answered by choice?", "Answered by choice, reworded?"));
+    __resetWikiCacheForTest();
+    try {
+      const res = await post({ questionId: "O2", choice: "A", body: "", questionHash: card.questionHash });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "question_changed" });
+      const fresh = (await inbox(KODE)).cards.find((c) => c.id === "O2")!;
+      expect(fresh.questionHash).not.toBe(card.questionHash);
+      expect((await post({ questionId: "O2", choice: "A", body: "", questionHash: fresh.questionHash })).status).toBe(201);
+    } finally {
+      await Bun.write(page, before);
+      __resetWikiCacheForTest();
+    }
+  });
 });

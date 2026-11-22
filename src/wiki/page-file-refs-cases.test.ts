@@ -10,6 +10,7 @@ import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
 import { checkPageFileRef, pageFileRefKinds } from "../format/query-block.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { pageDataFileRelPaths } from "./felles-remove.ts";
 import fixture from "./page-file-refs.cases.json";
 
 describe("page-file-refs.cases.json matches the reader's rule (loadPageFiles)", () => {
@@ -23,6 +24,20 @@ describe("page-file-refs.cases.json matches the reader's rule (loadPageFiles)", 
         return { ref, kinds: [...kinds].sort(), lexical, rel: lexical === "ok" ? resolveEmbedRelPath(c.page, ref) : null };
       });
       expect(refs).toEqual(c.refs);
+    });
+  }
+});
+
+// The remove side: the files publish uploads beside a page, and so the ones
+// Remove targets before its filesystem checks — data files plus each diagram
+// file's HTML sibling (arch review 2026-11-16 F48).
+describe("page-file-refs.cases.json removeCases match felles Remove's file list", () => {
+  test("the fixture has remove cases", () => {
+    expect(fixture.removeCases.length).toBeGreaterThan(0);
+  });
+  for (const c of fixture.removeCases) {
+    test(c.name, () => {
+      expect(pageDataFileRelPaths(c.page, c.markdown)).toEqual(c.targets);
     });
   }
 });

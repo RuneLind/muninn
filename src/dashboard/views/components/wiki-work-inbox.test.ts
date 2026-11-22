@@ -18,7 +18,7 @@ afterAll(() => {
 
 const XSS = `<img src=x onerror="alert(1)">`;
 const card = (over: Partial<InboxCard>): InboxCard => ({
-  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", question: "Which?", bodyHtml: "", structured: null, choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask", ...over,
+  relPath: "plans/a.mdx", id: "O1", title: "A", body: "Which?", question: "Which?", bodyHtml: "", structured: null, choices: [], recommendation: null, targets: [], added: null, laneSince: null, answers: [], hint: null, viewerAnswered: false, lane: "ask", questionHash: "h-O1", ...over,
 });
 
 async function load(body: DecisionInboxBody | null, status = 200): Promise<void> {
@@ -166,6 +166,57 @@ test("a 409 already_answered from a race says so, links the page and sends nothi
   expect(html).toContain("already has your answer");
   expect(html).toMatch(/wiki-wi-msg warn[^]*?data-relpath="plans\/a.mdx"/);
   expect(posts).toBe(1);
+});
+
+// Arch review 2026-11-16 F49 fix round 1: the inbox names the wording it showed.
+test("an answer sends the card's question hash; a 409 question_changed says the card was reworded", async () => {
+  await load({ wiki: "w", cards: [card({ id: "O7", lane: "ask", choices: ["A", "B"], questionHash: "hash-shown" })] });
+  let sent: Record<string, unknown> | null = null;
+  globalThis.fetch = ((url: string, init?: { body?: string }) => {
+    if (url !== "/api/wiki/answers") return new Promise(() => {});
+    sent = JSON.parse(init!.body!);
+    return Promise.resolve({ ok: false, status: 409, json: async () => ({ code: "question_changed", error: "question O7 was changed since this page loaded: reload the page" }) });
+  }) as unknown as typeof fetch;
+  click("row", "plans/a.mdx#O7");
+  click("pick", "plans/a.mdx#O7", { "data-wi-choice": "A" });
+  click("answer", "plans/a.mdx#O7");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(sent!.questionHash).toBe("hash-shown");
+  const html = inboxHtml(() => "", Date.now());
+  expect(html).toMatch(/wiki-wi-msg warn[^>]*>[^<]*O7 was reworded after the inbox loaded/);
+  expect(html).not.toContain("reload the page");
+  // The pick was made against the old wording: it is dropped.
+  expect(html).not.toContain('aria-pressed="true"');
+});
+
+test("a 409 question_changed keeps the typed note", async () => {
+  // Capture the module's document `input` listener: the suite's own stub has none.
+  let onInput = null as ((e: unknown) => void) | null;
+  const prev = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = {
+    getElementById: () => null,
+    querySelector: () => null,
+    addEventListener: (type: string, fn: (e: unknown) => void) => { if (type === "input") onInput = fn; },
+  };
+  try {
+    initInbox(() => {});
+    if (!onInput) throw new Error("the inbox's input listener was wired by an earlier suite in this process");
+    await load({ wiki: "w", cards: [card({ id: "O7", lane: "ask", choices: ["A", "B"] })] });
+    globalThis.fetch = ((url: string) =>
+      url === "/api/wiki/answers"
+        ? Promise.resolve({ ok: false, status: 409, json: async () => ({ code: "question_changed", error: "reworded" }) })
+        : new Promise(() => {})) as unknown as typeof fetch;
+    click("row", "plans/a.mdx#O7");
+    onInput!({ target: { getAttribute: (n: string) => (n === "data-wi-note" ? "plans/a.mdx#O7" : null), value: "keep this note" } });
+    click("pick", "plans/a.mdx#O7", { "data-wi-choice": "A" });
+    click("answer", "plans/a.mdx#O7");
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const html = inboxHtml(() => "", Date.now());
+    expect(html).toContain("O7 was reworded after the inbox loaded");
+    expect(html).toMatch(/<textarea class="wiki-wi-note"[^>]*>keep this note<\/textarea>/);
+  } finally {
+    (globalThis as { document?: unknown }).document = prev;
+  }
 });
 
 test("a good load after a failed one clears the failure line", async () => {

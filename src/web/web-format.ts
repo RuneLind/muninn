@@ -735,6 +735,10 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
   const isDuplicate = id !== "" && page.duplicates.has(id);
   const duplicate = isDuplicate ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
   const choices = parsed.choices;
+  // The hashes are keyed by the raw parse's id; a wikilink in this id is a
+  // sentinel here, so it is read back as its `[[…]]` source — the spelling
+  // `data-question-id` carries once the attributes are restored.
+  const hash = id ? opts.questionHashes?.get(id.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => currentLinkSources?.[Number(i)] ?? "")) : undefined;
   const data =
     (id ? ` data-question-id="${escapeHtml(id)}"` : "") +
     ` data-question-state="${state ? state.kind : "none"}"` +
@@ -742,6 +746,8 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     // A duplicated id is read-only: the answer route refuses it (409).
     ` data-wiki-answerable="${opts.answerable && !isDuplicate ? "true" : "false"}"` +
     ` data-question-lang="${opts.language}"` +
+    // The wording this render shows, sent back with a save (F49).
+    (hash ? ` data-question-hash="${escapeHtml(hash)}"` : "") +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +
     // Names only: no client reads an ident, and the reader's page should not

@@ -21,7 +21,13 @@ import type { AuthRole } from "../../auth/role.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
-import { registerWikiAnswerRoutes, WIKI_ANSWER_BODY_LIMIT, type WikiAnswerStore } from "./wiki-answers.ts";
+import {
+  ANSWER_SAVE_RATE,
+  ANSWER_VERSION_CAP,
+  registerWikiAnswerRoutes,
+  WIKI_ANSWER_BODY_LIMIT,
+  type WikiAnswerStore,
+} from "./wiki-answers.ts";
 import {
   getLatestWikiAnswerVersion,
   insertWikiAnswerVersion,
@@ -193,6 +199,7 @@ function appFor(
     role?: AuthRole;
     answers?: WikiAnswerConfig;
     store?: WikiAnswerStore;
+    now?: () => number;
     profile?: "default" | "nais";
   } = {},
 ): Hono {
@@ -208,7 +215,7 @@ function appFor(
     wikiAnswers: opts.answers ?? { wikis: new Set(["answers"]), owner: OWNER },
   } as unknown as Config;
   registerWikiReadRoutes(app, config);
-  registerWikiAnswerRoutes(app, config, opts.store);
+  registerWikiAnswerRoutes(app, config, opts.store, undefined, { now: opts.now });
   return app;
 }
 
@@ -1518,5 +1525,131 @@ describe("arch-10 D fix round 2: the carry token after a redact, and its pins", 
     expect(res.status).toBe(500);
     expect(await res.json()).toMatchObject({ code: "store_failed" });
     expect(await rowCount()).toBe(before);
+  });
+});
+
+// Arch review 2026-11-16 F49: a save names the wording the card rendered.
+describe("arch 11-16 F49: the card's question hash", () => {
+  const O1_TEXT = "**Keep the export block in Norwegian?**";
+  const REWORDED = "**Keep the export block in English?**";
+  const O1_HASH = sha256(`${O1_TEXT}\n\nchoices: A|B`);
+  const storedHashes = async () =>
+    (await getDb()`SELECT question_hash FROM wiki_answers ORDER BY created_at`).map((r) => r.question_hash as string);
+  async function withPage(edit: (page: string) => string, run: () => Promise<void>) {
+    await Bun.write(path.join(root, REL), edit(PAGE));
+    try {
+      await run();
+    } finally {
+      await Bun.write(path.join(root, REL), PAGE);
+    }
+  }
+
+  test("the page renders the hash the route stores on the answerable card", async () => {
+    const res = await appFor().request(`/api/wiki/page?wiki=answers&relPath=${encodeURIComponent(REL)}`);
+    const html = ((await res.json()) as { html: string }).html;
+    const card = /<section class="question[^"]*"[^>]*data-question-id="O1"[^>]*>/.exec(html)![0];
+    expect(card).toContain(`data-question-hash="${O1_HASH}"`);
+  });
+
+  test("a stale hash after a rewrite that keeps the id and the labels is 409 question_changed, nothing stored", async () => {
+    const app = appFor();
+    await withPage(
+      (p) => p.replace(O1_TEXT, REWORDED),
+      async () => {
+        const res = await post(app, answer({ choice: "A", questionHash: O1_HASH }));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "question_changed" });
+      },
+    );
+    expect(await storedHashes()).toEqual([]);
+  });
+
+  test("the matching hash saves, and the stored hash is the server's", async () => {
+    const res = await post(appFor(), answer({ choice: "A", questionHash: O1_HASH }));
+    expect(res.status).toBe(201);
+    expect(await storedHashes()).toEqual([O1_HASH]);
+  });
+
+  test("an edit with a stale hash is refused too", async () => {
+    const app = appFor();
+    const first = await (await post(app, answer({ choice: "A", questionHash: O1_HASH }))).json();
+    await withPage(
+      (p) => p.replace(O1_TEXT, REWORDED),
+      async () => {
+        const res = await post(app, answer({ choice: "B", answerId: first.answerId, baseVersion: 1, questionHash: O1_HASH }));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "question_changed" });
+      },
+    );
+  });
+
+  test("a POST without a hash (an older tab, another client) saves as before, stamped with the server's hash", async () => {
+    const res = await post(appFor(), answer({ choice: "A" }));
+    expect(res.status).toBe(201);
+    expect(await storedHashes()).toEqual([O1_HASH]);
+  });
+
+  test("a hash that is not a string is 400", async () => {
+    const res = await post(appFor(), answer({ questionHash: 7 }));
+    expect(res.status).toBe(400);
+  });
+});
+
+// Arch review 2026-11-16 F51: a role user's versions and save rate are capped.
+describe("arch 11-16 F51: version cap and save rate for role users", () => {
+  const O1_HASH = sha256("**Keep the export block in Norwegian?**\n\nchoices: A|B");
+  async function seedVersions(who: Identity, versions: number): Promise<string> {
+    const id = crypto.randomUUID();
+    await getDb()`
+      INSERT INTO wiki_answers (answer_id, version, wiki, rel_path, question_id, author_user_id, author_oid, author_nav_ident, author_name, body, question_hash)
+      SELECT ${id}, v, 'answers', ${REL}, 'O1', ${who.userId}, ${who.oid}, ${who.navIdent}, ${who.displayName}, 'v' || v, ${O1_HASH}
+      FROM generate_series(1, ${versions}::int) AS v
+    `;
+    return id;
+  }
+
+  test(`a role user's edit past ${ANSWER_VERSION_CAP} versions is 422 version_cap; the one reaching it saves`, async () => {
+    const app = appFor({ identity: synne, role: "user" });
+    const id = await seedVersions(synne, ANSWER_VERSION_CAP - 1);
+    const ok = await post(app, answer({ answerId: id, baseVersion: ANSWER_VERSION_CAP - 1, body: "last" }));
+    expect(ok.status).toBe(200);
+    const res = await post(app, answer({ answerId: id, baseVersion: ANSWER_VERSION_CAP, body: "one more" }));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ code: "version_cap" });
+  });
+
+  test("an admin is not capped", async () => {
+    const app = appFor({ identity: synne, role: "admin" });
+    const id = await seedVersions(synne, ANSWER_VERSION_CAP);
+    expect((await post(app, answer({ answerId: id, baseVersion: ANSWER_VERSION_CAP, body: "admin edit" }))).status).toBe(200);
+  });
+
+  test(`a role user's save past ${ANSWER_SAVE_RATE.max} in the window is 429; the window passing lets them save again`, async () => {
+    let t = 1_000_000;
+    const app = appFor({ identity: synne, role: "user", now: () => t });
+    const first = await (await post(app, answer({ body: "v1" }))).json();
+    let version = 1;
+    for (let i = 1; i < ANSWER_SAVE_RATE.max; i++) {
+      const res = await post(app, answer({ answerId: first.answerId, baseVersion: version, body: `v${version + 1}` }));
+      expect(res.status).toBe(200);
+      version++;
+    }
+    const refused = await post(app, answer({ answerId: first.answerId, baseVersion: version, body: "burst" }));
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({ code: "rate_limited" });
+    // Another role user is not held by Synne's burst.
+    expect((await post(appFor({ identity: ola, role: "user", now: () => t }), answer({ body: "ola" }))).status).toBe(201);
+    t += ANSWER_SAVE_RATE.windowMs;
+    expect((await post(app, answer({ answerId: first.answerId, baseVersion: version, body: "later" }))).status).toBe(200);
+  });
+
+  test("an admin and the owner with auth off are not rate limited", async () => {
+    for (const app of [appFor({ identity: synne, role: "admin" }), appFor()]) {
+      const first = await (await post(app, answer({ body: "v1" }))).json();
+      for (let v = 1; v <= ANSWER_SAVE_RATE.max; v++) {
+        expect((await post(app, answer({ answerId: first.answerId, baseVersion: v, body: `v${v + 1}` }))).status).toBe(200);
+      }
+      await getDb()`DELETE FROM wiki_answers`;
+    }
   });
 });
