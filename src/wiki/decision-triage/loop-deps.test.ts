@@ -17,7 +17,7 @@ const LOOP = path.join(import.meta.dir, "..", "work-map", "loop.ts");
 const REGISTRY = path.join(import.meta.dir, "..", "registry-memo.ts");
 
 /** Runs `steps` (a function body over `deps`, `step`, `root`), returning what each `step(...)` saw and the log lines. `model` is more of the run's seams. */
-async function drive(steps: string, env: Record<string, string>, tmp: string, model = "") {
+async function drive(steps: string, env: Record<string, string>, tmp: string, model = "", prelude = "") {
   const driver = path.join(tmp, "driver.ts");
   writeFileSync(driver, `
 import { configure } from ${JSON.stringify(LOGTAPE)};
@@ -47,6 +47,7 @@ const gate = () => {
   return { open, reached, pass: async () => { hit(); await opened; } };
 };
 const g1 = gate();
+${prelude}
 let appends = 0;
 let floorHits = 0;
 const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} }, tracer)!;
@@ -383,11 +384,42 @@ seen.push(await deps.readState("a"));
 
     test("a model-off night where the memory guard stopped every card is stored failed, not ok (F6)", async () => {
       const { tmp, env } = withCards(3);
-      const { seen } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: null, rss: (() => { let n = 0; return () => (n++ === 0 ? 0 : 3 * 1024 ** 3); })()`);
+      const { seen, lines } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: null, rss: (() => { let n = 0; return () => (n++ === 0 ? 0 : 3 * 1024 ** 3); })()`);
       expect(runLines(tmp).map((r) => r.outcome)).toEqual(["failed"]);
       expect(seen[0]).toMatchObject({ outcome: "failed" });
       expect((seen[1] as State)!.attempts.map((a) => a.outcome)).toEqual(["failed"]);
       expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+      // One warn for the night that is not clean; `runPass` logs info only for ok and partial.
+      expect(lines.filter((l) => l.startsWith("warning "))).toEqual(["warning Decision triage for a: failed: the model call is off (D19), 3 card(s) with no facts"]);
+    });
+
+    test("the memory guard's budget covers the day: the next wiki and a same-day retry measure from the day's first pass (F5)", async () => {
+      const { tmp, b, env } = withCards(2);
+      mkdirSync(path.join(b, "plans"));
+      writeFileSync(path.join(b, "plans", "p.mdx"), readFileSync(path.join(tmp, "a", "plans", "p.mdx"), "utf8"));
+      // RSS climbs 0.6 GiB at every reading and never falls back, so each pass starts where the last ended.
+      // The guard reads once per unanswered card: growth 0.6, 1.2 (a), 1.8, 2.4 (b), 3.0, 3.6 (a again).
+      const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+seen.push(await deps.run("b", new AbortController().signal));
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: (() => { let n = 0; return () => 0.6 * 1024 ** 3 * n++; })()`);
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "partial", "failed"]);
+      expect(runLines(tmp, "b")[0]).toMatchObject({ reason: "the model call is off (D19), 1 card(s) with no facts" });
+      const guarded = (wiki: string) => readFileSync(path.join(tmp, "logs", `${wiki}.jsonl`), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.reason === "the memory guard stopped the gather").map((l) => l.id);
+      expect(guarded("b")).toEqual(["O2"]);
+      expect(guarded("a")).toEqual(["O1", "O2"]);
+    });
+
+    test("a new Oslo day records a new baseline: the guard does not carry yesterday's growth", async () => {
+      const { tmp, env } = withCards(2);
+      const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+day = Date.parse("2026-10-21T05:00:00Z");
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => day, rss: (() => { let n = 0; return () => 1.5 * 1024 ** 3 * n++; })()`, `let day = Date.parse("2026-10-20T05:00:00Z");`);
+      // Day 1: baseline 0, readings 1.5 (gathers), 3.0 (stopped). Day 2: baseline 4.5, readings 6.0 (gathers), 7.5 (stopped).
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["partial", "partial"]);
     });
 
     test("b: the bound fires while the pass writes its run line, and the pass returns normally: one line, one state record", async () => {

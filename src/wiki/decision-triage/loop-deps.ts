@@ -14,7 +14,7 @@ import { getWikiRegistry } from "../registry-memo.ts";
 import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
-import { runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
+import { processRss, runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type RunLine } from "./schema.ts";
 import { NIGHTLY_MODEL_OFF, realTriageRunDeps, triageScope } from "./scope.ts";
 
@@ -98,7 +98,7 @@ export type TriagePassTracer = Pick<Tracer, "finish" | "traceId">;
 export function realTriageLoopDeps(
   config: Config,
   dir: string = DECISION_TRIAGE_DIR,
-  over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append" | "git">> = {},
+  over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append" | "git" | "rss" | "now">> = {},
   tracer: (wiki: string) => TriagePassTracer = () => new Tracer("decision-triage-pass", { botName: TRIAGE_AGENT_BOT, platform: "wiki" }),
 ): TriageLoopDeps | null {
   if (!config.decisionTriageRepoRoots) {
@@ -264,7 +264,8 @@ export function realTriageLoopDeps(
       }
       finishLine(held, turn.mine, true);
     };
-    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, append, track }), signal, (error) => {
+    const rssAtStart = dayRssBaseline((over.now ?? Date.now)(), over.rss ?? processRss);
+    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, append, track, rssAtStart }), signal, (error) => {
       log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
       return recordFailed(wiki, error);
     });
@@ -325,6 +326,16 @@ async function observedPass(wiki: string, tracer: TriagePassTracer, config: Pick
     agentStatus.completeRequest(reqId, { status: "error", ...traceId });
     throw err;
   }
+}
+
+/** The memory guard's baseline: the first pass of each Oslo day records it and every later
+ *  pass that day (the next wiki, a retry, Run now) measures from it, so gathering stops once the
+ *  day's passes together grew RSS by `RSS_GROWTH_GUARD_BYTES`, with no level check (F5). */
+let rssDay: { day: string; at: number } | null = null;
+function dayRssBaseline(nowMs: number, rss: () => number): number {
+  const day = osloDay(nowMs);
+  if (rssDay?.day !== day) rssDay = { day, at: rss() };
+  return rssDay.at;
 }
 
 let loopDepsMemo: { config: Config; deps: TriageLoopDeps | null } | null = null;

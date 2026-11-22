@@ -47,7 +47,8 @@ const CARD_GATHER_TIMEOUT_MS = 90_000;
 /** Replay stops gathering past this level: it is its own process, so its RSS is the
  *  gather's (the 10-02 kernel panic was a corpus script). */
 const RSS_GUARD_BYTES = 3 * 1024 ** 3;
-/** A pass stops gathering once RSS has grown this much since it started. It runs inside
+/** A pass stops gathering once RSS has grown this much since `rssAtStart` (the loop's: the
+ *  day's first pass, `dayRssBaseline`; a standalone run's: its own start). It runs inside
  *  the server, whose level is no measure of the pass: a laptop server stood at 5.24 GiB
  *  3.5 h after boot, so a level guard gathered nothing on 7 of 11 nights (review F5). */
 export const RSS_GROWTH_GUARD_BYTES = 2 * 1024 ** 3;
@@ -188,7 +189,7 @@ export function withTimeout<T>(work: Promise<T>, ms: number, what: string): Prom
 
 /** Replay's level check. A pass uses growth instead (`RSS_GROWTH_GUARD_BYTES`). */
 export const overRss = () => process.memoryUsage().rss > RSS_GUARD_BYTES;
-const processRss = () => process.memoryUsage().rss;
+export const processRss = () => process.memoryUsage().rss;
 
 /** A per-run repo resolver: one fetch per repo however many cards name it. */
 export function repoResolver(roots: RepoRoots, git: GitRun, opts: { fetch: boolean }) {
@@ -250,8 +251,10 @@ export interface TriageRunDeps {
   signal?: AbortSignal;
   /** Handed the run's live progress before anything is spent. */
   track?: (progress: TriageProgress) => void;
-  /** The process's RSS in bytes; the memory guard reads its growth from the pass's start. */
+  /** The process's RSS in bytes; the memory guard reads its growth from `rssAtStart`. */
   rss?: () => number;
+  /** The RSS the guard measures growth from; this pass's first reading when absent. */
+  rssAtStart?: number;
 }
 
 export type TriageRunResult =
@@ -274,7 +277,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
   const roots = parseRepoRoots(deps.repoRoots);
   const resolver = repoResolver(roots, deps.git, { fetch: true });
   const rss = deps.rss ?? processRss;
-  const rssAtStart = rss();
+  const rssAtStart = deps.rssAtStart ?? rss();
   const overGrowth = () => rss() - rssAtStart > RSS_GROWTH_GUARD_BYTES;
 
   /** Null when a stop came in while the floor was read: no line then. */
@@ -403,6 +406,7 @@ export async function runDecisionTriage(deps: TriageRunDeps): Promise<TriageRunR
     // No unanswered card gathered is a night that gathered nothing: failed, as with the call on.
     const run = await finish(noFacts > 0 ? (items.length === 0 ? "failed" : "partial") : "ok", cards.length, why);
     if (!run) return { outcome: "aborted" };
+    if (run.outcome !== "ok") log.warn("Decision triage for {wiki}: {outcome}: {why}", { wiki, outcome: run.outcome, why });
     return { outcome: run.outcome as Exclude<RunOutcome, "refused">, run, counts, wallMs: deps.now() - startedAt };
   }
   const call = deps.call;
