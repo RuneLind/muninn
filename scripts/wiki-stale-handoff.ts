@@ -57,7 +57,7 @@ import {
   type PostSse,
   type StaleLedger,
 } from "./wiki-stale.ts";
-import { takeWikiWriteLock, type WikiLockHandle, type WikiLockOutcome } from "../src/wiki/lockfile.ts";
+import { takeWikiWriteLock, WIKI_LOCK_STALE_MS, type WikiLockHandle, type WikiLockOutcome } from "../src/wiki/lockfile.ts";
 
 type Json = Record<string, any>;
 
@@ -87,6 +87,14 @@ const REPO_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"
 const TERM_GRACE_MS = 1_000;
 /** After the SIGKILL, how long the pipes may take to close before the call returns without the rest. */
 const PIPE_GRACE_MS = 500;
+/** How far past its bound a git call can run: the TERM wait, then the pipe wait. */
+const KILL_GRACE_MS = TERM_GRACE_MS + PIPE_GRACE_MS;
+/**
+ * The fast-forward's whole locked section, from before the first lock is taken:
+ * 2 s inside the stale window, a margin of choice, so no writer ever takes the
+ * gate's lock over as stale while git is still writing the checkout (F13).
+ */
+export const LOCKED_SECTION_MS = WIKI_LOCK_STALE_MS - 2_000;
 /** Process groups of the git calls still running: a signal or exit of this process ends them too. */
 const liveGroups = new Set<number>();
 const signalGroup = (pgid: number, sig: NodeJS.Signals) => {
@@ -303,8 +311,9 @@ export function lockRootsFor(main: string, roots: readonly string[]): string[] {
 async function takeGateLocks(
   roots: readonly string[],
   lock: (root: string) => Promise<WikiLockOutcome> = (root) => takeWikiWriteLock(root, { op: "stale-handoff-ff" }),
-): Promise<{ ok: true; release: () => void } | { ok: false; reason: string }> {
+): Promise<{ ok: true; release: () => void; since: number } | { ok: false; reason: string }> {
   hookExit();
+  const since = Date.now();
   const mine: WikiLockHandle[] = [];
   const release = () => {
     for (const l of mine.reverse()) {
@@ -324,7 +333,7 @@ async function takeGateLocks(
       heldLocks.add(t.lock);
     }
   }
-  return { ok: true, release };
+  return { ok: true, release, since };
 }
 
 /**
@@ -384,19 +393,48 @@ export async function runGate(
       if (!taken.ok) {
         g.note = `fetched ${g.remote}/${def}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
       } else {
+        let after = "";
+        let merged = false;
+        let before = "";
         try {
-          const before = await out(["rev-parse", "HEAD"]);
+          // Every call in here ends before the locks' stale window, counted from
+          // before the first acquire: a writer takes a lock older than that over.
+          const left = () => taken.since + LOCKED_SECTION_MS - Date.now() - KILL_GRACE_MS;
+          const head = async () => {
+            const ms = left();
+            if (ms <= 0) return "";
+            const r = await git(["rev-parse", "HEAD"], main, ms);
+            return r.code === 0 ? r.stdout.trim() : "";
+          };
+          before = await head();
+          const mergeMs = left();
           // Never stash another session's edits: the flags beat merge.autoStash.
-          const m = await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", `refs/remotes/${g.remote}/${def}`], main);
-          if (m.code === 0) {
-            const n = before ? Number(await out(["rev-list", "--count", `${before}..HEAD`])) || 0 : 0;
-            g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
+          const m: GitResult | null =
+            mergeMs > 0 ? await git(["-c", "merge.autoStash=false", "merge", "--ff-only", "--no-autostash", "--quiet", `refs/remotes/${g.remote}/${def}`], main, mergeMs) : null;
+          if (!m) {
+            // Taking the locks used the section's time: nothing ran, as when a lock is held.
+            g.note = `fetched ${g.remote}/${def}, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled`;
+          } else if (m.code === 0) {
+            merged = true;
+            after = await head();
+          } else if (m.timedOut) {
+            // «git pull» first: the fix path keys on that prefix (a worktree, until the checkout pulls cleanly).
+            skip(
+              `git pull --ff-only timed out (the fast-forward to ${g.remote}/${def} did not finish in ${(mergeMs / 1000).toFixed(1)} s, kept inside the wiki write lock's ${WIKI_LOCK_STALE_MS / 1000} s stale window); git was stopped, check \`git status\` in ${main}`,
+            );
+            g.note = g.skip;
           } else {
             skip(`git pull --ff-only refused (${gitError(m.stderr) || `exit ${m.code}`})`);
             g.note = g.skip;
           }
         } finally {
           taken.release();
+        }
+        if (merged) {
+          // Counted after the release: a read, so it holds no writer up.
+          const n = before && after ? Number(await out(["rev-list", "--count", `${before}..${after}`])) || 0 : 0;
+          if (before && !after) g.note = `fast-forwarded to ${g.remote}/${def}`;
+          else g.note = n ? `pulled ${n} commit(s) from ${g.remote}/${def}` : `up to date with ${g.remote}/${def}`;
         }
       }
     } else if (!r.timedOut && AUTH_FAILURE.test(r.stderr)) {

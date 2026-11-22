@@ -110,6 +110,46 @@ describe("the gate", () => {
     expect(existsSync(path.join(main, ".wiki-write.lock"))).toBe(false);
   });
 
+  test("F13 fix round 1 batch 2: a fast-forward that stalls is stopped and the locks released inside their stale window, and the note says it timed out", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    // A git that never finishes the merge: the real runner's bound and kill path stop it.
+    const fake = path.join(tmp(), "stalled-git");
+    writeFileSync(fake, "#!/bin/sh\nexec sleep 30\n");
+    chmodSync(fake, 0o755);
+    const stalled = gitRunner(fake);
+    const stalling: Git = (args, cwd, ms) => (args.includes("merge") ? stalled(args, cwd, ms) : git(args, cwd, ms));
+    let firstTaken = 0;
+    let stillHeldAtExit = true;
+    const lock = async (root: string) => {
+      const t = await takeWikiWriteLock(root, { op: "stale-handoff-ff" });
+      firstTaken ||= Date.now();
+      return t;
+    };
+    const gate = await runGate(main, [], stalling, { lock });
+    const heldMs = Date.now() - firstTaken;
+    stillHeldAtExit = existsSync(path.join(main, ".wiki-write.lock"));
+    expect({ stillHeldAtExit, insideStaleWindow: heldMs < 10_000 }).toEqual({ stillHeldAtExit: false, insideStaleWindow: true });
+    expect(gate.skip).toMatch(/^git pull --ff-only timed out \(the fast-forward to origin\/main did not finish in \d+\.\d s, kept inside the wiki write lock's 10 s stale window\); git was stopped/);
+    // Still a pull failure to the fix path: fix in a worktree until the checkout pulls cleanly.
+    expect(gate.fixPath).toStartWith("fix in a worktree:");
+  }, 20_000);
+
+  test("F13 fix round 1 batch 2: lock waits that use up the locked section run no merge: a note, the checkout as last pulled", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const before = await g(main, "rev-parse", "HEAD");
+    const verbs: string[] = [];
+    const watched: Git = (args, cwd, ms) => (verbs.push(args.find((a) => ["fetch", "merge"].includes(a)) ?? ""), git(args, cwd, ms));
+    const gate = await runGate(main, [], watched, { lock: async () => (await Bun.sleep(7_000), { ok: true, lock: null }) });
+    expect(gate.note).toBe("fetched origin/main, but taking the wiki write locks left no time to fast-forward inside their stale window; the main checkout is as last pulled");
+    expect({ skip: gate.skip, merged: verbs.includes("merge"), head: await g(main, "rev-parse", "HEAD") }).toEqual({ skip: undefined, merged: false, head: before });
+  }, 20_000);
+
   test("F13: a lock still held past its wait leaves the checkout as last pulled, a note and no skip", async () => {
     const { up, main } = await withRemote();
     write(up, "plans/a.md", "# A\nnew\n");

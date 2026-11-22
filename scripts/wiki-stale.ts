@@ -270,6 +270,8 @@ export function formatPageReport(r: Json): string[] {
     const b = r.buckets;
     const counts = Object.entries(b.counts).map(([k, n]) => `${BUCKET_LABEL[k] ?? k} ${n}`).join(" · ");
     out.push(`  linking pages: ${b.linking.length} — ${counts}`);
+    // The store's `fixed` rows were not read: To check may still count pages fixed through the Stale check.
+    if (r.fixed === "unavailable") out.push(`  to check: at most ${b.counts.toCheck} — fixed verdicts are unavailable`);
     const toCheck = b.linking.filter((l: Json) => l.bucket === "toCheck");
     if (toCheck.length) out.push("  to check:");
     for (const l of toCheck) {
@@ -290,8 +292,9 @@ export function formatSummary(r: Json): string[] {
   const t = r.totals;
   const unconfirmed = typeof t.hits === "number" && t.hits > t.staleLines ? ` (+ ${t.hits - t.staleLines} unconfirmed hit(s))` : "";
   const lines = r.verdicts === "unavailable" ? `stale status lines unknown (the verdict store is unavailable${typeof t.hits === "number" ? `, ${t.hits} hit(s) unconfirmed` : ""})` : `${t.staleLines} stale status line(s)${unconfirmed}`;
-  out.push(`${r.wiki}: ${lines}, ${t.toCheck} linking page(s) to check, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
-  const row = (p: Json) => `  ${p.relPath} — ${p.staleLines} stale line(s), ${p.toCheck} to check (last change ${day(p.lastChangeMs)})`;
+  const toCheck = r.fixed === "unavailable" ? `at most ${t.toCheck} linking page(s) to check (fixed verdicts unavailable)` : `${t.toCheck} linking page(s) to check`;
+  out.push(`${r.wiki}: ${lines}, ${toCheck}, ${t.changedPages} changed page(s) in the 14 days to ${day(r.asOfMs)}`);
+  const row = (p: Json) => `  ${p.relPath} — ${p.staleLines} stale line(s), ${p.fixed === "unavailable" ? "at most " : ""}${p.toCheck} to check (last change ${day(p.lastChangeMs)})`;
   const groups: [string, (p: Json) => boolean][] = [
     ["uncommitted", (p) => p.changed && p.dirty],
     ["recently committed", (p) => p.changed && !p.dirty],

@@ -13,7 +13,7 @@
  * row, so the rail never disagrees with the tab on the open page.
  */
 import { escHtml as esc } from "./escape.ts";
-import { staleCounts, staleCountsShown, staleCountsText, staleCountsToken, staleLinesUnknown, type StalePageCounts, type StaleReportView } from "./wiki-stale-tab.ts";
+import { staleCounts, staleCountsShown, staleCountsText, staleCountsToken, staleLinesUnknown, toCheckUnknown, type StalePageCounts, type StaleReportView } from "./wiki-stale-tab.ts";
 
 export interface StaleSummaryRow {
   relPath: string;
@@ -25,6 +25,8 @@ export interface StaleSummaryRow {
   changed?: boolean;
   /** PR 3 (D31): fixes for this page waiting in the Gardener. */
   inReview?: number;
+  /** The `fixed` rows could not be read: `toCheck` is an upper bound. */
+  fixed?: "unavailable";
 }
 
 export interface StaleSummaryView {
@@ -86,7 +88,8 @@ const countedRows = (s: StaleSummaryView) =>
   (s.pages ?? []).map((r) => {
     const inReview = Number(r.inReview) || 0;
     const unknown = staleLinesUnknown(s.verdicts, r.hits);
-    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" } : {}) } as StalePageCounts };
+    const fixed = toCheckUnknown(r.fixed, r.toCheck);
+    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" } : {}), ...(fixed ? { fixed: "unavailable" } : {}) } as StalePageCounts };
   });
 
 const isStale = staleCountsShown;
@@ -95,7 +98,8 @@ const isStale = staleCountsShown;
  *  unknown when the wiki's hits or any row's are (`staleLinesUnknown`, F11). */
 const totalsOf = (s: StaleSummaryView): StalePageCounts => {
   const unknown = staleLinesUnknown(s.verdicts, s.totals?.hits) || countedRows(s).some((x) => x.c.verdicts === "unavailable");
-  return { staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0, ...(unknown ? { verdicts: "unavailable" as const } : {}) };
+  const fixed = countedRows(s).some((x) => x.c.fixed === "unavailable");
+  return { staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0, ...(unknown ? { verdicts: "unavailable" as const } : {}), ...(fixed ? { fixed: "unavailable" as const } : {}) };
 };
 
 /** The wiki home line: the wiki's totals and a way into the Stale tab. */

@@ -31,6 +31,8 @@ import { STALE_FIX_CUTS_LINK, STALE_FIX_NOT_IN_PASSAGE } from "../../wiki/stale-
 import { decideZone } from "../../auth/zones.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { staleCounts, staleCountsToken } from "../views/components/wiki-stale-tab.ts";
+import { staleCountMap, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml } from "../views/components/wiki-stale-summary.ts";
 
 const DAY = 86_400_000;
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -217,6 +219,27 @@ describe("the Stale check's fix routes", () => {
     verdicts.rows.forEach((r, k) => r.kind === "fixed" && verdicts.rows.delete(k));
     __resetWikiCacheForTest();
     expect((await get("wiki=fixwiki&page=hub.md")).buckets.counts.toCheck).toBe(3);
+  });
+
+  test("fix round 1 batch 2: with the verdict store down after a `fixed` row exists, M reads as unknown, never as a known count", async () => {
+    await seedWiki();
+    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+    expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+    await git(root, Date.now() - 30 * DAY, "commit", "-q", "--amend", "--no-edit", "--reset-author");
+    __resetWikiCacheForTest();
+    expect((await get("wiki=fixwiki&page=hub.md")).buckets.counts.toCheck).toBe(2);
+    // The store goes down: every method throws.
+    __setStaleVerdictStoreForTest(new Proxy(verdicts, { get: (t, k) => (typeof (t as any)[k] === "function" ? () => Promise.reject(new Error("db down")) : (t as any)[k]) }));
+    const report = await get("wiki=fixwiki&page=hub.md");
+    const summary = await get("wiki=fixwiki");
+    // The page answer, the summary row and every surface's token: M (3, notes/a.md still in it) is shown as unknown.
+    expect({
+      pill: staleCountsToken(staleCounts(report)),
+      rail: staleRailBadgeHtml(staleCountMap(summary).get("hub.md")).match(/data-stale-rail="([^"]*)"/)?.[1],
+      home: staleHomeLineHtml(summary).match(/data-stale-home-totals="([^"]*)"/)?.[1],
+    }).toEqual({ pill: "?·?", rail: "?·?", home: "?·?" });
+    expect(stalePillHtml(report)).toContain("linking pages to check unknown (at most 3");
+    expect({ report: report.fixed, row: hubRow(summary).fixed, summary: summary.fixed }).toEqual({ report: "unavailable", row: "unavailable", summary: "unavailable" });
   });
 
   test("a Stale check fix commit is not a page change: the wiki-wide total drops after an Apply on a mutual link", async () => {

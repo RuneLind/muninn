@@ -981,6 +981,12 @@ describe("the confirm loop buys a shared key once (F68)", () => {
     expect({ calls: r.calls, prompts: prompts.length, hits: r.wikis[0]!.hits }).toEqual({ calls: 1, prompts: 1, hits: 2 });
     const views = await hitConfirmations("dup", index, [["hub.md", hits]], store);
     expect(hits.map((h) => views.get(hitKey("hub.md", h))?.verdict)).toEqual(["stale", "stale"]);
+    // Fix round 1 batch 2: every hit line lands in one count, and `stale` counts lines.
+    const row = r.wikis[0]!;
+    expect(row.stale).toBe(2);
+    // `?? 0` so a row without the count fails on the sum, not on a NaN.
+    expect(row.hits).toBe(row.cached + row.backoff + row.calls + row.left + (row.deduped ?? 0));
+    expect(row.deduped).toBe(1);
   });
 });
 

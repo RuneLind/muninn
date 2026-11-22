@@ -52,6 +52,8 @@ export interface StaleReportView {
   staleLines?: number;
   buckets?: { counts: Record<string, number>; linking: StaleLinkingView[] } | null;
   verdicts?: "unavailable";
+  /** The `fixed` rows could not be read: To check may still count fixed pages. */
+  fixed?: "unavailable";
   readonly?: "instance" | "root" | false;
   /** PR 3 (D31): the fixes this page's live Stale check card holds. */
   inReview?: StaleInReviewView;
@@ -71,7 +73,15 @@ export function staleCounts(r: StaleReportView | null | undefined): StalePageCou
   const staleLines = confirmedHits(r).length;
   const inReview = Number(r.inReview?.fixes) || 0;
   const unknown = staleLinesUnknown(r.verdicts, r.hits?.length);
-  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" as const } : {}) };
+  const toCheck = r.buckets?.counts?.toCheck ?? 0;
+  return { staleLines, toCheck, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" as const } : {}), ...(toCheckUnknown(r.fixed, toCheck) ? { fixed: "unavailable" as const } : {}) };
+}
+
+/** The one rule for «linking pages to check unknown»: the `fixed` rows that
+ *  count a page out of To check could not be read AND To check is not 0, so
+ *  M is an upper bound. With nothing to check, 0 is exact. */
+export function toCheckUnknown(fixed: string | undefined, toCheck: number | undefined): boolean {
+  return fixed === "unavailable" && (Number(toCheck) || 0) > 0;
 }
 
 /** The one rule for «stale status lines unknown» (F11), on every surface: the
@@ -84,7 +94,7 @@ export function staleLinesUnknown(verdicts: string | undefined, hits: number | u
 
 /** The counts as a data attribute and badge token: «N·M», «?·M» when unknown. */
 export function staleCountsToken(c: StalePageCounts, sep = "·"): string {
-  return `${c.verdicts === "unavailable" ? "?" : c.staleLines}${sep}${c.toCheck}`;
+  return `${c.verdicts === "unavailable" ? "?" : c.staleLines}${sep}${c.fixed === "unavailable" ? "?" : c.toCheck}`;
 }
 
 /** Is there anything to show: a stale line, a page to check, or an unknown count. */
@@ -99,6 +109,8 @@ export interface StalePageCounts {
   inReview?: number;
   /** `staleLines` is unknown, not 0 ({@link staleLinesUnknown}, F11). */
   verdicts?: "unavailable";
+  /** `toCheck` is an upper bound, shown as unknown ({@link toCheckUnknown}). */
+  fixed?: "unavailable";
 }
 
 /** The two numbers in words (D26): «N stale status lines · M linking pages
@@ -108,7 +120,8 @@ export interface StalePageCounts {
  *  (first-screen-claims F15). */
 export function staleCountsText(c: StalePageCounts): string {
   const lines = c.verdicts === "unavailable" ? "stale status lines unknown (verdicts unavailable)" : `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"}`;
-  const words = `${lines} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  const pages = c.fixed === "unavailable" ? `linking pages to check unknown (at most ${c.toCheck}, verdicts unavailable)` : `${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  const words = `${lines} · ${pages}`;
   return c.staleLines || c.toCheck || c.verdicts === "unavailable" ? `⚠ ${words}` : words;
 }
 
@@ -297,7 +310,7 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
   const counts = staleCounts(r);
   const { toCheck } = counts;
   let html =
-    `<div class="wiki-stale-head" data-stale-lines="${counts.verdicts === "unavailable" ? "?" : counts.staleLines}" data-stale-tocheck="${toCheck}">` +
+    `<div class="wiki-stale-head" data-stale-lines="${counts.verdicts === "unavailable" ? "?" : counts.staleLines}" data-stale-tocheck="${counts.fixed === "unavailable" ? "?" : toCheck}">` +
     esc(staleCountsText(counts)) +
     `</div>`;
   if (r.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;

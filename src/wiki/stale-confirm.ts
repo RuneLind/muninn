@@ -687,8 +687,14 @@ const realConfirmDeps: ConfirmDeps = {
 };
 
 export interface ConfirmRunSummary {
-  /** `backoff`: hits not called because their key is inside its backoff. */
-  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number; backoff: number }[];
+  /**
+   * Per wiki, every hit line lands in exactly one of `cached`, `backoff`,
+   * `calls`, `left` and `deduped`, so they add up to `hits`. `backoff`: not
+   * called, its key is inside its backoff. `deduped`: shares its key with an
+   * earlier line of this run, which bought the one call (F68). `stale`: hit
+   * lines the run's verdicts confirmed stale, a shared key's lines included.
+   */
+  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number; backoff: number; deduped: number }[];
   calls: number;
   errors: number;
   left: number;
@@ -777,7 +783,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   for (const [k, m] of failures) if (started - m.at > FAILURE_MEMORY_MS) failures.delete(k);
 
   type Row = ConfirmRunSummary["wikis"][number];
-  const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
+  const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string; lines?: number }[] = [];
   const wanted = new Set(wikiNames.map((n) => n.toLowerCase()));
   // Wikis whose rebuild last failed go last, oldest failure first (stable sort),
   // so a wiki that keeps hanging costs each run one bounded rebuild, after the rest.
@@ -787,7 +793,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     .sort((a, b) => (rebuildFailed.get(a.name.toLowerCase()) ?? 0) - (rebuildFailed.get(b.name.toLowerCase()) ?? 0));
   for (const entry of entries) {
     if (signal?.aborted) break;
-    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0, backoff: 0 };
+    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0, backoff: 0, deduped: 0 };
     out.wikis.push(row);
     let rebuilding = false;
     try {
@@ -824,12 +830,16 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       row.hits = mine.length;
       const cached = await bounded(() => deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
       // Identical hit lines on one page share a key: one call answers them all (F68).
-      const queued = new Set<string>();
+      const queued = new Map<string, (typeof todo)[number]>();
       for (const t of mine) {
+        const first = queued.get(t.key);
         if (cached.has(t.key)) row.cached++;
         else if (inBackoff(failures.get(t.key), started)) row.backoff++;
-        else if (!queued.has(t.key)) {
-          queued.add(t.key);
+        else if (first) {
+          row.deduped++;
+          first.lines = (first.lines ?? 1) + 1;
+        } else {
+          queued.set(t.key, t);
           todo.push(t);
         }
       }
@@ -894,7 +904,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         "verdict write",
       );
       failures.delete(t.key);
-      if (stored.verdict === "stale") row.stale++;
+      if (stored.verdict === "stale") row.stale += t.lines ?? 1;
     } catch (err) {
       // Stopped mid-call: the answer is dropped and the hit waits for the next run, not counted as failed.
       // Not sent because the budget is spent: the hit waits for the next run, not counted as failed.
