@@ -6,7 +6,7 @@
  * nothing) is driven through the booted shell in `wiki-boot/`.
  */
 import { describe, expect, test } from "bun:test";
-import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
+import { beginPageEntry, enterView, setViewTeardown, viewIsLive, viewIsShown, type PaneViewKind } from "./wiki-pane-view.ts";
 
 const read = (f: string) => Bun.file(new URL(`./${f}`, import.meta.url)).text();
 /** A top-level function's text, from its `function` line to its closing `}` line. */
@@ -35,22 +35,39 @@ describe("enterView", () => {
 });
 
 describe("beginPageEntry", () => {
-  test("a page fetch leaves the shown view live until it enters; a later fetch or any entry outdates it", () => {
+  test("a page fetch leaves the shown view on screen until it enters; a later fetch or any entry outdates it", () => {
     const calls: string[] = [];
     setViewTeardown((kind: PaneViewKind) => calls.push(kind));
     const ask = enterView("ask");
     const first = beginPageEntry();
-    expect(viewIsLive(ask)).toBe(true);
+    expect(viewIsShown(ask)).toBe(true);
     const second = beginPageEntry();
     expect([first.superseded(), second.superseded()]).toEqual([true, false]);
     expect(calls).toEqual(["ask"]);
     const page = second.enter();
-    expect([viewIsLive(ask), viewIsLive(page), second.superseded()]).toEqual([false, true, false]);
+    expect([viewIsShown(ask), viewIsLive(ask), viewIsLive(page), second.superseded()]).toEqual([false, false, true, false]);
     expect(second.enter()).toBe(page); // entered once
     expect(calls).toEqual(["ask", "page"]);
     const third = beginPageEntry();
     enterView("effort");
     expect([third.superseded(), second.superseded()]).toEqual([true, true]);
+  });
+});
+
+describe("viewIsLive and viewIsShown during a pending page fetch (fix round 2)", () => {
+  test("the shown view stays on screen but may no longer act from the fetch's start; the next entry is live again", () => {
+    setViewTeardown(() => {});
+    const page = enterView("page");
+    expect([viewIsShown(page), viewIsLive(page)]).toEqual([true, true]);
+    const entry = beginPageEntry();
+    // A Done write, a late explainer or effort response: stale now, not at the paint.
+    expect([viewIsShown(page), viewIsLive(page)]).toEqual([true, false]);
+    const next = entry.enter();
+    expect([viewIsShown(page), viewIsLive(page), viewIsShown(next), viewIsLive(next)]).toEqual([false, false, true, true]);
+    // A view entered over a pending fetch is live: the fetch is superseded.
+    const pending = beginPageEntry();
+    const effort = enterView("effort");
+    expect([pending.superseded(), viewIsLive(effort)]).toEqual([true, true]);
   });
 });
 

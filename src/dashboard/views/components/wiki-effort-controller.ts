@@ -43,7 +43,8 @@ let deps!: EffortDeps;
 // ── Effort page (work map P3) ─────────────────────────────────────────
 /** The effort last opened and its `enterView` token: shown while that token is live. */
 let effortOpen: { id: string; view: number } | null = null;
-/** The effort the article pane shows, or null. */
+/** The effort the article pane shows, or null; null too while a clicked page
+ *  loads over it (`viewIsLive`), so nothing repaints or refetches it then. */
 function shownEffort(): string | null {
   return effortOpen && viewIsLive(effortOpen.view) ? effortOpen.id : null;
 }

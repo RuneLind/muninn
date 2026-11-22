@@ -263,7 +263,8 @@ test("wikiClientScript stays under its size pin", async () => {
 // page view the write's reload is guarded by: 3,458.
 // 2026-11-22, architecture review B6 (F22: the six view entries' teardown in one
 // `leaveView` behind `enterView`, `pageViewSeq`/`pageFetchSeq` gone): 3,409; 49 lets.
-const WIKI_BROWSER_MAX_LINES = 3_409;
+// Its fix round 2: 3,411, the two comment lines saying which view stays live.
+const WIKI_BROWSER_MAX_LINES = 3_411;
 const WIKI_BROWSER_MAX_MODULE_LETS = 49;
 
 function moduleScopeDeclarations(src: string): { lines: number; lets: number; vars: string[] } {
@@ -335,16 +336,17 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // same PR: 2,498 (the dead `askActive` let gone, `askView` in its place, the
 // port's `clearShownPage` gone); the effort controller 237 → 229. Its fix round 1
 // batch 2: the Ask controller 2,498 → 2,516, Remember's outcome held on its turn
-// and painted only while that turn is shown.
+// and painted only while that turn is shown. Fix round 2: Ask 2,516 → 2,520
+// (Remember persisted and repainted at `done`), effort 229 → 230 (a comment).
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
   ["wiki-status-pills.ts", 29, 0],
   ["wiki-stale-controller.ts", 522, 18],
-  ["wiki-effort-controller.ts", 229, 3],
+  ["wiki-effort-controller.ts", 230, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
-  ["wiki-ask-controller.ts", 2_516, 10],
+  ["wiki-ask-controller.ts", 2_520, 10],
   ["wiki-article-controller.ts", 1_185, 10],
   ["wiki-series-controller.ts", 548, 3],
 ];

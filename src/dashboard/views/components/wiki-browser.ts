@@ -1609,7 +1609,8 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true, anch
 function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, hash?: string): void {
   // Taken now, so a load that fails cannot leave it for the next one.
   const inPlace = inPlaceLens;
-  // A later view drops this response, failure too (R2B4); the shown one stays live until it paints.
+  // A later view drops this response, failure too (R2B4). The shown view stays
+  // on screen until it paints, but only an Ask answer keeps acting (`viewIsShown`).
   const entry = beginPageEntry();
   fetch(url)
     .then((r) => r.json())
@@ -1715,7 +1716,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
           withWiki,
           reload: () => reloadPageInPlace(wtRelPath),
         });
-        // A Done write that returns after any later view started reloads nothing.
+        // A Done write that returns after the reader left this page reloads
+        // nothing: another view entered, or another page's fetch started.
         enhanceStepDone(articleRoot, { wiki: FIND_SELF_WIKI || WIKI, relPath: wtRelPath, hash: () => currentPageHash, reload: () => reloadPageInPlace(wtRelPath), current: () => viewIsLive(view) && currentRelPath === wtRelPath });
       }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,

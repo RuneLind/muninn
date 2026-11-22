@@ -31,6 +31,20 @@ test("wiki-client.ts loads the shell only under --watch, caught, so a broken rea
   expect(underWatch(["--watch"])).toBe(true);
   expect(underWatch(["--hot"])).toBe(true);
   expect(underWatch([])).toBe(false);
+  // With no argument it reads bun's own flags (`bun run --watch x.ts` puts
+  // `--watch` there), never the script's arguments.
+  const [execArgv, argv] = [process.execArgv, process.argv];
+  try {
+    process.execArgv = ["--watch"];
+    process.argv = [argv[0]!, "x.ts"];
+    expect(underWatch()).toBe(true);
+    process.execArgv = [];
+    process.argv = [argv[0]!, "x.ts", "--watch"];
+    expect(underWatch()).toBe(false);
+  } finally {
+    process.execArgv = execArgv;
+    process.argv = argv;
+  }
   const src = await Bun.file(new URL("./wiki-client.ts", import.meta.url)).text();
   // No static import of the shell: one would load it on `bun run start` too, and a throw there stops boot.
   expect(src).not.toMatch(/^import .*wiki-browser/m);

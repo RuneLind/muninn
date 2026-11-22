@@ -76,12 +76,21 @@ function hold(key: string): () => void {
     release();
   };
 }
+/** Page relPaths whose `/api/wiki/page` fetch rejects, as a network failure does. */
+const failingPages = new Set<string>();
+/** When set, `POST /api/wiki/remember` answers 500 with this error. */
+let rememberError: string | null = null;
 async function stubFetch(input: unknown, init?: { method?: string; body?: unknown }): Promise<unknown> {
   const raw = String(input);
   fetched.push(raw);
   const url = new URL(raw, "http://localhost:3011");
   const held = holds.get(`${url.pathname}?relPath=${url.searchParams.get("relPath")}`);
   if (held) await held;
+  if (url.pathname === "/api/wiki/page" && failingPages.has(url.searchParams.get("relPath") ?? "")) throw new TypeError("network down");
+  const R = g.Response as typeof Response;
+  if (url.pathname === "/api/wiki/remember" && rememberError !== null) {
+    return new R(JSON.stringify({ error: rememberError }), { status: 500, headers: { "content-type": "application/json" } });
+  }
   let body: unknown = {};
   if (url.pathname === "/api/wiki/pages") body = LISTING;
   else if (url.pathname === "/api/wiki/page") {
@@ -97,7 +106,6 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: unknow
     seriesPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
     body = { written: true };
   }
-  const R = g.Response as typeof Response;
   return new R(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
 }
 
@@ -136,6 +144,19 @@ async function until(cond: () => boolean, what: string): Promise<void> {
 }
 /** One animation frame, so a progressive render scheduled with rAF has run. */
 const frame = () => new Promise<void>((r) => (g.requestAnimationFrame as typeof requestAnimationFrame)(() => r()));
+
+/** The history list's item for question `q`. */
+const histItem = (q: string) =>
+  Array.from((g.document as Document).querySelectorAll<HTMLElement>("#wikiAskHistory [data-ask-idx]")).find((el) => el.textContent === q)!;
+/** Ask `q` from the Ask box and stream a whole answer to it. */
+function askAndFinish(q: string): void {
+  const input = (g.document as Document).getElementById("wikiAskInput") as HTMLTextAreaElement;
+  input.value = q;
+  (g.document as Document).getElementById("wikiAskBtn")!.click();
+  const es = FakeEventSource.all.at(-1)!;
+  es.emit("done", { answer: `Answer to ${q}`, cited: [] });
+  es.emit("answer_html", { html: `<p>Answer to ${q}</p>`, cited: [] });
+}
 
 /** Back/Forward to `url`: the shell's popstate route. */
 function popTo(url: string): void {
@@ -439,29 +460,129 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
   });
 
   test("a Remember that returns after another turn was opened lands on its own turn, not the one on screen (fix round 1 batch 2)", async () => {
-    const histItem = (q: string) =>
-      Array.from(doc().querySelectorAll<HTMLElement>("#wikiAskHistory [data-ask-idx]")).find((el) => el.textContent === q)!;
+    askAndFinish("Saved later?");
+    askAndFinish("Opened meanwhile?");
     const bar = () => doc().getElementById("wikiRememberBar")!;
-    histItem("Held question?").click();
+    histItem("Saved later?").click();
     const release = hold("/api/wiki/remember?relPath=null");
     rememberPosts.length = 0;
     fetched.length = 0;
     doc().getElementById("wikiRememberBtn")!.click();
     await until(() => fetched.some((u) => u.includes("/api/wiki/remember")), "the remember POST to go out");
     // Before it returns, the reader opens another turn.
-    histItem("Live question?").click();
+    histItem("Opened meanwhile?").click();
     const shown = bar().innerHTML;
     expect(shown).toContain("Remember this");
     release();
     await until(() => rememberPosts.length > 0, "the remember POST");
     await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
-    expect(rememberPosts.map((b) => b.question)).toEqual(["Held question?"]);
+    expect(rememberPosts.map((b) => b.question)).toEqual(["Saved later?"]);
     expect(bar().innerHTML).toBe(shown);
     expect(bar().textContent).not.toContain("Remembered");
     expect((doc().getElementById("wikiRememberBtn") as HTMLButtonElement).disabled).toBe(false);
     // The saved turn shows it once opened again.
-    histItem("Held question?").click();
-    expect(bar().textContent).toBe("✓ Remembered: sum:Held question?");
+    histItem("Saved later?").click();
+    expect(bar().textContent).toBe("✓ Remembered: sum:Saved later?");
+    expect(doc().getElementById("wikiRememberBtn")).toBe(null);
+  });
+
+  test("a page fetch the reader started makes the shown explainer's late payload stale: it paints nothing (fix round 2)", async () => {
+    const releaseExplainer = hold("/api/wiki/page?relPath=e.md");
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="e.md"]')!.click();
+    await until(() => !!doc().querySelector("#articleWrap iframe.wiki-explainer-frame"), "the explainer frame");
+    const conn = doc().getElementById("connBody")!.innerHTML;
+    expect(conn).toContain("Loading…");
+    const releasePage = hold("/api/wiki/page?relPath=k.md");
+    fetched.length = 0;
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="k.md"]')!.click();
+    await until(() => fetched.some((u) => u.includes("relPath=k.md")), "the k.md fetch");
+    try {
+      releaseExplainer();
+      await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+      expect(doc().getElementById("connBody")!.innerHTML).toBe(conn);
+    } finally {
+      releasePage();
+    }
+    await until(() => !!doc().querySelector("#articleWrap h1#kmd"), "k.md to render");
+  });
+
+  test("a page load that fails still leaves the shown view: its teardown runs (fix round 2)", async () => {
+    popTo("/wiki?wiki=w&relPath=p.md");
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#pmd"), "p.md to render");
+    const pill = () => doc().getElementById("wikiExplainBtn")!;
+    pill().style.display = ""; // a selection on p.md showed the Explain pill
+    failingPages.add("k.md");
+    try {
+      doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="k.md"]')!.click();
+      await until(() => /Failed to load page: network down/.test(wrap().textContent ?? ""), "the failure to paint");
+    } finally {
+      failingPages.delete("k.md");
+    }
+    expect(pill().style.display).toBe("none");
+  });
+
+  test("Remember clicked between `done` and `answer_html` stays disabled while its POST runs (fix round 2)", async () => {
+    const input = doc().getElementById("wikiAskInput") as HTMLTextAreaElement;
+    input.value = "Remember mid-stream?";
+    doc().getElementById("wikiAskBtn")!.click();
+    const es = FakeEventSource.all.at(-1)!;
+    es.emit("done", { answer: "Mid answer.", cited: [] });
+    const btn = () => doc().getElementById("wikiRememberBtn") as HTMLButtonElement | null;
+    expect(btn()!.disabled).toBe(false);
+    const release = hold("/api/wiki/remember?relPath=null");
+    fetched.length = 0;
+    btn()!.click();
+    await until(() => fetched.some((u) => u.includes("/api/wiki/remember")), "the remember POST to go out");
+    expect([btn()!.textContent, btn()!.disabled]).toEqual(["Saving…", true]);
+    try {
+      es.emit("answer_html", { html: "<p>Mid answer.</p>", cited: [] });
+      expect([btn()!.textContent, btn()!.disabled]).toEqual(["Saving…", true]);
+    } finally {
+      release();
+    }
+    await until(() => doc().getElementById("wikiRememberBar")!.textContent === "✓ Remembered: sum:Remember mid-stream?", "the saved bar");
+  });
+
+  test("the in-flight set alone refuses a second save, even with the button enabled (fix round 2)", async () => {
+    askAndFinish("Twice?");
+    const release = hold("/api/wiki/remember?relPath=null");
+    fetched.length = 0;
+    doc().getElementById("wikiRememberBtn")!.click();
+    await until(() => fetched.some((u) => u.includes("/api/wiki/remember")), "the remember POST to go out");
+    const btn = doc().getElementById("wikiRememberBtn") as HTMLButtonElement;
+    btn.disabled = false; // whatever enabled it, the turn is still saving
+    btn.click();
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 20));
+    release();
+    await until(() => doc().getElementById("wikiRememberBar")!.textContent === "✓ Remembered: sum:Twice?", "the saved bar");
+    expect(fetched.filter((u) => u.includes("/api/wiki/remember")).length).toBe(1);
+  });
+
+  test("a failed Remember shows its error and gives the button back (fix round 2)", async () => {
+    askAndFinish("Fails?");
+    rememberError = "boom";
+    try {
+      doc().getElementById("wikiRememberBtn")!.click();
+      await until(() => !!doc().getElementById("wikiRememberMsg")?.textContent, "the error");
+    } finally {
+      rememberError = null;
+    }
+    const btn = doc().getElementById("wikiRememberBtn") as HTMLButtonElement;
+    expect([btn.textContent, btn.disabled]).toEqual(["Remember this", false]);
+    const msg = doc().getElementById("wikiRememberMsg")!;
+    expect([msg.textContent, msg.className]).toEqual(["Couldn't remember that — boom", "wiki-remember-msg error"]);
+  });
+
+  test("a saved Remember survives a reload: the rehydrated turn reads «✓ Remembered» (fix round 2)", async () => {
+    const { getAskTurns, rehydrateAskSession } = await import("../components/wiki-ask-controller.ts");
+    askAndFinish("Kept after reload?");
+    doc().getElementById("wikiRememberBtn")!.click();
+    await until(() => doc().getElementById("wikiRememberBar")!.textContent === "✓ Remembered: sum:Kept after reload?", "the saved bar");
+    // A reload: the session comes back from localStorage alone (the boot's rehydrate).
+    getAskTurns().length = 0;
+    rehydrateAskSession();
+    histItem("Kept after reload?").click();
+    expect(doc().getElementById("wikiRememberBar")!.textContent).toBe("✓ Remembered: sum:Kept after reload?");
     expect(doc().getElementById("wikiRememberBtn")).toBe(null);
   });
 });

@@ -95,7 +95,7 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import { renderList } from "./wiki-rail-controller.ts";
-import { enterView, viewIsLive } from "./wiki-pane-view.ts";
+import { enterView, viewIsShown } from "./wiki-pane-view.ts";
 
 /** What Ask reads and calls on the shell, read live through a function so a
  *  value the shell reassigns is never a stale copy. */
@@ -218,9 +218,10 @@ export interface AskTurn {
   // the TURN is what stops a late fetch painting turn A's result onto turn B.
   chatEsc?: ChatEscState;
   // The summary `POST /api/wiki/remember` returned for THIS turn, once saved.
-  // Like `chatEsc`, it rides along into localStorage through
-  // `serializeAskSession`. It is held on the turn because `#wikiRememberBar` is
-  // a singleton node owned by whichever turn is painted.
+  // `submitRemember` stores the session when it lands, so it rides into
+  // localStorage through `serializeAskSession` (`isValidTurn` drops a
+  // non-string). It is held on the turn because `#wikiRememberBar` is a
+  // singleton node owned by whichever turn is painted.
   remembered?: string;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
@@ -232,7 +233,7 @@ const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
 let askShownTurn: AskTurn | null = null; // the turn painted in the pane last
 const rememberSaving = new WeakSet<AskTurn>(); // turns whose Remember POST is in flight
-let askView = 0; // its `enterView` token: the pane shows it while the token is live
+let askView = 0; // its `enterView` token: the pane shows it while `viewIsShown` holds
 let askBuffer = ""; // streamed plain-text accumulator for the streaming turn
 let composeText = ""; // fact-check compose lede accumulator (Phase 3 deltas)
 let askRenderRaf = 0; // pending progressive-render frame (0 = none)
@@ -244,7 +245,7 @@ const ASK_ANSWER_CHARS = 700;
  *  clicked mid-stream (or a page opened) leaves the live turn's handlers running,
  *  and they must update the TURN without writing into another view's nodes. */
 function paneShows(turn: AskTurn): boolean {
-  return turn === askShownTurn && viewIsLive(askView);
+  return turn === askShownTurn && viewIsShown(askView);
 }
 
 /** Throttle progressive markdown renders of the streaming buffer to one per
@@ -1183,11 +1184,12 @@ async function driveClaimRetry(
   }
 }
 
-/** True while the Ask view this batch is driving is still on screen. Navigating
- *  away does NOT clear `askShownTurn`, so without this a batch kept launching
- *  claims — up to ~24 minutes of model spend — with Cancel long since destroyed. */
+/** True while the Ask view this batch is driving is still on screen (through a
+ *  pending page fetch, as its Cancel is). Navigating away does NOT clear
+ *  `askShownTurn`, so without this a batch kept launching claims — up to ~24
+ *  minutes of model spend — with Cancel long since destroyed. */
 function claimRetryPaneAlive(): boolean {
-  return viewIsLive(askView);
+  return viewIsShown(askView);
 }
 
 /** Retry every unverified claim on the shown turn, SEQUENTIALLY (concurrency 1):
@@ -1418,11 +1420,13 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
   );
 }
 
-/** Enable/disable the follow-up + Remember controls by id (they may not exist yet
- *  at boot, and the article pane is re-rendered per turn — always look up
- *  fresh). The Remember button rides the same commit gate as the follow-up bar.
+/** Enable/disable the follow-up controls by id (they may not exist yet at boot,
+ *  and the article pane is re-rendered per turn — always look up fresh).
  *
- *  The two WRITE buttons are deliberately NOT here. Their state is derived from
+ *  Remember is NOT here: its button is derived from the turn and the in-flight
+ *  set (`refreshRememberBar`), and a blanket enable after `done` left a button
+ *  reading "Saving…" clickable while its POST ran. The two WRITE buttons are
+ *  deliberately NOT here either. Their state is derived from
  *  `turn.wrote` + the in-flight propose flag (`refreshWriteActionBars`), and a
  *  blanket `setFollowupDisabled(false)` from an SSE drop or the `end` fallback
  *  would force-enable a button the derivation had correctly retired — reviving a
@@ -1433,8 +1437,6 @@ function setFollowupDisabled(disabled: boolean): void {
   const btn = document.getElementById("wikiFollowupBtn") as HTMLButtonElement | null;
   if (input) input.disabled = disabled;
   if (btn) btn.disabled = disabled;
-  const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
-  if (remember) remember.disabled = disabled;
   // "Continue in chat →" is deliberately NOT here, for the same reason the two
   // write buttons aren't: every terminal path (app_error / end / onerror) called
   // `setFollowupDisabled(false)`, which force-enabled the button on turns that
@@ -1706,6 +1708,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       persistAskSession();
       btn.disabled = false;
       if (paneShows(turn)) setFollowupDisabled(false); // committed — the follow-up bar is now usable
+      refreshRememberBar(turn); // and Remember, which reads the committed answer
       // The pane was painted before the answer existed, so neither write-action
       // gate could run (both read the committed answer). Re-derive them now.
       refreshWriteActionBars(turn);
@@ -1855,6 +1858,7 @@ export async function submitRemember(): Promise<void> {
       throw new Error(data.error || ("HTTP " + res.status));
     }
     turn.remembered = data.summary || "";
+    persistAskSession(); // a reload shows "✓ Remembered", never a second save
   } catch (err) {
     error = "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
   } finally {
