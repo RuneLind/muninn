@@ -145,6 +145,24 @@ describe("createJobFollower (F17)", () => {
     expect(h.idle()).toBe(true);
   });
 
+  test("a job followed while a poll is in flight is judged only by a later poll", async () => {
+    let answerHeld: (jobs: { id: string; status: string; error?: string }[]) => void = () => {};
+    let answer = () => new Promise<{ id: string; status: string; error?: string }[]>((r) => (answerHeld = r));
+    const h = harness(() => answer());
+    const ends: string[] = [];
+    void h.f.follow("a").then((e) => ends.push(`a:${e.end}`));
+    await h.run(); // poll 1 starts and holds
+    expect(h.polls()).toBe(1);
+    void h.f.follow("b").then((e) => ends.push(`b:${e.end}`));
+    answerHeld([{ id: "a", status: "summarizing" }]); // poll 1's answer, asked before b was followed
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(ends).toEqual([]);
+    answer = async () => [{ id: "a", status: "summarizing" }, { id: "b", status: "error", error: "no captions" }];
+    await h.run();
+    expect(h.polls()).toBe(2);
+    expect(ends).toEqual(["b:error"]);
+  });
+
   test("a job the store no longer has is lost; failed polls give up after the bound", async () => {
     const h = harness(async () => []);
     const end = h.f.follow("gone");

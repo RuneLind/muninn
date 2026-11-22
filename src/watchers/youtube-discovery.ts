@@ -35,7 +35,7 @@
  *   - `youtube:search` — the yt-dlp searches (a seed fails it when every search failed)
  *   - `youtube:store`  — saving each shelf (the watcher's only output)
  * A key is `error` when at least half of the seeds that reached its step failed it
- * (`partial` when some passed), `ok` otherwise with any failures counted in its
+ * (`partial` when some passed and the run stored a shelf), `ok` otherwise with any failures counted in its
  * detail, carried when no seed reached it.
  *
  * The run keeps inside the runner's net: every model call carries one run-wide
@@ -253,13 +253,15 @@ export function tallyOutcome(out: DiscoverRunOutcome, t: RunTally): void {
 
 /**
  * One key's verdict: `error` when at least half of the seeds that reached the step
- * failed it (`partial` when some passed), else `ok`, with the failures in the detail.
+ * failed it, else `ok`, with the failures in the detail. The error is `partial` only
+ * when some seeds passed the step AND the run stored a shelf (`shelves`): the alert
+ * then says part of the run succeeded, which a run with no shelf would make false.
  */
-export function markStep(health: SourceHealthRecorder, key: string, s: StepTally, extra?: string): void {
+export function markStep(health: SourceHealthRecorder, key: string, s: StepTally, shelves: number, extra?: string): void {
   if (s.reached === 0) return health.carry(key);
   const seeds = s.failed > 0 ? `${s.failed} of ${s.reached} seed${s.reached === 1 ? "" : "s"} failed: ${s.detail ?? "no detail"}` : "";
   const detail = [seeds, extra ?? ""].filter(Boolean).join("; ");
-  if (s.failed * 2 >= s.reached) health.mark(key, "error", detail, { partial: s.failed < s.reached });
+  if (s.failed * 2 >= s.reached) health.mark(key, "error", detail, { partial: s.failed < s.reached && shelves > 0 });
   else health.mark(key, "ok", detail || undefined);
 }
 
@@ -523,10 +525,10 @@ export async function checkYouTubeDiscovery(
 
   // The listing answered: huginn is ok unless half the raw reads that ran failed.
   if (tally.huginn.reached === 0) health.mark(HEALTH_HUGINN, "ok");
-  else markStep(health, HEALTH_HUGINN, tally.huginn);
-  markStep(health, HEALTH_MODEL, tally.model);
+  else markStep(health, HEALTH_HUGINN, tally.huginn, shelves);
+  markStep(health, HEALTH_MODEL, tally.model, shelves);
   const s = tally.searches;
-  markStep(health, HEALTH_SEARCH, tally.search, s.failed > 0 ? `${s.failed} of ${s.ran} searches failed` : undefined);
+  markStep(health, HEALTH_SEARCH, tally.search, shelves, s.failed > 0 ? `${s.failed} of ${s.ran} searches failed` : undefined);
   // A seed dropped at the floor is output lost for good: it counts as a failed store.
   const extras: string[] = [];
   if (floorDropped.length > 0) {
@@ -537,7 +539,7 @@ export async function checkYouTubeDiscovery(
   }
   if (saveError) {
     extras.push(`saving the retry state failed: ${saveError}`);
-    health.mark(HEALTH_STORE, "error", extras.join("; "), { partial: store.reached > store.failed });
-  } else markStep(health, HEALTH_STORE, store, extras.join("; ") || undefined);
+    health.mark(HEALTH_STORE, "error", extras.join("; "), { partial: shelves > 0 });
+  } else markStep(health, HEALTH_STORE, store, shelves, extras.join("; ") || undefined);
   return health.finish();
 }

@@ -2,7 +2,8 @@
  * Summarize on the Discover page (architecture review 2026-11-16, F17), driven
  * through the real `bootDiscoverPage` in happy-dom with `fetch` stubbed: a
  * capture job that fails puts the video back (only while it is still `queued`)
- * and re-enables Summarize; a job that succeeds leaves it queued. The page follows
+ * and re-enables Summarize; a job that succeeds leaves it queued; Undo of a dismissal
+ * after a failed job brings the video back actionable, not stuck queued. The page follows
  * jobs through one poll of `GET /api/youtube/jobs`, never a stream per click.
  * Invented ids only (public repo).
  *
@@ -40,6 +41,7 @@ function restoreGlobals(): void {
 const V1 = "vidAAAAAAA1";
 const V2 = "vidBBBBBBB2";
 const V3 = "vidCCCCCCC3";
+const V4 = "vidDDDDDDD4";
 const hit = (videoId: string, rank: number) => ({
   videoId,
   title: `Video ${videoId}`,
@@ -67,11 +69,11 @@ const SHELF: DiscoverShelf = {
   origin: "watcher",
   failed: 0,
   createdAt: Date.parse("2026-11-20T12:00:00Z"),
-  hits: [hit(V1, 1), hit(V2, 2), hit(V3, 3)],
+  hits: [hit(V1, 1), hit(V2, 2), hit(V3, 3), hit(V4, 4)],
 };
 
 /** The server's side: each video's state, each job's status, and every URL asked. */
-const serverState = new Map<string, string>([V1, V2, V3].map((v) => [v, "new"]));
+const serverState = new Map<string, string>([V1, V2, V3, V4].map((v) => [v, "new"]));
 const jobs = new Map<string, { status: string; error?: string }>();
 const fetched: string[] = [];
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -143,6 +145,21 @@ describe("Summarize follows the capture job (F17)", () => {
     expect(serverState.get(V2)).toBe("dismissed");
     expect(card(V2)).toBeNull();
     expect(toastText()).not.toContain("still marked queued");
+  });
+
+  test("dismissed while the job ran, the job fails, then Undo: back to new with Summarize, never a stuck queued", async () => {
+    sumBtn(V4)!.click();
+    await until(() => sumBtn(V4)?.textContent === "✓ Queued", "queued");
+    card(V4)!.querySelector<HTMLButtonElement>('[data-act="dismiss"]')!.click();
+    await until(() => card(V4) === null, "dismissed");
+    jobs.set(`job-${V4}`, { status: "error", error: "Transcript unavailable" });
+    await until(() => toastText().includes("The summary failed: Transcript unavailable."), "failure toast");
+    expect(serverState.get(V4)).toBe("dismissed");
+    document.querySelector<HTMLButtonElement>("#dscToast [data-undo]")!.click();
+    await until(() => card(V4) !== null, "restored card");
+    expect(serverState.get(V4)).toBe("new");
+    expect(sumBtn(V4)!.textContent).toBe("Summarize");
+    expect(sumBtn(V4)!.getAttribute("aria-disabled")).toBeNull();
   });
 
   test("a job that succeeds leaves the video queued", async () => {

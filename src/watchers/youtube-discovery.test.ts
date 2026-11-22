@@ -10,7 +10,7 @@ import type { BotConfig } from "../bots/config.ts";
 import type { YouTubeHit } from "../youtube/discover.ts";
 import type { CapturedDoc } from "../youtube/discover-deps.ts";
 import type { DiscoverHitInput, DiscoverRunInput } from "../db/youtube-discover.ts";
-import type { SourceHealthRecorder, SourceOutcome } from "./source-health.ts";
+import { buildHealthAlerts, recordOutcome, type SourceHealthMap, type SourceHealthRecorder, type SourceOutcome } from "./source-health.ts";
 import { computeWatcherTimeoutMs, TICK_TIMEOUT_MS, WATCHER_TIMEOUT_MARGIN_MS } from "./timeout.ts";
 import {
   checkYouTubeDiscovery,
@@ -481,6 +481,36 @@ describe("F14: failed seeds, retries and the carried window (architecture review
     expect(partial).toBe(true);
     expect(Object.keys(state!.retry).sort()).toEqual(["ai/Seed 3.md", "ai/Seed 4.md", "ai/Seed 5.md"]);
     expect(Object.values(state!.retry).every((r) => r.attempts === 1 && !r.exhausted)).toBe(true);
+  });
+
+  test("a run with no shelf never says part of it succeeded: seed 1 fails its queries, seed 2 every search", async () => {
+    listed = [];
+    setDocs([1, 2], () => day(NOW - DAY));
+    queriesAnswer = async (p) => {
+      const n = /Title: Seed (\d+)/.exec(p)?.[1];
+      if (n === "1") throw new Error("model timeout");
+      return JSON.stringify([{ query: `q${n}`, why: "same topic" }]);
+    };
+    failing = new Set(["q2"]);
+    // The real record and alert text, alerting on the first failed run (a weekly row's rule).
+    const map: SourceHealthMap = {};
+    const d = weekly({
+      health: async () => ({
+        mark: (key, outcome, detail, o) => void (map[key] = recordOutcome(undefined, outcome, clock, detail, o)),
+        carry: () => {},
+        finish: async () => buildHealthAlerts("YouTube discovery", map, clock, 1),
+      }),
+    });
+    const alerts = await checkYouTubeDiscovery(watcher(), bot, undefined, d);
+    expect(saved).toHaveLength(0);
+    // youtube:model: seed 2 passed it, seed 1 failed it ⇒ error, yet the run made nothing.
+    const model = alerts.find((a) => a.subject?.includes(HEALTH_MODEL));
+    expect(model?.summary).toContain("1 of 2 seeds failed: queries call: model timeout");
+    for (const a of alerts) {
+      expect(a.summary).not.toContain("part of the last run still succeeded");
+      expect(a.summary).not.toContain("failed for part of its work");
+    }
+    expect(model?.summary).toContain("this source alone is not producing data");
   });
 
   test("retries run after this week's seeds, beyond maxSeeds; nothing in the window is skipped over three weeks", async () => {

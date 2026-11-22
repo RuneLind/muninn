@@ -102,11 +102,15 @@ export const DSC_JOB_POLL_MAX_FAILS = 15;
  * the page (architecture review 2026-11-16, F17).
  */
 export function createJobFollower(deps: JobFollowerDeps, pollMs = DSC_JOB_POLL_MS): { follow: (jobId: string) => Promise<CaptureEnd> } {
-  const followed = new Map<string, ((end: CaptureEnd) => void)[]>();
+  // `since`: how many polls had started when the job was followed. A poll judges only the jobs
+  // followed before it started: one followed while its fetch was in flight is missing from the
+  // answer, which would otherwise settle it `lost` at once.
+  const followed = new Map<string, { since: number; waiters: ((end: CaptureEnd) => void)[] }>();
+  let polls = 0;
   let scheduled = false;
   let fails = 0;
   const settle = (jobId: string, end: CaptureEnd) => {
-    for (const done of followed.get(jobId) ?? []) done(end);
+    for (const done of followed.get(jobId)?.waiters ?? []) done(end);
     followed.delete(jobId);
   };
   const schedule = () => {
@@ -116,16 +120,18 @@ export function createJobFollower(deps: JobFollowerDeps, pollMs = DSC_JOB_POLL_M
   };
   const tick = async () => {
     scheduled = false;
+    const poll = ++polls;
+    const judged = () => [...followed].filter(([, f]) => f.since < poll).map(([id]) => id);
     let jobs: Awaited<ReturnType<JobFollowerDeps["fetchJobs"]>>;
     try {
       jobs = await deps.fetchJobs();
       fails = 0;
     } catch {
-      if (++fails >= DSC_JOB_POLL_MAX_FAILS) for (const id of [...followed.keys()]) settle(id, { end: "lost" });
+      if (++fails >= DSC_JOB_POLL_MAX_FAILS) for (const id of judged()) settle(id, { end: "lost" });
       return schedule();
     }
     const byId = new Map(jobs.map((j) => [j.id, j]));
-    for (const id of [...followed.keys()]) {
+    for (const id of judged()) {
       const job = byId.get(id);
       // A job the store no longer has (a restart, the TTL) says nothing about the capture.
       if (!job) settle(id, { end: "lost" });
@@ -137,7 +143,9 @@ export function createJobFollower(deps: JobFollowerDeps, pollMs = DSC_JOB_POLL_M
   return {
     follow: (jobId) =>
       new Promise<CaptureEnd>((resolve) => {
-        followed.set(jobId, [...(followed.get(jobId) ?? []), resolve]);
+        const f = followed.get(jobId);
+        if (f) f.waiters.push(resolve);
+        else followed.set(jobId, { since: polls, waiters: [resolve] });
         schedule();
       }),
   };
@@ -625,17 +633,39 @@ function closeDrawer(): void {
   if (prev) cardEl(liveRun(prev.runId), prev.videoId)?.focus();
 }
 
+/** Videos this page queued: the state before Summarize, and how the capture ended (unset while it runs). */
+const captures = new Map<string, { before: DiscoverHitState; end?: CaptureEnd }>();
+
+/**
+ * The state a dismiss's Undo writes back. `queued` only while this page's capture runs or once it
+ * completed: after a failed or lost one, the put-back met the dismissal and gave way, so `queued`
+ * would leave a video no job will move, with Summarize gone. Then the state before Summarize.
+ */
+export function dscUndoState(before: DiscoverHitState, capture: { before: DiscoverHitState; end?: CaptureEnd } | undefined): DiscoverHitState {
+  if (before !== "queued" || !capture?.end || capture.end.end === "complete") return before;
+  return capture.before;
+}
+
 async function summarize(videoId: string): Promise<void> {
   const found = findHit(videoId);
   if (!found || st.summarizing.has(videoId) || found.hit.state === "queued") return;
   st.summarizing.add(videoId);
   render();
   const title = found.hit.title;
-  await summarizeFlow(found.hit.state, {
+  const prior = found.hit.state;
+  await summarizeFlow(prior, {
     start: () => postJson("/api/youtube/summarize", { title, url: watchUrl(videoId), video_id: videoId }),
     setState: (state) => setState(videoId, state),
     putBack: (state) => setState(videoId, state, "queued"),
-    follow: (jobId) => jobFollower().follow(jobId),
+    follow: (jobId) => {
+      captures.set(videoId, { before: prior });
+      return jobFollower()
+        .follow(jobId)
+        .then((end) => {
+          captures.set(videoId, { before: prior, end });
+          return end;
+        });
+    },
     toast,
     settled: () => {
       st.summarizing.delete(videoId);
@@ -678,7 +708,7 @@ async function dismiss(videoId: string, fromRun?: string): Promise<void> {
   if (st.open?.videoId === videoId) st.open = null;
   render();
   toast("Dismissed. It won't be suggested again.", () => {
-    void setState(videoId, before).then((undoErr) => {
+    void setState(videoId, dscUndoState(before, captures.get(videoId))).then((undoErr) => {
       if (undoErr) toast(undoErr);
       render();
       if (undoErr) return;
