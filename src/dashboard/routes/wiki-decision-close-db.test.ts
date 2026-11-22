@@ -171,6 +171,23 @@ describe("POST /api/wiki/decision-inbox/close", () => {
     expect(inbox.cards.map((c) => c.id)).not.toContain("O2");
   });
 
+  test("a close whose commit fails reports the write as uncommitted, as Done does", async () => {
+    const hook = path.join(root, ".git", "hooks", "pre-commit");
+    await Bun.write(hook, "#!/bin/sh\nexit 1\n");
+    execFileSync("chmod", ["+x", hook]);
+    try {
+      await answer("O2", "B", "");
+      const { body: p } = await preview("O2");
+      const res = await close({ questionId: "O2", baseHash: p.baseHash, rulingHash: p.rulingHash });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, decision: "D2", committed: false, commitReason: "error", uncommitted: true });
+      expect(await stateOf("O2")).toEqual({ kind: "decided", decision: "D2" });
+      expect(git("log", "-1", "--format=%s")).toBe("fixture\n");
+    } finally {
+      execFileSync("rm", ["-f", hook]);
+    }
+  });
+
   test("a hint naming a decision closes on it, with no new decision", async () => {
     const { body: p } = await preview("O1");
     expect(p.lines).toEqual(["- **O1** — Ruled by a decision. See the card. Closed 2026-11-07 (D1)."]);

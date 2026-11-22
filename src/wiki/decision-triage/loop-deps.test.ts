@@ -381,6 +381,15 @@ seen.push(await deps.readState("a"));
       }
     });
 
+    test("a model-off night where the memory guard stopped every card is stored failed, not ok (F6)", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: null, rss: (() => { let n = 0; return () => (n++ === 0 ? 0 : 3 * 1024 ** 3); })()`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["failed"]);
+      expect(seen[0]).toMatchObject({ outcome: "failed" });
+      expect((seen[1] as State)!.attempts.map((a) => a.outcome)).toEqual(["failed"]);
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+    });
+
     test("b: the bound fires while the pass writes its run line, and the pass returns normally: one line, one state record", async () => {
       const { tmp, env } = withCards(3);
       const { seen } = await drive(`

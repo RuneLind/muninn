@@ -13,7 +13,7 @@ import type { WikiIndex, WikiPageMeta } from "../store.ts";
 import { WORK_MAP_SPAWN_ARGS, WORK_MAP_TIMEOUT_MS } from "../work-map/run.ts";
 import { appendLogLines, nightlyLogPath, parseLog, readLog } from "./log.ts";
 import { TRIAGE_SYSTEM_PROMPT } from "./prompt.ts";
-import { decisionTriageBotConfig, MODEL_OFF, parseVerdicts, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
+import { decisionTriageBotConfig, MEMORY_GUARD_REASON, MODEL_OFF, parseVerdicts, RSS_GROWTH_GUARD_BYTES, realDecisionTriageModel, runDecisionTriage, type TriageModel, type TriageProgress, type TriageRunDeps } from "./run.ts";
 import { commitAt, pushMain, repoWithOrigin, write } from "./test-repo.ts";
 import { realGit } from "./git.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type LogLine } from "./schema.ts";
@@ -310,17 +310,57 @@ describe("partial and failed nights", () => {
     expect(cards.map((c) => c.verdict)).toEqual(["NO_VERDICT", "NO_VERDICT"]);
   });
 
-  test("the memory guard stopping every card is a failed night too", async () => {
-    const spy = spyOn(process, "memoryUsage").mockReturnValue({ rss: 4 * 1024 ** 3 } as never);
+  /** RSS readings in call order: the first is the pass's start, the last repeats. */
+  const rssSeq = (...gib: number[]) => {
+    let i = 0;
+    return spyOn(process, "memoryUsage").mockImplementation((() => ({ rss: gib[Math.min(i++, gib.length - 1)]! * 1024 ** 3 })) as never);
+  };
+
+  test("a server already past the old 3 GiB level still gathers: the guard reads growth from the pass's start (F5)", async () => {
+    const spy = rssSeq(5.2, 5.3, 5.4);
     try {
-      const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(card("O1")) } }));
-      expect(res.outcome).toBe("failed");
+      const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }));
+      expect(res.outcome).toBe("ok");
+    } finally {
+      spy.mockRestore();
+    }
+    const { cards } = await readLog(dirs.log);
+    expect(cards.map((c) => c.verdict)).toEqual(["DEFAULT", "DEFAULT"]);
+  });
+
+  test("growth past the guard stops the gather from that card on, with the guard's reason", async () => {
+    const spy = rssSeq(5.2, 5.4, 7.5);
+    try {
+      const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(`${card("O1")}\n${card("O2")}`) } }));
+      expect(res.outcome).toBe("partial");
     } finally {
       spy.mockRestore();
     }
     const { runs, cards } = await readLog(dirs.log);
-    expect(cards[0]!.reason).toBe("the memory guard stopped the gather");
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    expect(byId.get("O1")!.verdict).toBe("DEFAULT");
+    expect(byId.get("O2")).toMatchObject({ verdict: "NO_VERDICT", reason: MEMORY_GUARD_REASON });
     expect(runs[0]!.reason).toBe("1 card(s) with no facts");
+  });
+
+  test("the memory guard stopping every card is a failed night too", async () => {
+    let n = 0;
+    const rss = () => (n++ === 0 ? 0 : RSS_GROWTH_GUARD_BYTES + 1);
+    const res = await runDecisionTriage(deps({ "plans/p.mdx": { text: page(card("O1")) } }, { rss }));
+    expect(res.outcome).toBe("failed");
+    const { runs, cards } = await readLog(dirs.log);
+    expect(cards[0]!.reason).toBe(MEMORY_GUARD_REASON);
+    expect(runs[0]!.reason).toBe("1 card(s) with no facts");
+  });
+
+  test("with the model off, a night where no unanswered card gathered is failed, not partial (F6)", async () => {
+    const res = await runDecisionTriage(
+      deps({ "plans/p.mdx": { text: page(`${card("O1", NAMES_A)}\n${card("O2", NAMES_A)}\n${card("O3")}`) } }, factsThrow({ call: null, answers: async () => [answer("O3")] })),
+    );
+    expect(res.outcome).toBe("failed");
+    const { runs, cards } = await readLog(dirs.log);
+    expect(runs[0]).toMatchObject({ outcome: "failed", reason: `${MODEL_OFF}, 2 card(s) with no facts`, promptVersion: MODEL_OFF_VERSION });
+    expect(cards.map((c) => c.verdict).sort()).toEqual(["ANSWERED", "NO_VERDICT", "NO_VERDICT"]);
   });
 
   test("an answer with no verdicts: failed, for that reason and no other", async () => {

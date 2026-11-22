@@ -44,7 +44,7 @@ interface InboxState {
   preview: Record<string, { lines: string[]; warnings: string[]; baseHash: string; rulingHash: string; ev: string }>;
   showKept: boolean;
   /** The last close, said in the «close?» lane: its row leaves on the reload. */
-  closed: string | null;
+  closed: { text: string; warn: boolean } | null;
   /** The triage's status line (`GET /api/wiki/decision-triage/status`); null when it did not load. */
   status: TriageStatusBody | null;
   statusOpen: boolean;
@@ -380,7 +380,7 @@ export function inboxHtml(hrefFor: (rel: string) => string, now: number): string
     const isOpen = s.laneOpen[lane] ?? (open || lane === firstFull || list.some((c) => keyOf(c) === s.open));
     const rows =
       (list.length ? `<ul class="wiki-wi-rows">${list.map((c) => rowHtml(c, now, hrefFor)).join("")}</ul>` : "") +
-      (lane === "close" && s.closed ? `<div class="wiki-wi-msg" role="status">${esc(s.closed)}</div>` : "") +
+      (lane === "close" && s.closed ? `<div class="wiki-wi-msg${s.closed.warn ? " warn" : ""}" role="status">${esc(s.closed.text)}</div>` : "") +
       (lane === "close" && hidden ? `<button class="wiki-wi-btn" data-wi-act="kept">${s.showKept ? "Hide" : "Show"} ${hidden} kept open</button>` : "");
     return `<details class="wiki-wi-lane" data-wi-lane="${lane}"${isOpen ? " open" : ""}><summary class="wiki-wm-lane-title">${label} <span class="wiki-wm-count">${list.length}</span> <span class="wiki-wi-hint">${hint}</span></summary>${rows}</details>`;
   }).join("");
@@ -429,7 +429,7 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
   delete s.msg[k];
   repaint(`${sel(k)} .wiki-wi-row`);
   let status = 0;
-  let data: { error?: string; lines?: string[]; warnings?: string[]; baseHash?: string; rulingHash?: string; decision?: string } | null = null;
+  let data: { error?: string; lines?: string[]; warnings?: string[]; baseHash?: string; rulingHash?: string; decision?: string; uncommitted?: boolean } | null = null;
   try {
     const res = await fetch("/api/wiki/decision-inbox/close", {
       method: "POST",
@@ -447,7 +447,10 @@ async function sendClose(c: InboxCard, k: string, sent: { baseHash: string; ruli
   if (ok && !sent && data?.lines && data.baseHash && data.rulingHash) s.preview[k] = { lines: data.lines, warnings: data.warnings ?? [], baseHash: data.baseHash, rulingHash: data.rulingHash, ev: evidenceKey(c) };
   else {
     delete s.preview[k];
-    if (ok) s.closed = `Closed ${c.id} (${data?.decision ?? ""}).`;
+    // A written page whose commit failed says so, as Done and Stale Apply do.
+    if (ok) s.closed = data?.uncommitted === true
+      ? { text: `Closed ${c.id} (${data.decision ?? ""}), but the commit failed: the page has uncommitted edits, so commit it by hand.`, warn: true }
+      : { text: `Closed ${c.id} (${data?.decision ?? ""}).`, warn: false };
     else s.msg[k] = { text: `Couldn’t close: ${data?.error ?? (status ? `HTTP ${status}` : "the server did not answer")}.`, warn: true, page: status === 409 };
   }
   // A closed card's row leaves on the reload: focus its lane.

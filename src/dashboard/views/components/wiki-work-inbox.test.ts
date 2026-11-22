@@ -320,6 +320,22 @@ test("a close says so in the lane after the closed row has left it", async () =>
   expect(html).toContain('data-wi-lane="close" open');
 });
 
+test("a close whose commit failed says so in the lane, as a warning", async () => {
+  const closing = card({ id: "O6", lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
+  await load({ wiki: "w", cards: [closing] });
+  const reply = (closeBody: unknown) =>
+    (async (url: string) =>
+      url.endsWith("/close") ? { ok: true, status: 200, json: async () => closeBody } : { ok: true, status: 200, json: async () => ({ wiki: "w", cards: [] }) }) as unknown as typeof fetch;
+  globalThis.fetch = reply({ ok: true, preview: true, lines: ["- x"], warnings: [], baseHash: "b", rulingHash: "r", decision: "D3" });
+  click("preview", "plans/a.mdx#O6");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  globalThis.fetch = reply({ ok: true, decision: "D3", committed: false, commitReason: "error", uncommitted: true });
+  click("close", "plans/a.mdx#O6");
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  const html = inboxHtml((rel) => `/wiki?relPath=${rel}`, Date.now());
+  expect(html).toContain('<div class="wiki-wi-msg warn" role="status">Closed O6 (D3), but the commit failed: the page has uncommitted edits, so commit it by hand.</div>');
+});
+
 test("after a close, focus goes to the lane, and a later close's refusal does not sit beside the old «Closed»", async () => {
   const mk = (id: string) => card({ id, lane: "close", answers: [{ author: "R", choice: "A", body: "", at: "2026-11-02T10:00:00Z", questionChanged: false }] });
   await load({ wiki: "w", cards: [mk("O6"), mk("O7")] });
