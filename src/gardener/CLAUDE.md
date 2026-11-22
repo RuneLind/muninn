@@ -226,8 +226,9 @@ both read-only refusals the route makes fire before the apply is ever called.
 Four more rules on that route, each a measured defect:
 
 - **The gate refuses a decision in flight and SKIPS what is settled.** Another
-  Accept or Dismiss of the group in flight in this process (`groupVerbsInFlight`,
-  checked and set with no `await` between) answers 409 `{outcome: "mixed",
+  Accept or Dismiss of the group in flight (`groupVerbsInFlight` in this
+  process, checked and set with no `await` between; the group's DB lease in
+  any process) answers 409 `{outcome: "mixed",
   error: "another Accept or Dismiss of this group is in flight"}`, and a
   `rejected` row (a dismissal) 409 `{outcome: "mixed", error: "a rejected row
   blocks the group", statuses}`; `applied` and `stale` rows are skipped and
@@ -351,15 +352,38 @@ An Accept that threw after its claim, or a restart mid-apply, left rows
 rows kept holding their pages against Done, Close and Stale Apply until someone
 ran SQL. Now:
 
-- **With no Accept or Dismiss of the group in flight in this process, an
-  `approved` row is stranded, and both verbs take it.** Accept claims `draft` and
-  stranded rows; Dismiss rejects both (`rejectWikiProposalGroup` takes
-  `approved`), so a half-stranded group settles whole, never as `approved` +
-  `rejected`. A live row whose page already IS its draft is settled `applied` by
-  Dismiss, not `rejected`, named in `alreadyWritten`, and logged and committed
-  by a re-run of the apply over just those rows. The card shows Accept
-  and Dismiss while any row is `draft` or `approved`, and "Accept all N" counts
-  both (`groupAcceptCount`).
+- **Each verb holds the group's lease, and with it held an `approved` row is
+  stranded, so both verbs take it.** The lease is a DB row
+  (`wiki_proposal_group_leases`, migration 092, `claimWikiProposalGroupLease`):
+  one statement inserts it or takes one whose `expires_at` passed (TTL 120 s,
+  renewed every 30 s while the verb runs, deleted by token in its `finally`). It
+  holds across processes: `bun run dev:chat` runs the same routes on the same DB
+  and wikis, and a per-process set let a Dismiss there reject rows an Accept here
+  was writing, which then landed as `rejected`. A verb that cannot claim answers
+  the in-flight 409. A dead process strands its rows for at most the TTL. Accept
+  claims `draft` and stranded rows; Dismiss rejects both
+  (`rejectWikiProposalGroup` takes `approved`), so a half-stranded group settles
+  whole, never as `approved` + `rejected`. The card shows Accept and Dismiss
+  while any row is `draft` or `approved`, and "Accept all N" counts both
+  (`groupAcceptCount`).
+- **Dismiss settles a written row only after logging it, inside the write
+  section.** A live row whose page already IS its draft is settled `applied`,
+  not `rejected`, and named in `alreadyWritten`. `settleWrittenGroupRows`
+  (`apply.ts`) reads each page, compares, writes the group's `log.md` entry for
+  the pages still uncommitted and runs the settle CAS, all in ONE
+  `runWikiWriteExclusive` section; the commit runs right after it, and only then
+  are the other rows rejected. So a queued writer cannot change a page between
+  the read and the settle, and a throw (in the reject, a later step, or the
+  settle step itself) never leaves an `applied` row over a page nobody logged:
+  what was not settled stays live for the next verb. Residual: a crash between
+  the settle and the commit leaves the page logged and uncommitted, for the
+  sweeper.
+- **An Accept that loses a terminal CAS says so.** A `markProposal` that
+  returns false (another verb moved the row while this one applied it, possible
+  only once the lease expired) answers 409 `{outcome: "conflict", lost,
+  applied, …}`, never `applied`. After the lease is claimed the Accept's
+  re-read refuses (`mixed`, rejected row) a group a Dismiss elsewhere settled
+  between its first read and the claim.
 - **Every claimed row is protected from before the claim.** On any throw, the
   Accept's `finally` marks a row the apply REPORTED written (`onRowOutcome`, so
   a throw after the write still knows) `applied`, and puts every other claimed
@@ -373,10 +397,6 @@ ran SQL. Now:
   (`recovered`). Residuals: a crash between the log append and the commit logs
   that page twice; a dead pass's page the sync loop or the sweeper committed
   first gets no group log entry; a wiki outside git recovers nothing.
-- **Single writer.** The in-flight set is per process. `bun run dev:chat`
-  registers the same routes on the same DB and wikis with its own set, so an
-  Accept there while one runs here reads this one's rows as stranded and
-  applies them a second time (each page a no-op, but two passes).
 
 ## Stale check fixes (`kind: "stale-check"`, `src/gardener/stale-proposals.ts`)
 

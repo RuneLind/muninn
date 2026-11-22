@@ -692,9 +692,9 @@ export async function approveWikiProposalGroup(
  *  leaving these rows in place.
  *
  *  `approved` is taken too (F35, arch review 2026-11-16): the route calls this
- *  only when no Accept of the group is in flight in its process, so an
- *  `approved` row there is one a failed or restarted Accept stranded, and a
- *  Dismiss that skipped it left the group wedged as `approved` + `rejected`. */
+ *  only while it holds the group's lease ({@link claimWikiProposalGroupLease}),
+ *  so an `approved` row there is one a failed or restarted Accept stranded, and
+ *  a Dismiss that skipped it left the group wedged as `approved` + `rejected`. */
 export async function rejectWikiProposalGroup(
   wikiName: string,
   groupKey: string,
@@ -723,6 +723,63 @@ export async function settleWikiProposalApplied(id: string): Promise<WikiProposa
     RETURNING *
   `;
   return row ? mapRow(row) : null;
+}
+
+/** How long a group verb's lease lives without a renewal, and how often a
+ *  running verb renews it. A verb that dies leaves its rows stranded for at
+ *  most the TTL. */
+export const GROUP_LEASE_TTL_MS = 120_000;
+export const GROUP_LEASE_RENEW_MS = 30_000;
+
+/**
+ * Claim a group for one Accept or Dismiss, across processes (F35, migration
+ * 092). ONE statement: insert the lease, or take one whose `expires_at` has
+ * passed. Returns the token, or null when another verb holds a live lease.
+ * `scope` is the `COALESCE(wiki_name, bot_name)` the group verbs filter on.
+ */
+export async function claimWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  verb: "accept" | "dismiss",
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<string | null> {
+  const sql = getDb();
+  const token = crypto.randomUUID();
+  const [row] = await sql`
+    INSERT INTO wiki_proposal_group_leases (scope, group_key, token, verb, expires_at)
+    VALUES (${scope}, ${groupKey}, ${token}, ${verb}, now() + ${ttlMs} * interval '1 millisecond')
+    ON CONFLICT (scope, group_key) DO UPDATE
+      SET token = EXCLUDED.token, verb = EXCLUDED.verb, expires_at = EXCLUDED.expires_at
+      WHERE wiki_proposal_group_leases.expires_at <= now()
+    RETURNING token
+  `;
+  return row ? (row.token as string) : null;
+}
+
+/** Push a held lease's expiry out by the TTL. False when the token no longer
+ *  holds it (it expired and another verb took it). */
+export async function renewWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  token: string,
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposal_group_leases SET expires_at = now() + ${ttlMs} * interval '1 millisecond'
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token}
+    RETURNING 1
+  `;
+  return rows.length > 0;
+}
+
+/** Drop a lease this token holds; a lease another verb took is left alone. */
+export async function releaseWikiProposalGroupLease(scope: string, groupKey: string, token: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    DELETE FROM wiki_proposal_group_leases
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token}
+  `;
 }
 
 /** One lint row, reduced to what the seeder decides with: which group it is in,

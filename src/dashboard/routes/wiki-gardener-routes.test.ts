@@ -31,6 +31,7 @@ import {
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { applyWikiProposalGroup } from "../../gardener/apply.ts";
 import { runGit } from "../../wiki/commit.ts";
+import { runWikiWriteExclusive } from "../../wiki/queue.ts";
 import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
@@ -329,6 +330,9 @@ const lintGroupStubs = {
   approveProposalGroup: async () => [],
   rejectProposalGroup: async () => [],
   settleProposalApplied: async () => null,
+  claimGroupLease: async () => "lease-token",
+  renewGroupLease: async () => true,
+  releaseGroupLease: async () => {},
   markProposal: async () => true,
   seedLintProposals: async () => ({
     proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [],
@@ -339,6 +343,9 @@ const lintGroupStubs = {
   | "approveProposalGroup"
   | "rejectProposalGroup"
   | "settleProposalApplied"
+  | "claimGroupLease"
+  | "renewGroupLease"
+  | "releaseGroupLease"
   | "markProposal"
   | "seedLintProposals"
 >;
@@ -2997,6 +3004,10 @@ describe("lint proposals — seeding and the group verbs", () => {
   function groupStore(initial: unknown[]) {
     type Row = { id: string; status: string };
     let state = initial as Row[];
+    // The DB lease (migration 092), shared by every app registered on this
+    // store the way two processes share one database.
+    const leases = new Map<string, string>();
+    let tokens = 0;
     const marked: Array<[string, string]> = [];
     const reverted: string[] = [];
     const set = (id: string, status: string) => {
@@ -3005,7 +3016,10 @@ describe("lint proposals — seeding and the group verbs", () => {
     return {
       marked,
       reverted,
+      leases,
       rows: () => state,
+      /** What another process does to a row behind this one's back. */
+      setStatus: set,
       deps: {
         listProposalsByGroup: async () => state,
         approveProposalGroup: async () => {
@@ -3026,6 +3040,17 @@ describe("lint proposals — seeding and the group verbs", () => {
           return row as never;
         },
         getProposalById: async (id: string) => state.find((r) => r.id === id) ?? null,
+        claimGroupLease: async (w: string, g: string) => {
+          const key = `${w}\0${g}`;
+          if (leases.has(key)) return null;
+          const token = `t${++tokens}`;
+          leases.set(key, token);
+          return token;
+        },
+        renewGroupLease: async (w: string, g: string, token: string) => leases.get(`${w}\0${g}`) === token,
+        releaseGroupLease: async (w: string, g: string, token: string) => {
+          if (leases.get(`${w}\0${g}`) === token) leases.delete(`${w}\0${g}`);
+        },
         // Both CAS on `approved`, as the DB verbs do.
         markProposal: async (id: string, status: string) => {
           if (state.find((r) => r.id === id)?.status !== "approved") return false;
@@ -3352,6 +3377,179 @@ describe("lint proposals — seeding and the group verbs", () => {
       expect((await first).status).toBe(200);
       expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
       expect((await Bun.file(path.join(root, "log.md")).text()).split("## [").length - 1).toBe(1);
+    });
+  });
+
+  /**
+   * F35 fix round 1: Dismiss logs and commits a written page before it settles
+   * the row, inside the write section, and a group verb's claim holds across
+   * processes (the DB lease, shared here by two apps on one store).
+   */
+  describe("F35 — Dismiss settles only logged pages, and the claim holds across processes", () => {
+    const gitIn = (dir: string) => (...args: string[]) =>
+      runGit(dir, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+
+    /** A git wiki whose PAGE_A carries r1's draft, written and never committed. */
+    async function deadPassWiki() {
+      const g = gitIn(root);
+      await g("init", "-q", "-b", "main");
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      const r2 = await lintRow("r2", PAGE_B, "prov");
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      return { g, r1, r2 };
+    }
+
+    test("a reject that throws after a written row is settled: that page is already logged and committed", async () => {
+      const { g, r1, r2 } = await deadPassWiki();
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          rejectProposalGroup: async () => {
+            throw new Error("injected: connection reset on the reject");
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "draft"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe(`[lint] fix: 1 page (${GROUP})`);
+      expect((await g("status", "--porcelain", "--", PAGE_A)).stdout).toBe("");
+    });
+
+    test("a failure logging the written rows leaves them live, and the next Accept logs and commits them once", async () => {
+      const { g, r1, r2 } = await deadPassWiki();
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      const injected = async () => {
+        throw new Error("injected: the already-written step failed");
+      };
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          // The step that logs and commits the written pages, under both names
+          // it has had (the re-run of the apply, then `settleWrittenRows`).
+          applyProposalGroup: injected as unknown as typeof applyWikiProposalGroup,
+          settleWrittenRows: injected,
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      // Never `applied` over a page nobody logged.
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "draft"]);
+      expect(res.status).toBe(500);
+
+      const again = new Hono();
+      registerWikiGardenerRoutes(again, deps(store.deps));
+      const next = await again.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(next.status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split(PAGE_A).length - 1).toBe(1);
+      expect((await g("status", "--porcelain")).stdout).toBe("");
+    });
+
+    test("a writer queued while Dismiss reads cannot change the page before the row is settled", async () => {
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      const r2 = await lintRow("r2", PAGE_B, "prov");
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      const seenAtSettle: boolean[] = [];
+      const writers: Promise<unknown>[] = [];
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleProposalApplied: async (id: string) => {
+            // Another wiki writer (the sync loop's pull, a fact-check append)
+            // queues on this wiki between the read and the settle.
+            writers.push(runWikiWriteExclusive(root, () => Bun.write(path.join(root, PAGE_A), body("A, rewritten"))));
+            await Bun.sleep(50);
+            seenAtSettle.push((await Bun.file(path.join(root, PAGE_A)).text()) === r1.draft);
+            return store.deps.settleProposalApplied(id);
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(seenAtSettle).toEqual([true]);
+      await Promise.all(writers);
+    });
+
+    test("a Dismiss in another process while an Accept applies is refused, and no landed edit ends `rejected`", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inApply = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            entered();
+            await gate;
+            return applyWikiProposalGroup(rows, applyDeps, opts);
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      await inApply;
+      // The other process (`bun run dev:chat`) has its own in-flight set, which
+      // holds nothing for this group: only the shared database can tell it.
+      __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+      const other = new Hono();
+      registerWikiGardenerRoutes(other, deps(store.deps));
+      const second = await other.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      release();
+      const firstRes = await first;
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      expect(second.status).toBe(409);
+      expect(await second.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      expect(firstRes.status).toBe(200);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+    });
+
+    test("an Accept whose terminal CAS another verb won reports the conflict, not `applied`", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            const result = await applyWikiProposalGroup(rows, applyDeps, opts);
+            // Another process, its lease long expired, dismissed r1 meanwhile.
+            store.setStatus("r1", "rejected");
+            return result;
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", lost: [PAGE_A], applied: [PAGE_A, PAGE_B] });
+      expect(store.rows().map((r) => r.status)).toEqual(["rejected", "applied"]);
+    });
+
+    test("a lease held elsewhere refuses both verbs before any row moves", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      store.leases.set(`lintwiki\0${GROUP}`, "other-process");
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      for (const verb of ["approve", "reject"]) {
+        const res = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=lintwiki`, JSON_POST);
+        expect([verb, res.status]).toEqual([verb, 409]);
+        expect(await res.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      }
+      expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toBe(body("A"));
+      // A refused verb leaves the other holder's lease alone; a finished one
+      // releases its own.
+      expect(store.leases.get(`lintwiki\0${GROUP}`)).toBe("other-process");
+      store.leases.clear();
+      expect((await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST)).status).toBe(200);
+      expect(store.leases.size).toBe(0);
     });
   });
 

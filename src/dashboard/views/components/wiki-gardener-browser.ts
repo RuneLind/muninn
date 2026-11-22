@@ -737,7 +737,7 @@ async function actOnGroup(
       // A partial apply moved rows, so the list on screen is stale either way —
       // and the lint panel is stale too: the finding the group was FOR may be
       // gone, or may have grown a member.
-      if (data.outcome === "stopped") {
+      if (data.outcome === "stopped" || data.outcome === "conflict") {
         loadProposals();
         loadLint();
       }

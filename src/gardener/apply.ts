@@ -571,6 +571,59 @@ export async function applyWikiProposalGroup(
   }
 }
 
+/**
+ * Group Dismiss's half for the rows an earlier Accept already wrote (F35, arch
+ * review 2026-11-16): inside ONE write section, read each row's page, and for
+ * every page that IS the row's draft write the group's `log.md` entry (for the
+ * pages still uncommitted: an earlier pass that died before its commit) and
+ * then `settle` the row (`draft`/`approved` → `applied`). The commit tail runs
+ * outside the section, as on the apply.
+ *
+ * Read, compare, log and settle share the section so a queued writer cannot
+ * change the page between the read and the settle, and a row is never
+ * `applied` over a page that was not logged first. A throw anywhere leaves the
+ * unsettled rows live, which a later Accept or Dismiss takes. Returns the rows
+ * it settled.
+ */
+export async function settleWrittenGroupRows(
+  rows: readonly WikiProposal[],
+  deps: ApplyDeps,
+  settle: (row: WikiProposal) => Promise<boolean>,
+): Promise<WikiProposal[]> {
+  if (rows.length === 0 || readonlyRefusalFor(deps, rows[0]!.targetPath)) return [];
+  const groupKey = rows[0]?.groupKey ?? "(no group)";
+  // Read before the section, so this adds no git status inside it.
+  const recoverable = await uncommittedDraftPages(rows, deps);
+  const tail: { paths: string[] } = { paths: [] };
+  try {
+    return await runWikiWriteExclusive(deps.wikiDir, async () => {
+      const carried: WikiProposal[] = [];
+      for (const row of rows) {
+        const current = await deps.readFile(path.join(deps.wikiDir, row.targetPath));
+        if (current !== null && current === row.draft) carried.push(row);
+      }
+      const recovered = carried.filter((r) => recoverable.has(r.targetPath));
+      if (recovered.length > 0) {
+        await writeGroupLogEntry(recovered, deps);
+        for (const r of recovered) tail.paths.push(r.targetPath, WIKI_LOG_FILE);
+      }
+      const settled: WikiProposal[] = [];
+      for (const row of carried) if (await settle(row)) settled.push(row);
+      return settled;
+    });
+  } finally {
+    if (deps.commit && tail.paths.length > 0) {
+      const paths = [...new Set(tail.paths)];
+      const pages = paths.filter((p) => p !== WIKI_LOG_FILE).length;
+      try {
+        await deps.commit(paths, groupCommitMessageFor(groupKey, pages, rows[0]?.kind));
+      } catch (err) {
+        log.warn("Wiki-gardener group Dismiss: commit failed for {group}: {error}", { group: groupKey, error: errMsg(err) });
+      }
+    }
+  }
+}
+
 /** The rows whose page on disk already IS their draft and carries uncommitted
  *  changes: what an earlier pass of the group leaves when it dies before its
  *  commit. A status that cannot be read counts as uncommitted (the page is then

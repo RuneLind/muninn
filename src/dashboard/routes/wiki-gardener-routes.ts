@@ -42,9 +42,18 @@ import {
   approveWikiProposalGroup,
   rejectWikiProposalGroup,
   settleWikiProposalApplied,
+  claimWikiProposalGroupLease,
+  renewWikiProposalGroupLease,
+  releaseWikiProposalGroupLease,
+  GROUP_LEASE_RENEW_MS,
   type DeletedSourceProposal,
 } from "../../db/wiki-proposals.ts";
-import { applyWikiProposalGroup, type GroupApplyResult, type GroupRowOutcome } from "../../gardener/apply.ts";
+import {
+  applyWikiProposalGroup,
+  settleWrittenGroupRows,
+  type GroupApplyResult,
+  type GroupRowOutcome,
+} from "../../gardener/apply.ts";
 import {
   seedLintProposals,
   DEFAULT_LINT_PROPOSAL_DEPS,
@@ -500,6 +509,16 @@ export interface BacklogRouteDeps extends CoverageDeps {
   /** Group Dismiss's CAS for a live row whose page already carries its draft:
    *  `draft`/`approved` → `applied` (`settleWikiProposalApplied`). */
   settleProposalApplied: (id: string) => Promise<WikiProposal | null>;
+  /** The group's cross-process lease (F35, migration 092): claim answers a
+   *  token, or null when another Accept or Dismiss — in this process or
+   *  another one on the same DB — holds a live lease; renew answers false when
+   *  the token lost it. */
+  claimGroupLease: (wikiName: string, groupKey: string, verb: "accept" | "dismiss") => Promise<string | null>;
+  renewGroupLease: (wikiName: string, groupKey: string, token: string) => Promise<boolean>;
+  releaseGroupLease: (wikiName: string, groupKey: string, token: string) => Promise<void>;
+  /** Group Dismiss's settle of the already-written rows; absent ⇒
+   *  `settleWrittenGroupRows`. Injectable so a test can make it throw. */
+  settleWrittenRows?: typeof settleWrittenGroupRows;
   /** The group apply itself; absent ⇒ `applyWikiProposalGroup`. Injectable so
    *  a test can make it throw part-way through a real apply on a real wiki. */
   applyProposalGroup?: typeof applyWikiProposalGroup;
@@ -550,6 +569,9 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   approveProposalGroup: (wikiName, groupKey) => approveWikiProposalGroup(wikiName, groupKey),
   rejectProposalGroup: (wikiName, groupKey, exceptIds) => rejectWikiProposalGroup(wikiName, groupKey, exceptIds),
   settleProposalApplied: (id) => settleWikiProposalApplied(id),
+  claimGroupLease: (wikiName, groupKey, verb) => claimWikiProposalGroupLease(wikiName, groupKey, verb),
+  renewGroupLease: (wikiName, groupKey, token) => renewWikiProposalGroupLease(wikiName, groupKey, token),
+  releaseGroupLease: (wikiName, groupKey, token) => releaseWikiProposalGroupLease(wikiName, groupKey, token),
   seedLintProposals,
 };
 
@@ -587,14 +609,13 @@ const lastBacklogRuns = new Map<string, LastBacklogRun>();
 
 /**
  * Group verbs (Accept, Dismiss) in flight in THIS process, keyed
- * `<wiki lowercased>\0<group key>`. It is what tells an Accept that is still
- * running from one a throw or a restart stranded in `approved` (F35, arch
- * review 2026-11-16): with no verb in flight, an `approved` row is stranded and
- * both verbs take it. Checked and set with no `await` between, so two clicks
- * cannot both pass. Single-writer assumption: one muninn process acts on a
- * wiki's gardener gate. `bun run dev:chat` registers the same routes on the
- * same DB and wikis with its own set, so an Accept there while one runs here
- * would read this one's rows as stranded.
+ * `<wiki lowercased>\0<group key>`: the synchronous first check, set with no
+ * `await` after the check, so two clicks here cannot both pass. What holds
+ * across processes is the DB lease each verb then claims (`claimGroupLease`,
+ * migration 092): `bun run dev:chat` registers the same routes on the same DB
+ * and wikis with its own set, and only the lease tells it an Accept here is
+ * still running. An `approved` row with no live lease is stranded (a throw or
+ * a restart), and both verbs take it (F35, arch review 2026-11-16).
  */
 const groupVerbsInFlight = new Set<string>();
 
@@ -3060,12 +3081,12 @@ export function registerWikiGardenerRoutes(
    *
    * **The gate refuses a decision somebody else is making, and SKIPS the rows
    * that are already settled.** Another Accept or Dismiss of the group in
-   * flight in this process (`groupVerbsInFlight`), or a `rejected` row (a
-   * dismissal the reviewer made), refuses the whole request, 409
-   * `{outcome: "mixed", statuses}`. `applied` and `stale` rows are skipped and
-   * reported (`skipped`). The `draft` rows are claimed and applied, and so is
-   * every `approved` row: with no verb in flight it is one a throw or a restart
-   * stranded (F35, arch review 2026-11-16), and the re-run is safe
+   * flight (`groupVerbsInFlight` in this process, the group's DB lease in any
+   * process), or a `rejected` row (a dismissal the reviewer made), refuses the
+   * whole request, 409 `{outcome: "mixed", statuses}`. `applied` and `stale`
+   * rows are skipped and reported (`skipped`). The `draft` rows are claimed and
+   * applied, and so is every `approved` row: with the lease held it is one a
+   * throw or a restart stranded (F35, arch review 2026-11-16), and the re-run is safe
    * (`applyWikiProposalGroup`). A group with no `draft` or `approved` row left
    * answers 409 `{outcome: "nothing-to-apply"}`, which is a different fact and a
    * different remedy — and that check runs FIRST, so a fully-dismissed group is
@@ -3124,7 +3145,7 @@ export function registerWikiGardenerRoutes(
     }
     const flightKey = groupFlightKey(wikiName, groupKey);
     const blockedBy = groupVerbsInFlight.has(flightKey)
-      ? "another Accept or Dismiss of this group is in flight"
+      ? IN_FLIGHT
       : existing.some((r) => r.status === "rejected")
         ? "a rejected row blocks the group"
         : null;
@@ -3132,6 +3153,17 @@ export function registerWikiGardenerRoutes(
       return c.json({ outcome: "mixed", error: blockedBy, statuses: statusCounts(existing) }, 409);
     }
     groupVerbsInFlight.add(flightKey);
+    let lease: GroupLease | null;
+    try {
+      lease = await holdGroupLease(backlogDeps, wikiName, groupKey, "accept");
+    } catch (err) {
+      groupVerbsInFlight.delete(flightKey);
+      throw err;
+    }
+    if (!lease) {
+      groupVerbsInFlight.delete(flightKey);
+      return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
+    }
 
     // Every row this request may hold in `approved`, protected BEFORE the claim:
     // the live rows it read. A row still `draft` when the `finally` runs is
@@ -3146,9 +3178,15 @@ export function registerWikiGardenerRoutes(
       await backlogDeps.approveProposalGroup(wikiName, groupKey);
       // Re-read rather than trusting the CAS's own RETURNING set: it does not
       // carry the stranded `approved` rows this request claims too.
-      rows = (await backlogDeps.listProposalsByGroup(wikiName, groupKey)).filter(
-        (r) => r.status === "approved" && unsettled.has(r.id),
-      );
+      const reread = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
+      // A Dismiss in another process that finished between the first read and
+      // the lease rejected rows this request read as live: the group is
+      // decided, so nothing is applied over it (the claimed rows go back to
+      // `draft` in the `finally`).
+      if (reread.some((r) => r.status === "rejected" && unsettled.has(r.id))) {
+        return c.json({ outcome: "mixed", error: "a rejected row blocks the group", statuses: statusCounts(reread) }, 409);
+      }
+      rows = reread.filter((r) => r.status === "approved" && unsettled.has(r.id));
       if (rows.length === 0) {
         return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
       }
@@ -3166,10 +3204,36 @@ export function registerWikiGardenerRoutes(
       // linking page's new passage, on the index the apply refreshed. Before the
       // status marks, so a mark that throws does not lose them.
       const fixed = await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered], snapshots);
+      // A terminal CAS this request loses means another verb moved the row
+      // while this one applied it (only possible once its lease expired): the
+      // answer reports it rather than "applied".
+      const lost: string[] = [];
       for (const action of actions) {
         if (action.status === "draft") await backlogDeps.revertProposal(action.id);
-        else await backlogDeps.markProposal(action.id, action.status);
+        else if (!(await backlogDeps.markProposal(action.id, action.status))) {
+          lost.push(rows.find((r) => r.id === action.id)?.targetPath ?? action.id);
+        }
         unsettled.delete(action.id);
+      }
+      if (lost.length > 0) {
+        const after = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
+        log.error("Lint group {group}: another verb settled {lost} while this Accept applied them", {
+          group: groupKey,
+          lost: lost.join(", "),
+        });
+        return c.json(
+          {
+            outcome: "conflict",
+            error: "another Accept or Dismiss settled rows of this group while this one applied them",
+            lost,
+            applied,
+            noop,
+            recovered,
+            statuses: statusCounts(after),
+            ...(fixed !== null ? { fixed } : {}),
+          },
+          409,
+        );
       }
 
       const stopped = result.stoppedAt;
@@ -3214,6 +3278,7 @@ export function registerWikiGardenerRoutes(
       return c.json({ error: `group apply failed: ${reason}` }, 500);
     } finally {
       await settleUnsettledGroupRows(unsettled, outcomes, groupKey);
+      await lease.release();
       groupVerbsInFlight.delete(flightKey);
     }
   });
@@ -3223,15 +3288,17 @@ export function registerWikiGardenerRoutes(
    * purpose — the seeder's skip list reads them, so they are what stops the
    * finding being proposed again on the next lint pass.
    *
-   * It takes every live row: `draft`, and `approved` when no Accept or Dismiss
-   * of the group is in flight in this process (a stranded row, F35), so a
-   * half-stranded group settles whole rather than as `approved` + `rejected`.
-   * A live row whose page already IS its draft (an earlier Accept wrote it) is
-   * settled `applied`, not `rejected`, and named in `alreadyWritten`: rejecting
-   * it would record a dismissal of an edit that is on the page, and a Stale
-   * check card would write «kept as written» verdicts for it. Those pages are
-   * then logged and committed (when still uncommitted) by a re-run of the apply
-   * over just those rows, and a Stale check row gets its `fixed` verdict.
+   * It holds the group's lease (`claimGroupLease`, across processes) and
+   * takes every live row: `draft`, and `approved` (with the lease held, a
+   * stranded row, F35), so a half-stranded group settles whole rather than as
+   * `approved` + `rejected`. A live row whose page already IS its draft (an
+   * earlier Accept wrote it) is settled `applied`, not `rejected`, and named in
+   * `alreadyWritten`: rejecting it would record a dismissal of an edit that is
+   * on the page, and a Stale check card would write «kept as written» verdicts
+   * for it. The read, the compare, the `log.md` entry (for a page still
+   * uncommitted) and the settle run inside one write section and the commit
+   * after it (`settleWrittenGroupRows`), all before the rest are rejected; a
+   * Stale check row then gets its `fixed` verdict.
    *
    * It carries BOTH read-only refusals, unlike its single-row sibling
    * (`proposals/:id/reject`, a DB status flip that mutates no wiki). A dismissal
@@ -3255,38 +3322,34 @@ export function registerWikiGardenerRoutes(
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
     const flightKey = groupFlightKey(scope.wikiName, groupKey);
     if (groupVerbsInFlight.has(flightKey)) {
-      return c.json(
-        { outcome: "mixed", error: "another Accept or Dismiss of this group is in flight", statuses: statusCounts(existing) },
-        409,
-      );
+      return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
     }
     groupVerbsInFlight.add(flightKey);
+    let lease: GroupLease | null = null;
     try {
-      const live = existing.filter(isLiveGroupRow);
-      const { wikiDir } = groupApplyPolicy(scope.wikiEntry, scope.bot);
-      const written: WikiProposal[] = [];
-      for (const r of live) {
-        const current = await readFileOrNull(path.join(wikiDir, r.targetPath));
-        if (current !== null && current === r.draft && (await backlogDeps.settleProposalApplied(r.id))) written.push(r);
-      }
+      lease = await holdGroupLease(backlogDeps, scope.wikiName, groupKey, "dismiss");
+      if (!lease) return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
+      // Re-read under the lease: an Accept elsewhere may have settled rows
+      // between the first read and the claim.
+      const current = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
+      const live = current.filter(isLiveGroupRow);
+      // Rows an earlier Accept already wrote: read, compared, logged and
+      // settled `applied` inside ONE write section, committed after it, so a
+      // row is `applied` only over a page that carried its draft when settled
+      // and was logged first. A throw leaves the rest live for a later verb.
+      const written = await (backlogDeps.settleWrittenRows ?? settleWrittenGroupRows)(
+        live,
+        applyDepsForWiki(scope.wikiEntry, scope.bot),
+        async (r) => (await backlogDeps.settleProposalApplied(r.id)) !== null,
+      );
       const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey, written.map((r) => r.id));
       if (rejected.length === 0 && written.length === 0) {
-        return c.json({ error: "group is no longer a draft", statuses: statusCounts(existing) }, 409);
+        return c.json({ error: "group is no longer a draft", statuses: statusCounts(current) }, 409);
       }
-      // The pages an earlier Accept wrote get what that Accept would have given
-      // them: a re-run of the apply over just those rows is all no-ops, and it
-      // logs and commits the ones still uncommitted (`recovered`); a Stale check
-      // row gets its `fixed` verdict. Best effort: the rows are settled already.
+      // A Stale check row an earlier Accept wrote gets its `fixed` verdict
+      // (best effort, logged inside).
       if (written.length > 0) {
-        try {
-          await (backlogDeps.applyProposalGroup ?? applyWikiProposalGroup)(written, applyDepsForWiki(scope.wikiEntry, scope.bot));
-          await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), []);
-        } catch (err) {
-          log.warn("Lint group {group} Dismiss: logging and committing the already-written pages failed: {error}", {
-            group: groupKey,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+        await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), []);
       }
       // D20: a rejected Stale check card's edits are «kept as written»: reader
       // «still true» rows where the stored verdict still carries the edit.
@@ -3297,7 +3360,12 @@ export function registerWikiGardenerRoutes(
         ...(written.length > 0 ? { alreadyWritten: written.map((r) => r.targetPath) } : {}),
         ...(kept ?? {}),
       });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      log.error("Lint group {group} Dismiss failed: {error}", { group: groupKey, error: reason });
+      return c.json({ error: `group dismiss failed: ${reason}` }, 500);
     } finally {
+      await lease?.release();
       groupVerbsInFlight.delete(flightKey);
     }
   });
@@ -3574,7 +3642,7 @@ export function groupApplyActions(
 }
 
 /** A group row a verb can still act on: `draft`, or `approved` (in flight, or
- *  stranded by a throw or a restart — `groupVerbsInFlight` tells which). */
+ *  stranded by a throw or a restart — the group's lease tells which). */
 function isLiveGroupRow(r: WikiProposal): boolean {
   return r.status === "draft" || r.status === "approved";
 }
@@ -3599,6 +3667,50 @@ function groupMemberRefusal(c: Context, row: WikiProposal): Response | null {
     },
     409,
   );
+}
+
+const IN_FLIGHT = "another Accept or Dismiss of this group is in flight";
+
+interface GroupLease {
+  release: () => Promise<void>;
+}
+
+/**
+ * Claim the group's cross-process lease for one verb and keep it renewed
+ * until `release`; null when another verb holds a live one. A renewal that
+ * finds the lease gone is logged: the Accept's terminal CAS is what then
+ * reports the conflict.
+ */
+async function holdGroupLease(
+  deps: Pick<BacklogRouteDeps, "claimGroupLease" | "renewGroupLease" | "releaseGroupLease">,
+  wikiName: string,
+  groupKey: string,
+  verb: "accept" | "dismiss",
+): Promise<GroupLease | null> {
+  const token = await deps.claimGroupLease(wikiName, groupKey, verb);
+  if (!token) return null;
+  const timer = setInterval(() => {
+    deps.renewGroupLease(wikiName, groupKey, token).then(
+      (held) => {
+        if (!held) log.error("Lint group {group}: the {verb} lost its lease while running", { group: groupKey, verb });
+      },
+      (err) => log.warn("Lint group {group}: lease renewal failed: {error}", { group: groupKey, error: err instanceof Error ? err.message : String(err) }),
+    );
+  }, GROUP_LEASE_RENEW_MS);
+  timer.unref?.();
+  return {
+    release: async () => {
+      clearInterval(timer);
+      try {
+        await deps.releaseGroupLease(wikiName, groupKey, token);
+      } catch (err) {
+        log.warn("Lint group {group}: lease release failed, it expires on its own: {error}", {
+          group: groupKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  };
 }
 
 function groupFlightKey(wikiName: string, groupKey: string): string {

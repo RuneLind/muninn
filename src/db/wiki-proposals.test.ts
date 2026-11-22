@@ -33,6 +33,9 @@ import {
   rejectWikiProposalGroup,
   revertWikiProposalToDraft,
   settleWikiProposalApplied,
+  claimWikiProposalGroupLease,
+  renewWikiProposalGroupLease,
+  releaseWikiProposalGroupLease,
   listLintGroupRowsByWiki,
   markLintGroupStale,
   listLivePageHolders,
@@ -756,5 +759,35 @@ describe("page claims across writers", () => {
       expect(await liveOn("plans/a.mdx")).toEqual(["lint"]);
       expect(await liveOn("plans/b.mdx")).toEqual(["lint"]);
     });
+  });
+});
+
+describe("group leases (F35, migration 092)", () => {
+  const G = "lint:series-unnamed:0123456789ab";
+
+  test("one live lease per group: a second claim gets null, another group or wiki gets its own", async () => {
+    const t1 = await claimWikiProposalGroupLease("lintwiki", G, "accept");
+    expect(t1).toBeString();
+    expect(await claimWikiProposalGroupLease("lintwiki", G, "dismiss")).toBeNull();
+    expect(await claimWikiProposalGroupLease("otherwiki", G, "dismiss")).toBeString();
+    expect(await claimWikiProposalGroupLease("lintwiki", `${G}x`, "dismiss")).toBeString();
+  });
+
+  test("an expired lease is taken by the next claim, and the old token can neither renew nor release it", async () => {
+    const old = await claimWikiProposalGroupLease("lintwiki", G, "accept", 1);
+    await Bun.sleep(20);
+    const next = await claimWikiProposalGroupLease("lintwiki", G, "dismiss");
+    expect(next).toBeString();
+    expect(next).not.toBe(old);
+    expect(await renewWikiProposalGroupLease("lintwiki", G, old!)).toBe(false);
+    await releaseWikiProposalGroupLease("lintwiki", G, old!);
+    expect(await claimWikiProposalGroupLease("lintwiki", G, "accept")).toBeNull();
+    expect(await renewWikiProposalGroupLease("lintwiki", G, next!)).toBe(true);
+  });
+
+  test("release by the holder frees the group at once", async () => {
+    const t = await claimWikiProposalGroupLease("lintwiki", G, "accept");
+    await releaseWikiProposalGroupLease("lintwiki", G, t!);
+    expect(await claimWikiProposalGroupLease("lintwiki", G, "dismiss")).toBeString();
   });
 });
