@@ -31,7 +31,9 @@ export function groupStatusSummary(statuses: readonly string[]): string {
  * the ends, so every adjacent pair is pinned by a table test now:
  *
  *  `draft` — the card offers a verb, whatever else it holds.
- *  `approved` — a decision is in flight over these pages; the next Accept 409s.
+ *  `approved` — an Accept is applying these pages, or a throw or a restart
+ *  stranded it there; with no Accept running, Accept and Dismiss both take it
+ *  (F35), so the card offers its verbs.
  *  `error` — an apply failed and the reviewer has to look.
  *  `stale` — the page moved under the draft; re-propose.
  *  `rejected` — dismissed on purpose; nothing is owed.
@@ -48,6 +50,18 @@ export function groupChipTone(statuses: readonly string[]): string {
   // A status this file has never heard of keeps its own class, so a new one
   // renders as itself rather than silently borrowing `draft`'s colour.
   return statuses[0] ?? "draft";
+}
+
+/** A group row Accept or Dismiss still takes: `draft`, or `approved` (an
+ *  Accept running, or one a throw or a restart stranded — the route tells
+ *  which, and takes the stranded ones). */
+export function isLiveGroupStatus(status: string): boolean {
+  return status === "draft" || status === "approved";
+}
+
+/** The N in "Accept all N": the rows the Accept claims and applies. */
+export function groupAcceptCount(statuses: readonly string[]): number {
+  return statuses.filter(isLiveGroupStatus).length;
 }
 
 /**

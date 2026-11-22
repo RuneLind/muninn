@@ -803,6 +803,18 @@ CREATE UNIQUE INDEX wiki_proposals_wiki_topic_live_idx
 CREATE INDEX wiki_proposals_group_key_idx
   ON wiki_proposals (group_key) WHERE group_key IS NOT NULL;
 
+-- Which Accept or Dismiss of a gardener group holds it, across processes
+-- (migration 093): claimed by insert or by taking an expired lease, renewed
+-- while the verb runs, deleted by token when it ends.
+CREATE TABLE wiki_proposal_group_leases (
+  scope       TEXT NOT NULL,           -- COALESCE(wiki_name, bot_name) of the group's rows
+  group_key   TEXT NOT NULL,
+  token       UUID NOT NULL,
+  verb        TEXT NOT NULL,           -- accept | dismiss | self-heal
+  expires_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (scope, group_key)
+);
+
 -- ============================================================================
 -- Source-drafter attempt ledger: why a captured doc has no wiki page.
 -- One row per (bot, collection, doc), latest attempt wins. Mirrors

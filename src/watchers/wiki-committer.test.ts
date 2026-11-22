@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, writeFile, unlink } from "node:fs/promises";
+import { rm, mkdir, writeFile, unlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { checkWikiCommitter } from "./wiki-committer.ts";
@@ -196,5 +196,226 @@ describe("wikiDirtyStat (Index-card badge endpoint logic)", () => {
     const stat = await wikiDirtyStat(loose);
     expect(stat.dirtyCount).toBe(0);
     expect(stat.oldestDirtyMtimeMs).toBeNull();
+  });
+});
+
+// F37 (arch review 2026-11-16): the sweeper's only guard against a half-finished
+// git operation was the sync ledger's `blocked` state, which lives in memory — a
+// fresh process has none. Each case puts the repo in one state, adds an untracked
+// wiki page a sweep WOULD commit, and runs the sweeper with a cold ledger.
+describe("checkWikiCommitter — stands down while a git operation is in progress (F37)", () => {
+  let base: string;
+
+  beforeEach(async () => {
+    __resetForTest();
+    base = await testTempDir(path.join(tmpdir(), "wiki-committer-f37-"));
+  });
+  afterEach(async () => {
+    __resetForTest();
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const PAGE = (wikiDir: string) => path.join(wikiDir, "concepts", "Old.md");
+  const FRESH = "data/wiki/concepts/Fresh.md";
+
+  /** `other` and `main` both edit Old.md, so replaying one over the other conflicts. */
+  async function divergedRepo(): Promise<{ repo: string; wikiDir: string; otherSha: string }> {
+    const r = await makeRepo(base);
+    await git(r.repo, ["checkout", "-q", "-b", "other"]);
+    await writeFile(PAGE(r.wikiDir), "# Old\nfrom other\n");
+    await git(r.repo, ["commit", "-q", "-am", "other"]);
+    const otherSha = (await git(r.repo, ["rev-parse", "HEAD"])).out;
+    await git(r.repo, ["checkout", "-q", "main"]);
+    await writeFile(PAGE(r.wikiDir), "# Old\nfrom main\n");
+    await git(r.repo, ["commit", "-q", "-am", "main"]);
+    return { ...r, otherSha };
+  }
+
+  async function touchLock(repo: string, offsetMs: number): Promise<void> {
+    const lock = path.join(repo, ".git", "index.lock");
+    await writeFile(lock, "");
+    const t = new Date(Date.now() + offsetMs);
+    await utimes(lock, t, t);
+  }
+
+  type Case = {
+    name: string;
+    setup: () => Promise<{ repo: string; wikiDir: string }>;
+    /** Whether the stand-down raises the first-day alert (a stale or future-dated lock). */
+    alert: boolean;
+  };
+  const cases: Case[] = [
+    {
+      name: "merge conflict (MERGE_HEAD + unmerged page)",
+      alert: false,
+      setup: async () => {
+        const r = await divergedRepo();
+        expect((await git(r.repo, ["merge", "other"])).code).not.toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "rebase stopped on a conflict",
+      alert: false,
+      setup: async () => {
+        const r = await divergedRepo();
+        expect((await git(r.repo, ["rebase", "other"])).code).not.toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "`git am` stopped on a patch that does not apply",
+      alert: false,
+      setup: async () => {
+        const r = await divergedRepo();
+        const patch = path.join(base, "other.patch");
+        await writeFile(patch, (await git(r.repo, ["format-patch", "-1", "--stdout", r.otherSha])).out + "\n");
+        expect((await git(r.repo, ["am", patch])).code).not.toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "cherry-pick conflict",
+      alert: false,
+      setup: async () => {
+        const r = await divergedRepo();
+        expect((await git(r.repo, ["cherry-pick", r.otherSha])).code).not.toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "stash-pop conflict (unmerged paths, no .git marker)",
+      alert: false,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await writeFile(PAGE(r.wikiDir), "# Old\nstashed\n");
+        await git(r.repo, ["stash", "push", "-q"]);
+        await writeFile(PAGE(r.wikiDir), "# Old\ncommitted\n");
+        await git(r.repo, ["commit", "-q", "-am", "c"]);
+        expect((await git(r.repo, ["stash", "pop", "-q"])).code).not.toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "`git revert --no-commit` (REVERT_HEAD, the revert staged)",
+      alert: false,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await writeFile(PAGE(r.wikiDir), "# Old\nedit\n");
+        await git(r.repo, ["commit", "-q", "-am", "edit"]);
+        expect((await git(r.repo, ["revert", "--no-commit", "HEAD"])).code).toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "a two-commit revert paused after its first conflict was resolved and committed (sequencer)",
+      alert: false,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await writeFile(PAGE(r.wikiDir), "# Old\none\n");
+        await git(r.repo, ["commit", "-q", "-am", "one"]);
+        await writeFile(PAGE(r.wikiDir), "# Old\ntwo\n");
+        await git(r.repo, ["commit", "-q", "-am", "two"]);
+        // Reverting `one` before `two` conflicts on the page.
+        expect((await git(r.repo, ["revert", "--no-edit", "HEAD~1", "HEAD"])).code).not.toBe(0);
+        await writeFile(PAGE(r.wikiDir), "# Old\n");
+        await git(r.repo, ["add", "-A"]);
+        expect((await git(r.repo, ["-c", "core.editor=true", "commit", "-q", "--no-edit"])).code).toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "bisect in progress",
+      alert: false,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await writeFile(PAGE(r.wikiDir), "# Old\nb\n");
+        await git(r.repo, ["commit", "-q", "-am", "b"]);
+        // Started with no revisions: HEAD stays on main, only BISECT_LOG says so.
+        expect((await git(r.repo, ["bisect", "start"])).code).toBe(0);
+        return r;
+      },
+    },
+    {
+      name: "a FRESH index.lock (a live git process) — transient, skipped",
+      alert: false,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await touchLock(r.repo, 0);
+        return r;
+      },
+    },
+    {
+      name: "an OLD index.lock (a crash leftover) — blocked, first-day alert",
+      alert: true,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await touchLock(r.repo, -60 * 60 * 1000);
+        return r;
+      },
+    },
+    {
+      name: "a FUTURE-dated index.lock — blocked, not transient forever",
+      alert: true,
+      setup: async () => {
+        const r = await makeRepo(base);
+        await touchLock(r.repo, 60 * 60 * 1000);
+        return r;
+      },
+    },
+    {
+      name: "a linked worktree whose own merge is in progress",
+      alert: false,
+      setup: async () => {
+        const r = await divergedRepo();
+        // The main checkout moves off `main`, so a linked worktree can hold it.
+        await git(r.repo, ["checkout", "-q", "other"]);
+        const linked = path.join(base, "linked");
+        expect((await git(r.repo, ["worktree", "add", "-q", linked, "main"])).code).toBe(0);
+        expect((await git(linked, ["merge", "other"])).code).not.toBe(0);
+        return { repo: linked, wikiDir: path.join(linked, "data", "wiki") };
+      },
+    },
+  ];
+
+  for (const c of cases) {
+    test(`${c.name} → no commit, nothing staged by the sweeper`, async () => {
+      const { repo, wikiDir } = await c.setup();
+      await writeFile(path.join(repo, FRESH), "# Fresh\n");
+      const head = (await git(repo, ["rev-parse", "HEAD"])).out;
+      const before = (await git(repo, ["status", "--porcelain"])).out;
+
+      const alerts = (await checkWikiCommitter(watcher, botConfig(wikiDir))).filter((a) => a.source === "wiki-committer");
+
+      expect((await git(repo, ["rev-parse", "HEAD"])).out).toBe(head);
+      expect((await git(repo, ["status", "--porcelain"])).out).toBe(before);
+      if (c.alert) {
+        expect(alerts).toHaveLength(1);
+        expect(alerts[0]!.summary).toContain("Wiki sweep stood down: ");
+        expect(alerts[0]!.summary).toContain("index.lock");
+      } else {
+        expect(alerts).toEqual([]);
+      }
+    });
+  }
+
+  test("a clean repo with a cold ledger still sweeps", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(repo, FRESH), "# Fresh\n");
+    const alerts = await checkWikiCommitter(watcher, botConfig(wikiDir));
+    expect(alerts.map((a) => a.summary)).toEqual(["Swept 1 uncommitted wiki file into a [sweep] commit"]);
+    expect((await git(repo, ["log", "--format=%s", "-1"])).out).toBe("[sweep] daily wiki sweep: 1 files");
+  });
+
+  test("a clean LINKED worktree sweeps too: the check reads that worktree's own git dir", async () => {
+    const r = await makeRepo(base);
+    await git(r.repo, ["checkout", "-q", "-b", "parked"]);
+    // A merge in progress in the MAIN checkout is not the linked worktree's.
+    const linked = path.join(base, "linked-clean");
+    expect((await git(r.repo, ["worktree", "add", "-q", linked, "main"])).code).toBe(0);
+    await writeFile(path.join(linked, FRESH), "# Fresh\n");
+    const alerts = await checkWikiCommitter(watcher, botConfig(path.join(linked, "data", "wiki")));
+    expect(alerts).toHaveLength(1);
+    expect((await git(linked, ["log", "--format=%s", "-1"])).out).toBe("[sweep] daily wiki sweep: 1 files");
   });
 });

@@ -4840,8 +4840,10 @@ non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config s
 - **Sweeper subsumption:** `checkWikiCommitter` stands down for a repo a `wiki`-mode
   entry covers only on EVIDENCE — a tick that got THROUGH its LOCAL (commit) section
   without failing in it within ~26h (`syncSubsumesSweeper`) — plus the one `blocked`
-  case, which subsumes regardless of freshness because this sweeper has no
-  unmerged-paths pre-flight and would commit the half-finished merge. Every other
+  case, which subsumes regardless of freshness because a sweep would commit the
+  half-finished merge; the sweeper also runs the loop's tree check
+  (`treeOperationBlock`) itself on every tick, since the ledger is in memory and
+  a restart empties it (F37). Every other
   state falls through once the evidence is stale. Configuration alone used to stand it
   down forever; so did a tick that errored at the fetch having committed nothing; and
   so did one that reached `git commit` and failed there (a broken signing key, a

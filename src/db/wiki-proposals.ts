@@ -356,11 +356,11 @@ export async function rejectWikiProposal(id: string): Promise<WikiProposal | nul
  * apply step wrote the file successfully. Only an `approved` row (the one this
  * process just claimed) can flip, so a stray double-apply is a no-op.
  */
-export async function markWikiProposalApplied(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalApplied(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -371,11 +371,11 @@ export async function markWikiProposalApplied(id: string): Promise<WikiProposal 
  * (update-mode hash mismatch, or a create-mode path that now exists), so nothing
  * was written and the topic becomes eligible again on the next weekly run.
  */
-export async function markWikiProposalStale(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalStale(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -393,22 +393,22 @@ export async function markWikiProposalStale(id: string): Promise<WikiProposal | 
  * verb; flipping it to `error` burns a perfectly good draft on a policy answer.
  * `approve` never sets `resolved_at`, so there is nothing to clear here.
  */
-export async function revertWikiProposalToDraft(id: string): Promise<WikiProposal | null> {
+export async function revertWikiProposalToDraft(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'draft'
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
 }
 
 /** CAS `approved → error` (+ resolved_at) — the apply step failed unexpectedly. */
-export async function markWikiProposalError(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalError(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'error', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -674,33 +674,147 @@ export async function listWikiProposalsByGroup(
 export async function approveWikiProposalGroup(
   wikiName: string,
   groupKey: string,
+  lease?: GroupLeaseRef,
 ): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposals SET status = 'approved'
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
+      AND group_key = ${groupKey} AND status = 'draft' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return rows.map(mapRow);
 }
 
-/** CAS every `draft` row of a group to `rejected` (+ resolved_at). The rejected
- *  rows are what makes the group's key a SKIP LIST: `lint-proposals.ts` refuses
- *  to re-propose a group any row of which exists in any status, so a dismissal
- *  is remembered by leaving these rows in place. */
+/** CAS every live (`draft` or `approved`) row of a group to `rejected`
+ *  (+ resolved_at), except `exceptIds`. The rejected rows are what makes the
+ *  group's key a SKIP LIST: `lint-proposals.ts` refuses to re-propose a group
+ *  any row of which exists in any status, so a dismissal is remembered by
+ *  leaving these rows in place.
+ *
+ *  `approved` is taken too (F35, arch review 2026-11-16): the route calls this
+ *  only while it holds the group's lease ({@link claimWikiProposalGroupLease}),
+ *  so an `approved` row there is one a failed or restarted Accept stranded, and
+ *  a Dismiss that skipped it left the group wedged as `approved` + `rejected`. */
 export async function rejectWikiProposalGroup(
   wikiName: string,
   groupKey: string,
+  exceptIds: readonly string[] = [],
+  lease?: GroupLeaseRef,
 ): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposals SET status = 'rejected', resolved_at = now()
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
+      AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+      AND NOT (id = ANY(${exceptIds as string[]}::uuid[])) ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return rows.map(mapRow);
+}
+
+/** CAS a live (`draft` or `approved`) row to `applied` (+ resolved_at): a group
+ *  row whose page already carries its draft when the reviewer dismisses the
+ *  group (an earlier Accept wrote it). Rejecting it would record a dismissal of
+ *  an edit that is on the page. */
+export async function settleWikiProposalApplied(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
+    WHERE id = ${id} AND status IN ('draft', 'approved') ${leaseFence(sql, lease)}
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/** How long a group verb's lease lives without a renewal, and how often a
+ *  running verb renews it. A verb that dies leaves its rows stranded for at
+ *  most the TTL. */
+export const GROUP_LEASE_TTL_MS = 120_000;
+export const GROUP_LEASE_RENEW_MS = 30_000;
+
+/**
+ * Claim a group for one Accept or Dismiss, across processes (F35, migration
+ * 092). ONE statement: insert the lease, or take one whose `expires_at` has
+ * passed. Returns the token, or null when another verb holds a live lease.
+ * `scope` is the `COALESCE(wiki_name, bot_name)` the group verbs filter on.
+ */
+export async function claimWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  verb: "accept" | "dismiss" | "self-heal",
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<string | null> {
+  const sql = getDb();
+  const token = crypto.randomUUID();
+  const [row] = await sql`
+    INSERT INTO wiki_proposal_group_leases (scope, group_key, token, verb, expires_at)
+    VALUES (${scope}, ${groupKey}, ${token}, ${verb}, now() + ${ttlMs} * interval '1 millisecond')
+    ON CONFLICT (scope, group_key) DO UPDATE
+      SET token = EXCLUDED.token, verb = EXCLUDED.verb, expires_at = EXCLUDED.expires_at
+      WHERE wiki_proposal_group_leases.expires_at <= now()
+    RETURNING token
+  `;
+  return row ? (row.token as string) : null;
+}
+
+/** Push a held lease's expiry out by the TTL. False when the token no longer
+ *  holds a LIVE lease: another verb took it, or it expired. An expired lease
+ *  is never revived, so a lease found gone stays gone (the F35 state table
+ *  relies on it: a verb that saw it lost cannot have it back mid-run). */
+export async function renewWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  token: string,
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposal_group_leases SET expires_at = now() + ${ttlMs} * interval '1 millisecond'
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token} AND expires_at > now()
+    RETURNING 1
+  `;
+  return rows.length > 0;
+}
+
+/** A held group lease, as the fenced writes take it (F35 fix round 2). */
+export interface GroupLeaseRef {
+  scope: string;
+  groupKey: string;
+  token: string;
+}
+
+/** The `AND EXISTS (…)` clause that fences a row CAS on a live lease: the
+ *  statement moves nothing unless `lease.token` still holds the group and its
+ *  `expires_at` has not passed, checked in the same statement as the CAS. No
+ *  lease ⇒ an empty fragment (the single-row verbs). */
+function leaseFence(sql: Sql, lease: GroupLeaseRef | undefined) {
+  return lease
+    ? sql`AND EXISTS (
+        SELECT 1 FROM wiki_proposal_group_leases
+        WHERE scope = ${lease.scope} AND group_key = ${lease.groupKey} AND token = ${lease.token} AND expires_at > now()
+      )`
+    : sql``;
+}
+
+/** Does `token` still hold a live lease on the group? The check a lease holder
+ *  runs before a write that is not a row CAS (a page, `log.md`, a verdict). */
+export async function wikiProposalGroupLeaseHeld(scope: string, groupKey: string, token: string): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT 1 FROM wiki_proposal_group_leases
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token} AND expires_at > now()
+  `;
+  return rows.length > 0;
+}
+
+/** Drop a lease this token holds; a lease another verb took is left alone. */
+export async function releaseWikiProposalGroupLease(scope: string, groupKey: string, token: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    DELETE FROM wiki_proposal_group_leases
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token}
+  `;
 }
 
 /** One lint row, reduced to what the seeder decides with: which group it is in,
@@ -733,8 +847,8 @@ export interface LintGroupRow {
  *  - **which PAGES are claimed** — the `target_path` of every live row. One page
  *    may be in one live group at a time, or applying either group stales the
  *    other forever;
- *  - **which live DRAFT groups no longer match a finding** — the self-heal's
- *    input (see `seedLintProposals`).
+ *  - **which live groups no longer match a finding** — the self-heal's input
+ *    (see `seedLintProposals`).
  */
 export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGroupRow[]> {
   const sql = getDb();
@@ -783,7 +897,7 @@ export async function insertLintGroupRows(wikiName: string, rows: readonly Inser
 }
 
 /**
- * Retire every `draft` row of one lint group — the self-heal's write.
+ * Retire the live rows of one lint group — the self-heal's write.
  *
  * `stale` rather than `rejected`: the reviewer said nothing, the FINDING changed
  * shape under the card (the cluster grew a member after a sibling fix applied),
@@ -791,17 +905,29 @@ export async function insertLintGroupRows(wikiName: string, rows: readonly Inser
  * describes the wiki". A `rejected` row would silence the successor group too,
  * since a dismissal is by group key and the key is what moved.
  *
- * `approved` rows are left alone: they are mid-apply, and the apply's own
- * terminal CAS owns them.
+ * Without `leaseToken` only `draft` rows are retired. With it, `approved` rows
+ * are retired too, and only while that token still holds a live lease on the
+ * group ({@link claimWikiProposalGroupLease}): with no verb holding the group,
+ * an `approved` row is one a failed or restarted Accept stranded (F35), not one
+ * an apply is writing. The token check keeps the statement off a group a verb
+ * claimed after the self-heal's lease ran out.
  */
-export async function markLintGroupStale(wikiName: string, groupKey: string): Promise<number> {
+export async function markLintGroupStale(wikiName: string, groupKey: string, leaseToken?: string): Promise<number> {
   const sql = getDb();
-  const rows = await sql`
-    UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
-    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
-    RETURNING id
-  `;
+  const rows = leaseToken
+    ? await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+        ${leaseFence(sql, { scope: wikiName, groupKey, token: leaseToken })}
+      RETURNING id
+    `
+    : await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status = 'draft'
+      RETURNING id
+    `;
   return rows.length;
 }
 

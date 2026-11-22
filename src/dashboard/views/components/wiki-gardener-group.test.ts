@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
+import { groupAcceptCount, isLiveGroupStatus, groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { renderWikiGardenerPage } from "../wiki-gardener-page.ts";
 import { themeTokenStyles } from "../shared-styles.ts";
 
@@ -173,5 +173,18 @@ describe("groupStopNote", () => {
     expect(groupStopNote({ ...stopped, applied: [], notLanded: [] }, 409)).toBe("Stopped at notes/b.md (error): write failed: EACCES");
     expect(groupStopNote({ outcome: "mixed", error: "an approved or rejected row blocks the group" }, 409)).toBe("an approved or rejected row blocks the group");
     expect(groupStopNote({}, 500)).toBe("Failed (500)");
+  });
+});
+
+// F35 (arch review 2026-11-16): a row a failed or restarted Accept stranded in
+// `approved` is taken by both verbs, so the card must offer them and count it.
+describe("which rows the group verbs take", () => {
+  test("draft and approved are live; settled statuses are not", () => {
+    expect(["draft", "approved", "applied", "stale", "rejected", "error"].map(isLiveGroupStatus)).toEqual([true, true, false, false, false, false]);
+  });
+  test("Accept all N counts every row the Accept claims, stranded ones included", () => {
+    expect(groupAcceptCount(["approved", "draft", "applied"])).toBe(2);
+    expect(groupAcceptCount(["approved", "approved"])).toBe(2);
+    expect(groupAcceptCount(["applied", "rejected"])).toBe(0);
   });
 });

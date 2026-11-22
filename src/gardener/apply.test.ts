@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   applyWikiProposal,
   applyWikiProposalGroup,
+  GroupLogWriteError,
   insertLogEntry,
   reindexCollectionFor,
   draftTitle,
@@ -969,11 +970,15 @@ describe("applyWikiProposalGroup", () => {
     await writeFile(logPath, original);
     await chmod(logPath, 0o200);
     try {
-      const res = await applyWikiProposalGroup(
-        [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))],
-        deps(),
-      );
-      expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+      const seen: string[] = [];
+      // F35 R3: an entry that cannot be written throws, so the caller marks no
+      // row `applied` over the pages it would have named.
+      await expect(
+        applyWikiProposalGroup([lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))], deps(), {
+          onRowOutcome: (o) => seen.push(o.outcome.outcome),
+        }),
+      ).rejects.toBeInstanceOf(GroupLogWriteError);
+      expect(seen).toEqual(["applied", "applied"]);
     } finally {
       await chmod(logPath, 0o644);
     }
@@ -1256,6 +1261,92 @@ describe("applyWikiProposalGroup", () => {
 
     expect(res.results[0]!.outcome.outcome).toBe("applied");
     expect(await readFile(path.join(wikiDir, "plans/c.mdx"), "utf8")).toBe(expected);
+  });
+
+  // F35 (arch review 2026-11-16): a group Accept must stay safe to re-run, and a
+  // throw must not cost the pages written before it their log entry and commit.
+  describe("re-run and throw safety (F35)", () => {
+    const commitsInto = (commits: Array<{ paths: string[]; message: string }>) => async (paths: string[], message: string) => {
+      commits.push({ paths: [...paths].sort(), message });
+    };
+
+    test("a row that THROWS after an earlier row wrote: the written page is logged, committed and reported, then the throw goes on", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const reported: string[] = [];
+      let calls = 0;
+      const realIndex = () => buildWikiIndex(wikiDir);
+      const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+      // Call 1 is the preflight, call 2 row r1's own read, call 3 row r2's.
+      const failing = deps({
+        commit: commitsInto(commits),
+        getWikiIndex: async () => {
+          if (++calls === 3) throw new Error("index read blew up");
+          return realIndex();
+        },
+      });
+      const err = await applyWikiProposalGroup(rows, failing, { onRowOutcome: (o) => reported.push(`${o.id}:${o.outcome.outcome}`) }).catch((e) => e);
+
+      expect(String(err)).toContain("index read blew up");
+      expect(reported).toEqual(["r1:applied"]);
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+      expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toBe(pageBody("B"));
+      const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+      expect(log).toContain(`1 page: ${PAGE_A}`);
+      expect(commits).toEqual([{ paths: [PAGE_A, "log.md"].sort(), message: "[lint] fix: 1 page (lint:series-unnamed:deadbeef1234)" }]);
+    });
+
+    test("a row whose own write LANDED before it threw counts as written", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const reported: string[] = [];
+      const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+      let reindexes = 0;
+      const failing = deps({
+        commit: commitsInto(commits),
+        // A synchronous throw from the reindex kick escapes `applyInner` after
+        // the page write, on the second row.
+        reindex: (() => {
+          if (++reindexes === 2) throw new Error("reindex kick threw");
+          return Promise.resolve();
+        }) as ApplyDeps["reindex"],
+      });
+      const err = await applyWikiProposalGroup(rows, failing, { onRowOutcome: (o) => reported.push(`${o.id}:${o.outcome.outcome}`) }).catch((e) => e);
+
+      expect(String(err)).toContain("reindex kick threw");
+      expect(reported).toEqual(["r1:applied", "r2:applied"]);
+      expect(await readFile(path.join(wikiDir, "log.md"), "utf8")).toContain(`2 pages: ${PAGE_A}, ${PAGE_B}`);
+      expect(commits).toHaveLength(1);
+      expect(commits[0]!.paths).toEqual([PAGE_A, PAGE_B, "log.md"].sort());
+    });
+
+    test("a re-run after a dead pass: the page that pass wrote and never committed is staged and logged ONCE, as `recovered`", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      const rowB = lintRow("r2", PAGE_B, pageBody("B"));
+      // The dead pass wrote A and died before its log entry and its commit.
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      const res = await applyWikiProposalGroup(
+        [rowA, rowB],
+        deps({ commit: commitsInto(commits), hasUncommittedChanges: async (rel) => rel === PAGE_A }),
+      );
+
+      expect(res.results[0]).toMatchObject({ id: "r1", outcome: { outcome: "applied", noop: true }, recovered: true });
+      expect(res.results[1]).not.toHaveProperty("recovered");
+      const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+      expect(log.split("## [").length - 1).toBe(1);
+      expect(log).toContain(`2 pages: ${PAGE_A}, ${PAGE_B}`);
+      expect(commits).toEqual([{ paths: [PAGE_A, PAGE_B, "log.md"].sort(), message: "[lint] fix: 2 pages (lint:series-unnamed:deadbeef1234)" }]);
+    });
+
+    test("a no-op page that is already committed is NOT recovered: no second log entry, nothing staged", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      const res = await applyWikiProposalGroup([rowA], deps({ commit: commitsInto(commits), hasUncommittedChanges: async () => false }));
+
+      expect(res.results[0]).not.toHaveProperty("recovered");
+      expect(commits).toEqual([]);
+      expect(await Bun.file(path.join(wikiDir, "log.md")).exists()).toBe(false);
+    });
   });
 });
 

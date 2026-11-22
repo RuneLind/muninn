@@ -6,6 +6,7 @@ import { TEST_DATABASE_URL } from "./test-db-url.ts";
 
 const ALL_TABLES = [
   "wiki_proposals",
+  "wiki_proposal_group_leases",
   "research_citations",
   "search_signals",
   "traces",

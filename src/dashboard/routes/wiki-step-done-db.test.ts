@@ -20,12 +20,21 @@ import { __setStaleProposalStoreForTest, dbStaleProposalStore } from "../../gard
 import type { LivePageHolder } from "../../db/wiki-proposals.ts";
 import { registerWikiStepDoneRoutes, type StepDoneDeps } from "./wiki-step-done.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
+import { setPlanPriority, setPlanStatus } from "../../plans/frontmatter.ts";
+import { PLANS_WIKI_NAME } from "../../plans/source.ts";
+import { __resetSyncReposForTest } from "../../sync/config.ts";
+import { __resetSyncStateForTest, __setSyncLedgerEntryForTest } from "../../sync/run.ts";
+import type { SyncLedgerEntry } from "../../sync/decide.ts";
+import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
+import { saveWatcher, toggleWatcher } from "../../db/watchers.ts";
 
 setupTestDb();
 
 const WIKI = "step-done-wiki";
 const OUTSIDE = "step-done-outside";
 const LOCKED = "step-done-locked";
+/** The plans wiki's name: only there is board-key-only dirt named as the board's (F36). */
+const PLANS = PLANS_WIKI_NAME;
 const REL = "plans/step-done.mdx";
 const PAGE = [
   "---\ntitle: Step fixture\n---\n",
@@ -46,6 +55,9 @@ let app: Hono;
 let guardRefusal: Response | null = null;
 let commitResult: CommitWikiResult | null = null;
 const NOW = Date.parse("2026-11-10T12:00:00+01:00");
+/** The plans wiki's registry `source`, and the bots `sweptWikiDirs` reads (F36, fix round 1). */
+let plansSource: "bot" | "extra" = "extra";
+let sweeperBots: { name: string; wikiDir?: string }[] = [];
 
 const git = (...args: string[]) =>
   execFileSync("git", ["-C", root, ...args], {
@@ -96,14 +108,17 @@ beforeAll(async () => {
     { name: WIKI, root, source: "extra" as const },
     { name: OUTSIDE, root, source: "extra" as const },
     { name: LOCKED, root: `${root}-locked`, source: "extra" as const },
+    { name: PLANS, root, source: "extra" as const },
   ];
   __setWikiRegistryForTest(registry);
   const config = { dashboardPort: 3010, profile: "default", knowledgeApiUrl: "http://127.0.0.1:9" } as unknown as Config;
   const guards: DecisionCloseGuards = { readonlyRefusal: () => guardRefusal, egressRefusal: () => null };
   const deps = (): StepDoneDeps => ({
-    registry: () => registry,
-    workMapWikis: () => [WIKI, LOCKED],
-    answerConfig: () => ({ wikis: new Set([WIKI, OUTSIDE, LOCKED]), owner: null, groups: new Map() }),
+    registry: () => registry.map((e) => (e.name === PLANS ? { ...e, source: plansSource } : e)),
+    // The real watcher rows in the test DB, against the bots a test names.
+    sweptWikiDirs: () => sweptWikiDirs(sweeperBots),
+    workMapWikis: () => [WIKI, LOCKED, PLANS],
+    answerConfig: () => ({ wikis: new Set([WIKI, OUTSIDE, LOCKED, PLANS]), owner: null, groups: new Map() }),
     now: () => NOW,
     isReadonlyRoot: (r) => r === `${root}-locked`,
     commit: async (r, paths, message) => commitResult ?? (await commitWikiChange(r, paths, message, { push: false })),
@@ -267,6 +282,163 @@ describe("/api/wiki/step-done", () => {
     expect(body.dirty).toBe(true);
     expect(body.error).toBe(`${REL} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`);
     expect(await pageText()).toBe(dirty);
+  });
+
+  // F36 (arch review 2026-11-16): the /plans board's priority and status flips
+  // pass no committer, so the page they leave dirty was refused as a session's.
+  describe("a plan page whose only dirt is a plans-board flip", () => {
+    const prevSync = process.env.SYNC_REPOS;
+    afterAll(() => {
+      if (prevSync === undefined) delete process.env.SYNC_REPOS;
+      else process.env.SYNC_REPOS = prevSync;
+      __resetSyncReposForTest();
+    });
+    function syncRepos(value: string | undefined): void {
+      if (value === undefined) delete process.env.SYNC_REPOS;
+      else process.env.SYNC_REPOS = value;
+      __resetSyncReposForTest();
+    }
+    /** Write `content` as the page's dirt, then Done the second step on `wiki`. */
+    async function doneAfter(content: string, wiki = PLANS): Promise<{ status: number; body: Record<string, unknown> }> {
+      await Bun.write(path.join(root, REL), content);
+      __resetWikiCacheForTest();
+      const { body: l } = await list(wiki);
+      const at = { wiki, step: keyOf(l, "Read the second note."), baseHash: l.baseHash };
+      const p = (await (await post({ ...at, preview: true })).json()) as Record<string, unknown>;
+      const res = await post({ ...at, previewHash: p.previewHash });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    }
+    const flipped = () => {
+      const pri = setPlanPriority(PAGE, "p1");
+      if (pri.kind !== "changed") throw new Error("fixture: the priority flip did not change the page");
+      const st = setPlanStatus(pri.content, "blocked", "2026-11-10");
+      if (st.kind !== "changed") throw new Error("fixture: the status flip did not change the page");
+      return st.content;
+    };
+    const BOARD = `${REL} carries a priority or status change from the plans board that is not committed yet.`;
+
+    test("with no SYNC_REPOS entry and no bot owner, the refusal says to commit it by hand — never a session, never a loop", async () => {
+      syncRepos(undefined);
+      const content = flipped();
+      const { status, body } = await doneAfter(content);
+      expect(status).toBe(409);
+      expect(body.dirty).toBe(true);
+      expect(body.error).toBe(`${BOARD} Nothing on this instance commits it automatically: commit it by hand. Then try again.`);
+      expect(await pageText()).toBe(content);
+    });
+
+    // F36 fix round 1: the loop is named only as far as its ledger is evidence —
+    // one test per ledger state the message tells apart.
+    describe("with the wiki in SYNC_REPOS in wiki mode, the loop is named from its ledger", () => {
+      const ticked = (over: Partial<SyncLedgerEntry>): SyncLedgerEntry => ({
+        state: "ok",
+        consecutiveDeferrals: 0,
+        lastSuccessMs: NOW - 60_000,
+        lastRunMs: NOW - 60_000,
+        lastLocalSectionMs: NOW - 60_000,
+        lastCommitStep: "passed",
+        ...over,
+      });
+      afterAll(() => __resetSyncStateForTest());
+
+      test("the last tick was healthy: the loop commits it", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __setSyncLedgerEntryForTest(PLANS, ticked({}));
+        const { status, body } = await doneAfter(flipped());
+        expect(status).toBe(409);
+        expect(body.error).toBe(`${BOARD} The repo-sync loop commits it after its quiet period, or commit it by hand. Then try again.`);
+      });
+
+      test("paused on a feature branch: it will not commit until that is cleared", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "paused", reason: "off default branch (feature)", lastLocalSectionMs: NOW - 86_400_000, lastCommitStep: "not-reached" }));
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(
+          `${BOARD} The repo-sync loop is paused and will not commit it until that is cleared: off default branch (feature). Clear that, or commit it by hand. Then try again.`,
+        );
+      });
+
+      test("blocked by a bisect: it will not commit until the bisect is reset", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        const reason = "a git operation is in progress (BISECT_LOG) — end the bisect with `git bisect reset`";
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "blocked", reason, lastLocalSectionMs: null, lastCommitStep: "not-reached" }));
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(`${BOARD} The repo-sync loop is blocked and will not commit it until that is cleared: ${reason}. Clear that, or commit it by hand. Then try again.`);
+      });
+
+      test("never run since boot: the promise is conditional", async () => {
+        syncRepos(`${PLANS}=${root}:wiki`);
+        __resetSyncStateForTest();
+        const { body } = await doneAfter(flipped());
+        expect(body.error).toBe(
+          `${BOARD} The repo-sync loop commits it after its quiet period if it is running (it has not run since muninn started), or commit it by hand. Then try again.`,
+        );
+      });
+    });
+
+    test("a plain-mode SYNC_REPOS entry commits nothing, so it is not named", async () => {
+      syncRepos(`${PLANS}=${root}:plain`);
+      const { body } = await doneAfter(flipped());
+      expect(body.error).toBe(`${BOARD} Nothing on this instance commits it automatically: commit it by hand. Then try again.`);
+    });
+
+    // F36 fix round 1: the sweeper is named only when an ENABLED `wiki-committer`
+    // row exists for a bot whose wikiDir contains this root, never off `source`.
+    describe("the daily sweeper", () => {
+      const SWEPT = `${BOARD} The daily wiki sweep commits it, or commit it by hand. Then try again.`;
+      const NOBODY = `${BOARD} Nothing on this instance commits it automatically: commit it by hand. Then try again.`;
+      const committerRow = (botName: string) => saveWatcher({ userId: "u1", botName, name: "Wiki sweep", type: "wiki-committer" });
+      afterAll(() => {
+        plansSource = "extra";
+        sweeperBots = [];
+      });
+
+      test("a bot wiki whose bot has an enabled wiki-committer watcher: the sweep is named", async () => {
+        syncRepos(undefined);
+        plansSource = "bot";
+        sweeperBots = [{ name: PLANS, wikiDir: root }];
+        await committerRow(PLANS);
+        const { status, body } = await doneAfter(flipped());
+        expect(status).toBe(409);
+        expect(body.error).toBe(SWEPT);
+      });
+
+      test("the same bot wiki with no wiki-committer watcher, or a disabled one: nothing is named", async () => {
+        syncRepos(undefined);
+        plansSource = "bot";
+        sweeperBots = [{ name: PLANS, wikiDir: root }];
+        expect((await doneAfter(flipped())).body.error).toBe(NOBODY);
+        await toggleWatcher(await committerRow(PLANS), false);
+        expect((await doneAfter(flipped())).body.error).toBe(NOBODY);
+      });
+
+      test("a WIKI_EXTRA wiki whose root is another bot's wikiDir, with a watcher: the sweep is named", async () => {
+        syncRepos(undefined);
+        plansSource = "extra";
+        sweeperBots = [{ name: "jarvis", wikiDir: root }];
+        await committerRow("jarvis");
+        expect((await doneAfter(flipped())).body.error).toBe(SWEPT);
+      });
+    });
+
+    test("a board flip beside a body edit keeps the session refusal", async () => {
+      syncRepos(undefined);
+      const { status, body } = await doneAfter(`${flipped()}\nA hand edit.\n`);
+      expect(status).toBe(409);
+      expect(String(body.error)).toContain("a session is editing it");
+    });
+
+    test("a frontmatter edit outside the board's keys keeps the session refusal", async () => {
+      syncRepos(undefined);
+      const { body } = await doneAfter(PAGE.replace("title: Step fixture", "title: Renamed"));
+      expect(String(body.error)).toContain("a session is editing it");
+    });
+
+    test("board-key-only dirt on a wiki that is not the plans wiki keeps the session refusal", async () => {
+      syncRepos(undefined);
+      const { body } = await doneAfter(flipped(), WIKI);
+      expect(String(body.error)).toContain("a session is editing it");
+    });
   });
 
   test("after a failed commit, the next Done's refusal does not blame a session (fix round 2, finding 2)", async () => {

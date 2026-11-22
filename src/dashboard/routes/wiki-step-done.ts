@@ -32,9 +32,16 @@ import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import { commitWikiChange, pageHasUncommittedChanges, type CommitWikiResult } from "../../wiki/commit.ts";
 import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
+import { dirtIsPendingBoardWrite, pendingBoardWriteMessage } from "../../plans/board-dirt.ts";
+import { PLANS_WIKI_NAME } from "../../plans/source.ts";
+import { getSyncRepos } from "../../sync/config.ts";
+import { syncLoopOutlook, type SyncLoopOutlook } from "../../sync/decide.ts";
+import { getSyncLedgerEntry } from "../../sync/run.ts";
+import { sweeperCommits, syncRepoCovering } from "../../wiki/series-committer.ts";
+import { sweptWikiDirs } from "../../watchers/wiki-committer.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
 import { postCollectionUpdate } from "../../wiki/reindex.ts";
-import { discoverAllBots } from "../../bots/config.ts";
+import { discoverActiveBots, discoverAllBots } from "../../bots/config.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { listYouSteps, stepDoneEdit, stepDoneLogLine, stepsDoneEdit, stepsDoneLogLine, youLaneRows } from "../../format/step-done.ts";
 import { realDecisionInboxDeps, type DecisionCloseGuards, type DecisionInboxDeps } from "./wiki-decision-inbox.ts";
@@ -48,6 +55,9 @@ export const STEP_DONE_LOG_KIND = "step-done";
 export interface StepDoneDeps extends Pick<DecisionInboxDeps, "registry" | "workMapWikis" | "answerConfig" | "now"> {
   isReadonlyRoot: (root: string) => boolean;
   commit: (root: string, paths: string[], message: string, push: boolean) => Promise<CommitWikiResult>;
+  /** The `wikiDir`s the daily sweeper covers (`sweptWikiDirs`). Absent: the
+   *  active bots against the DB's watcher rows. */
+  sweptWikiDirs?: () => Promise<string[]>;
 }
 
 export function realStepDoneDeps(config: Config): StepDoneDeps {
@@ -60,6 +70,25 @@ export function realStepDoneDeps(config: Config): StepDoneDeps {
     isReadonlyRoot: isReadonlyWikiRoot,
     commit: (root, paths, message, push) => commitWikiChange(root, paths, message, { push }),
   };
+}
+
+/** The swept dirs, or none when the watcher rows cannot be read: Done never
+ *  promises a sweep nobody can confirm. */
+async function sweptDirsOrNone(deps: StepDoneDeps): Promise<string[]> {
+  try {
+    return await (deps.sweptWikiDirs ?? (() => sweptWikiDirs(discoverActiveBots())))();
+  } catch (err) {
+    log.warn("Step done: the wiki-committer watcher rows could not be read: {error}", { error: err instanceof Error ? err.message : String(err) });
+    return [];
+  }
+}
+
+/** The repo-sync loop as Done may name it: `null` when no `wiki`-mode entry
+ *  covers the root, otherwise read off that repo's ledger, since configuration
+ *  is not evidence that the loop runs or can commit (F36 fix round 1). */
+function syncLoopOutlookFor(root: string, now: number): SyncLoopOutlook | null {
+  const repo = syncRepoCovering(root, getSyncRepos().repos);
+  return repo ? syncLoopOutlook(getSyncLedgerEntry(repo.name), now) : null;
 }
 
 /** What {@link stepWikiScope} reads: the owner-step checks route resolves through it too. */
@@ -260,10 +289,19 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
         const has = await pageHasUncommittedChanges(entry.root, target.relPath);
         if (has === false) return true;
         // Git cannot tell a session's edits from an earlier Done whose commit failed, so the text names both.
+        // A plans-board priority/status flip passes no committer, so dirt that is only that is named as the
+        // board's, with the committers this instance runs (F36, arch review 2026-11-16).
         dirty =
           has === null
             ? `${target.relPath}: git status failed, so its uncommitted edits are unknown`
-            : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
+            : entry.name.toLowerCase() === PLANS_WIKI_NAME && (await dirtIsPendingBoardWrite(entry.root, target.relPath))
+              ? pendingBoardWriteMessage(target.relPath, {
+                  syncLoop: syncLoopOutlookFor(entry.root, deps.now()),
+                  // Named only when an enabled sweeper's bot wikiDir contains this root, never off the
+                  // registry's `source` (a bot wiki is named after its bot, and names de-duplicate).
+                  sweeper: await sweeperCommits(entry.root, await sweptDirsOrNone(deps)),
+                })
+              : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
         return false;
       },
       transform: (raw) => {

@@ -55,7 +55,8 @@ function app(deps: WikiSeriesRouteDeps = {}): Hono {
   const a = new Hono();
   // A short lock wait keeps the `locked` case in milliseconds rather than the
   // two seconds a human click would wait.
-  registerWikiSeriesRoutes(a, { lockWaitMs: 50, ...deps });
+  // No sweeper unless a test names one: the default reads the DB's watcher rows.
+  registerWikiSeriesRoutes(a, { lockWaitMs: 50, sweptWikiDirs: async () => [], ...deps });
   return a;
 }
 
@@ -931,6 +932,8 @@ describe("who commits the write", () => {
     source: "bot" | "extra",
     syncRepos?: string,
     top: string = dir,
+    /** The bot wikiDirs an enabled sweeper covers. */
+    swept: string[] = [],
   ): Promise<{ subjects: string[]; headFiles: string; status: string[] }> {
     __setWikiRegistryForTest([{ name: "g", root: dir, source }]);
     const prevSync = process.env.SYNC_REPOS;
@@ -940,7 +943,7 @@ describe("who commits the write", () => {
     __resetWikiCacheForTest();
     try {
       const baseHash = sha256(await readFile(path.join(dir, LONE), "utf8"));
-      const res = await post({ wiki: "g", relPath: LONE, baseHash, series: "prov" });
+      const res = await post({ wiki: "g", relPath: LONE, baseHash, series: "prov" }, {}, { sweptWikiDirs: async () => swept });
       expect(res.status).toBe(200);
       expect(((await res.json()) as { written: boolean }).written).toBe(true);
       return {
@@ -977,11 +980,20 @@ describe("who commits the write", () => {
     expect(status).toContain(`M ${LONE}`);
   });
 
-  test("a bot wiki is left to the wiki-committer sweeper", async () => {
+  test("a wiki inside a swept bot wikiDir is left to the wiki-committer sweeper, whatever its source", async () => {
+    for (const source of ["bot", "extra"] as const) {
+      const dir = await gitWiki();
+      const { subjects, status } = await editLone(dir, source, undefined, dir, [dir]);
+      expect([source, subjects]).toEqual([source, ["init"]]);
+      expect(status).toContain(`M ${LONE}`);
+    }
+  });
+
+  test("a bot wiki with no enabled sweeper row is committed by the route itself", async () => {
     const dir = await gitWiki();
-    const { subjects, status } = await editLone(dir, "bot");
-    expect(subjects).toEqual(["init"]);
-    expect(status).toContain(`M ${LONE}`);
+    const { subjects, headFiles } = await editLone(dir, "bot");
+    expect(subjects).toEqual([`[series] edit: ${LONE}`, "init"]);
+    expect(headFiles).toBe(LONE);
   });
 
   test("a standalone wiki whose repo has a remote is not committed", async () => {

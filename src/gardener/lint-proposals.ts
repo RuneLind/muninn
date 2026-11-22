@@ -33,14 +33,23 @@ import path from "node:path";
 import type { LintFinding } from "../wiki/lint.ts";
 import type { LintPageEdit } from "../wiki/lint-series.ts";
 import {
+  claimWikiProposalGroupLease,
   listLintGroupRowsByWiki,
+  listWikiProposalsByGroup,
   markLintGroupStale,
   insertLintGroupRows,
+  releaseWikiProposalGroupLease,
+  settleWikiProposalApplied,
+  wikiProposalGroupLeaseHeld,
+  type GroupLeaseRef,
   type InsertLintGroupOutcome,
   type InsertWikiProposalParams,
   type LintGroupRow,
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
+import { GroupLeaseLostError, settleWrittenGroupRows, type ApplyDeps } from "./apply.ts";
+import { commitWikiChange, pageHasUncommittedChanges } from "../wiki/commit.ts";
+import { getWikiIndex } from "../wiki/store.ts";
 import { lintMeta, type LintSeeder } from "./lint-markers.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
 import { buildSeeAlsoEdit } from "./wire.ts";
@@ -199,11 +208,121 @@ export interface SeedLintProposalsResult {
   /** Findings every page of which refused the edit. Counted once per pass, so a
    *  wiki with one fenceless blog does not read as a growing problem. */
   refused: number;
-  /** Live `draft` groups the self-heal retired because no current finding
-   *  carries their key any more. */
+  /** Rows the self-heal retired `stale` because no current finding carries
+   *  their group's key any more (`draft` rows, and `approved` rows no verb holds). */
   staled: number;
+  /** Rows of such groups whose page already carried their draft, settled
+   *  `applied` (logged and committed) instead of retired. */
+  settled: number;
+  /** Superseded groups the self-heal left alone because an Accept or Dismiss
+   *  held their lease; the next pass retires them. */
+  held: number;
   /** Pages a finding wanted to edit and the builder would not. */
   refusals: LintProposalRefusal[];
+}
+
+/** What the self-heal did with one superseded group. */
+export interface RetireLintGroupOutcome {
+  staled: number;
+  settled: number;
+  /** A verb held the group's lease, so nothing was touched. */
+  held: boolean;
+}
+
+/** The seams the default self-heal settles written rows through. */
+export interface RetireLintGroupDeps {
+  wikiDir: string;
+  readFile: (absPath: string) => Promise<string | null>;
+  /** Push the settle's commit (the bot's `wikiAutoCommit.push`). Default true. */
+  push?: boolean;
+}
+
+/**
+ * The self-heal's write for ONE superseded lint group (F35, arch review
+ * 2026-11-16). It claims the group's lease, so it never acts on a group an
+ * Accept or Dismiss holds (`held`), and a verb that claims after it finds the
+ * rows already settled. With the lease held:
+ *
+ *  1. every live row whose page already IS its draft (a dead Accept wrote it)
+ *     is logged, committed and settled `applied` (`settleWrittenGroupRows`, the
+ *     route Dismiss's own step), never retired over a landed edit;
+ *  2. every other live row, `draft` and stranded `approved` alike, is retired
+ *     `stale` (`markLintGroupStale` with the lease token).
+ *
+ * A stranded `approved` row left live beside `stale` siblings would offer
+ * «Accept all 1» and apply one member of a superseded series edit alone.
+ */
+export async function retireVanishedLintGroup(
+  wikiName: string,
+  groupKey: string,
+  deps: RetireLintGroupDeps,
+): Promise<RetireLintGroupOutcome> {
+  const token = await claimWikiProposalGroupLease(wikiName, groupKey, "self-heal");
+  if (!token) return { staled: 0, settled: 0, held: true };
+  try {
+    return await retireClaimedLintGroup(wikiName, groupKey, token, deps);
+  } finally {
+    await releaseWikiProposalGroupLease(wikiName, groupKey, token);
+  }
+}
+
+/**
+ * {@link retireVanishedLintGroup}'s work under the lease `token` holds. The
+ * lease is not renewed here, so it can lapse mid-run. Every write is fenced on
+ * that token (F35): the settle's log entry passes `logGroupPages` (lease
+ * checked right before it), each settle CAS and the `stale` CAS check it in
+ * the same statement. A lease found gone answers `held`, with nothing logged
+ * after the loss and every unsettled row still live; a row the CASes left
+ * live (settled + staled short of the live rows) answers `held` too, so its
+ * key and page stay held this pass. A `log.md` entry that cannot be written
+ * throws (`GroupLogWriteError`) with every row still live; the seeder logs it
+ * and the next pass retries.
+ */
+async function retireClaimedLintGroup(
+  wikiName: string,
+  groupKey: string,
+  token: string,
+  deps: RetireLintGroupDeps,
+): Promise<RetireLintGroupOutcome> {
+  const lease: GroupLeaseRef = { scope: wikiName, groupKey, token };
+  const live = (await listWikiProposalsByGroup(wikiName, groupKey)).filter(
+    (r) => r.status === "draft" || r.status === "approved",
+  );
+  let settled: WikiProposal[];
+  try {
+    settled = await settleWrittenGroupRows(
+      live,
+      settleDepsFor(deps),
+      async (r) => (await settleWikiProposalApplied(r.id, lease)) !== null,
+      { leaseHeld: () => wikiProposalGroupLeaseHeld(wikiName, groupKey, token) },
+    );
+  } catch (err) {
+    if (err instanceof GroupLeaseLostError) return { staled: 0, settled: 0, held: true };
+    throw err;
+  }
+  const staled = await markLintGroupStale(wikiName, groupKey, token);
+  return { staled, settled: settled.length, held: settled.length + staled < live.length };
+}
+
+/** The apply seams `settleWrittenGroupRows` reads: page and `log.md` I/O, the
+ *  uncommitted check and the commit. It writes no page, so no reindex. */
+function settleDepsFor(deps: RetireLintGroupDeps): ApplyDeps {
+  const { wikiDir } = deps;
+  return {
+    wikiDir,
+    now: () => Date.now(),
+    readFile: deps.readFile,
+    writeFile: async (absPath, content) => {
+      await Bun.write(absPath, content);
+    },
+    getWikiIndex: () => getWikiIndex({ root: wikiDir }),
+    refreshIndex: async () => {
+      await getWikiIndex({ root: wikiDir, refresh: true });
+    },
+    reindex: async () => {},
+    commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push: deps.push ?? true }),
+    hasUncommittedChanges: (relPath) => pageHasUncommittedChanges(wikiDir, relPath),
+  };
 }
 
 export interface SeedLintProposalsDeps extends LintProposalDeps {
@@ -215,7 +334,11 @@ export interface SeedLintProposalsDeps extends LintProposalDeps {
    *  carries. Defaults to the weekly watcher. */
   seededBy?: LintSeeder;
   listGroupRows?: (wikiName: string) => Promise<LintGroupRow[]>;
-  markGroupStale?: (wikiName: string, groupKey: string) => Promise<number>;
+  /** The self-heal's write for one superseded group. Defaults to
+   *  {@link retireVanishedLintGroup}. */
+  retireGroup?: (wikiName: string, groupKey: string) => Promise<RetireLintGroupOutcome>;
+  /** Push the self-heal's settle commit (the bot's `wikiAutoCommit.push`). Default true. */
+  push?: boolean;
   insert?: (params: InsertWikiProposalParams) => Promise<WikiProposal | null>;
   /** One finding's rows in one go, re-checking the page claims under the lock
    *  Send takes. Defaults to `insertLintGroupRows`; when only `insert` is given
@@ -239,7 +362,10 @@ export async function seedLintProposals(
   deps: SeedLintProposalsDeps,
 ): Promise<SeedLintProposalsResult> {
   const listGroupRows = deps.listGroupRows ?? listLintGroupRowsByWiki;
-  const markGroupStale = deps.markGroupStale ?? markLintGroupStale;
+  const retireGroup =
+    deps.retireGroup ??
+    ((wikiName: string, groupKey: string) =>
+      retireVanishedLintGroup(wikiName, groupKey, { wikiDir: deps.wikiDir, readFile: deps.readFile, push: deps.push }));
   const insert = deps.insert;
   const insertGroup =
     deps.insertGroup ??
@@ -260,6 +386,8 @@ export async function seedLintProposals(
     claimed: 0,
     refused: 0,
     staled: 0,
+    settled: 0,
+    held: 0,
     refusals: [],
   };
 
@@ -272,23 +400,44 @@ export async function seedLintProposals(
   const fixable = findings.filter((f) => !!f.fix);
   const currentKeys = new Set(fixable.map((f) => f.fix!.groupKey));
 
-  // 1. SELF-HEAL. A live `draft` group whose key no current finding mints is a
-  //    card describing a finding that no longer exists in that shape — the
+  // 1. SELF-HEAL. A live group whose key no current finding mints is a card
+  //    describing a finding that no longer exists in that shape — the
   //    superseded 8.2 group after an 8.1 accept grew its member set by one, so
   //    the key moved and the old card can only ever apply a stale edit. Retire
   //    it, and do it BEFORE the claim pass so its pages are released in this
-  //    same run rather than a week later.
-  const vanished = new Set<string>();
+  //    same run rather than a week later. `approved` rows count (F35): with no
+  //    verb holding the group they are stranded, and `retireGroup` claims the
+  //    group's lease, so a group a verb holds is left whole (`held`) and keeps
+  //    its keys and pages below.
+  const candidates = new Set<string>();
   for (const row of lintRows) {
-    if (row.status === "draft" && !currentKeys.has(row.groupKey)) vanished.add(row.groupKey);
+    if ((row.status === "draft" || row.status === "approved") && !currentKeys.has(row.groupKey)) candidates.add(row.groupKey);
   }
-  for (const key of vanished) {
-    result.staled += await markGroupStale(deps.wikiName, key);
+  const vanished = new Set<string>();
+  for (const key of candidates) {
+    let outcome: RetireLintGroupOutcome;
+    try {
+      outcome = await retireGroup(deps.wikiName, key);
+    } catch (err) {
+      log.warn("Lint proposals: retiring superseded group {group} on {wiki} failed: {error}", {
+        wiki: deps.wikiName,
+        group: key,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    if (outcome.held) {
+      result.held += 1;
+      continue;
+    }
+    vanished.add(key);
+    result.staled += outcome.staled;
+    result.settled += outcome.settled;
   }
   if (vanished.size > 0) {
     log.info(
-      "Lint proposals: retired {groups} superseded draft group(s) ({rows} row(s)) on {wiki}",
-      { wiki: deps.wikiName, groups: vanished.size, rows: result.staled },
+      "Lint proposals: retired {groups} superseded group(s) ({rows} row(s) stale, {settled} settled applied) on {wiki}",
+      { wiki: deps.wikiName, groups: vanished.size, rows: result.staled, settled: result.settled },
     );
   }
 

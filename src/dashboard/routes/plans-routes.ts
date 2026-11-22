@@ -29,8 +29,14 @@
  *     (`src/plans/write.ts`), which `writeWikiPage` cannot carry — its path
  *     confinement admits `.md`/`.mdx` only.
  *
- * **Neither passes a `commit`.** mimir is in the repo-sync loop in `wiki` mode;
- * the sync loop is the committer, behind its 5-minute quiet period.
+ * **Neither passes a `commit`.** The sync loop commits these writes where
+ * `SYNC_REPOS` covers mimir in `wiki` mode, behind its 5-minute quiet period; the
+ * daily `wiki-committer` sweeper where `sweeperCommits` says it commits that root
+ * and the loop's ledger says it would commit there (`sweeperOutcome`); otherwise
+ * nobody, and the page stays dirty until a human commits it (the state table:
+ * «Who commits a page the plans board left dirty», `src/sync/CLAUDE.md`). Until then
+ * Done refuses the page, and its refusal names the board's pending write and the
+ * committers this instance actually runs (`src/plans/board-dirt.ts`, F36).
  *
  * ── The wire contract the board's client is written against ─────────────────
  *

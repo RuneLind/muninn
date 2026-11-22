@@ -23,6 +23,8 @@
  *  - resolve the git toplevel; not-a-repo ⇒ no-op.
  *  - covered by a `wiki`-mode `SYNC_REPOS` entry WITH evidence (or blocked) ⇒
  *    no-op (subsumed) — but warn first if the loop has not committed in ~26h.
+ *  - a git operation in progress, unmerged paths or an `index.lock` anywhere in
+ *    the repo (`treeOperationBlock`, the sync loop's own check) ⇒ no-op.
  *  - off the default branch ⇒ no-op (a feature checkout is left alone — the same
  *    rule the commit seam applies; committing onto a feature branch would be
  *    surprising).
@@ -46,12 +48,33 @@ import {
   listWikiSubtreeDirty,
   commitWikiChange,
 } from "../wiki/commit.ts";
-import { syncSubsumesSweeper } from "../sync/run.ts";
+import { syncSubsumesSweeper, treeOperationBlock } from "../sync/run.ts";
 import { todayOslo } from "../utils/date-hash.ts";
+import { getAllWatchers } from "../db/watchers.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-committer");
+
+/**
+ * The `wikiDir`s this sweeper covers: the bot's, for every ENABLED
+ * `wiki-committer` watcher row (the opt-in `scripts/setup-wiki-committer.ts`
+ * creates). A tick sweeps that dir's whole subtree in the dir's own repo, so a
+ * wiki root inside one that shares its git toplevel and that git does not
+ * ignore there (`sweeperCommits`, `src/wiki/series-committer.ts`) is
+ * committed by it, whatever name the registry gave that wiki; a nested repo
+ * is only a gitlink there. Rows read off `getAllWatchers`
+ * unless `listWatchers` is given.
+ */
+export async function sweptWikiDirs(
+  bots: readonly Pick<BotConfig, "name" | "wikiDir">[],
+  listWatchers: () => Promise<readonly Pick<Watcher, "botName" | "type" | "enabled">[]> = () => getAllWatchers(),
+): Promise<string[]> {
+  const sweeping = new Set(
+    (await listWatchers()).filter((w) => w.type === "wiki-committer" && w.enabled).map((w) => w.botName.toLowerCase()),
+  );
+  return bots.filter((b) => !!b.wikiDir && sweeping.has(b.name.toLowerCase())).map((b) => b.wikiDir!);
+}
 
 export async function checkWikiCommitter(
   watcher: Watcher,
@@ -128,8 +151,9 @@ export async function checkWikiCommitter(
   //
   // The WARN is deliberately decoupled from the stand-down and emitted FIRST.
   // `blocked` subsumes regardless of freshness (the loop refused an unmerged
-  // tree and this sweeper, having no pre-flight of its own, would commit the
-  // half-finished merge) — but "nobody has committed this wiki in ~26h" is still
+  // tree, which this sweeper would commit, half-finished merge and all; its own
+  // `treeOperationBlock` check below refuses the same tree when the ledger is
+  // cold) — but "nobody has committed this wiki in ~26h" is still
   // true, and the one thing that must never happen is a silent stand-down over a
   // wiki nothing is committing.
   const subsumption = await syncSubsumesSweeper(top);
@@ -152,6 +176,34 @@ export async function checkWikiCommitter(
       { botName: name, top },
     );
     health.mark(SRC, "ok");
+    return health.finish();
+  }
+
+  // The sync loop's own "never touch this tree" check, run on EVERY tick (F37,
+  // arch review 2026-11-16). The `blocked` subsumption above reads the loop's
+  // in-memory ledger, which a restart empties, so after one this sweeper staged
+  // a human's half-finished merge, conflict markers and all. Read from the tree
+  // itself, so a cold ledger neither stands a clean tree down nor lets a
+  // mid-operation one through. A stale (or future-dated) `index.lock` is an
+  // `error` with a first-day alert, as the commit it used to make failing on
+  // that lock was; an operation in progress or unmerged paths is `skipped`,
+  // escalating on the streak — that is a human's work in progress.
+  const block = await treeOperationBlock(top);
+  if (block.kind !== "clear") {
+    log.warn("Wiki-committer: {top} — not sweeping: {reason}", { botName: name, top, reason: block.reason });
+    if (block.kind === "blocked" && block.staleLock) {
+      health.mark(SRC, "error", `not sweeping: ${block.reason}`);
+      return [
+        ...(await health.finish()),
+        {
+          id: `wiki-sweep-fail-${todayOslo(Date.now())}`,
+          source: "wiki-committer",
+          summary: `Wiki sweep stood down: ${block.reason}`,
+          urgency: "medium",
+        },
+      ];
+    }
+    health.mark(SRC, "skipped", `not sweeping: ${block.reason}`);
     return health.finish();
   }
 
