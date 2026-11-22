@@ -26,9 +26,13 @@ test("a failed build names the entry and is retried on the next request; a good 
   expect(get()).toBe(second); // a good build stays memoized
 });
 
-test("wiki-client.ts imports the shell as a value, so a client-only edit restarts `bun --watch`", async () => {
+test("wiki-client.ts loads the shell only under --watch, caught, so a broken reader file never stops the server", async () => {
+  const { underWatch } = await import("./wiki-client.ts");
+  expect(underWatch(["--watch"])).toBe(true);
+  expect(underWatch(["--hot"])).toBe(true);
+  expect(underWatch([])).toBe(false);
   const src = await Bun.file(new URL("./wiki-client.ts", import.meta.url)).text();
-  expect(src).toMatch(/^import \{ boot \} from "\.\/wiki-browser\.ts";$/m);
-  // An import nothing reads is dropped by Bun's transpiler, and with it the files.
-  expect(src).toMatch(/^export const wikiShellBoot: \(\) => unknown = boot;$/m);
+  // No static import of the shell: one would load it on `bun run start` too, and a throw there stops boot.
+  expect(src).not.toMatch(/^import .*wiki-browser/m);
+  expect(src).toMatch(/^if \(underWatch\(\)\) \{\n {2}import\("\.\/wiki-browser\.ts"\)\.catch\(/m);
 });
