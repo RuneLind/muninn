@@ -76,6 +76,16 @@ describe("closeCardEdit", () => {
     expect(item).toContain(`too &amp; keep 1 &lt; 2 &lt;${J}Fact id=&quot;f&quot;&gt;x&lt;${J}/Fact&gt;, <code>Closes O2</code>`);
   });
 
+  // The chain reads lowercase «closes»/«lukker» too (`CLOSES_RE`), so the scan breaks those.
+  test.each([["closes"], ["lukker"]])("a lowercase «%s O2» in an answer is broken and adds no chain edge", (word) => {
+    const text = page(q("O1"), q("O2"), "<DecisionLog>\n\n- **O1** — Which one?\n- **O2** — And this?\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer({ choice: null, body: `this also ${word} O2` }), TODAY));
+    expect(r.content).toContain(`- **D1** — this also ${word[0]}${J}${word.slice(1)} O2. Rune Lind, 06.11.2026.`);
+    const d1 = analyzeDecisionChains(parseBlocks(r.content.replace(/^---\n[\s\S]*?\n---\n/, "")), []).chains.find((c) => c.decision === "D1");
+    expect(d1?.questions.map((x) => x.id)).toEqual(["O1"]);
+    expect(stateOf(r.content, "O2")).toEqual({ kind: "open" });
+  });
+
   test("a close or reopen word before a date in an answer is broken by a word joiner", () => {
     const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n\n</DecisionLog>\n");
     const r = ok(closeCardEdit(text, "O1", answer({ choice: null, body: "Lukket 01.01.2026 (D9) was wrong; it ``Reopened`` later" }), TODAY));

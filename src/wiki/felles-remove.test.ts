@@ -111,6 +111,22 @@ describe("TARGET SET: remove targets what publish uploads for the page as it sta
     expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
   });
 
+  // The mirror compares lowercase NFC (`collisionKey`): a case or NFD spelling
+  // of the sibling elsewhere names the same object. (An `<Embed>` src is ASCII
+  // only, `EMBED_SRC_RE`, so the NFD spelling comes from the index.)
+  test("a sibling another local page <Embed>s in another case is kept as shared", async () => {
+    const read = async (abs: string) =>
+      abs === "/w/p/page.mdx" ? diagram("Flow.workflow.json") : abs === "/w/q/other.md" ? `<Embed src="../p/flow.html" />\n` : null;
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "q/other.md" }], read, probe({ "/w/p/Flow.workflow.json": F(), "/w/p/Flow.html": F() }, ext4));
+    expect(got).toEqual({ dataFiles: ["p/Flow.workflow.json"], shared: ["p/Flow.html"], refused: [] });
+  });
+
+  test("a sibling the index lists in NFD as a page of its own is kept as shared", async () => {
+    const entries = { "/w/p/måling.workflow.json": F(), "/w/p/måling.html": F() };
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "p/måling.html".normalize("NFD") }], pageAt(diagram("måling.workflow.json")), probe(entries, ext4));
+    expect(got).toEqual({ dataFiles: ["p/måling.workflow.json"], shared: ["p/måling.html"], refused: [] });
+  });
+
   // F48 fix round 2: the index lists the page's own sibling as a page attached
   // to it, so being indexed keeps a sibling only when it folds under ANOTHER page.
   test("a sibling indexed as the page's own attachment is targeted; one folded under another page is kept", async () => {
