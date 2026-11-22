@@ -58,7 +58,7 @@
     "@scalar/hono-api-reference": "^0.10.20",
     "@slack/bolt": "^4.7.3",
     "grammy": "^1.46.0",
-    "hono": "^4.13.14",
+    "hono": "^4.13.20",
     "marked": "15.0.12",
     "playwright-core": "1.58.2",
     "postgres": "^3.4.9",
