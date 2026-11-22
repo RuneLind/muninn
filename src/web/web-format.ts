@@ -807,14 +807,6 @@ function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLa
 
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
-/** Each `Query` card's anchor made unique in the finished HTML, across the
- *  cards and every other element's id but a DecisionLog item's (which yields
- *  later, {@link uniqueLogAnchors}): the `CaseBoard` rows (made unique first,
- *  {@link uniqueCaseAnchors}), the `<Question>` cards' `qcard-…` anchors and
- *  the lanes' `nm-q-…` ones. A repeat, or a card whose slug another element
- *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
- *  `-3`, and its id link follows. A pass over the OUTPUT, because some
- *  components render a body twice and keep one copy (`foldBodyHtml`). */
 /** A Query id's parked wikilink as its link text inside the id's own anchor:
  *  restored as a link it would nest an `<a>` in an `<a>`, which the browser
  *  closes early. After `uniqueAnchors`, which reads the sentinel to rank the
@@ -826,6 +818,14 @@ function unlinkQueryIds(html: string): string {
   );
 }
 
+/** Each `Query` card's anchor made unique in the finished HTML, across the
+ *  cards and every other element's id but a DecisionLog item's (which yields
+ *  later, {@link uniqueLogAnchors}): the `CaseBoard` rows (made unique first,
+ *  {@link uniqueCaseAnchors}), the `<Question>` cards' `qcard-…` anchors and
+ *  the lanes' `nm-q-…` ones. A repeat, or a card whose slug another element
+ *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
+ *  `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
 function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
   const others = [...html.replace(ANCHOR_RE, "$2").replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!);
