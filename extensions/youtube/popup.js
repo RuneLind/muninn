@@ -95,9 +95,12 @@ const STORAGE_READ_TIMEOUT_MS = 2000;
  */
 const OPTIONS_READ_TIMEOUT_MS = 5000;
 
-/** Said when the remembered choices could not be read at all. */
-const STORAGE_LOST_MESSAGE =
-  "Could not read the remembered Model, Kind, Slides tick and Visuals choice — showing this Muninn's defaults.";
+/**
+ * Marks, in the settle outcome's notes, that the remembered choices could not
+ * be read at all. Never shown as is: `storageNote` words the line from the
+ * controls the reader has not set yet.
+ */
+const STORAGE_LOST_MESSAGE = 'storage-lost';
 
 /** Said when the controls themselves could not be painted. */
 const CONTROLS_BROKEN_MESSAGE =
@@ -126,10 +129,16 @@ let captureOptions = FALLBACK_CAPTURE_OPTIONS;
 let optionsNote = '';
 let framesNote = '';
 /**
- * The settle-time notes (unreachable, storage lost). They describe the whole
- * popup, not one connector, so a connector change keeps them.
+ * The options line, kept as parts so each control's listener updates only its
+ * own: the settle-time notes other than storage-lost (unreachable, controls
+ * broken), whether storage was lost, which controls the reader has set since,
+ * and the line about the current pick (a remembered connector or kind not
+ * offered, or a kind a connector narrowed away). `composeOptionsNote` joins them.
  */
 let settleNotes = [];
+let storageLost = false;
+const touched = new Set();
+let pickNote = '';
 /**
  * The kind and Slides tick the reader CHOSE: restored at settle, then updated
  * only by the reader's own changes. A connector change narrows the controls
@@ -407,7 +416,9 @@ function paintControls({ options, stored, notes }) {
   if (!kindSelect || !frames) return false;
 
   baseOptions = options;
-  settleNotes = notes;
+  storageLost = notes.includes(STORAGE_LOST_MESSAGE);
+  settleNotes = notes.filter((n) => n !== STORAGE_LOST_MESSAGE);
+  touched.clear();
   chosenKind = stored[KIND_KEY] ?? null;
   chosenFrames = stored[FRAMES_KEY] === true;
   const connector = paintConnector(stored[CONNECTOR_KEY], options);
@@ -440,13 +451,31 @@ function paintControls({ options, stored, notes }) {
   // returns null for it.
   const restored = restoredKindNote(stored[KIND_KEY], picked, captureOptions);
   const restoredConnector = restoredConnectorNote(stored[CONNECTOR_KEY], connector, options);
-  optionsNote = [
-    ...notes,
-    ...(restoredConnector ? [restoredConnector] : []),
-    ...(restored ? [restored] : []),
-  ].join(' ');
+  pickNote = [restoredConnector, restored].filter(Boolean).join(' ');
+  composeOptionsNote();
   renderNotes();
   return true;
+}
+
+/**
+ * The storage-lost line, naming only the controls that still show this
+ * Muninn's defaults: a control the reader has set since is their choice, not a
+ * default, and saying otherwise is the false note this exists to avoid. Model
+ * is named only where there is a picker. Null when nothing is left to name.
+ */
+function storageNote() {
+  if (!storageLost) return null;
+  const left = [baseOptions.connectors ? 'Model' : null, 'Kind', 'Slides tick', 'Visuals choice'].filter(
+    (name) => name && !touched.has(name),
+  );
+  if (left.length === 0) return null;
+  const list = left.length === 1 ? left[0] : `${left.slice(0, -1).join(', ')} and ${left[left.length - 1]}`;
+  return `Could not read the remembered ${list} — showing this Muninn's defaults.`;
+}
+
+/** Rebuild the options line from its parts (see `settleNotes`). */
+function composeOptionsNote() {
+  optionsNote = [...settleNotes, storageNote(), pickNote].filter(Boolean).join(' ');
 }
 
 /**
@@ -532,11 +561,12 @@ function attachControlListeners() {
 
   kindSelect.addEventListener('change', () => {
     chosenKind = kindSelect.value;
-    // The note explains a value the reader has now overridden.
-    if (optionsNote && captureOptions.fromServer) {
-      optionsNote = '';
-      renderNotes();
-    }
+    // The pick note explains a kind the reader has now overridden, and Kind is
+    // no longer one of "this Muninn's defaults".
+    touched.add('Kind');
+    pickNote = '';
+    composeOptionsNote();
+    renderNotes();
     chrome.storage.sync
       .set({ [KIND_KEY]: kindSelect.value })
       .catch((err) => console.warn('Could not save the summary kind', err));
@@ -546,6 +576,9 @@ function attachControlListeners() {
     // listener both go through `renderVisualRow` rather than each toggling the
     // class on their own.
     chosenFrames = frames.checked;
+    touched.add('Slides tick');
+    composeOptionsNote();
+    renderNotes();
     renderVisualRow();
     chrome.storage.sync
       .set({ [FRAMES_KEY]: frames.checked })
@@ -558,12 +591,14 @@ function attachControlListeners() {
     // `chosenFrames`), not from what the controls show now: a narrower
     // connector and back restores the choice. Only the connector is persisted;
     // a kind or tick the new connector lacks is narrowed in the controls and
-    // said, never erased. The settle-time notes still hold and are kept; the
-    // "remembered connector not offered" one is answered by this pick.
+    // said, never erased. The pick note becomes the narrowing line (the
+    // "remembered connector not offered" one is answered by this pick), and
+    // Model drops out of the storage-lost line.
     captureOptions = optionsForConnector(baseOptions, connectorSelect.value);
     const picked = paintKindAndFrames(chosenKind, chosenFrames);
-    const narrowed = restoredKindNote(chosenKind, picked, captureOptions);
-    optionsNote = [...settleNotes, ...(narrowed ? [narrowed] : [])].join(' ');
+    touched.add('Model');
+    pickNote = restoredKindNote(chosenKind, picked, captureOptions) ?? '';
+    composeOptionsNote();
     renderNotes();
     chrome.storage.sync
       .set({ [CONNECTOR_KEY]: connectorSelect.value })
@@ -573,6 +608,9 @@ function attachControlListeners() {
   visualSelect?.addEventListener('change', () => {
     // The element, not `ev.target` — the same shape the kind listener uses, and
     // the one that does not depend on how the event was dispatched.
+    touched.add('Visuals choice');
+    composeOptionsNote();
+    renderNotes();
     chrome.storage.sync
       .set({ [VISUAL_KEY]: visualSelect.value })
       .catch((err) => console.warn('Could not save the visual detail preference', err));

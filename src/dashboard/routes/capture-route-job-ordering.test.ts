@@ -1300,31 +1300,74 @@ describe("YouTube: the CONNECTOR pick (`/api/youtube/options` connectors + `conn
 
   test("a picked claude-cli row over a non-CLI bot gets the CLI-age check for Slides", async () => {
     summarizerBot = copilotBot;
-    connectorRows = [{ id: NO_MODEL_ID, name: "claude-cli bare", connectorType: "claude-cli" }];
+    connectorRows = [{ id: NO_MODEL_ID, name: "claude-cli opus", connectorType: "claude-cli", model: "claude-opus-5-5" }];
     __setClaudeCliVersionForTest("2.1.200");
+    const before = jobCount();
     try {
       const res = await post(ytApp(), "/api/youtube/summarize", {
         url: YT_URL, video_id: YT_ID, frames: true, connector_id: NO_MODEL_ID,
       });
       expect(res.status).toBe(503);
       expect(((await res.json()) as { code: string }).code).toBe("cli_too_old");
+      expect(jobCount()).toBe(before);
+      expect(youtubeSummarizeCalls).toBe(0);
     } finally {
       __setClaudeCliVersionForTest("2.1.304");
     }
   });
 
-  test("a row of ANOTHER connector type inherits none of the bot's type-bound fields; the same type does", () => {
+  test("a row of ANOTHER model family inherits none of the bot's model-bound fields; the same type does", () => {
     const bot = {
       name: "melosys", dir: "/tmp/melosys", connector: "copilot-sdk", model: "gpt-5.5",
       baseUrl: "http://bot-endpoint", thinkingMaxTokens: 32000, effort: "high", timeoutMs: 900_000,
     } as never;
-    const crossType = applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "cli bare", connectorType: "claude-cli" } as never);
-    expect(crossType).toMatchObject({ name: "melosys", dir: "/tmp/melosys", connector: "claude-cli", timeoutMs: 900_000 });
-    for (const field of ["model", "baseUrl", "thinkingMaxTokens", "effort"]) {
+    const crossType = applyCaptureConnector(bot, {
+      id: NO_MODEL_ID, name: "cli opus", connectorType: "claude-cli", model: "claude-opus-5-5",
+    } as never);
+    expect(crossType).toMatchObject({
+      name: "melosys", dir: "/tmp/melosys", connector: "claude-cli", model: "claude-opus-5-5", timeoutMs: 900_000,
+    });
+    for (const field of ["baseUrl", "thinkingMaxTokens", "effort"]) {
       expect((crossType as unknown as Record<string, unknown>)[field]).toBeUndefined();
     }
     const sameType = applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "copilot bare", connectorType: "copilot-sdk" } as never);
     expect(sameType).toMatchObject({ connector: "copilot-sdk", model: "gpt-5.5", baseUrl: "http://bot-endpoint", effort: "high" });
+  });
+
+  test("claude-cli and claude-sdk are ONE model family: a model-less row keeps the bot's model and effort", () => {
+    const bot = { name: "jarvis", dir: "/tmp/jarvis", connector: "claude-cli", model: "claude-opus-5-5", effort: "high" } as never;
+    expect(applyCaptureConnector(bot, { id: NO_MODEL_ID, name: "sdk bare", connectorType: "claude-sdk" } as never))
+      .toMatchObject({ connector: "claude-sdk", model: "claude-opus-5-5", effort: "high" });
+    // A bot with no `connector` key runs claude-cli, the documented default.
+    const bare = { name: "jarvis", dir: "/tmp/jarvis", model: "claude-opus-5-5" } as never;
+    expect(applyCaptureConnector(bare, { id: NO_MODEL_ID, name: "sdk bare", connectorType: "claude-sdk" } as never))
+      .toMatchObject({ connector: "claude-sdk", model: "claude-opus-5-5" });
+  });
+
+  test("a row that cannot run over this bot is not offered, and is 400 connector_incomplete before any job", async () => {
+    summarizerBot = { ...cliBot, model: "claude-opus-5-5" };
+    const COPILOT_BARE = "55555555-5555-4555-8555-555555555555";
+    const LOCAL_NO_URL = "66666666-6666-4666-8666-666666666666";
+    connectorRows = [
+      sdkSonnet,
+      // Another model family and no model of its own: nothing sensible to run.
+      { id: COPILOT_BARE, name: "copilot bare", connectorType: "copilot-sdk" },
+      // A local model with no endpoint, over a bot that has none for it.
+      { id: LOCAL_NO_URL, name: "gemma", connectorType: "openai-compat", model: "gemma4:26B" },
+    ];
+    const body = await options(ytApp());
+    expect(body.connectors?.options.map((o) => o.id)).toEqual([SDK_ID]);
+
+    const before = jobCount();
+    for (const connector_id of [COPILOT_BARE, LOCAL_NO_URL]) {
+      const res = await post(ytApp(), "/api/youtube/summarize", { url: YT_URL, video_id: YT_ID, connector_id });
+      expect(res.status).toBe(400);
+      const err = (await res.json()) as { code: string; error: string };
+      expect(err.code).toBe("connector_incomplete");
+      expect(err.error).toContain(connector_id === COPILOT_BARE ? "copilot bare" : "gemma");
+    }
+    expect(jobCount()).toBe(before);
+    expect(youtubeSummarizeCalls).toBe(0);
   });
 
   test("a connector_id that is not a listed row is 400 bad_connector, and a failed lookup 503 — no job either way", async () => {

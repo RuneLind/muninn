@@ -31,6 +31,7 @@ import { requireJsonRequest } from "./json-request.ts";
 import {
   DEFAULT_CAPTURE_CONNECTOR_DEPS,
   applyCaptureConnector,
+  captureConnectorGap,
   captureConnectorLabel,
   defaultCaptureConnectorLabel,
   kindsForPick,
@@ -424,7 +425,11 @@ export function registerYouTubeRoutes(
       if (!p) framesByType.set(type, (p = framesBlock({ connector: type }).then((b) => b === null)));
       return p;
     };
-    const rows = await listCaptureConnectors(connectorDeps);
+    // A row that could not run over this bot (`captureConnectorGap`) is not
+    // offered: the POST would refuse it.
+    const rows = (await listCaptureConnectors(connectorDeps)).filter(
+      (row) => captureConnectorGap(summarizerBot, row) === null,
+    );
     const connectorOptions = await Promise.all(
       rows.map(async (row) => {
         const bot = applyCaptureConnector(summarizerBot, row);

@@ -787,6 +787,44 @@ describe("the connector picker", () => {
     expect(noteText(d)).toContain("Could not read the remembered");
   });
 
+  test("the storage-lost note names only the controls the reader has not set yet", async () => {
+    const d = await drivePopup({ options: "server", storage: "rejects", connectors: CONNECTORS });
+    d.fireDomReady();
+    await d.settleTimers();
+    const LOST = (what: string) => `Could not read the remembered ${what} — showing this Muninn's defaults.`;
+    expect(noteText(d)).toBe(LOST("Model, Kind, Slides tick and Visuals choice"));
+
+    d.node("sel-connector").value = SDK_ID;
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    expect(noteText(d)).toBe(LOST("Kind, Slides tick and Visuals choice"));
+
+    d.node("sel-kind").value = "deep";
+    d.node("sel-kind").fire("change");
+    d.node("sel-connector").value = "";
+    d.node("sel-connector").fire("change");
+    await d.microtasks();
+    // A kind the reader set is no longer "this Muninn's default", and a second
+    // connector change must not bring that claim back.
+    expect(noteText(d)).toBe(LOST("Slides tick and Visuals choice"));
+
+    d.node("chk-frames").checked = true;
+    d.node("chk-frames").fire("change");
+    d.node("sel-visual").value = "detailed";
+    d.node("sel-visual").fire("change");
+    await d.microtasks();
+    expect(noteText(d)).toBe("");
+  });
+
+  test("with no connector picker, the storage-lost note does not name a Model", async () => {
+    const d = await drivePopup({ options: "server", storage: "rejects" });
+    d.fireDomReady();
+    await d.settleTimers();
+    expect(noteText(d)).toBe(
+      "Could not read the remembered Kind, Slides tick and Visuals choice — showing this Muninn's defaults.",
+    );
+  });
+
   test("Slides dimmed by a PICKED connector blames the pick, not the summarizer bot", async () => {
     const d = await drivePopup({ options: "server", storage: "answers", connectors: CONNECTORS });
     d.fireDomReady();
