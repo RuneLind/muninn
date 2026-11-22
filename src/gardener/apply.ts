@@ -420,6 +420,33 @@ export interface GroupApplyOptions {
   /** Called with each row's outcome the moment it is known, so a caller still
    *  learns which pages landed when a later row, or a later step, throws. */
   onRowOutcome?: (row: GroupRowOutcome) => void;
+  /** Does the caller still hold the group's lease (F35)? Asked inside the
+   *  write section before the preflight and before each row's page write; a
+   *  false answer throws {@link GroupLeaseLostError} with no further page
+   *  written. Absent ⇒ never asked. */
+  leaseHeld?: () => Promise<boolean>;
+}
+
+/** A group verb found its lease gone before a write (it expired and another
+ *  verb may have claimed the group): nothing more is written. */
+export class GroupLeaseLostError extends Error {
+  constructor(groupKey: string) {
+    super(`lost the lease on group ${groupKey} before writing`);
+    this.name = "GroupLeaseLostError";
+  }
+}
+
+/** The group's `log.md` entry could not be written, so no row was settled
+ *  `applied` over the page it names. */
+export class GroupLogWriteError extends Error {
+  constructor(groupKey: string) {
+    super(`log.md entry for group ${groupKey} could not be written`);
+    this.name = "GroupLogWriteError";
+  }
+}
+
+async function assertLeaseHeld(leaseHeld: (() => Promise<boolean>) | undefined, groupKey: string): Promise<void> {
+  if (leaseHeld && !(await leaseHeld())) throw new GroupLeaseLostError(groupKey);
 }
 
 /**
@@ -478,6 +505,7 @@ export async function applyWikiProposalGroup(
         out.results.push(entry);
         opts.onRowOutcome?.(entry);
       };
+      await assertLeaseHeld(opts.leaseHeld, groupKey);
       // Every member's pre-write checks BEFORE the first write, so a stale or
       // refused member stops the group with nothing written (finding 61). The section serializes the
       // in-process writers, so the check holds until the loop below runs.
@@ -494,6 +522,8 @@ export async function applyWikiProposalGroup(
           // twelve-member series otherwise files twelve entries whose only
           // difference is which frontmatter line moved, burying the curated ones the
           // log is for. The entry is written below, still inside this section.
+          // Re-asked before each page write: a lease lost mid-group stops it.
+          await assertLeaseHeld(opts.leaseHeld, groupKey);
           let rowPaths: string[] = [];
           const write = { failed: false, landed: false };
           let outcome: ApplyOutcome;
@@ -582,13 +612,16 @@ export async function applyWikiProposalGroup(
  * Read, compare, log and settle share the section so a queued writer cannot
  * change the page between the read and the settle, and a row is never
  * `applied` over a page that was not logged first. A throw anywhere leaves the
- * unsettled rows live, which a later Accept or Dismiss takes. Returns the rows
- * it settled.
+ * unsettled rows live, which a later Accept or Dismiss takes: a log entry that
+ * could not be written throws {@link GroupLogWriteError} before any settle, and
+ * `opts.leaseHeld` answering false at the section's start throws
+ * {@link GroupLeaseLostError} before any write. Returns the rows it settled.
  */
 export async function settleWrittenGroupRows(
   rows: readonly WikiProposal[],
   deps: ApplyDeps,
   settle: (row: WikiProposal) => Promise<boolean>,
+  opts: { leaseHeld?: () => Promise<boolean> } = {},
 ): Promise<WikiProposal[]> {
   if (rows.length === 0 || readonlyRefusalFor(deps, rows[0]!.targetPath)) return [];
   const groupKey = rows[0]?.groupKey ?? "(no group)";
@@ -597,6 +630,8 @@ export async function settleWrittenGroupRows(
   const tail: { paths: string[] } = { paths: [] };
   try {
     return await runWikiWriteExclusive(deps.wikiDir, async () => {
+      // Before the first write (the log entry, then the settle CASes).
+      await assertLeaseHeld(opts.leaseHeld, groupKey);
       const carried: WikiProposal[] = [];
       for (const row of rows) {
         const current = await deps.readFile(path.join(deps.wikiDir, row.targetPath));
@@ -604,7 +639,8 @@ export async function settleWrittenGroupRows(
       }
       const recovered = carried.filter((r) => recoverable.has(r.targetPath));
       if (recovered.length > 0) {
-        await writeGroupLogEntry(recovered, deps);
+        // A failed entry settles nothing: every row stays live for the next verb.
+        if (!(await writeGroupLogEntry(recovered, deps))) throw new GroupLogWriteError(groupKey);
         for (const r of recovered) tail.paths.push(r.targetPath, WIKI_LOG_FILE);
       }
       const settled: WikiProposal[] = [];
@@ -653,13 +689,16 @@ async function uncommittedDraftPages(rows: readonly WikiProposal[], deps: ApplyD
  * Same shape and same degrade as the per-row entry in `applyInner` step 4 — a
  * log hiccup must never undo a page write — and written inside the group's write
  * section, because `log.md` is wiki-global and the section is what keeps the
- * fact-check and integrate writers out from between the rows.
+ * fact-check and integrate writers out from between the rows. Answers whether
+ * the entry was written (an unreadable `log.md` is skipped, not overwritten):
+ * Dismiss and the self-heal settle no row on false; the Accept, whose pages are
+ * already written, marks its rows anyway.
  *
  * The headline is the FINDING's page (the one the lint filed the finding
  * against), not `rows[0]`: the rows are sorted by `target_path`, so the first
  * one is an alphabetical accident.
  */
-async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps): Promise<void> {
+async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps): Promise<boolean> {
   // `lint_meta` is the SAME on every row of a group, so it is read off whichever
   // row carries it (a row written before migration 078 carries none) rather than
   // off the head — the head is chosen BY it, and reading the seeder off a head
@@ -674,12 +713,13 @@ async function writeGroupLogEntry(rows: readonly WikiProposal[], deps: ApplyDeps
     const entry =
       `## [${todayOslo(deps.now())}] ${head.mode} | ${draftTitle(head)}\n` +
       `- via ${logWriterFor({ ...head, lintMeta: meta })}, ${paths.length} page${paths.length === 1 ? "" : "s"}: ${paths.join(", ")}`;
-    await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps);
+    return (await appendWikiLogEntry(path.join(deps.wikiDir, WIKI_LOG_FILE), entry, deps)) === "written";
   } catch (err) {
     log.warn("Wiki-gardener group apply: log.md update failed for {group}: {error}", {
       group: rows[0]?.groupKey ?? "(no group)",
       error: errMsg(err),
     });
+    return false;
   }
 }
 

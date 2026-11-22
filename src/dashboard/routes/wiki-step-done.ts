@@ -299,7 +299,7 @@ export function registerWikiStepDoneRoutes(app: Hono, config: Config, guards: De
                   syncLoop: syncLoopOutlookFor(entry.root, deps.now()),
                   // Named only when an enabled sweeper's bot wikiDir contains this root, never off the
                   // registry's `source` (a bot wiki is named after its bot, and names de-duplicate).
-                  sweeper: sweeperCommits(entry.root, await sweptDirsOrNone(deps)),
+                  sweeper: await sweeperCommits(entry.root, await sweptDirsOrNone(deps)),
                 })
               : `${target.relPath} has changes that are not committed yet: a session is editing it, or an earlier Done could not be committed. Commit or discard them, then try again.`;
         return false;

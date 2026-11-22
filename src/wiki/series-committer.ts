@@ -73,9 +73,23 @@ export function syncRepoCovering(root: string, repos: readonly SyncRepo[]): Sync
  *  bot with an enabled sweeper row. The registry names a bot wiki after its bot
  *  and de-duplicates by name only, so a wiki's `source` says nothing about
  *  this: a `WIKI_EXTRA` wiki at a swept bot's root is swept, and a bot wiki
- *  with no sweeper row is not. Compared with symlinks resolved. */
-export function sweeperCommits(root: string, sweptDirs: readonly string[]): boolean {
-  return sweptDirs.some((dir) => contains(dir, root));
+ *  with no sweeper row is not.
+ *
+ *  The sweeper commits the dirty files under its `wikiDir` in that dir's own
+ *  repo, so the root must lie under the dir AND share its git toplevel
+ *  (symlinks resolved): a wiki that is its own repo nested inside the dir is
+ *  only a gitlink to the outer repo, and nothing is ever committed inside it.
+ *  A dir outside git is swept by nobody. */
+export async function sweeperCommits(root: string, sweptDirs: readonly string[]): Promise<boolean> {
+  const under = sweptDirs.filter((dir) => contains(dir, root));
+  if (under.length === 0) return false;
+  const rootTop = await gitToplevel(root);
+  if (!rootTop) return false;
+  for (const dir of under) {
+    const dirTop = await gitToplevel(dir);
+    if (dirTop && norm(dirTop) === norm(rootTop)) return true;
+  }
+  return false;
 }
 
 /**
@@ -87,13 +101,13 @@ export function sweeperCommits(root: string, sweptDirs: readonly string[]): bool
  * `entry === null` is the bare `WIKI_DIR` override — the bot-owned default wiki
  * under another name, which is never warned about.
  */
-export function seriesCommitterWarning(
+export async function seriesCommitterWarning(
   entry: SeriesCommitterWiki | null,
   repos: readonly SyncRepo[],
   sweptDirs: readonly string[],
-): string | null {
+): Promise<string | null> {
   if (!entry) return null;
-  if (syncLoopCommits(entry.root, repos) || sweeperCommits(entry.root, sweptDirs)) return null;
+  if (syncLoopCommits(entry.root, repos) || (await sweeperCommits(entry.root, sweptDirs))) return null;
   return (
     `wiki "${entry.name}" has NO committer: no wiki-mode SYNC_REPOS entry covers it and no ` +
     `enabled wiki-committer sweeper's bot wikiDir contains it, so this series edit stays uncommitted ` +

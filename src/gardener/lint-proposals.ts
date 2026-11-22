@@ -40,12 +40,14 @@ import {
   insertLintGroupRows,
   releaseWikiProposalGroupLease,
   settleWikiProposalApplied,
+  wikiProposalGroupLeaseHeld,
+  type GroupLeaseRef,
   type InsertLintGroupOutcome,
   type InsertWikiProposalParams,
   type LintGroupRow,
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
-import { settleWrittenGroupRows, type ApplyDeps } from "./apply.ts";
+import { GroupLeaseLostError, settleWrittenGroupRows, type ApplyDeps } from "./apply.ts";
 import { commitWikiChange, pageHasUncommittedChanges } from "../wiki/commit.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintMeta, type LintSeeder } from "./lint-markers.ts";
@@ -258,15 +260,51 @@ export async function retireVanishedLintGroup(
   const token = await claimWikiProposalGroupLease(wikiName, groupKey, "self-heal");
   if (!token) return { staled: 0, settled: 0, held: true };
   try {
-    const live = (await listWikiProposalsByGroup(wikiName, groupKey)).filter(
-      (r) => r.status === "draft" || r.status === "approved",
-    );
-    const settled = await settleWrittenGroupRows(live, settleDepsFor(deps), async (r) => (await settleWikiProposalApplied(r.id)) !== null);
-    const staled = await markLintGroupStale(wikiName, groupKey, token);
-    return { staled, settled: settled.length, held: false };
+    return await retireClaimedLintGroup(wikiName, groupKey, token, deps);
   } finally {
     await releaseWikiProposalGroupLease(wikiName, groupKey, token);
   }
+}
+
+/**
+ * {@link retireVanishedLintGroup}'s work under the lease `token` holds. The
+ * lease is not renewed here, so it can lapse mid-run. Every write is fenced on
+ * that token (F35 fix round 2): the settle's section asks whether the lease is
+ * still live before its log entry, each settle CAS and the `stale` CAS check it
+ * in the same statement. A lease found gone answers `held`, with no row moved
+ * and nothing logged. A `log.md` entry that cannot be written throws
+ * (`GroupLogWriteError`) with every row still live; the seeder logs it and the
+ * next pass retries.
+ */
+async function retireClaimedLintGroup(
+  wikiName: string,
+  groupKey: string,
+  token: string,
+  deps: RetireLintGroupDeps,
+): Promise<RetireLintGroupOutcome> {
+  const lease: GroupLeaseRef = { scope: wikiName, groupKey, token };
+  const live = (await listWikiProposalsByGroup(wikiName, groupKey)).filter(
+    (r) => r.status === "draft" || r.status === "approved",
+  );
+  let settled: WikiProposal[];
+  try {
+    settled = await settleWrittenGroupRows(
+      live,
+      settleDepsFor(deps),
+      async (r) => (await settleWikiProposalApplied(r.id, lease)) !== null,
+      { leaseHeld: () => wikiProposalGroupLeaseHeld(wikiName, groupKey, token) },
+    );
+  } catch (err) {
+    if (err instanceof GroupLeaseLostError) return { staled: 0, settled: 0, held: true };
+    throw err;
+  }
+  const staled = await markLintGroupStale(wikiName, groupKey, token);
+  // A CAS that moved fewer rows than were live because the lease lapsed: the
+  // group is another verb's now, so its keys and pages stay held this pass.
+  if (settled.length + staled < live.length && !(await wikiProposalGroupLeaseHeld(wikiName, groupKey, token))) {
+    return { staled, settled: settled.length, held: true };
+  }
+  return { staled, settled: settled.length, held: false };
 }
 
 /** The apply seams `settleWrittenGroupRows` reads: page and `log.md` I/O, the

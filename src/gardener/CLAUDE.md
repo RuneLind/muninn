@@ -306,7 +306,10 @@ questions are asked of them):
    (`retireVanishedLintGroup`, F35): it claims the group's lease, settles a row
    whose page already IS its draft `applied` (logged and committed, as Dismiss
    does) and marks every other live row, `draft` and stranded `approved` alike,
-   `stale` (`markLintGroupStale` fenced on the lease token). A group an Accept
+   `stale`. Its lease is not renewed, so every write is fenced on it (next
+   section): a lease that lapsed and was claimed elsewhere answers `held` with
+   nothing logged or moved, and a `log.md` entry it cannot write leaves the
+   whole group live for the next pass. A group an Accept
    or Dismiss holds is left whole and keeps its key and pages (`held`); the
    next pass retires it. The weekly watcher therefore calls the seeder
    whenever the wiki is writable, before its own clean-wiki return, rather than
@@ -379,12 +382,38 @@ ran SQL. Now:
   are the other rows rejected. So a queued writer cannot change a page between
   the read and the settle, and a throw (in the reject, a later step, or the
   settle step itself) never leaves an `applied` row over a page nobody logged:
-  what was not settled stays live for the next verb. Residual: a crash between
+  what was not settled stays live for the next verb. A log entry that is not
+  written (the append threw, or `log.md` is unreadable and so skipped) throws
+  `GroupLogWriteError` before any settle: Dismiss answers 500 and rejects
+  nothing, so the written row is not rejected either. The first cut swallowed
+  that failure and settled anyway (`[applied, rejected]` over an unlogged page,
+  measured with `log.md` chmod 000). Residual: a crash between
   the settle and the commit leaves the page logged and uncommitted, for the
   sweeper.
-- **An Accept that loses a terminal CAS says so.** A `markProposal` that
-  returns false (another verb moved the row while this one applied it, possible
-  only once the lease expired) answers 409 `{outcome: "conflict", lost,
+- **Every write a lease holder makes is fenced on its lease** (fix round 2).
+  The lease only held off a verb that tried to CLAIM: a holder whose lease had
+  lapsed went on writing, so with two processes an Accept gated before its
+  write wrote, logged and committed both pages after a Dismiss elsewhere had
+  rejected them (rows `rejected`, pages edited), and the self-heal settled and
+  logged after its unrenewed lease lapsed. Now each row CAS takes the lease
+  (`GroupLeaseRef`) and joins it in the same statement (`leaseFence`:
+  `token` matches and `expires_at > now()`): the group claim, the terminal
+  marks, the revert to `draft`, the settle to `applied`, the reject, and the
+  self-heal's `stale`. The writes that are not a row CAS ask
+  (`wikiProposalGroupLeaseHeld`, or `lost` after a renewal answered false)
+  first: the apply before its preflight and before each page write, the
+  Dismiss and self-heal settle at the start of their write section (before
+  the log entry), and every Stale check verdict write. A lease found gone
+  throws `GroupLeaseLostError`: the verb answers 409 `{outcome: "conflict"}`
+  with no further page written and no row moved, and the self-heal answers
+  `held`. Residuals: the check before a page write is not atomic with it, so
+  a lease that lapses in that gap (its renewals failing for 90 s while the
+  section runs) still lets that one page land; the log entry and commit for
+  pages already written run without a check, because they record a write
+  that happened.
+- **An Accept that loses a terminal CAS says so.** A `markProposal` or
+  revert that moves nothing (another verb moved the row, or the lease lapsed,
+  while this one applied it) answers 409 `{outcome: "conflict", lost,
   applied, …}`, never `applied`. After the lease is claimed the Accept's
   re-read refuses (`mixed`, rejected row) a group a Dismiss elsewhere settled
   between its first read and the claim.

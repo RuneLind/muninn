@@ -363,7 +363,7 @@ export function registerWikiSeriesRoutes(app: Hono, deps: WikiSeriesRouteDeps = 
       /** Rule 4's loser — the member that already names this series. */
       let twoHeaded: { relPath: string; seriesLabel: string } | null = null;
       // Non-null only where nothing else commits this wiki — see the header.
-      const noCommitter = seriesCommitterWarning(
+      const noCommitter = await seriesCommitterWarning(
         entry ? { name: entry.name, root: entry.root, source: entry.source } : null,
         getSyncRepos().repos,
         entry ? await sweptDirsOrNone(deps) : [],

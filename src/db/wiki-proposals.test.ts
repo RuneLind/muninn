@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm } from "node:fs/promises";
+import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -34,6 +34,9 @@ import {
   approveWikiProposalGroup,
   rejectWikiProposalGroup,
   revertWikiProposalToDraft,
+  markWikiProposalApplied,
+  markWikiProposalStale,
+  markWikiProposalError,
   settleWikiProposalApplied,
   claimWikiProposalGroupLease,
   renewWikiProposalGroupLease,
@@ -788,6 +791,36 @@ describe("group leases (F35, migration 092)", () => {
     expect(await renewWikiProposalGroupLease("lintwiki", G, next!)).toBe(true);
   });
 
+  test("every group CAS given a lease moves nothing once that token no longer holds a live lease", async () => {
+    const W = "fencewiki";
+    for (const rel of ["plans/a.mdx", "plans/b.mdx"]) {
+      await insertWikiProposal(
+        makeProposal({ botName: W, wikiName: W, topicKey: `${G}:${rel}`, groupKey: G, kind: "lint", mode: "update", targetPath: rel, sourceDocs: [] }),
+      );
+    }
+    const statuses = async () => (await listWikiProposalsByGroup(W, G)).map((r) => r.status);
+    const lapsed = { scope: W, groupKey: G, token: (await claimWikiProposalGroupLease(W, G, "accept", 1))! };
+    await Bun.sleep(20);
+    // Lapsed and unclaimed: the claim CAS refuses.
+    expect(await approveWikiProposalGroup(W, G, lapsed)).toEqual([]);
+    const live = { scope: W, groupKey: G, token: (await claimWikiProposalGroupLease(W, G, "dismiss"))! };
+    expect(await approveWikiProposalGroup(W, G, lapsed)).toEqual([]);
+    expect(await statuses()).toEqual(["draft", "draft"]);
+    // The live holder claims; the lapsed token can then move none of them.
+    expect((await approveWikiProposalGroup(W, G, live)).length).toBe(2);
+    const [a, b] = await listWikiProposalsByGroup(W, G);
+    expect(await markWikiProposalApplied(a!.id, lapsed)).toBeNull();
+    expect(await markWikiProposalStale(a!.id, lapsed)).toBeNull();
+    expect(await markWikiProposalError(a!.id, lapsed)).toBeNull();
+    expect(await revertWikiProposalToDraft(a!.id, lapsed)).toBeNull();
+    expect(await settleWikiProposalApplied(a!.id, lapsed)).toBeNull();
+    expect(await rejectWikiProposalGroup(W, G, [], lapsed)).toEqual([]);
+    expect(await statuses()).toEqual(["approved", "approved"]);
+    // The live token moves them.
+    expect(await markWikiProposalApplied(a!.id, live)).not.toBeNull();
+    expect((await rejectWikiProposalGroup(W, G, [], live)).map((r) => r.id)).toEqual([b!.id]);
+  });
+
   test("release by the holder frees the group at once", async () => {
     const t = await claimWikiProposalGroupLease("lintwiki", G, "accept");
     await releaseWikiProposalGroupLease("lintwiki", G, t!);
@@ -874,6 +907,51 @@ describe("the lint self-heal retires a stranded group (F35)", () => {
     expect(out).toMatchObject({ staled: 0, settled: 0, held: 1 });
     // The holder's lease is untouched.
     expect(await renewWikiProposalGroupLease(W, G, token!)).toBe(true);
+  });
+
+  /**
+   * F35 fix round 2: the self-heal's lease is not renewed, so it can lapse
+   * while the self-heal runs, and another process can claim the group. The
+   * hook lapses it (expires_at in the past) and claims it for an Accept at the
+   * self-heal's first read of the written page, before its write section.
+   */
+  test("a self-heal whose lease lapsed and was claimed elsewhere settles nothing and logs nothing", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), DRAFT_A);
+    let other: string | null = null;
+    const out = await seedLintProposals([], {
+      wikiDir: root,
+      wikiName: W,
+      push: false,
+      readFile: async (abs) => {
+        if (other === null && abs.endsWith("plans/a.mdx")) {
+          await getDb()`UPDATE wiki_proposal_group_leases SET expires_at = now() - interval '1 second' WHERE scope = ${W} AND group_key = ${G}`;
+          other = await claimWikiProposalGroupLease(W, G, "accept");
+        }
+        return Bun.file(abs).text().catch(() => null);
+      },
+    });
+    expect(other).toBeString();
+    // No row moved to `applied` (or `stale`), and log.md is as seeded.
+    expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+    expect(await Bun.file(path.join(root, "log.md")).text()).toBe("# Log\n");
+    expect(out).toMatchObject({ staled: 0, settled: 0, held: 1 });
+    // The other holder's lease is untouched.
+    expect(await renewWikiProposalGroupLease(W, G, other!)).toBe(true);
+  });
+
+  test("a self-heal that cannot write log.md settles no row applied and retires none", async () => {
+    await Bun.write(path.join(root, "plans/a.mdx"), DRAFT_A);
+    const logPath = path.join(root, "log.md");
+    await chmod(logPath, 0o000);
+    try {
+      const out = await heal();
+      expect(await statuses()).toEqual([["plans/a.mdx", "approved"], ["plans/b.mdx", "draft"]]);
+      expect(out).toMatchObject({ staled: 0, settled: 0 });
+    } finally {
+      await chmod(logPath, 0o644);
+    }
+    expect(await Bun.file(logPath).text()).toBe("# Log\n");
+    expect((await g("log", "-1", "--format=%s")).stdout).toBe("seed");
   });
 
   test("the stale write is fenced on the lease token: a token that no longer holds the group retires nothing", async () => {
