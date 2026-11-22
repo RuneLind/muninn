@@ -144,6 +144,31 @@ describe("where a term is never marked", () => {
     expect(marks(out)).toEqual([["hold", "Hold"]]);
   });
 
+  test("a tag ends where the browser ends it: a quote opens a value only right after `=`", () => {
+    const entries: GlossaryEntry[] = [{ term: "Hold", ...glossaryKey("Hold"), definition: "kept back", codeSpelled: false, at: 0 }];
+    // [html, the tag the browser reads, the marks after it]
+    const cases: [string, string, number][] = [
+      // An unquoted value holding a quote, then a quoted value holding `>`: an even quote count.
+      ['<p><span title=a"b c="d>Hold e">x</span> Hold</p>', '<span title=a"b c="d>Hold e">', 1],
+      // Mixed quotes: the `'` value holds a `"`.
+      [`<p><span title=a"b c='d>Hold "e'>x</span> Hold</p>`, `<span title=a"b c='d>Hold "e'>`, 1],
+      // A quote in an attribute's name opens nothing.
+      ['<p><span a"b="c>Hold">x</span> Hold</p>', '<span a"b="c>Hold">', 1],
+      // An `=` that starts a name opens no value: the quote after it is part of the name.
+      ['<p><span ="a>Hold">x</span></p>', '<span ="a>', 1],
+      // Whitespace around `=`; an unquoted value ends at its first `>`.
+      ['<p><span title = "a>Hold" >x</span> Hold</p>', '<span title = "a>Hold" >', 1],
+      ['<p><span title= a"b>Hold">x</span></p>', '<span title= a"b>', 1],
+    ];
+    for (const [html, tag, n] of cases) {
+      const out = markGlossaryTerms(html, entries);
+      expect(out.startsWith(`<p>${tag}`)).toBe(true);
+      expect(marks(out)).toHaveLength(n);
+    }
+    // A quoted value left open runs to the end, as in the browser: no mark in it.
+    expect(markGlossaryTerms('<p><span title="x>Hold</p>', entries)).toBe('<p><span title="x>Hold</p>');
+  });
+
   test("a CaseBoard's count strip and status pills are never marked; its note is prose", () => {
     const files = new Map([["c.yaml", { ok: true as const, text: "- {id: LIB-1, status: hold, note: Asked for a Hold}\n" }]]);
     const html = renderWikiHtml('<CaseBoard src="c.yaml" />\n' + HOLD, () => undefined, { views: true, files });

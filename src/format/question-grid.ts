@@ -192,15 +192,22 @@ export function questionCardAnchor(id: string, linkTexts?: readonly string[]): s
 /** Each card's final anchor, by id, for `ids` in page order; an id absent from
  *  the map takes none. Safe ids and `reserved` (the page's other anchors) are
  *  taken first, so a slugged id never takes a safe one's anchor: it gets the
- *  first free `-2`, `-3`. */
+ *  first free `-2`, `-3`. A safe id whose anchor an earlier safe id took
+ *  (`O16`, `o16`) is suffixed the same way. The page's Query cards yield to
+ *  every anchor here (`uniqueAnchors` in `web-format.ts`). */
 export function questionCardAnchors(ids: readonly string[], reserved: Iterable<string>, linkTexts?: readonly string[]): Map<string, string> {
   const out = new Map<string, string>();
   const taken = new Set(reserved);
-  const slugged = ids.filter((id) => UNSAFE_ANCHOR_ID_RE.test(id));
+  const safe = new Set<string>();
+  const slugged: string[] = [];
   for (const id of ids) {
-    if (UNSAFE_ANCHOR_ID_RE.test(id)) continue;
-    const anchor = questionCardAnchor(id);
+    const anchor = UNSAFE_ANCHOR_ID_RE.test(id) ? "" : questionCardAnchor(id);
+    if (!anchor || safe.has(anchor)) {
+      slugged.push(id);
+      continue;
+    }
     out.set(id, anchor);
+    safe.add(anchor);
     taken.add(anchor);
   }
   for (const id of slugged) {

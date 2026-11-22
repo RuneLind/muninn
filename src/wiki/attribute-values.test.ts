@@ -741,6 +741,70 @@ describe("rendered attribute values (F58)", () => {
     expect(html).not.toContain('id="nm-q-"');
   });
 
+  /** Every id the page's elements carry, with each repeat listed. */
+  const repeatedIds = (html: string) => {
+    const seen = new Set<string>();
+    const repeats: string[] = [];
+    for (const [, id] of html.matchAll(/\sid="([^"]+)"/g)) {
+      if (seen.has(id!)) repeats.push(id!);
+      seen.add(id!);
+    }
+    return repeats;
+  };
+  const query = (id: string, body = "x") => [`<Query id="${id}">`, "", body, "", "</Query>", ""];
+
+  describe("every anchor on the page is unique: Question, Query after its renumbering, lane", () => {
+    test("a slugged Question never shares a renumbered Query's -2", () => {
+      const html = render(cardsPage(["O16'", "O17", "O18"], [...query("qcard-o16"), ...query("qcard-o16", "y")]), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(cardIds(html)[0]).toEqual(["O16'", "qcard-o16-2"]);
+      expect(html).toMatch(/<section class="query" id="qcard-o16">[\s\S]*?<section class="query" id="qcard-o16-3">[\s\S]*?<a class="query-id" href="#qcard-o16-3">/);
+    });
+
+    test("nor a wikilink Query's, which yields last", () => {
+      const html = render(cardsPage(["O16'", "O17", "O18"], [...query("[[Hostile Page|qcard-o16]]"), ...query("qcard-o16", "y")]), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(cardIds(html)[0]).toEqual(["O16'", "qcard-o16-2"]);
+      expect(html).toMatch(/<section class="query" id="qcard-o16-3">[\s\S]*?<section class="query" id="qcard-o16">/);
+    });
+
+    test("a Query yields to a safe Question's anchor and to a lane's", () => {
+      const lane = ["<NextMoves>", "", '<Lane kind="waiting" who="Owner Person" since="2026-10-01">', "", "- answer **O17**", "", "</Lane>", "", "</NextMoves>", ""];
+      const html = render(cardsPage(["O16", "O17", "O18"], [...lane, ...query("qcard-o16"), ...query("nm-q-o17", "y")]), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(cardIds(html)).toContainEqual(["O16", "qcard-o16"]);
+      expect(html).toContain('<div class="nm-qcard" id="nm-q-o17">');
+      expect(html).toContain('<section class="query" id="qcard-o16-2">');
+      expect(html).toContain('<section class="query" id="nm-q-o17-2">');
+    });
+
+    test("two safe ids one case apart: the second is suffixed", () => {
+      const html = render(cardsPage(["O16", "o16", "O17", "O18"]), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(cardIds(html).slice(0, 2)).toEqual([["O16", "qcard-o16"], ["o16", "qcard-o16-2"]]);
+    });
+
+    test("two slugged ids with one slug take -2 and -3, never one anchor", () => {
+      const html = render(cardsPage(["[[A|O16]]", "[[B|O16]]", "O16", "O17", "O18"]), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(cardIds(html).map(([, a]) => a)).toEqual(["qcard-o16-2", "qcard-o16-3", "qcard-o16", "qcard-o17", "qcard-o18"]);
+    });
+
+    test("the O16 grid row links the O16 card, though a wikilink card above it reads O16 too", () => {
+      const html = render(cardsPage(["[[X|O16]]", "O16", "O17", "O18"]), "views", "x");
+      expect(cardIds(html).slice(0, 2)).toEqual([["[[X|O16]]", "qcard-o16-2"], ["O16", "qcard-o16"]]);
+      expect(html).toContain('<a class="qg-card" href="#qcard-o16">');
+      expect(html).not.toContain('href="#qcard-o16-2"');
+    });
+
+    test("a DecisionLog item still yields to a Query card, which keeps its slug", () => {
+      const html = render(cardsPage(["O17", "O18"], query("O16")), "views", "x");
+      expect(repeatedIds(html)).toEqual([]);
+      expect(html).toContain('<section class="query" id="o16">');
+      expect(html).toMatch(/<li class="dl-item[^"]*"(?: value="\d+")? id="o16-2"[ >]/);
+    });
+  });
+
   const results = [...cases()].map((c) => ({ c, ...judge(c) }));
 
   test("every component, setup and hostile fill keeps the contract", () => {

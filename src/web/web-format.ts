@@ -800,18 +800,20 @@ function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLa
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
 /** Each `Query` card's anchor made unique in the finished HTML, across the
- *  cards and the `CaseBoard` rows (made unique first, {@link
- *  uniqueCaseAnchors}): a repeat, or a card whose slug a case holds
- *  (`<Query id="Case-A">` beside case `A`), gets the first free `-2`, `-3`,
- *  and its id link follows. A pass over the OUTPUT, because some components
- *  render a body twice and keep one copy (`foldBodyHtml`). */
+ *  cards and every other element's id but a DecisionLog item's (which yields
+ *  later, {@link uniqueLogAnchors}): the `CaseBoard` rows (made unique first,
+ *  {@link uniqueCaseAnchors}), the `<Question>` cards' `qcard-…` anchors and
+ *  the lanes' `nm-q-…` ones. A repeat, or a card whose slug another element
+ *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
+ *  `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
 function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
-  const cases = [...html.matchAll(CASE_ROW_RE)].map((m) => m[1]!);
+  const others = [...html.replace(ANCHOR_RE, "$2").replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!);
   // Every card's own slug is reserved first, so a repeat's suffix never takes
   // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
-  const reserved = new Set([...[...html.matchAll(ANCHOR_RE)].map((m) => m[1]!), ...cases]);
-  const used = new Set<string>(cases);
+  const reserved = new Set([...html.matchAll(ANCHOR_RE)].map((m) => m[1]!));
+  const used = new Set<string>(others);
   // A card whose id holds a parked wikilink (its id text still carries the
   // sentinel here) slugs its link text, so it yields to every other card.
   const matches = [...html.matchAll(ANCHOR_RE)];

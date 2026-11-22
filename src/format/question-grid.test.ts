@@ -3,7 +3,7 @@ import { analyzeDecisionChains } from "./decision-chain.ts";
 import { parseBlocks } from "./markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { renderWikiHtml } from "../wiki/render.ts";
-import { QUESTION_GRID_TEXT_MAX, QUESTION_GRID_CAP, questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "./question-grid.ts";
+import { QUESTION_GRID_TEXT_MAX, QUESTION_GRID_CAP, questionCardAnchor, questionCardAnchors, questionGridHtml, questionGridRows, questionGridSlot } from "./question-grid.ts";
 
 const rowsOf = (body: string, today?: string) => {
   const blocks = parseBlocks(body);
@@ -300,5 +300,19 @@ describe("questionCardAnchor (F26, F57)", () => {
   test("a parked wikilink reads as its link text, any other sentinel as nothing", () => {
     expect(questionCardAnchor("\x00WIKIPAGELINK1\x00", ["x", "Hostile Page"])).toBe("qcard-hostile-page");
     expect(questionCardAnchor("A\x00INLINE0\x00B")).toBe("qcard-a-b");
+  });
+  test("each unsafe character alone slugs the id: & too", () => {
+    expect(["a&b", "a<b", "a>b", 'a"b', "a'b", "a\x00b"].map((id) => questionCardAnchor(id))).toEqual([...Array(5).fill("qcard-a-b"), "qcard-ab"]);
+  });
+});
+
+describe("questionCardAnchors", () => {
+  test("two slugged ids with one slug take the base and then -2", () => {
+    const anchors = questionCardAnchors(["\x00WIKIPAGELINK0\x00", "\x00WIKIPAGELINK1\x00"], [], ["O16", "O16"]);
+    expect([...anchors.values()]).toEqual(["qcard-o16", "qcard-o16-2"]);
+  });
+  test("a slugged id skips the reserved anchors and every safe id's", () => {
+    const anchors = questionCardAnchors(["O16'", "O16", "O16-2"], ["qcard-o16-3"]);
+    expect(anchors.get("O16'")).toBe("qcard-o16-4");
   });
 });
