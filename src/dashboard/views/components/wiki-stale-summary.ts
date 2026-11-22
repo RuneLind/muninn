@@ -13,21 +13,25 @@
  * row, so the rail never disagrees with the tab on the open page.
  */
 import { escHtml as esc } from "./escape.ts";
-import { staleCounts, staleCountsText, type StalePageCounts, type StaleReportView } from "./wiki-stale-tab.ts";
+import { staleCounts, staleCountsShown, staleCountsText, staleCountsToken, staleLinesUnknown, toCheckUnknown, type StalePageCounts, type StaleReportView } from "./wiki-stale-tab.ts";
 
 export interface StaleSummaryRow {
   relPath: string;
   title: string;
   staleLines: number;
   toCheck: number;
+  /** The free hit count: the status-line hits, confirmed or not. */
+  hits?: number;
   changed?: boolean;
   /** PR 3 (D31): fixes for this page waiting in the Gardener. */
   inReview?: number;
+  /** The `fixed` rows could not be read: `toCheck` is an upper bound. */
+  fixed?: "unavailable";
 }
 
 export interface StaleSummaryView {
   pages?: StaleSummaryRow[];
-  totals?: { staleLines: number; toCheck: number; changedPages?: number; inReview?: number };
+  totals?: { staleLines: number; toCheck: number; hits?: number; changedPages?: number; inReview?: number };
   verdicts?: "unavailable";
   inReview?: "unavailable";
   error?: string;
@@ -50,12 +54,13 @@ export const inReviewText = (n: number) => `${plural(n, "fix", "fixes")} in revi
  *  K fixes wait in the Gardener (PR 3); "" when all are 0. */
 export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
   const review = Number(c?.inReview) || 0;
-  if (!c || (!c.staleLines && !c.toCheck && !review)) return "";
-  const stale = c.staleLines || c.toCheck;
+  const unknown = c?.verdicts === "unavailable";
+  if (!c || (!c.staleLines && !c.toCheck && !review && !unknown)) return "";
+  const stale = c.staleLines || c.toCheck || unknown;
   const words = [stale ? staleCountsText(c).replace(/^⚠ /, "") : "", review ? `${inReviewText(review)} in the Gardener` : ""].filter(Boolean).join(" · ");
   return (
-    `<span class="wiki-stale-rail${stale ? "" : " review-only"}" data-stale-rail="${c.staleLines}·${c.toCheck}"${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
-    (stale ? `⚠ ${c.staleLines} · ${c.toCheck}` : "") +
+    `<span class="wiki-stale-rail${stale ? "" : " review-only"}${unknown ? " unavailable" : ""}" data-stale-rail="${staleCountsToken(c)}"${unknown ? ` data-stale-verdicts="unavailable"` : ""}${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
+    (stale ? `⚠ ${staleCountsToken(c, " · ")}` : "") +
     (review ? `${stale ? " " : ""}<span class="wiki-stale-rail-review">⧗ ${review}</span>` : "") +
     `</span>`
   );
@@ -65,11 +70,13 @@ export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
  *  or when it failed, so the pill never shows another page's numbers. */
 export function stalePillHtml(r: StaleReportView | null | undefined): string {
   if (!r || r.error) return "";
+  // The rail row's own counts, so the two never disagree (F11).
   const c = staleCounts(r);
-  const none = !c.staleLines && !c.toCheck;
+  const unknown = c.verdicts === "unavailable";
+  const none = !staleCountsShown(c);
   const review = Number(c.inReview) || 0;
   return (
-    `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${c.staleLines}·${c.toCheck}" title="Open the STALE tab">` +
+    `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${staleCountsToken(c)}"${unknown ? ` data-stale-verdicts="unavailable"` : ""} title="Open the STALE tab">` +
     esc(staleCountsText(c)) +
     (review ? ` <span class="wiki-stale-pill-review" data-stale-pill-review="${review}">⧗ ${esc(inReviewText(review))}</span>` : "") +
     `</button>`
@@ -80,13 +87,20 @@ export function stalePillHtml(r: StaleReportView | null | undefined): string {
 const countedRows = (s: StaleSummaryView) =>
   (s.pages ?? []).map((r) => {
     const inReview = Number(r.inReview) || 0;
-    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}) } as StalePageCounts };
+    const unknown = staleLinesUnknown(s.verdicts, r.hits);
+    const fixed = toCheckUnknown(r.fixed, r.toCheck);
+    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" } : {}), ...(fixed ? { fixed: "unavailable" } : {}) } as StalePageCounts };
   });
 
-const isStale = (c: StalePageCounts) => c.staleLines + c.toCheck > 0;
+const isStale = staleCountsShown;
 
-/** The wiki's totals as the route sends them (confirmed stale lines, D26). */
-const totalsOf = (s: StaleSummaryView): StalePageCounts => ({ staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0 });
+/** The wiki's totals as the route sends them (confirmed stale lines, D26),
+ *  unknown when the wiki's hits or any row's are (`staleLinesUnknown`, F11). */
+const totalsOf = (s: StaleSummaryView): StalePageCounts => {
+  const unknown = staleLinesUnknown(s.verdicts, s.totals?.hits) || countedRows(s).some((x) => x.c.verdicts === "unavailable");
+  const fixed = countedRows(s).some((x) => x.c.fixed === "unavailable");
+  return { staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0, ...(unknown ? { verdicts: "unavailable" as const } : {}), ...(fixed ? { fixed: "unavailable" as const } : {}) };
+};
 
 /** The wiki home line: the wiki's totals and a way into the Stale tab. */
 export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): string {
@@ -96,7 +110,7 @@ export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): strin
   const pages = countedRows(s).filter((x) => isStale(x.c)).length;
   return (
     `<span class="wiki-stale-home-k">Stale check</span> ` +
-    `<span class="wiki-stale-home-v" data-stale-home-totals="${t.staleLines}·${t.toCheck}">${esc(staleCountsText(t))}${pages ? ` on ${plural(pages, "page")}` : ""}</span>` +
+    `<span class="wiki-stale-home-v" data-stale-home-totals="${staleCountsToken(t)}">${esc(staleCountsText(t))}${pages ? ` on ${plural(pages, "page")}` : ""}</span>` +
     (s.verdicts === "unavailable" ? ` <span class="wiki-stale-home-note">verdicts unavailable</span>` : "") +
     (pages ? ` <button type="button" class="wiki-stale-home-open" data-stale-home-open>Show</button>` : "")
   );
@@ -112,7 +126,7 @@ export function staleHomeBodyHtml(s: StaleSummaryView | null | undefined): strin
   for (const { r, c } of rows) {
     if (!isStale(c)) continue;
     html +=
-      `<div class="wiki-stale-home-row" data-relpath="${esc(r.relPath)}" data-stale-home-row="${c.staleLines}·${c.toCheck}">` +
+      `<div class="wiki-stale-home-row" data-relpath="${esc(r.relPath)}" data-stale-home-row="${staleCountsToken(c)}">` +
       `<span class="wiki-stale-home-title">${esc(r.title || r.relPath)}</span>` +
       `<span class="wiki-stale-home-counts">${esc(staleCountsText(c))}</span>` +
       `<span class="wiki-stale-home-path">${esc(r.relPath)}</span>` +
@@ -129,6 +143,7 @@ export function wikiStaleSummaryStyles(): string {
   return `
     .wiki-stale-rail { font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 8px; white-space: nowrap; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
     .wiki-stale-rail.review-only { background: color-mix(in srgb, var(--status-info) 18%, transparent); }
+    .wiki-stale-rail.unavailable { background: color-mix(in srgb, var(--text-dim) 22%, transparent); }
     .wiki-stale-rail-review, .wiki-stale-pill-review { white-space: nowrap; }
     .wiki-stale-pill-slot:empty { display: none; }
     .wiki-stale-pill { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; cursor: pointer; border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }

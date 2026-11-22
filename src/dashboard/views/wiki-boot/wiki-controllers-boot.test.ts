@@ -106,6 +106,9 @@ const STALE_REPORT = {
 };
 /** The wiki-wide summary: q.md has one stale line and three pages to check. */
 const STALE_SUMMARY = { pages: [{ relPath: "q.md", title: "Q", staleLines: 1, toCheck: 3 }], totals: { staleLines: 1, toCheck: 3 } };
+/** What the stale routes answer; the verdict-store-down test swaps them. */
+let staleReportAnswer: unknown = STALE_REPORT;
+let staleSummaryAnswer: unknown = STALE_SUMMARY;
 
 const fetched: { method: string; url: string }[] = [];
 /** What `/api/wiki/work-map` answers; the effort tests set it. */
@@ -134,7 +137,7 @@ async function stubFetch(input: unknown, init?: { method?: string }): Promise<un
   else if (url.pathname === "/api/wiki/page") {
     const rel = url.searchParams.get("relPath") ?? "p.md";
     body = { meta: LISTING.pages.find((p) => p.relPath === rel) ?? LISTING.pages[1], html: `<h1>${rel}</h1><p>Body.</p>`, outgoing: [], backlinks: [], hash: "h-" + rel };
-  } else if (url.pathname === "/api/wiki/stale") body = url.searchParams.get("page") ? STALE_REPORT : STALE_SUMMARY;
+  } else if (url.pathname === "/api/wiki/stale") body = url.searchParams.get("page") ? staleReportAnswer : staleSummaryAnswer;
   else if (url.pathname === "/api/wiki/work-map") {
     status = workMapStatus;
     body = status === 200 ? { map: null } : { error: "boom" };
@@ -208,6 +211,33 @@ describe("the stale check (wiki-stale-controller.ts)", () => {
     loadStale("p.md");
     await until(() => !!det() && !det()!.hasAttribute("data-old-body"), "the tab to repaint");
     expect(det()!.open).toBe(false);
+  });
+
+  test("F11: a verdict store that is down paints the pill and the rail as unavailable, never the clean zero", async () => {
+    const { loadStale, loadStaleSummary } = await import("../components/wiki-stale-controller.ts");
+    const hit = { line: 3, target: "k.md", said: ["in-flight"], now: "shipped", text: "- [[k]] is in-flight", confirmation: "unconfirmed" };
+    staleReportAnswer = { page: { relPath: "p.md", title: "P" }, hits: [hit], staleLines: 0, buckets: null, verdicts: "unavailable" };
+    staleSummaryAnswer = { pages: [{ relPath: "u.md", title: "U", staleLines: 0, toCheck: 0, hits: 1 }], totals: { staleLines: 0, toCheck: 0 }, verdicts: "unavailable" };
+    try {
+      loadStale("p.md");
+      loadStaleSummary();
+      const pill = () => doc().querySelector("#wikiStalePill .wiki-stale-pill");
+      await until(() => pill()?.getAttribute("data-stale-verdicts") === "unavailable", "the pill's unavailable state");
+      expect(pill()!.classList.contains("none")).toBe(false);
+      expect(pill()!.textContent).toBe("⚠ stale status lines unknown (verdicts unavailable) · 0 linking pages to check");
+      const rail = (rel: string) => doc().querySelector(`#wikiList [data-relpath="${rel}"] .wiki-stale-rail`);
+      await until(() => !!rail("u.md"), "the rail badge for u.md");
+      expect(rail("u.md")!.textContent).toBe("⚠ ? · 0");
+      expect(rail("u.md")!.getAttribute("data-stale-verdicts")).toBe("unavailable");
+      // The open page's row follows its own report, which has a hit.
+      await until(() => !!rail("p.md"), "the rail badge for the open page");
+      expect(rail("p.md")!.getAttribute("data-stale-rail")).toBe("?·0");
+    } finally {
+      staleReportAnswer = STALE_REPORT;
+      staleSummaryAnswer = STALE_SUMMARY;
+      loadStale("p.md");
+      loadStaleSummary();
+    }
   });
 });
 

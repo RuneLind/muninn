@@ -14,14 +14,19 @@ import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "./reado
 import type { WikiRegistryEntry } from "./registry.ts";
 import {
   buildStalePrompt,
+  changedHashOf,
   changedPageContentHash,
   commitsFor,
   CONFIRM_MAX_CALLS,
   CONFIRM_START_CUTOFF_MS,
+  hitConfirmations,
+  hitKey,
   memoryStaleVerdictStore,
   otherPlansIn,
   parseStaleAnswer,
   passageKeyHash,
+  passageVerdictKey,
+  passageVerdicts,
   runStaleCheck,
   runStaleConfirm,
   startStaleConfirmLoop,
@@ -32,6 +37,7 @@ import {
   type StaleModel,
 } from "./stale-confirm.ts";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiPageMeta } from "./store.ts";
+import { linkingBuckets } from "./stale.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
@@ -933,5 +939,109 @@ describe("parseStaleAnswer: an edit placement would refuse is dropped (R2B2-2)",
     expect(parse("*nope")).toBeNull();
     expect(parse("landed, c: 1")).toBeNull();
     expect(parse("landed on 18.06")).toEqual({ old: "landed on 23.05", new: "landed on 18.06" });
+  });
+});
+
+// F68: two identical hit lines on one page share one key; one run buys it once.
+describe("the confirm loop buys a shared key once (F68)", () => {
+  let root = "";
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-confirm-dup-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await writeFile(path.join(root, "plans/p.md"), page("P", "Body.", "plan_status: shipped\n"));
+    await writeFile(path.join(root, "hub.md"), page("Hub", "- [[p]] is in-flight\n\nOther text.\n\n- [[p]] is in-flight"));
+  });
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("one model call for two identical lines, and its verdict confirms both", async () => {
+    const store = memoryStaleVerdictStore();
+    const prompts: string[] = [];
+    const model: StaleModel = async (p) => (prompts.push(p), '{"verdict":"stale","reason":"shipped","edit":{"old":"in-flight","new":"shipped"}}');
+    const entry = { name: "dup", root, source: "extra" } as WikiRegistryEntry;
+    const deps: ConfirmDeps = {
+      registry: () => [entry],
+      bots: () => [BOT],
+      index: (r) => getWikiIndex({ root: r, refresh: true }),
+      store: () => store,
+      model: () => model,
+      now: Date.now,
+      span: () => {},
+      tracer: () => null,
+      failures: new Map(),
+      rebuildFailures: new Map(),
+    };
+    const r = await runStaleConfirm(["dup"], deps);
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const hits = index.statusLineHits!.get("hub.md")!;
+    expect(hits).toHaveLength(2);
+    expect(new Set(hits.map((h) => statusLineVerdictKey(index, "hub.md", h))).size).toBe(1);
+    expect({ calls: r.calls, prompts: prompts.length, hits: r.wikis[0]!.hits }).toEqual({ calls: 1, prompts: 1, hits: 2 });
+    const views = await hitConfirmations("dup", index, [["hub.md", hits]], store);
+    expect(hits.map((h) => views.get(hitKey("hub.md", h))?.verdict)).toEqual(["stale", "stale"]);
+    // Fix round 1 batch 2: every hit line lands in one count, and `stale` counts lines.
+    const row = r.wikis[0]!;
+    expect(row.stale).toBe(2);
+    // `?? 0` so a row without the count fails on the sum, not on a NaN.
+    expect(row.hits).toBe(row.cached + row.backoff + row.calls + row.left + (row.deduped ?? 0));
+    expect(row.deduped).toBe(1);
+  });
+});
+
+// F65: Check states the changed page's status from the read its hash came
+// from, so an out-of-band `plan_status` edit the cached index has not seen is
+// what the prompt says, and the verdict lands on that content's key.
+describe("Check reads the changed page's status where its hash comes from (F65)", () => {
+  let root = "";
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
+  };
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const asOfMs = Date.parse("2026-06-20T00:00:00Z");
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-check-oob-"));
+    await git("init", "-q", "-b", "main");
+    await write("plans/p.md", page("P", "Body.", "plan_status: proposed\n"));
+    await write("notes/n.md", page("N", "The plan [[p]] lands in PR #42."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("plans/p.md", page("P", "Body two.", "plan_status: in-flight\n"));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "p: starts");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("the prompt carries the new plan_status, and the cached verdict's key matches that content", async () => {
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    expect(index.resolveRelPath("plans/p.md")!.plan_status).toBe("in-flight");
+    // Out of band: the index above is not rebuilt.
+    const now = page("P", "Body two.", "plan_status: shipped\nstatus_note: all merged\n");
+    await write("plans/p.md", now);
+    const prompts: string[] = [];
+    const model: StaleModel = async (p) => (prompts.push(p), '{"verdict":"true","reason":"fine"}');
+    const store = memoryStaleVerdictStore();
+    const ok = await runStaleCheck({ wiki: "w", index, relPath: "plans/p.md", asOfMs, bot: BOT, store, model, onEvent: () => {} });
+    expect(ok).toBe(true);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("plan_status: shipped");
+    expect(prompts[0]).toContain("status_note: all merged");
+    expect(prompts[0]).not.toContain("plan_status: in-flight");
+    // The stored row is the one the GET finds for the content on disk now.
+    const buckets = (await linkingBuckets(index, "plans/p.md", { asOfMs }))!;
+    const hash = await changedHashOf(index, "plans/p.md");
+    expect(hash).toBe(changedPageContentHash(now));
+    const n = buckets.linking.find((l) => l.relPath === "notes/n.md")!;
+    expect([...store.rows.values()].map((r) => r.keyHash)).toEqual([passageVerdictKey(index, "plans/p.md", hash!, n)]);
+    expect([...(await passageVerdicts("w", index, "plans/p.md", buckets.linking, { store })).keys()]).toEqual(["notes/n.md"]);
   });
 });

@@ -31,6 +31,8 @@ import { STALE_FIX_CUTS_LINK, STALE_FIX_NOT_IN_PASSAGE } from "../../wiki/stale-
 import { decideZone } from "../../auth/zones.ts";
 import { wikiRouteTable } from "../../test/wiki-route-table.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { staleCounts, staleCountsToken } from "../views/components/wiki-stale-tab.ts";
+import { staleCountMap, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml } from "../views/components/wiki-stale-summary.ts";
 
 const DAY = 86_400_000;
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
@@ -218,6 +220,56 @@ describe("the Stale check's fix routes", () => {
     __resetWikiCacheForTest();
     expect((await get("wiki=fixwiki&page=hub.md")).buckets.counts.toCheck).toBe(3);
   });
+
+  test("fix round 1 batch 2: with the verdict store down after a `fixed` row exists, M reads as unknown, never as a known count", async () => {
+    await seedWiki();
+    await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+    expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+    await git(root, Date.now() - 30 * DAY, "commit", "-q", "--amend", "--no-edit", "--reset-author");
+    __resetWikiCacheForTest();
+    expect((await get("wiki=fixwiki&page=hub.md")).buckets.counts.toCheck).toBe(2);
+    // The store goes down: every method throws.
+    __setStaleVerdictStoreForTest(new Proxy(verdicts, { get: (t, k) => (typeof (t as any)[k] === "function" ? () => Promise.reject(new Error("db down")) : (t as any)[k]) }));
+    const report = await get("wiki=fixwiki&page=hub.md");
+    const summary = await get("wiki=fixwiki");
+    // The page answer, the summary row and every surface's token: M (3, notes/a.md still in it) is shown as unknown.
+    expect({
+      pill: staleCountsToken(staleCounts(report)),
+      rail: staleRailBadgeHtml(staleCountMap(summary).get("hub.md")).match(/data-stale-rail="([^"]*)"/)?.[1],
+      home: staleHomeLineHtml(summary).match(/data-stale-home-totals="([^"]*)"/)?.[1],
+    }).toEqual({ pill: "?·?", rail: "?·?", home: "?·?" });
+    expect(stalePillHtml(report)).toContain("linking pages to check unknown (at most 3");
+    expect({ report: report.fixed, row: hubRow(summary).fixed, summary: summary.fixed }).toEqual({ report: "unavailable", row: "unavailable", summary: "unavailable" });
+  });
+
+  /** The store with one read failing: the status-line verdicts still answer, so only the `fixed` read is unknown. */
+  const failing = (which: "fixed-get" | "pages") =>
+    ({
+      get: (wiki, kind, keys) => (which === "fixed-get" && kind === "fixed" ? Promise.reject(new Error("db down")) : verdicts.get(wiki, kind, keys)),
+      upsert: (v) => verdicts.upsert(v),
+      pages: (wiki, kind) => (which === "pages" ? Promise.reject(new Error("db down")) : verdicts.pages!(wiki, kind)),
+    }) satisfies Parameters<typeof __setStaleVerdictStoreForTest>[0];
+
+  for (const which of ["fixed-get", "pages"] as const) {
+    test(`fix round 2 batch 1: the status-line verdicts answer but the \`fixed\` read fails (${which}): M reads as unknown on the row, the summary and the page`, async () => {
+      await seedWiki();
+      await seedPassage("notes/a.md", { old: "landed on 23.05", new: "landed on 18.06" });
+      expect((await post("apply", { kind: "passage", linking: "notes/a.md", old: "landed on 23.05" })).status).toBe(200);
+      await git(root, Date.now() - 30 * DAY, "commit", "-q", "--amend", "--no-edit", "--reset-author");
+      __resetWikiCacheForTest();
+      __setStaleVerdictStoreForTest(failing(which));
+      const report = await get("wiki=fixwiki&page=hub.md");
+      const summary = await get("wiki=fixwiki");
+      expect({ verdicts: [report.verdicts, summary.verdicts], report: report.fixed, row: hubRow(summary).fixed, summary: summary.fixed }).toEqual({
+        verdicts: [undefined, undefined],
+        report: "unavailable",
+        row: "unavailable",
+        summary: "unavailable",
+      });
+      // N (the status lines) stays known: only M is unknown.
+      expect(staleCountsToken(staleCounts(report))).toBe("0·?");
+    });
+  }
 
   test("a Stale check fix commit is not a page change: the wiki-wide total drops after an Apply on a mutual link", async () => {
     await seedWiki();

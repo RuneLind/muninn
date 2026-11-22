@@ -2545,26 +2545,41 @@ export function registerWikiToolRoutes(
         return { ...r, hits: hits.length, staleLines: confirmations ? hits.filter((h) => isConfirmedStale(confirmations!.get(hitKey(r.relPath, h)))).length : 0 };
       });
       // PR 3 (D29): a To-check page whose current passage carries a `fixed`
-      // row is counted out, as the page report counts it out.
+      // row is counted out, as the page report counts it out. The `fixed`
+      // rows live in the verdict store: when it is down, a row's To check may
+      // still hold fixed pages, so the row says `fixed: "unavailable"` (its M
+      // an upper bound, shown as unknown) instead of passing as exact.
+      const fixedUnknown = new Set<string>();
+      let fixedPages: Set<string> | null = null;
       if (confirmations) {
         try {
-          const fixedPages = (await staleVerdictStore().pages?.(entry.name, "fixed")) ?? new Set<string>();
-          const fixedKeys = new Set([...fixedPages].map((p) => normalizeRelPath(p)));
-          for (const r of fixedKeys.size ? pages : []) {
-            if (!r.toCheck || !(index.backlinks.get(normalizeRelPath(r.relPath)) ?? []).some((k) => fixedKeys.has(k))) continue;
+          fixedPages = (await staleVerdictStore().pages?.(entry.name, "fixed")) ?? new Set<string>();
+        } catch (err) {
+          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      if (!fixedPages) {
+        for (const r of pages) if (r.toCheck) fixedUnknown.add(r.relPath);
+      } else {
+        const fixedKeys = new Set([...fixedPages].map((p) => normalizeRelPath(p)));
+        for (const r of fixedKeys.size ? pages : []) {
+          if (!r.toCheck || !(index.backlinks.get(normalizeRelPath(r.relPath)) ?? []).some((k) => fixedKeys.has(k))) continue;
+          try {
             const buckets = await linkingBuckets(index, r.relPath, { asOfMs });
             if (!buckets) continue;
             const fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: buckets.relPath, linking: buckets.linking, fixedPages });
             r.toCheck = Math.max(0, r.toCheck - fixed.size);
+          } catch (err) {
+            fixedUnknown.add(r.relPath);
+            log.warn("Stale fixed verdicts unavailable for {page}: {error}", { page: r.relPath, error: err instanceof Error ? err.message : String(err) });
           }
-        } catch (err) {
-          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
         }
       }
       // PR 3 (D31): the fixes waiting in the Gardener, per changed page. A
       // page with fixes in review is a row even when nothing else is.
       const review = await inReviewFor(entry.name);
-      const rows: (typeof pages[number] & { inReview?: number })[] = pages;
+      const rows: (typeof pages[number] & { inReview?: number; fixed?: "unavailable" })[] = pages;
+      for (const r of rows) if (fixedUnknown.has(r.relPath)) r.fixed = "unavailable";
       if (review) {
         for (const r of rows) {
           const n = review.get(r.relPath)?.fixes;
@@ -2590,6 +2605,7 @@ export function registerWikiToolRoutes(
         },
         pages: rows,
         ...(confirmations ? {} : { verdicts: "unavailable" }),
+        ...(fixedUnknown.size ? { fixed: "unavailable" } : {}),
         ...(review ? {} : { inReview: "unavailable" }),
       });
     }
@@ -2608,12 +2624,19 @@ export function registerWikiToolRoutes(
     const hits = report.hits.map((h) => ({ ...h, confirmation: confirmations?.get(hitKey(meta.relPath, h)) ?? ("unconfirmed" as const) }));
     // PR 3 (D29): a To-check page whose current passage carries a `fixed` row
     // was fixed through the Stale check; it counts as Changed since.
+    // With the verdict store down the fixed set is unknown, so To check is an
+    // upper bound and the answer says `fixed: "unavailable"`, as the summary's rows do.
     let fixed = new Set<string>();
-    if (report.buckets && confirmations) {
-      try {
-        fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: report.buckets.relPath, linking: report.buckets.linking });
-      } catch (err) {
-        log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+    let fixedUnknown = false;
+    if (report.buckets?.counts.toCheck) {
+      if (!confirmations) fixedUnknown = true;
+      else {
+        try {
+          fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: report.buckets.relPath, linking: report.buckets.linking });
+        } catch (err) {
+          fixedUnknown = true;
+          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
       }
     }
     const review = (await inReviewFor(entry.name))?.get(meta.relPath);
@@ -2637,6 +2660,7 @@ export function registerWikiToolRoutes(
         : null,
       ...(review ? { inReview: review } : {}),
       ...(confirmations ? {} : { verdicts: "unavailable" }),
+      ...(fixedUnknown ? { fixed: "unavailable" } : {}),
     });
   });
 

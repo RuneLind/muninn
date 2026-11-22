@@ -54,7 +54,7 @@ import { lineLinks, linkingBuckets, linkingPassageRows, pageStaleFacts, type Lin
 import { EDIT_TEXT_CAP, staleEditOnLine, windowPieces, type StaleFixVariant } from "./stale-fix.ts";
 
 export { EDIT_TEXT_CAP, linkingPassageRows };
-import { getWikiIndex, parseFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
+import { getWikiIndex, parseFrontmatter, readPlanStatus, readStatusNote, type WikiIndex, type WikiPageMeta } from "./store.ts";
 
 const log = getLog("wiki", "stale-confirm");
 
@@ -687,8 +687,14 @@ const realConfirmDeps: ConfirmDeps = {
 };
 
 export interface ConfirmRunSummary {
-  /** `backoff`: hits not called because their key is inside its backoff. */
-  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number; backoff: number }[];
+  /**
+   * Per wiki, every hit line lands in exactly one of `cached`, `backoff`,
+   * `calls`, `left` and `deduped`, so they add up to `hits`. `backoff`: not
+   * called, its key is inside its backoff. `deduped`: shares its key with an
+   * earlier line of this run, which bought the one call (F68). `stale`: hit
+   * lines the run's verdicts confirmed stale, a shared key's lines included.
+   */
+  wikis: { wiki: string; skipped?: string; hits: number; cached: number; calls: number; stale: number; errors: number; left: number; backoff: number; deduped: number }[];
   calls: number;
   errors: number;
   left: number;
@@ -777,7 +783,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
   for (const [k, m] of failures) if (started - m.at > FAILURE_MEMORY_MS) failures.delete(k);
 
   type Row = ConfirmRunSummary["wikis"][number];
-  const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string }[] = [];
+  const todo: { row: Row; entry: WikiRegistryEntry; index: WikiIndex; bot: BotConfig; page: WikiPageMeta; hit: StatusLineHit; key: string; lines?: number }[] = [];
   const wanted = new Set(wikiNames.map((n) => n.toLowerCase()));
   // Wikis whose rebuild last failed go last, oldest failure first (stable sort),
   // so a wiki that keeps hanging costs each run one bounded rebuild, after the rest.
@@ -787,7 +793,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
     .sort((a, b) => (rebuildFailed.get(a.name.toLowerCase()) ?? 0) - (rebuildFailed.get(b.name.toLowerCase()) ?? 0));
   for (const entry of entries) {
     if (signal?.aborted) break;
-    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0, backoff: 0 };
+    const row: Row = { wiki: entry.name, hits: 0, cached: 0, calls: 0, stale: 0, errors: 0, left: 0, backoff: 0, deduped: 0 };
     out.wikis.push(row);
     let rebuilding = false;
     try {
@@ -823,10 +829,19 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
       }
       row.hits = mine.length;
       const cached = await bounded(() => deps.store().get(entry.name, "status-line", mine.map((t) => t.key)), `verdict read for ${entry.name}`);
+      // Identical hit lines on one page share a key: one call answers them all (F68).
+      const queued = new Map<string, (typeof todo)[number]>();
       for (const t of mine) {
+        const first = queued.get(t.key);
         if (cached.has(t.key)) row.cached++;
         else if (inBackoff(failures.get(t.key), started)) row.backoff++;
-        else todo.push(t);
+        else if (first) {
+          row.deduped++;
+          first.lines = (first.lines ?? 1) + 1;
+        } else {
+          queued.set(t.key, t);
+          todo.push(t);
+        }
       }
     } catch (err) {
       if (err instanceof ConfirmStopped) break;
@@ -889,7 +904,7 @@ export async function runStaleConfirm(wikiNames: readonly string[], deps: Confir
         "verdict write",
       );
       failures.delete(t.key);
-      if (stored.verdict === "stale") row.stale++;
+      if (stored.verdict === "stale") row.stale += t.lines ?? 1;
     } catch (err) {
       // Stopped mid-call: the answer is dropped and the hit waits for the next run, not counted as failed.
       // Not sent because the budget is spent: the hit waits for the next run, not counted as failed.
@@ -1119,6 +1134,19 @@ export async function changedHashOf(index: WikiIndex, relPath: string): Promise<
   return text === null ? null : changedPageContentHash(text);
 }
 
+/** The changed page read once: its content hash and the `plan_status` and
+ *  `status_note` a Check prompt states, both from that one text, so the
+ *  verdict's key covers what the model was told. The index can lag an
+ *  out-of-band edit by its cache age (F65). Null when it cannot be read. */
+export async function readChangedPage(index: Pick<WikiIndex, "root">, relPath: string): Promise<{ hash: string; planStatus?: string; statusNote?: string } | null> {
+  const text = await readText(path.join(index.root, relPath));
+  if (text === null) return null;
+  const fm = parseFrontmatter(text.replace(/\r\n/g, "\n"));
+  const planStatus = readPlanStatus(fm);
+  const statusNote = readStatusNote(fm);
+  return { hash: changedPageContentHash(text), ...(planStatus ? { planStatus } : {}), ...(statusNote ? { statusNote } : {}) };
+}
+
 /**
  * Check one changed page's To-check linking pages: a cached verdict is
  * reported as is, the rest get one call each, at most {@link CHECK_MAX_CALLS},
@@ -1148,15 +1176,19 @@ export async function runStaleCheck(opts: {
   for (const [k, m] of failures) if (Date.now() - m.at > FAILURE_MEMORY_MS) failures.delete(k);
   const buckets = await linkingBuckets(index, opts.relPath, opts.asOfMs !== undefined ? { asOfMs: opts.asOfMs } : {});
   if (!buckets) return false;
-  const changedHash = await changedHashOf(index, buckets.relPath);
-  if (changedHash === null) throw new StaleChangedUnreadableError(buckets.relPath);
+  const changed = await readChangedPage(index, buckets.relPath);
+  if (changed === null) throw new StaleChangedUnreadableError(buckets.relPath);
+  const changedHash = changed.hash;
   const subjects: SubjectsMemo = new Map();
   const changedMeta = index.resolveRelPath(buckets.relPath);
   const keyed = buckets.linking
     .filter((l) => l.bucket === "toCheck")
     .map((l) => {
       const ctx = passageKeyContext(index, buckets.relPath, l);
-      return { l, passage: ctx.passage, ctx, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
+      // The status facts come from the read the hash came from, not the index (F65).
+      const { planStatus: _p, statusNote: _n, ...rest } = ctx.target;
+      const target = { ...rest, ...(changed.planStatus ? { planStatus: changed.planStatus } : {}), ...(changed.statusNote ? { statusNote: changed.statusNote } : {}) };
+      return { l, passage: ctx.passage, ctx: { ...ctx, target }, key: passageKeyHash(l.relPath, ctx.passage, changedHash, ctx) };
     });
   // A page whose current passage carries a `fixed` row (D29) is Changed since
   // on the GET, so Check neither counts nor calls it.

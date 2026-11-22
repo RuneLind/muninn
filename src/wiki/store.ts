@@ -658,11 +658,15 @@ function parsePlanFields(
     if (followups === undefined) drop("followups");
   }
 
-  // NOT comment-stripped (see `stripTrailingComment`) — a note may say "#399".
-  const rawNote = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
-  const note = YAML_BLOCK_SCALAR_INDICATORS.has(rawNote) ? "" : rawNote;
+  return { plan_status, status_date, followups, status_note: readStatusNote(fm) };
+}
 
-  return { plan_status, status_date, followups, status_note: note || undefined };
+/** A page's `status_note:` as the index keeps it: trimmed, NOT comment-stripped
+ *  (see `stripTrailingComment`: a note may say "#399"), a bare block-scalar
+ *  indicator read as absent. */
+export function readStatusNote(fm: Record<string, string | string[]>): string | undefined {
+  const rawNote = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
+  return YAML_BLOCK_SCALAR_INDICATORS.has(rawNote) ? undefined : rawNote || undefined;
 }
 
 /**

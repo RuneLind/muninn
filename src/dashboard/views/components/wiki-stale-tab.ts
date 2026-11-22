@@ -52,6 +52,8 @@ export interface StaleReportView {
   staleLines?: number;
   buckets?: { counts: Record<string, number>; linking: StaleLinkingView[] } | null;
   verdicts?: "unavailable";
+  /** The `fixed` rows could not be read: To check may still count fixed pages. */
+  fixed?: "unavailable";
   readonly?: "instance" | "root" | false;
   /** PR 3 (D31): the fixes this page's live Stale check card holds. */
   inReview?: StaleInReviewView;
@@ -70,7 +72,34 @@ export function staleCounts(r: StaleReportView | null | undefined): StalePageCou
   if (!r || r.error) return { staleLines: 0, toCheck: 0 };
   const staleLines = confirmedHits(r).length;
   const inReview = Number(r.inReview?.fixes) || 0;
-  return { staleLines, toCheck: r.buckets?.counts?.toCheck ?? 0, ...(inReview ? { inReview } : {}) };
+  const unknown = staleLinesUnknown(r.verdicts, r.hits?.length);
+  const toCheck = r.buckets?.counts?.toCheck ?? 0;
+  return { staleLines, toCheck, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" as const } : {}), ...(toCheckUnknown(r.fixed, toCheck) ? { fixed: "unavailable" as const } : {}) };
+}
+
+/** The one rule for «linking pages to check unknown»: the `fixed` rows that
+ *  count a page out of To check could not be read AND To check is not 0, so
+ *  M is an upper bound. With nothing to check, 0 is exact. */
+export function toCheckUnknown(fixed: string | undefined, toCheck: number | undefined): boolean {
+  return fixed === "unavailable" && (Number(toCheck) || 0) > 0;
+}
+
+/** The one rule for «stale status lines unknown» (F11), on every surface: the
+ *  verdict store was down AND the page (or wiki) has status-line hits, the
+ *  only thing a verdict could turn into a stale line. With no hits the count
+ *  is a true 0, whatever the store, and To-check pages do not change it. */
+export function staleLinesUnknown(verdicts: string | undefined, hits: number | undefined): boolean {
+  return verdicts === "unavailable" && (Number(hits) || 0) > 0;
+}
+
+/** The counts as a data attribute and badge token: «N·M», «?·M» when unknown. */
+export function staleCountsToken(c: StalePageCounts, sep = "·"): string {
+  return `${c.verdicts === "unavailable" ? "?" : c.staleLines}${sep}${c.fixed === "unavailable" ? "?" : c.toCheck}`;
+}
+
+/** Is there anything to show: a stale line, a page to check, or an unknown count. */
+export function staleCountsShown(c: StalePageCounts): boolean {
+  return c.staleLines + c.toCheck > 0 || c.verdicts === "unavailable";
 }
 
 export interface StalePageCounts {
@@ -78,6 +107,10 @@ export interface StalePageCounts {
   toCheck: number;
   /** PR 3 (D31): fixes waiting in the Gardener, shown as ⧗. */
   inReview?: number;
+  /** `staleLines` is unknown, not 0 ({@link staleLinesUnknown}, F11). */
+  verdicts?: "unavailable";
+  /** `toCheck` is an upper bound, shown as unknown ({@link toCheckUnknown}). */
+  fixed?: "unavailable";
 }
 
 /** The two numbers in words (D26): «N stale status lines · M linking pages
@@ -86,8 +119,10 @@ export interface StalePageCounts {
  *  things counted too: «✓ nothing stale» read as a verdict on the whole page
  *  (first-screen-claims F15). */
 export function staleCountsText(c: StalePageCounts): string {
-  const words = `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"} · ${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
-  return c.staleLines || c.toCheck ? `⚠ ${words}` : words;
+  const lines = c.verdicts === "unavailable" ? "stale status lines unknown (verdicts unavailable)" : `${c.staleLines} stale status line${c.staleLines === 1 ? "" : "s"}`;
+  const pages = c.fixed === "unavailable" ? `linking pages to check unknown (at most ${c.toCheck}, verdicts unavailable)` : `${c.toCheck} linking page${c.toCheck === 1 ? "" : "s"} to check`;
+  const words = `${lines} · ${pages}`;
+  return c.staleLines || c.toCheck || c.verdicts === "unavailable" ? `⚠ ${words}` : words;
 }
 
 /** The hits a reader sees: confirmed stale only (D11). */
@@ -101,10 +136,10 @@ export const STALE_TAB_TITLE = "What a change to this page may have made untrue 
 /** The tab's count badge: «N · M», or "" when both are 0. `tabTitle` is the
  *  tab's tooltip: {@link STALE_TAB_TITLE}, then the counts when there are any. */
 export function staleTabBadge(r: StaleReportView | null | undefined): { text: string; title: string; tabTitle: string } {
-  const { staleLines, toCheck } = staleCounts(r);
-  if (!staleLines && !toCheck) return { text: "", title: "Nothing stale", tabTitle: STALE_TAB_TITLE };
-  const title = `${staleLines} stale status line${staleLines === 1 ? "" : "s"} · ${toCheck} linking page${toCheck === 1 ? "" : "s"} to check`;
-  return { text: `${staleLines} · ${toCheck}`, title, tabTitle: `${STALE_TAB_TITLE}\n${title}` };
+  const c = staleCounts(r);
+  if (!staleCountsShown(c)) return { text: "", title: "Nothing stale", tabTitle: STALE_TAB_TITLE };
+  const title = staleCountsText(c).replace(/^⚠ /, "");
+  return { text: staleCountsToken(c, " · "), title, tabTitle: `${STALE_TAB_TITLE}\n${title}` };
 }
 
 /** What the client knows beyond the report: Check's state and what it left. */
@@ -272,10 +307,11 @@ export function staleBodyHtml(r: StaleReportView | null, opts: StaleBodyOpts = {
   if (!r) return `<div class="wiki-conn-empty">Loading…</div>`;
   if (r.error) return `<div class="wiki-conn-empty">Stale check unavailable: ${esc(r.error)}</div>`;
   const page = r.page?.relPath ?? "";
-  const { staleLines, toCheck } = staleCounts(r);
+  const counts = staleCounts(r);
+  const { toCheck } = counts;
   let html =
-    `<div class="wiki-stale-head" data-stale-lines="${staleLines}" data-stale-tocheck="${toCheck}">` +
-    esc(staleCountsText({ staleLines, toCheck })) +
+    `<div class="wiki-stale-head" data-stale-lines="${counts.verdicts === "unavailable" ? "?" : counts.staleLines}" data-stale-tocheck="${counts.fixed === "unavailable" ? "?" : toCheck}">` +
+    esc(staleCountsText(counts)) +
     `</div>`;
   if (r.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
 
