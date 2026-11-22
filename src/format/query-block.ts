@@ -154,6 +154,24 @@ export function anchorSlug(id: string): string {
   return id.normalize("NFC").toLowerCase().replace(/[^\p{L}\p{M}\p{N}_-]+/gu, "-").replace(/^-+|-+$/g, "");
 }
 
+/**
+ * An authored `<Question>`, `<Query>` or lane id as an anchor slug (F26, F57):
+ * a parked wikilink reads as its link text (`linkTexts`, `renderWikiHtml`'s),
+ * any other NUL-delimited sentinel as nothing, then {@link anchorSlug}. A
+ * Question card keeps its older unslugged anchor where that was safe
+ * (`questionCardAnchor`).
+ */
+export function idAnchor(id: string, linkTexts?: readonly string[]): string {
+  const text = id
+    .replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "")
+    .replace(/\x00[^\x00]*\x00/g, " ")
+    .replaceAll("\x00", "");
+  return anchorSlug(text);
+}
+
+/** An id that cannot sit raw in an attribute value, or holds a parked sentinel. */
+export const UNSAFE_ANCHOR_ID_RE = /[<>"'&\x00]/;
+
 export function parseQueryAttrs(attrs: Record<string, string>): QueryAttrs {
   const id = (attrs.id ?? "").trim();
   return {

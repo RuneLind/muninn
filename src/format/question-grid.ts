@@ -12,6 +12,7 @@
 
 import type { Block } from "./markdown-ast.ts";
 import { escapeHtml } from "./markdown-core.ts";
+import { idAnchor, UNSAFE_ANCHOR_ID_RE } from "./query-block.ts";
 import { parseLaneSince } from "./component-spec.ts";
 import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
 import type { ChainAnalysis } from "./decision-chain.ts";
@@ -177,10 +178,50 @@ export function questionGridRows(blocks: Block[], analysis: ChainAnalysis, today
   return rows.sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open") || num(a) - num(b));
 }
 
-/** The anchor a `<Question>` card takes on the page render. */
-export const questionCardAnchor = (id: string): string => `qcard-${id.toLowerCase()}`;
+/** The anchor a `<Question>` card asks for on the page render, before
+ *  {@link questionCardAnchors} makes it unique. An id that is safe in an
+ *  attribute keeps the anchor deep links already name, `qcard-` + the id
+ *  lower-cased (`Q.1` → `qcard-q.1`); any other is slugged (F26, F57), and ""
+ *  when nothing is left: such a card takes no anchor. */
+export function questionCardAnchor(id: string, linkTexts?: readonly string[]): string {
+  if (!UNSAFE_ANCHOR_ID_RE.test(id)) return `qcard-${id.toLowerCase()}`;
+  const slug = idAnchor(id, linkTexts);
+  return slug ? `qcard-${slug}` : "";
+}
 
-function rowHtml(r: QuestionGridRow, language: QuestionLanguage): string {
+/** Each card's final anchor, by id, for `ids` in page order; an id absent from
+ *  the map takes none. Safe ids and `reserved` (the page's other anchors) are
+ *  taken first, so a slugged id never takes a safe one's anchor: it gets the
+ *  first free `-2`, `-3`. A safe id whose anchor an earlier safe id took
+ *  (`O16`, `o16`) is suffixed the same way. The page's Query cards yield to
+ *  every anchor here (`uniqueAnchors` in `web-format.ts`). */
+export function questionCardAnchors(ids: readonly string[], reserved: Iterable<string>, linkTexts?: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const taken = new Set(reserved);
+  const safe = new Set<string>();
+  const slugged: string[] = [];
+  for (const id of ids) {
+    const anchor = UNSAFE_ANCHOR_ID_RE.test(id) ? "" : questionCardAnchor(id);
+    if (!anchor || safe.has(anchor)) {
+      slugged.push(id);
+      continue;
+    }
+    out.set(id, anchor);
+    safe.add(anchor);
+    taken.add(anchor);
+  }
+  for (const id of slugged) {
+    const base = questionCardAnchor(id, linkTexts);
+    if (!base) continue;
+    let anchor = base;
+    for (let k = 2; taken.has(anchor); k++) anchor = `${base}-${k}`;
+    taken.add(anchor);
+    out.set(id, anchor);
+  }
+  return out;
+}
+
+function rowHtml(r: QuestionGridRow, language: QuestionLanguage, anchorOf: (id: string) => string): string {
   const L = LABELS[language];
   const open = r.state === "open";
   const age = r.ageDays === null ? "" : ` · ${r.ageDays === 0 ? L.today : `${r.ageDays} d`}`;
@@ -189,9 +230,10 @@ function rowHtml(r: QuestionGridRow, language: QuestionLanguage): string {
     : r.decision
       ? `<span class="qg-chip qg-chip-done${r.reversed ? " qg-chip-reversed" : ""}">${dcGoLink(r.decision, escapeHtml(r.decision))}</span>`
       : `<span class="qg-chip qg-chip-done">${escapeHtml(L.closed)}</span>`;
+  const anchor = open && r.hasCard ? anchorOf(r.id) : "";
   const body = open
-    ? r.hasCard
-      ? `<a class="qg-card" href="#${questionCardAnchor(r.id)}">${escapeHtml(L.card)}</a>`
+    ? anchor
+      ? `<a class="qg-card" href="#${anchor}">${escapeHtml(L.card)}</a>`
       : ""
     : `${r.reversed ? `<em class="qg-reversed">${escapeHtml(L.reversed)}</em> ` : ""}${escapeHtml(r.answer ?? "")}${r.who ? ` <span class="qg-who">· ${escapeHtml(r.who)}</span>` : ""}`;
   return (
@@ -210,8 +252,9 @@ export function questionGridSlot(blocks: Block[], viewSlotAt: number): number {
 }
 
 /** The grid, or "" under {@link QUESTION_GRID_MIN} rows. It folds when no row is
- *  open: it counts rows, so an open `<Question>` card does not hold it open. */
-export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLanguage): string {
+ *  open: it counts rows, so an open `<Question>` card does not hold it open.
+ *  `anchorOf`: the anchor a row's card took on the page ("" for none). */
+export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLanguage, anchorOf: (id: string) => string = (id) => questionCardAnchor(id)): string {
   if (rows.length < QUESTION_GRID_MIN) return "";
   const L = LABELS[language];
   const openCount = rows.filter((r) => r.state === "open").length;
@@ -219,13 +262,13 @@ export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLang
   const section = (inner: string) => `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">${inner}</section>`;
   // Nothing to answer: the settled rows wait one click away, so a long list does not push the page's picture down.
   if (openCount === 0) {
-    return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language)).join("")}</div></details>`);
+    return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language, anchorOf)).join("")}</div></details>`);
   }
   const shown = Math.max(QUESTION_GRID_CAP, openCount);
-  const head = rows.slice(0, shown).map((r) => rowHtml(r, language)).join("");
+  const head = rows.slice(0, shown).map((r) => rowHtml(r, language, anchorOf)).join("");
   const rest = rows.slice(shown);
   const more = rest.length
-    ? `<details class="qg-more"><summary>${escapeHtml(L.more(rest.length))}</summary>${rest.map((r) => rowHtml(r, language)).join("")}</details>`
+    ? `<details class="qg-more"><summary>${escapeHtml(L.more(rest.length))}</summary>${rest.map((r) => rowHtml(r, language, anchorOf)).join("")}</details>`
     : "";
   return section(`<div class="dc-title">${titleInner}</div><div class="qg-rows" role="list">${head}${more}</div>`);
 }

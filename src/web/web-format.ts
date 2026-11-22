@@ -32,7 +32,7 @@ import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { beforeAfterChipsHtml, htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
-import { questionCardAnchor, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
+import { questionCardAnchors, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
@@ -42,6 +42,8 @@ import {
   STEPS_NO_SRC,
   QUERY_CSV_MAX_ROWS,
   anchorSlug,
+  idAnchor,
+  UNSAFE_ANCHOR_ID_RE,
   formatCount,
   lookupPageFile,
   pageFileFailureText,
@@ -65,6 +67,7 @@ import {
 import {
   decisionLogEntries,
   DECISION_ID_RE,
+  eachComponent,
   isOpenQuestion,
   namedQuestionIds,
   parseQuestionAttrs,
@@ -389,6 +392,16 @@ export function formatWebHtml(
     // sees one block at a time, so every card's state is read off the whole
     // page first. A substring test keeps the walk off every chat delta.
     currentQuestionPage = text.includes("<Question") ? questionPage(blocks, opts?.question) : undefined;
+    if (currentViews && currentQuestionPage?.options) {
+      const qp = currentQuestionPage;
+      // A slugged card id yields to every safe one and to the Query cards' slugs.
+      const queries: string[] = [];
+      eachComponent(blocks, (b) => {
+        if (b.name === "Query") queries.push(idAnchor(parseQueryAttrs(b.attrs).id, currentLinkTexts));
+      });
+      const ids = [...qp.questionIds].filter((id) => !qp.duplicates.has(id));
+      qp.cardAnchors = questionCardAnchors(ids, queries.filter(Boolean), currentLinkTexts);
+    }
     // On the reader, a waiting lane that names a `<Question>` holds its card
     // (D13); decided over the whole page first, as the card may sit above or
     // below the block.
@@ -427,7 +440,18 @@ export function formatWebHtml(
       const data = pageDecisionData(analysedBlocks, { proposed: opts?.proposedPlan === true });
       const lanes = currentItemDates && opts?.timelineLanes ? opts.timelineLanes(blocks, currentItemDates, currentLanguage, shownLinkText) : "";
       const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis) + lanes;
-      const grid = questionGridHtml(questionGridRows(analysedBlocks, data.analysis, currentItemDates?.today), currentLanguage);
+      // The rows read link labels, the cards their sentinels: key the anchors by label.
+      const cardAnchors = currentQuestionPage?.cardAnchors;
+      const byLabel = new Map<string, string>();
+      for (const [id, a] of cardAnchors ?? []) {
+        const label = id.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+        if (!byLabel.has(label)) byLabel.set(label, a);
+      }
+      const grid = questionGridHtml(
+        questionGridRows(analysedBlocks, data.analysis, currentItemDates?.today),
+        currentLanguage,
+        cardAnchors ? (id) => byLabel.get(id) ?? "" : undefined,
+      );
       // Grid first when both land in one slot; the sort is stable.
       const inserts = [
         { at: grid ? questionGridSlot(blocks, slot) : -1, html: grid },
@@ -628,6 +652,9 @@ interface QuestionPage {
   /** Each DecisionLog id's own text after the id, from the first item that
    *  carries it: what a settled card's row quotes from its decision. */
   logText: Map<string, string>;
+  /** On the page render (`views`): each card's final `qcard-…` anchor by id
+   *  ({@link questionCardAnchors}); an id absent takes none. */
+  cardAnchors?: Map<string, string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -722,7 +749,8 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
   // The question grid's link lands here; only the page render draws that grid.
-  const anchor = currentViews && id !== "" && !isDuplicate ? ` id="${questionCardAnchor(id)}"` : "";
+  const cardAnchor = currentViews && id !== "" && !isDuplicate ? (page.cardAnchors?.get(id) ?? "") : "";
+  const anchor = cardAnchor ? ` id="${cardAnchor}"` : "";
   return `<section class="${cls}"${anchor}${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }
 
@@ -772,26 +800,45 @@ function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLa
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
 /** Each `Query` card's anchor made unique in the finished HTML, across the
- *  cards and the `CaseBoard` rows (made unique first, {@link
- *  uniqueCaseAnchors}): a repeat, or a card whose slug a case holds
- *  (`<Query id="Case-A">` beside case `A`), gets the first free `-2`, `-3`,
- *  and its id link follows. A pass over the OUTPUT, because some components
- *  render a body twice and keep one copy (`foldBodyHtml`). */
+ *  cards and every other element's id but a DecisionLog item's (which yields
+ *  later, {@link uniqueLogAnchors}): the `CaseBoard` rows (made unique first,
+ *  {@link uniqueCaseAnchors}), the `<Question>` cards' `qcard-…` anchors and
+ *  the lanes' `nm-q-…` ones. A repeat, or a card whose slug another element
+ *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
+ *  `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
 function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
-  const cases = [...html.matchAll(CASE_ROW_RE)].map((m) => m[1]!);
+  const others = [...html.replace(ANCHOR_RE, "$2").replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!);
   // Every card's own slug is reserved first, so a repeat's suffix never takes
   // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
-  const reserved = new Set([...[...html.matchAll(ANCHOR_RE)].map((m) => m[1]!), ...cases]);
-  const used = new Set<string>(cases);
-  return html.replace(ANCHOR_RE, (_m, slug: string, between: string) => {
-    let anchor = slug;
-    if (used.has(anchor)) {
-      let k = 2;
-      while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
-      anchor = `${slug}-${k}`;
-    }
-    used.add(anchor);
+  const reserved = new Set([...html.matchAll(ANCHOR_RE)].map((m) => m[1]!));
+  const used = new Set<string>(others);
+  // A card whose id holds a parked wikilink (its id text still carries the
+  // sentinel here) slugs its link text, so it yields to every other card.
+  const matches = [...html.matchAll(ANCHOR_RE)];
+  const parked = matches.map((m) => {
+    const end = m.index! + m[0].length;
+    return html.slice(end, html.indexOf("<", end)).includes("\x00");
+  });
+  const final: string[] = [];
+  for (const pass of [false, true]) {
+    matches.forEach((m, i) => {
+      if (parked[i] !== pass) return;
+      const slug = m[1]!;
+      let anchor = slug;
+      if (used.has(anchor)) {
+        let k = 2;
+        while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
+        anchor = `${slug}-${k}`;
+      }
+      used.add(anchor);
+      final[i] = anchor;
+    });
+  }
+  let n = 0;
+  return html.replace(ANCHOR_RE, (_m, _slug: string, between: string) => {
+    const anchor = final[n++]!;
     return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
   });
 }
@@ -1482,13 +1529,8 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
   const takenLane = new Map<string, Block[]>();
-  const anchors = new Set<string>();
   const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
-    const base = `nm-q-${anchorSlug(id)}`;
-    let anchor = base;
-    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
-    anchors.add(anchor);
-    out.moved.set(id, anchor);
+    out.moved.set(id, ""); // the anchor is given below, once every card is taken
     takenBy.set(id, block);
     takenLane.set(id, lane);
     list.push(questions.get(id)!.block);
@@ -1513,6 +1555,20 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
     const list: ComponentBlock[] = [];
     for (const id of settledIds) take(id, host, SETTLED_LANE, list);
     if (list.length) out.settled.set(host.children, list);
+  }
+  // `nm-q-` + the slug, a repeat suffixed `-2`, `-3` in take order; an id
+  // unsafe in an attribute (or holding a sentinel) comes after every safe one,
+  // so it never takes a safe id's anchor, and one that slugs to nothing takes
+  // `nm-q-card` (its moved-card line needs a target).
+  const anchors = new Set<string>();
+  const ids = [...out.moved.keys()];
+  for (const id of [...ids.filter((i) => !UNSAFE_ANCHOR_ID_RE.test(i)), ...ids.filter((i) => UNSAFE_ANCHOR_ID_RE.test(i))]) {
+    const slug = idAnchor(id, currentLinkTexts);
+    const base = `nm-q-${slug || (UNSAFE_ANCHOR_ID_RE.test(id) ? "card" : "")}`;
+    let anchor = base;
+    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
+    anchors.add(anchor);
+    out.moved.set(id, anchor);
   }
   planMovedStubs(blocks, out, takenBy, takenLane);
   return out;
@@ -2533,8 +2589,9 @@ const webRenderer: BlockRenderer = {
         // One card per query: header (id, question, answer, run date, uses),
         // the reading, the result table, the SQL behind a closed disclosure.
         const q = parseQueryAttrs(attrs);
-        // Made unique across the page by `uniqueAnchors`, after rendering.
-        const anchor = q.anchor;
+        // Made unique across the page by `uniqueAnchors`, after rendering. Read
+        // with a parked wikilink as its text, never the sentinel (F57).
+        const anchor = idAnchor(q.id, currentLinkTexts);
         const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
         const idHtml = !q.id
           ? ""
