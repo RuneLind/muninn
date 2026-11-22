@@ -129,3 +129,10 @@ test("F71: a Confidence line inside a fence or a code span stays code", () => {
   expect(html).toContain("<code>Confidence: 70/100</code>");
   expect(html).toContain('wiki-fc-conf-chip mid">60/100');
 });
+
+test("F29: the streaming buffer and a stored plain answer drop NUL and U+0001 before formatting", () => {
+  for (const html of [renderStreamingBody("a\0b\x01c"), askAnswerBodyHtml(null, "", "a\0b\x01c")]) {
+    expect(html).not.toMatch(/[\x00\x01]/);
+    expect(html).toBe("abc");
+  }
+});

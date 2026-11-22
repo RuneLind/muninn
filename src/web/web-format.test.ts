@@ -866,3 +866,25 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     expect(html).toContain('<a class="query-id" href="#page">Page</a>');
   });
 });
+
+describe("post-passes, fix round 1 batch 2 (A2)", () => {
+  const opts = { reader: true, readerShapes: true };
+  test("F53: an angle-bracket link whose URL holds a code span shows what was written, never [url](url)", () => {
+    expect(formatWebHtml("<https://e.com/`c`>")).toBe("&lt;https://e.com/<code>c</code>&gt;");
+    expect(formatWebHtml("<https://e.com/x#`a_b`|l>")).toBe("&lt;https://e.com/x#<code>a_b</code>|l&gt;");
+    // A plain one still links.
+    expect(formatWebHtml("<https://e.com/x>")).toBe('<a href="https://e.com/x" target="_blank" rel="noopener">https://e.com/x</a>');
+  });
+
+  test("F53: a #fragment href is parked from the emphasis pass", () => {
+    expect(formatWebHtml("[l](#_x_)")).toBe('<a href="#_x_">l</a>');
+  });
+
+  test("a parked code span reads as a letter before a before → after run: no chip", () => {
+    expect(formatWebHtml("`v`1.2 → 1.3", opts)).toBe("<code>v</code>1.2 → 1.3");
+  });
+
+  test("a parked link open tag reads as nothing: a letter before it still holds the chip off", () => {
+    expect(formatWebHtml("v[1 → 2](https://x.com)", opts)).toBe('v<a href="https://x.com" target="_blank" rel="noopener">1 → 2</a>');
+  });
+});

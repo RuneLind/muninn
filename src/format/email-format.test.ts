@@ -13,3 +13,7 @@ test("a bad height is reported as an invalid embed, not blamed on the src", () =
   expect(out).toContain("Embedded page: invalid embed");
   expect(out).not.toContain("invalid src");
 });
+
+test("a code span's placeholder close lets emphasis open right after it", () => {
+  expect(formatEmailHtml("`y`*em*")).toEndWith("</code><em>em</em></p>");
+});

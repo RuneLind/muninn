@@ -370,7 +370,12 @@ const TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]
 const ATTR_RE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+)))?/g;
 const RAW_TEXT = new Set(["script", "style"]);
 
-type ViolationKind = "nul" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
+type ViolationKind = "nul" | "soh" | "marker" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
+
+/** A sentinel's marker word (`WIKIPAGELINK3`, `INLINECMP0`) left visible in
+ *  text: the NUL backstop turns an unrestored `\x00WIKIPAGELINK3\x00` into it.
+ *  Not word-bounded, since a leak sits flush against the text around it. */
+const MARKER_WORD_RE = /(?<![A-Z])[A-Z]{4,}\d+(?!\d)/g;
 
 /** One break of the contract: what, on which element (name and `class`) and
  *  which attribute, and the page from there on. */
@@ -407,6 +412,7 @@ export function scanHtml(html: string): Scan {
   const textUpTo = (end: number) => {
     const k = html.indexOf(">", textFrom);
     if (k >= 0 && k < end) add("raw-gt", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
+    for (const w of html.slice(textFrom, end).matchAll(MARKER_WORD_RE)) add("marker", Math.max(0, textFrom + w.index - 80), lastOpen.tag, lastOpen.cls, "", w[0]);
   };
   const nulsUpTo = (end: number) => {
     for (let k = html.indexOf("\0", nulFrom); k >= 0 && k < end; k = html.indexOf("\0", k + 1)) add("nul", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
@@ -460,6 +466,8 @@ export function scanHtml(html: string): Scan {
   }
   nulsUpTo(html.length);
   textUpTo(html.length);
+  // A U+0001 anywhere, text or attribute: an unrestored placeholder's close.
+  for (let k = html.indexOf("\x01"); k >= 0; k = html.indexOf("\x01", k + 1)) add("soh", Math.max(0, k - 80), "", "", "", html.slice(Math.max(0, k - 40), k + 41));
   return { violations, elements };
 }
 
@@ -535,10 +543,13 @@ function benign(c: Case): Set<string> {
 const injectedElements = (hostile: Set<string>, known: Set<string>) => [...hostile].filter((e) => !known.has(e) && !FILL_MARKDOWN_ELEMENTS.has(e));
 
 /** Every violation of `c`: the scanner's, and each element the hostile render
- *  opens that the benign one does not and the fill's markdown cannot make. */
+ *  opens that the benign one does not and the fill's markdown cannot make. A
+ *  marker word the fill itself spells (`INLINE0`) is its text, not a leak. */
 function violationsOf(c: Case): Violation[] {
   const html = render(page(c.component, c.fill, c.setup), c.mode, c.fill);
   const scan = scanHtml(html);
+  const fillWords = new Set(c.fill.match(MARKER_WORD_RE) ?? []);
+  scan.violations = scan.violations.filter((v) => v.kind !== "marker" || !fillWords.has(v.value));
   const extra = injectedElements(scan.elements, benign(c))
     .map((e): Violation => {
       const i = Math.max(0, html.search(new RegExp(`<${e}[\\s/>]`, "i")));
@@ -678,6 +689,8 @@ describe("rendered attribute values (F58)", () => {
     expect(attributeViolations(`<span class="cb-owner"><img src=x data-pwn onerror=alert(1)></span>`).map((v) => v.split(" ")[0])).toEqual(["injected-attr", "injected-attr"]);
     expect(attributeViolations(`<span title="x" onmouseover="y">t</span>`)).toHaveLength(1);
     expect(attributeViolations(`<section id="a" data-x="q &gt; 1"><p>x &lt; y</p><br><img src="x" alt=""/></section>`)).toEqual([]);
+    // A visible marker word, flush against its text or not, and a U+0001 anywhere.
+    expect(attributeViolations(`<p>pINLINECMP0<code>c</code> WIKIPAGELINK3.</p><a title="x\x01">Q-16 abc1234 MELO-12</a>`).map((v) => v.split(" ")[0])).toEqual(["marker", "marker", "soh"]);
   });
 
   test("the real views render: each valid setup draws its view, never a fallback", () => {

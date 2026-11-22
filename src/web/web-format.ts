@@ -2766,6 +2766,9 @@ function renderInline(text: string): string {
   return renderInlineWith(text, true);
 }
 
+/** A parked placeholder (code span, inline component) inside a link's URL. */
+const PARKED_IN_URL_RE = /\x00[A-Z]+\d+\x01/;
+
 /** `renderInline`; `chips` false keeps the before → after chips out (a
  *  heading, a fold's duplicate heading, a table header). They are drawn
  *  only where the reader shapes apply. */
@@ -2821,8 +2824,11 @@ function renderInlineWith(text: string, chips: boolean): string {
   // turn the angle brackets into entities and hide the link).
   // Linear matchers for `<(https?:\/\/[^|>]+)\|([^>]+)>` and `<(https?:\/\/[^>]+)>`
   // (F30: the regexes rescanned the line from every unclosed opener).
-  result = replaceAnglePipeLinks(result, (_m, url, label) => `[${label}](${url})`);
-  result = replaceAngleLinks(result, (_m, url) => `[${url}](${url})`);
+  // A URL holding a parked code span or inline component stays as written:
+  // the link pass below would refuse it and print `[url](url)` (F53).
+  const angle = (m: string, url: string, label?: string) => (PARKED_IN_URL_RE.test(url) ? m : `[${label ?? url}](${url})`);
+  result = replaceAnglePipeLinks(result, (m, url, label) => angle(m, url, label));
+  result = replaceAngleLinks(result, (m, url) => angle(m, url));
 
   // Escape HTML entities — prevents raw HTML in Claude's response from being
   // interpreted as tags. Must happen before generated tags are emitted below.
@@ -2838,7 +2844,7 @@ function renderInlineWith(text: string, chips: boolean): string {
   // back as its source text through `restoreParkedSentinels`.)
   result = replaceMarkdownLinks(result, (m, label, url) => {
     const linkable = /^https?:\/\//.test(url) || /^#[^\s#]+$/.test(url);
-    if (linkable && /\x00[A-Z]+\d+\x01/.test(url)) return m;
+    if (linkable && PARKED_IN_URL_RE.test(url)) return m;
     if (/^https?:\/\//.test(url)) {
       return `${ph.add("LINKOPEN", `<a href="${url}" target="_blank" rel="noopener">`)}${label}</a>`;
     }

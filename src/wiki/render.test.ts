@@ -3,6 +3,7 @@ import { paragraphGaps, readerPayload, renderWikiHtml, stripFrontmatter } from "
 import { parseWikiDefaultLens } from "../format/reader-lens.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
+import { locateSection } from "./walkthrough.ts";
 
 const page = (name: string): WikiPageMeta => ({
   name,
@@ -619,5 +620,24 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     expect(html).not.toContain("\0");
     expect(html).toContain('<th scope="col">ab</th>');
     expect(html).toContain('<th scope="col">cd</th>');
+  });
+
+  // Each strip covers one path the other does not reach.
+  test("the page-entry strip: a PR ledger label the decision views read carries no U+0001", () => {
+    const md = [
+      "# Plan", "",
+      "<NextMoves>", "", '<Lane kind="you">', "", "1. Run it.", "", "</Lane>", "", "</NextMoves>", "",
+      "<DecisionLog>", "", "- **O1** — Which store? Closed 2026-10-01 (D1).", "- **D1** — Use the flat file.", "", "</DecisionLog>", "",
+      "**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|",
+      "| 1 — a\x01b | merged | D1 |", "| 2 — c | open | D1 |", "| 3 — d | open | D1 |", "| 4 — e | planned | D1 |", "",
+    ].join("\n");
+    const html = renderWikiHtml(md, () => undefined, { views: true });
+    expect(html).toContain('title="PR 1 · merged · ab"');
+    expect(html).not.toContain("\x01");
+  });
+
+  test("readerBody's strip: the Walk-me-through section carries no NUL or U+0001", () => {
+    const r = locateSection("# T\n\n## A\n\nx\x01y\x00z\n", { heading: "A", ordinal: 0, count: 1 });
+    expect(r).toEqual({ ok: true, section: { level: 2, headingText: "A", markdown: "\nxyz\n" } });
   });
 });

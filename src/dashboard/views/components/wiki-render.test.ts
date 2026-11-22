@@ -230,6 +230,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // tag, and the formatter and the Ask confidence pass skipping rendered code): 923,243 (316,290 gzipped), so the pin moves to 923,400.
 // A2 fix round 1 (a parked link tag read as a tag by the chip pass, U+0001 dropped with NUL from
 // untrusted text): 923,617 (316,439 gzipped), so the pin moves to 923,618.
+// A2 fix round 1 batch 2 (the Ask stream drops NUL and U+0001, an angle-bracket link with a parked
+// code span stays as written): 923,689 (316,466 gzipped), so the pin moves to 923,690.
 const WIKI_CLIENT_MAX_BYTES = 926_800;
 
 test("wikiClientScript stays under its size pin", async () => {

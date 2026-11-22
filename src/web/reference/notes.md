@@ -193,7 +193,9 @@ so a `[1]` in a link URL or a Question id cut the value. These caller sentinels
 are `\x00…\x00`; `Placeholders`' own are `\x00…\x01` (F29), so a marker word
 between two of them cannot spell a third. No input supplies either delimiter:
 the page body and an Ask answer drop both (`withoutSentinelDelimiters`,
-`src/format/markdown-core.ts`), the page-file loader turns both into U+FFFD
+`src/format/markdown-core.ts`; the answer on the server in `renderAskAnswerHtml`
+and in the client's streaming and stored-answer render, `renderStreamingBody`),
+the page-file loader turns both into U+FFFD
 (`pageFileText`), and the diagram JSON, CaseBoard YAML and CSV parsers drop the
 ones an escape spells from every parsed string.
 

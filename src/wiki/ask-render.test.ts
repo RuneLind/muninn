@@ -277,4 +277,10 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     expect(html).not.toContain("\0");
     expect(html).toContain('data-question-id="ab"');
   });
+
+  test("a NUL-spelled citation token in the answer forges no citation", () => {
+    const html = renderAskAnswerHtml("x \x00ASKCITE0\x00 y [1]", cites);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(html).toStartWith("x ASKCITE0 y <sup");
+  });
 });

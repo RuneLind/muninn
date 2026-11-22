@@ -15,6 +15,7 @@
 
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { inRenderedCode, renderedCodeRegions } from "../../../format/rendered-code.ts";
+import { withoutSentinelDelimiters } from "../../../format/markdown-core.ts";
 
 /**
  * Matches a standalone `Confidence: NN/100` line in **formatWebHtml output**.
@@ -58,9 +59,10 @@ export function enhanceConfidenceHtml(html: string): string {
  *  into the same `.wiki-article`-styled body as the final answer, so headings,
  *  lists and code grow formatted during the stream instead of as plain text. The
  *  confidence-chip enhancement is baked in here so EVERY streaming/done render of a
- *  fact-check buffer carries the chip (no per-call-site opt-in to forget). */
+ *  fact-check buffer carries the chip (no per-call-site opt-in to forget). The
+ *  raw text drops NUL and U+0001 first, as the server's answer does (F29). */
 export function renderStreamingBody(text: string): string {
-  return enhanceConfidenceHtml(formatWebHtml(text));
+  return enhanceConfidenceHtml(formatWebHtml(withoutSentinelDelimiters(text)));
 }
 
 /** Body HTML for one Ask turn: the server-rendered final article once it has
