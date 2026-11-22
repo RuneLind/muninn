@@ -3,7 +3,8 @@
  * through the real `bootDiscoverPage` in happy-dom with `fetch` stubbed: a
  * capture job that fails puts the video back (only while it is still `queued`)
  * and re-enables Summarize; a job that succeeds leaves it queued; Undo of a dismissal
- * after a failed job brings the video back actionable, not stuck queued. The page follows
+ * after a failed job brings the video back actionable, not stuck queued, also when the job fails
+ * while the Undo write is in flight; a later Summarize replaces the earlier attempt's record. The page follows
  * jobs through one poll of `GET /api/youtube/jobs`, never a stream per click.
  * Invented ids only (public repo).
  *
@@ -42,6 +43,9 @@ const V1 = "vidAAAAAAA1";
 const V2 = "vidBBBBBBB2";
 const V3 = "vidCCCCCCC3";
 const V4 = "vidDDDDDDD4";
+const V5 = "vidEEEEEEE5";
+const V6 = "vidFFFFFFF6";
+const V7 = "vidGGGGGGG7";
 const hit = (videoId: string, rank: number) => ({
   videoId,
   title: `Video ${videoId}`,
@@ -69,26 +73,41 @@ const SHELF: DiscoverShelf = {
   origin: "watcher",
   failed: 0,
   createdAt: Date.parse("2026-11-20T12:00:00Z"),
-  hits: [hit(V1, 1), hit(V2, 2), hit(V3, 3), hit(V4, 4)],
+  hits: [hit(V1, 1), hit(V2, 2), hit(V3, 3), hit(V4, 4), hit(V5, 5), hit(V6, 6), hit(V7, 7)],
 };
 
 /** The server's side: each video's state, each job's status, and every URL asked. */
-const serverState = new Map<string, string>([V1, V2, V3, V4].map((v) => [v, "new"]));
+const serverState = new Map<string, string>([V1, V2, V3, V4, V5, V6, V7].map((v) => [v, "new"]));
 const jobs = new Map<string, { status: string; error?: string }>();
 const fetched: string[] = [];
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+/** Videos whose next Summarize the server answers `duplicate` (already captured, no job). */
+const duplicates = new Set<string>();
+/** A state write held before it commits, while `hold` matches it; `release` lets it through. */
+let hold: ((body: Record<string, string>) => boolean) | null = null;
+let held: { body: Record<string, string>; release: () => void } | null = null;
+/** Every conditional write the server refused, as `<videoId>:<state>`. */
+const refused: string[] = [];
 
 async function stubFetch(input: unknown, init?: { method?: string; body?: unknown }): Promise<Response> {
   const url = String(input);
   fetched.push(url);
   const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, string>) : {};
   if (url === "/api/youtube/summarize") {
+    if (duplicates.delete(body.video_id!)) return json(200, { duplicate: true });
     const id = `job-${body.video_id}`;
     jobs.set(id, { status: "summarizing" });
     return json(200, { job_id: id });
   }
   if (url === "/api/summaries/discover/state") {
-    if (body.ifState && serverState.get(body.videoId!) !== body.ifState) return json(409, { error: "changed", code: "state_changed" });
+    if (hold?.(body)) {
+      hold = null;
+      await new Promise<void>((release) => (held = { body, release }));
+    }
+    if (body.ifState && serverState.get(body.videoId!) !== body.ifState) {
+      refused.push(`${body.videoId}:${body.state}`);
+      return json(409, { error: "changed", code: "state_changed" });
+    }
     serverState.set(body.videoId!, body.state!);
     return json(200, { videoId: body.videoId, state: body.state });
   }
@@ -176,5 +195,60 @@ describe("Summarize follows the capture job (F17)", () => {
     expect(fetched.filter((u) => u.startsWith("/api/youtube/jobs")).length).toBe(settledPolls);
     // Never a stream per click.
     expect(fetched.some((u) => u.includes("/api/youtube/stream/"))).toBe(false);
+  });
+});
+
+describe("Undo after Summarize (F17 fix round 2 batch 2)", () => {
+  const heldNow = () => held as { body: Record<string, string>; release: () => void } | null;
+  const dismissAndWait = async (v: string) => {
+    card(v)!.querySelector<HTMLButtonElement>('[data-act="dismiss"]')!.click();
+    await until(() => card(v) === null && serverState.get(v) === "dismissed", "dismissed");
+  };
+  const undo = () => document.querySelector<HTMLButtonElement>("#dscToast [data-undo]")!.click();
+
+  test("the job fails while the Undo write is in flight: the put-back meets the dismissal, then Undo still ends at new with Summarize", async () => {
+    sumBtn(V5)!.click();
+    await until(() => sumBtn(V5)?.textContent === "✓ Queued", "queued");
+    await dismissAndWait(V5);
+    hold = (b) => b.videoId === V5 && b.state === "queued" && !b.ifState;
+    undo();
+    await until(() => heldNow() !== null, "the Undo write held");
+    jobs.set(`job-${V5}`, { status: "error", error: "Transcript unavailable" });
+    await until(() => refused.includes(`${V5}:new`), "the put-back refused while dismissed");
+    expect(serverState.get(V5)).toBe("dismissed");
+    heldNow()!.release();
+    await until(() => sumBtn(V5)?.textContent === "Summarize", "back to Summarize");
+    expect(serverState.get(V5)).toBe("new");
+    expect(sumBtn(V5)!.getAttribute("aria-disabled")).toBeNull();
+    expect(toastText()).toContain("The summary failed: Transcript unavailable. You can try again.");
+  });
+
+  test("a failed capture, then a Summarize answered duplicate: dismiss and Undo give queued, not the stale state", async () => {
+    sumBtn(V6)!.click();
+    await until(() => sumBtn(V6)?.textContent === "✓ Queued", "queued");
+    jobs.set(`job-${V6}`, { status: "error", error: "Transcript unavailable" });
+    await until(() => sumBtn(V6)?.textContent === "Summarize", "back to Summarize");
+    duplicates.add(V6);
+    sumBtn(V6)!.click();
+    await until(() => sumBtn(V6)?.textContent === "✓ Queued" && serverState.get(V6) === "queued", "queued again");
+    await dismissAndWait(V6);
+    undo();
+    await until(() => card(V6) !== null, "restored card");
+    expect(serverState.get(V6)).toBe("queued");
+    expect(sumBtn(V6)!.textContent).toBe("✓ Queued");
+  });
+
+  test("a failed capture, then a second Summarize still running: dismiss and Undo give queued", async () => {
+    sumBtn(V7)!.click();
+    await until(() => sumBtn(V7)?.textContent === "✓ Queued", "queued");
+    jobs.set(`job-${V7}`, { status: "error", error: "Transcript unavailable" });
+    await until(() => sumBtn(V7)?.textContent === "Summarize", "back to Summarize");
+    sumBtn(V7)!.click();
+    await until(() => sumBtn(V7)?.textContent === "✓ Queued" && serverState.get(V7) === "queued", "queued again");
+    expect(jobs.get(`job-${V7}`)?.status).toBe("summarizing");
+    await dismissAndWait(V7);
+    undo();
+    await until(() => card(V7) !== null, "restored card");
+    expect(serverState.get(V7)).toBe("queued");
   });
 });

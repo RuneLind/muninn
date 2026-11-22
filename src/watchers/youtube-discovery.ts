@@ -44,8 +44,9 @@
  * The run keeps inside the runner's net: every model call carries one run-wide
  * `deadlineAt` (min(net, tick) minus the net's margin, so `health.finish()` still runs), and
  * no seed starts with less than {@link MIN_SEED_MS} left. A seed whose model call the deadline
- * cuts is no failure of the seed or the model: it is left for the next run uncharged, and
- * `youtube:model` does not count it.
+ * cuts (started with under {@link CUT_START_MAX_MS} left) is no failure of the seed or the model:
+ * it is left for the next run uncharged, and `youtube:model` does not count it. A call started
+ * with more that rejects at the deadline hung, and is a model failure.
  */
 
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -87,6 +88,14 @@ export const MIN_SEED_MS = 60_000;
  * router bounds its last attempt at the deadline itself, so such a call rejects at or after it.
  */
 export const DEADLINE_CUT_SLACK_MS = 1_000;
+/**
+ * A model call started with at least this left had its chance, and one that still rejects at the
+ * deadline hung: a model failure, not a cut. The router sizes its attempts from the deadline (at
+ * most two, each at least half of this), and a whole healthy seed took 11–14 s (see MIN_SEED_MS).
+ * Only a call a slow earlier step left with less is cut. Every seed starts with MIN_SEED_MS left,
+ * so its queries call is judged unless the raw read ate half of it.
+ */
+export const CUT_START_MAX_MS = MIN_SEED_MS / 2;
 /** Failed attempts (the first one included) after which a seed is no longer retried. */
 export const MAX_SEED_ATTEMPTS = 3;
 /**
@@ -474,15 +483,17 @@ export async function checkYouTubeDiscovery(
     return new Set([...captured, ...stored, ...shelved]);
   };
   const opts = { deadlineAt };
-  // Set when a model call of the current seed rejects at the deadline (see DEADLINE_CUT_SLACK_MS).
+  // Set when a model call of the current seed, started with under CUT_START_MAX_MS left, rejects
+  // at the deadline (DEADLINE_CUT_SLACK_MS). One started with more that rejects there hung.
   let cut = false;
   const bounded =
     <A extends unknown[]>(call: (...a: A) => Promise<string>) =>
     async (...a: A): Promise<string> => {
+      const leftAtStart = deadlineAt - now();
       try {
         return await call(...a);
       } catch (err) {
-        if (deadlineAt - now() < DEADLINE_CUT_SLACK_MS) cut = true;
+        if (leftAtStart < CUT_START_MAX_MS && deadlineAt - now() < DEADLINE_CUT_SLACK_MS) cut = true;
         throw err;
       }
     };

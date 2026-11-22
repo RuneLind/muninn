@@ -1,7 +1,17 @@
 /** The Discover page's pure helpers: lengths, counts, ages, and which cards a shelf shows in what order. */
 import { describe, expect, test } from "bun:test";
-import { createJobFollower, dscAge, dscCount, dscDuration, dscHiddenNote, dscVisibleHits, DSC_JOB_POLL_MAX_FAILS } from "./discover-page-client.ts";
-import type { DiscoverHit } from "../../../db/youtube-discover.ts";
+import {
+  createJobFollower,
+  dscAge,
+  dscCount,
+  dscDuration,
+  dscHiddenNote,
+  dscUndoState,
+  dscVisibleHits,
+  DSC_JOB_POLL_MAX_FAILS,
+  type CaptureEnd,
+} from "./discover-page-client.ts";
+import type { DiscoverHit, DiscoverHitState } from "../../../db/youtube-discover.ts";
 import { dscFilterSeeds } from "./discover-seed-bar-client.ts";
 import type { SeedDoc } from "../../../youtube/discover-seeds.ts";
 
@@ -179,6 +189,26 @@ describe("createJobFollower (F17)", () => {
     await down.run();
     expect(settled).toEqual({ end: "lost" });
     expect(down.idle()).toBe(true);
+  });
+});
+
+describe("dscUndoState (F17 fix round 2 batch 2)", () => {
+  const capture = (end?: CaptureEnd) => ({ before: "later" as DiscoverHitState, ...(end ? { end } : {}) });
+  test("a video queued by this page: queued while the job runs, after it completed, and when no job was followed", () => {
+    expect(dscUndoState("queued", capture())).toBe("queued");
+    expect(dscUndoState("queued", capture({ end: "complete" }))).toBe("queued");
+  });
+  test("after a failed or a lost capture: the state before Summarize", () => {
+    expect(dscUndoState("queued", capture({ end: "error", message: "x" }))).toBe("later");
+    expect(dscUndoState("queued", capture({ end: "lost" }))).toBe("later");
+  });
+  test("a video queued before this page loaded, or any other state, is written back as it was", () => {
+    expect(dscUndoState("queued", undefined)).toBe("queued");
+    for (const s of ["new", "later", "dismissed"] as DiscoverHitState[]) {
+      expect(dscUndoState(s, capture({ end: "error", message: "x" }))).toBe(s);
+      expect(dscUndoState(s, capture({ end: "lost" }))).toBe(s);
+      expect(dscUndoState(s, capture({ end: "complete" }))).toBe(s);
+    }
   });
 });
 

@@ -1053,8 +1053,12 @@ describe("F14 fix round 1 batch 3: search tally after a rank failure; a deadline
   });
 
   const deadlineOf = (w: Watcher) => NOW + Math.min(computeWatcherTimeoutMs(w), TICK_TIMEOUT_MS) - WATCHER_TIMEOUT_MARGIN_MS;
-  /** The first rank call is cut by the run's deadline: the clock reaches it and the router's deadline error rejects. */
-  function cutRun(): { d: YouTubeDiscoveryDeps; w: Watcher; setClock: (t: number) => void } {
+  /**
+   * The first rank call is cut by the run's deadline: a slow search leaves it 10 s (under
+   * CUT_START_MAX_MS), the clock reaches the deadline and the router's deadline error rejects.
+   * `slowRead` puts the slow step before the queries call instead.
+   */
+  function cutRun(slowRead = false): { d: YouTubeDiscoveryDeps; w: Watcher; setClock: (t: number) => void } {
     let clock = NOW;
     const w = watcher({ timeoutMs: 300_000 });
     const d = deps({
@@ -1065,6 +1069,12 @@ describe("F14 fix round 1 batch 3: search tally after a rank failure; a deadline
         return `run-${saved.length}`;
       },
     });
+    const late = () => {
+      if (clock < NOW + DAY) clock = deadlineOf(w) - 10_000;
+    };
+    const { readRaw, search } = d.services;
+    if (slowRead) d.services.readRaw = async (c, id) => (late(), readRaw(c, id));
+    else d.services.search = async (q, n) => (late(), search(q, n));
     d.services.rankCall = async () => {
       if (clock < NOW + DAY) {
         clock = deadlineOf(w);
@@ -1102,11 +1112,55 @@ describe("F14 fix round 1 batch 3: search tally after a rank failure; a deadline
 
   test("a queries call the deadline cuts is no failure either", async () => {
     listed = [doc(1, "2026-11-13")];
-    const { d, w } = cutRun();
+    const { d, w } = cutRun(true);
     d.services.queriesCall = d.services.rankCall;
     await checkYouTubeDiscovery(w, bot, undefined, d);
     expect(state!.retry).toEqual({});
     expect(state!.carryFrom).toBe("2026-11-13");
     expect(carried).toContain(HEALTH_MODEL);
+  });
+});
+
+describe("F14 fix round 2 batch 2: a model call that hangs to the deadline is a model failure, not a cut", () => {
+  const id = (n: number) => `ai/Seed ${n}.md`;
+  /**
+   * The Haiku router on a non-CLI backend under `deadlineAt`: the backend attempt gets
+   * min(60 s, left/2), the CLI fallback min(60 s, what is left), and both stall to their bounds.
+   */
+  const hangingCall = (clock: { t: number }, deadlineAt: number) => async (): Promise<string> => {
+    const backend = Math.min(60_000, Math.floor((deadlineAt - clock.t) / 2));
+    clock.t += backend;
+    clock.t += Math.min(60_000, deadlineAt - clock.t);
+    throw new Error("Haiku timed out after 45000 ms");
+  };
+
+  test("default row (no timeoutMs, 90 s): a queries call that stalls both attempts charges youtube:model and records a retry", async () => {
+    listed = [doc(1, "2026-11-13")];
+    const w = watcher();
+    const deadlineAt = NOW + Math.min(computeWatcherTimeoutMs(w), TICK_TIMEOUT_MS) - WATCHER_TIMEOUT_MARGIN_MS;
+    expect(deadlineAt - NOW).toBe(90_000);
+    const clock = { t: NOW };
+    const d = deps({ now: () => clock.t });
+    d.services.queriesCall = hangingCall(clock, deadlineAt);
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    // The call rejected AT the deadline, after 45 s + 45 s: the time alone would read as a cut.
+    expect(clock.t).toBe(deadlineAt);
+    expect(saved).toEqual([]);
+    expect(marks.get(HEALTH_MODEL)?.outcome).toBe("error");
+    expect(state!.retry[id(1)]).toMatchObject({ attempts: 1, lastAt: deadlineAt });
+  });
+
+  test("a retry whose rank call stalls to the deadline is charged an attempt", async () => {
+    listed = [doc(1, "2026-11-10")];
+    state = { carryFrom: null, retry: { [id(1)]: { attempts: 1, lastAt: NOW - 7 * 86_400_000, error: "rank call: 429" } } };
+    const w = watcher();
+    const deadlineAt = NOW + 90_000;
+    const clock = { t: NOW };
+    const d = deps({ now: () => clock.t });
+    d.services.rankCall = hangingCall(clock, deadlineAt);
+    await checkYouTubeDiscovery(w, bot, undefined, d);
+    expect(clock.t).toBe(deadlineAt);
+    expect(state!.retry[id(1)]).toMatchObject({ attempts: 2, lastAt: deadlineAt });
+    expect(marks.get(HEALTH_MODEL)?.outcome).toBe("error");
   });
 });

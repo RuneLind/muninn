@@ -633,13 +633,17 @@ function closeDrawer(): void {
   if (prev) cardEl(liveRun(prev.runId), prev.videoId)?.focus();
 }
 
-/** Videos this page queued: the state before Summarize, and how the capture ended (unset while it runs). */
+/**
+ * Videos this page sent to Summarize: the state before the click, and how the followed capture
+ * ended (unset while it runs, and for a Summarize that followed no job, such as a duplicate).
+ */
 const captures = new Map<string, { before: DiscoverHitState; end?: CaptureEnd }>();
 
 /**
- * The state a dismiss's Undo writes back. `queued` only while this page's capture runs or once it
- * completed: after a failed or lost one, the put-back met the dismissal and gave way, so `queued`
- * would leave a video no job will move, with Summarize gone. Then the state before Summarize.
+ * The state a dismiss's Undo writes back. `queued` while this page's capture runs, once it
+ * completed, and when it followed no job. After a failed one the put-back met the dismissal and
+ * gave way; after a lost one nothing put it back and nothing will move it. `queued` would leave
+ * either with Summarize gone, so Undo writes the state before Summarize.
  */
 export function dscUndoState(before: DiscoverHitState, capture: { before: DiscoverHitState; end?: CaptureEnd } | undefined): DiscoverHitState {
   if (before !== "queued" || !capture?.end || capture.end.end === "complete") return before;
@@ -653,19 +657,19 @@ async function summarize(videoId: string): Promise<void> {
   render();
   const title = found.hit.title;
   const prior = found.hit.state;
+  // Every Summarize replaces the record, so an earlier attempt's end never answers for this one.
+  captures.set(videoId, { before: prior });
   await summarizeFlow(prior, {
     start: () => postJson("/api/youtube/summarize", { title, url: watchUrl(videoId), video_id: videoId }),
     setState: (state) => setState(videoId, state),
     putBack: (state) => setState(videoId, state, "queued"),
-    follow: (jobId) => {
-      captures.set(videoId, { before: prior });
-      return jobFollower()
+    follow: (jobId) =>
+      jobFollower()
         .follow(jobId)
         .then((end) => {
           captures.set(videoId, { before: prior, end });
           return end;
-        });
-    },
+        }),
     toast,
     settled: () => {
       st.summarizing.delete(videoId);
@@ -708,8 +712,17 @@ async function dismiss(videoId: string, fromRun?: string): Promise<void> {
   if (st.open?.videoId === videoId) st.open = null;
   render();
   toast("Dismissed. It won't be suggested again.", () => {
-    void setState(videoId, dscUndoState(before, captures.get(videoId))).then((undoErr) => {
+    const undoTo = dscUndoState(before, captures.get(videoId));
+    void setState(videoId, undoTo).then(async (undoErr) => {
       if (undoErr) toast(undoErr);
+      // The capture failed while this Undo was in flight: its put-back met the dismissal and gave
+      // way, then this Undo wrote `queued`. Put it back now, still only while it is queued.
+      const c = captures.get(videoId);
+      if (!undoErr && undoTo === "queued" && c?.end?.end === "error") {
+        const again = await setState(videoId, c.before, "queued");
+        if (again === null) toast(`The summary failed: ${c.end.message}. You can try again.`);
+        else if (again !== "changed") toast(`The summary failed: ${c.end.message}. It is still marked queued: ${again}`);
+      }
       render();
       if (undoErr) return;
       const run = liveRun(runId);
