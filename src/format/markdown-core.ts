@@ -280,14 +280,32 @@ export function withoutSentinelDelimiters(text: string): string {
 }
 
 /** A parsed YAML or JSON value with {@link withoutSentinelDelimiters} applied
- *  to every string in it (mapping keys stay as parsed). */
-export function parsedWithoutSentinelDelimiters(value: unknown): unknown {
+ *  to every string in it (mapping keys stay as parsed).
+ *
+ *  Each source object is copied once and its copy reused (`seen`): YAML gives
+ *  every alias of an anchor the SAME object, so a copy per visit grows
+ *  exponentially with nested aliases (a 545-byte file, 10 aliases 8 levels
+ *  deep: 19 s and 8 GB measured), and a cycle never ends. The copy is
+ *  registered before its children are walked, so a cycle resolves to it. */
+export function parsedWithoutSentinelDelimiters(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
   if (typeof value === "string") return withoutSentinelDelimiters(value);
-  if (Array.isArray(value)) return value.map(parsedWithoutSentinelDelimiters);
-  if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, parsedWithoutSentinelDelimiters(v)]));
+  if (value === null || typeof value !== "object") return value;
+  const done = seen.get(value);
+  if (done !== undefined) return done;
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    seen.set(value, out);
+    for (const v of value) out.push(parsedWithoutSentinelDelimiters(v, seen));
+    return out;
   }
-  return value;
+  if (Object.getPrototypeOf(value) !== Object.prototype) return value;
+  const out: Record<string, unknown> = {};
+  seen.set(value, out);
+  for (const [k, v] of Object.entries(value)) {
+    // defineProperty, not `out[k] =`: a `__proto__` key stays an own field.
+    Object.defineProperty(out, k, { value: parsedWithoutSentinelDelimiters(v, seen), writable: true, enumerable: true, configurable: true });
+  }
+  return out;
 }
 
 /**

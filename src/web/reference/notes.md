@@ -197,7 +197,13 @@ the page body and an Ask answer drop both (`withoutSentinelDelimiters`,
 and in the client's streaming and stored-answer render, `renderStreamingBody`),
 the page-file loader turns both into U+FFFD
 (`pageFileText`), and the diagram JSON, CaseBoard YAML and CSV parsers drop the
-ones an escape spells from every parsed string.
+ones an escape spells from every parsed string. The YAML walk
+(`parsedWithoutSentinelDelimiters`) copies each source object once: YAML hands
+every alias of an anchor the same object, and a copy per visit took a 545-byte
+file of nested aliases to 19 s and 8 GB. Every sentinel name lives in
+`src/format/sentinel-names.ts`; a new kind joins it (`sentinel-names.test.ts`
+scans `src/` for producers), and the F58 guard scans text and attribute values
+for exactly those names plus digits.
 
 The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
 button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the

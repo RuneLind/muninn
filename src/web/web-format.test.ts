@@ -887,4 +887,16 @@ describe("post-passes, fix round 1 batch 2 (A2)", () => {
   test("a parked link open tag reads as nothing: a letter before it still holds the chip off", () => {
     expect(formatWebHtml("v[1 → 2](https://x.com)", opts)).toBe('v<a href="https://x.com" target="_blank" rel="noopener">1 → 2</a>');
   });
+
+  // Fix round 2 (#896): inputs where the LINKOPEN read decides. Read as a
+  // letter (a placeholder's default), the open tag would hold both chips off.
+  test("a parked link open tag after a space or an opening bracket still draws the chip", () => {
+    const chip = '<span class="ba-old">1</span> <span class="ba-arr">→</span> <span class="ba-new">2</span></span></a>';
+    expect(formatWebHtml("see [1 → 2](https://x.com)", opts)).toBe(
+      `see <a href="https://x.com" target="_blank" rel="noopener"><span class="ba-chip">${chip}`,
+    );
+    expect(formatWebHtml("([1 → 2](https://x.com))", opts)).toBe(
+      `(<a href="https://x.com" target="_blank" rel="noopener"><span class="ba-chip ba-chip-o ba-chip-p">${chip})`,
+    );
+  });
 });

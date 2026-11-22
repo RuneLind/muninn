@@ -6,6 +6,7 @@ import { diagramSvgFromHtml } from "./diagram-svg.ts";
 import { questionRenderOptionsFor, renderWikiHtml } from "./render.ts";
 import { pageFileText } from "./page-files.ts";
 import type { WikiPageMeta } from "./store.ts";
+import { SENTINEL_NAMES } from "../format/sentinel-names.ts";
 
 /**
  * F58 (architecture review 2026-11-16): the finished-HTML passes after the
@@ -14,9 +15,10 @@ import type { WikiPageMeta } from "./store.ts";
  * every attribute value to hold no raw `<`, `>` or `"`. One page per component,
  * setup and hostile fill goes through `renderWikiHtml` (views on and off) and
  * `renderAskAnswerHtml`; the output is parsed quote-aware, and a tag that does
- * not parse, a value holding `<` or `>`, a raw `<` in text, a NUL, an `on*` or
- * `data-pwn` attribute, or an element the same setup never renders with a
- * benign fill fails.
+ * not parse, a value holding `<` or `>`, a raw `<` in text, a NUL or U+0001,
+ * a sentinel's marker word in text or a value, an `on*` or `data-pwn`
+ * attribute, or an element the same setup never renders with a benign fill
+ * fails.
  *
  * Each component renders under its `hostile` setup (the fill in every
  * attribute: the fallback paths) and under setups that walk each enumerated
@@ -372,10 +374,12 @@ const RAW_TEXT = new Set(["script", "style"]);
 
 type ViolationKind = "nul" | "soh" | "marker" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
 
-/** A sentinel's marker word (`WIKIPAGELINK3`, `INLINECMP0`) left visible in
- *  text: the NUL backstop turns an unrestored `\x00WIKIPAGELINK3\x00` into it.
- *  Not word-bounded, since a leak sits flush against the text around it. */
-const MARKER_WORD_RE = /(?<![A-Z])[A-Z]{4,}\d+(?!\d)/g;
+/** A sentinel's marker word (`WIKIPAGELINK3`, `INLINECMP0`, `CB3`) left
+ *  visible in text or an attribute value: the NUL backstop turns an unrestored
+ *  `\x00WIKIPAGELINK3\x00` into it. Exactly the real names
+ *  (`SENTINEL_NAMES`, longest first so `INLINECMP` wins over `INLINE`) and
+ *  their digits; not word-bounded, since a leak sits flush against its text. */
+const MARKER_WORD_RE = new RegExp(`(?<![A-Z])(?:${[...SENTINEL_NAMES].sort((a, b) => b.length - a.length).join("|")})\\d+(?!\\d)`, "g");
 
 /** One break of the contract: what, on which element (name and `class`) and
  *  which attribute, and the page from there on. */
@@ -456,6 +460,7 @@ export function scanHtml(html: string): Scan {
     for (const a of attrs) {
       if (/[<>]/.test(a.value)) add("value-lt-gt", i, name, cls, a.name, a.value);
       if (/^on/.test(a.name) || a.name === "data-pwn") add("injected-attr", i, name, cls, a.name, a.value);
+      for (const w of a.value.matchAll(MARKER_WORD_RE)) add("marker", i, name, cls, a.name, w[0]);
     }
     i = TAG_RE.lastIndex;
     if (!closing && RAW_TEXT.has(name)) {
@@ -691,6 +696,13 @@ describe("rendered attribute values (F58)", () => {
     expect(attributeViolations(`<section id="a" data-x="q &gt; 1"><p>x &lt; y</p><br><img src="x" alt=""/></section>`)).toEqual([]);
     // A visible marker word, flush against its text or not, and a U+0001 anywhere.
     expect(attributeViolations(`<p>pINLINECMP0<code>c</code> WIKIPAGELINK3.</p><a title="x\x01">Q-16 abc1234 MELO-12</a>`).map((v) => v.split(" ")[0])).toEqual(["marker", "marker", "soh"]);
+    // Fix round 2 (#896): a two-letter name (fenced code's `CB`), a leak in an
+    // attribute value, and words that only look like markers.
+    expect(attributeViolations(`<p>xCB3 and ABCB3</p><a href="https://e.com/CB0" title="LINKOPEN12">CBS1 HOLD12 MEL3</a>`).map((v) => v.split(" ").slice(0, 3).join(" "))).toEqual([
+      'marker <p> "CB3"',
+      'marker <a>[href] "CB0"',
+      'marker <a>[title] "LINKOPEN12"',
+    ]);
   });
 
   test("the real views render: each valid setup draws its view, never a fallback", () => {
