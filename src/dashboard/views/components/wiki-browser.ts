@@ -388,7 +388,7 @@ import {
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
 import { initDiscussTab } from "./wiki-discuss-tab.ts";
-import { enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
+import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -1609,16 +1609,13 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true, anch
 function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, hash?: string): void {
   // Taken now, so a load that fails cannot leave it for the next one.
   const inPlace = inPlaceLens;
-  // This load's view. A later view (another load, an explainer, the start
-  // view, an Ask answer, an issue graph, an effort page) drops this response
-  // whatever it is: a page left behind paints nothing, a late failure clears
-  // nothing (R2B4). The shown page keeps its identity until the response.
-  const view = enterView("page");
-  const superseded = () => !viewIsLive(view);
+  // A later view drops this response, failure too (R2B4); the shown one stays live until it paints.
+  const entry = beginPageEntry();
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
-      if (superseded()) return;
+      if (entry.superseded()) return;
+      const view = entry.enter();
       // Restore the 3-pane layout on every outcome — an error rendered into
       // #articleWrap has replaced the atlas, so the panes must come back too.
       setAtlasFull(false);
@@ -1799,7 +1796,8 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       renderList();
     })
     .catch((err: Error) => {
-      if (superseded()) return;
+      if (entry.superseded()) return;
+      entry.enter();
       setAtlasFull(false);
       navInFlight = false;
       removeGraph();

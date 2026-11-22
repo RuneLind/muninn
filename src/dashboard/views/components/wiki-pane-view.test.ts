@@ -6,7 +6,7 @@
  * nothing) is driven through the booted shell in `wiki-boot/`.
  */
 import { describe, expect, test } from "bun:test";
-import { enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
+import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
 
 const read = (f: string) => Bun.file(new URL(`./${f}`, import.meta.url)).text();
 /** A top-level function's text, from its `function` line to its closing `}` line. */
@@ -34,6 +34,26 @@ describe("enterView", () => {
   });
 });
 
+describe("beginPageEntry", () => {
+  test("a page fetch leaves the shown view live until it enters; a later fetch or any entry outdates it", () => {
+    const calls: string[] = [];
+    setViewTeardown((kind: PaneViewKind) => calls.push(kind));
+    const ask = enterView("ask");
+    const first = beginPageEntry();
+    expect(viewIsLive(ask)).toBe(true);
+    const second = beginPageEntry();
+    expect([first.superseded(), second.superseded()]).toEqual([true, false]);
+    expect(calls).toEqual(["ask"]);
+    const page = second.enter();
+    expect([viewIsLive(ask), viewIsLive(page), second.superseded()]).toEqual([false, true, false]);
+    expect(second.enter()).toBe(page); // entered once
+    expect(calls).toEqual(["ask", "page"]);
+    const third = beginPageEntry();
+    enterView("effort");
+    expect([third.superseded(), second.superseded()]).toEqual([true, true]);
+  });
+});
+
 describe("every view entry goes through enterView (F22)", () => {
   const ENTRIES: [file: string, fn: string, kind: PaneViewKind][] = [
     ["wiki-browser.ts", "renderStart", "start"],
@@ -45,16 +65,18 @@ describe("every view entry goes through enterView (F22)", () => {
   ];
 
   test("each of the six entries calls it with its kind, and nothing else does", async () => {
+    // A page enters through `beginPageEntry`, whose `enter()` is the one `enterView("page")`.
     for (const [file, fn, kind] of ENTRIES) {
-      expect(fnBody(await read(file), fn)).toContain(`enterView("${kind}"`);
+      expect(fnBody(await read(file), fn)).toContain(kind === "page" ? "beginPageEntry()" : `enterView("${kind}"`);
     }
+    expect(fnBody(await read("wiki-pane-view.ts"), "beginPageEntry")).toContain('enterView("page")');
     const glob = new Bun.Glob("*.ts");
     let sites = 0;
     for await (const f of glob.scan({ cwd: new URL(".", import.meta.url).pathname })) {
       if (f.endsWith(".test.ts") || f === "wiki-pane-view.ts") continue;
       sites += code(await read(f)).join("\n").match(/\benterView\(/g)?.length ?? 0;
     }
-    expect(sites).toBe(ENTRIES.length);
+    expect(sites).toBe(ENTRIES.length - 1);
   });
 
   test("the teardown is written once: the shown page's identity, hash, breadcrumb and agent runs are cleared only in leaveView", async () => {

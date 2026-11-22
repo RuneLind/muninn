@@ -163,3 +163,30 @@ test("F22: a page response held past an Ask answer paints nothing; the answer an
   await expect(page.locator("#articleWrap")).not.toContainText("Beta body.");
   await expect(page.locator("#wikiBreadcrumb")).toBeHidden();
 });
+
+test("fix round 1: an answer streaming while a clicked page's fetch is held keeps painting until the page lands", async ({ page }) => {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route(
+    (u) => u.pathname === "/api/wiki/page" && u.searchParams.get("relPath") === "beta.md",
+    async (route) => {
+      await held;
+      await route.continue();
+    },
+  );
+  await page.locator("#wikiAskInput").fill("Held question?");
+  await page.locator("#wikiAskBtn").click();
+  await emit(page, 0, "delta", { text: "HELD-ONE " });
+  await expect(page.locator("#askAnswerBody")).toContainText("HELD-ONE");
+  await page.locator('#wikiList .wiki-list-item[data-relpath="beta.md"]').click();
+  await page.waitForTimeout(200);
+  await emit(page, 0, "delta", { text: "HELD-TWO" });
+  await nextFrame(page);
+  console.log(`[held page] answer during the held fetch: ${(await page.locator("#askAnswerBody").innerText()).trim()}`);
+  await expect(page.locator("#askAnswerBody")).toContainText("HELD-TWO");
+  await emit(page, 0, "done", { answer: "HELD-ONE HELD-TWO", cited: [] });
+  await expect(page.locator("#wikiRememberBtn")).toBeEnabled();
+  release();
+  await expect(page.locator("#articleWrap")).toContainText("Beta body.");
+  await expect(page.locator("#askAnswerBody")).toHaveCount(0);
+});

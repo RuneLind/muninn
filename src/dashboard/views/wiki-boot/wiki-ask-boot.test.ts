@@ -414,4 +414,27 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     expect(doc().getElementById("connBody")!.textContent).toBe(conn);
     expect(!!doc().getElementById("askAnswerBody")).toBe(true);
   });
+
+  test("an answer streaming while a clicked page's fetch is held keeps painting until the page replaces it (fix round 1)", async () => {
+    const input = doc().getElementById("wikiAskInput") as HTMLTextAreaElement;
+    input.value = "Held question?";
+    doc().getElementById("wikiAskBtn")!.click();
+    const es = FakeEventSource.all.at(-1)!;
+    es.emit("delta", { text: "HELD-ONE " });
+    await frame();
+    expect(doc().getElementById("askAnswerBody")!.innerHTML).toContain("HELD-ONE");
+    const release = hold("/api/wiki/page?relPath=k.md");
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="k.md"]')!.click();
+    await until(() => fetched.some((u) => u.includes("relPath=k.md")), "the k.md fetch");
+    es.emit("delta", { text: "HELD-TWO" });
+    await frame();
+    expect(doc().getElementById("askAnswerBody")!.innerHTML).toContain("HELD-TWO");
+    es.emit("done", { answer: "HELD-ONE HELD-TWO", cited: [] });
+    await frame();
+    expect((doc().getElementById("wikiRememberBtn") as HTMLButtonElement).disabled).toBe(false);
+    expect((doc().getElementById("wikiFollowupBtn") as HTMLButtonElement).disabled).toBe(false);
+    // The held page still lands once released.
+    release();
+    await until(() => !!doc().querySelector("#articleWrap h1#kmd"), "k.md to render");
+  });
 });
