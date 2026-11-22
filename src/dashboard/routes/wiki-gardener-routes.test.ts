@@ -3346,6 +3346,8 @@ describe("lint proposals — seeding and the group verbs", () => {
     test("Dismiss over a page a dead pass wrote and never committed: settled `applied`, logged and committed once", async () => {
       const g = (...args: string[]) => runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
       await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
       await g("add", "-A");
       await g("commit", "-q", "-m", "seed");
       const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
@@ -3405,6 +3407,8 @@ describe("lint proposals — seeding and the group verbs", () => {
     async function deadPassWiki() {
       const g = gitIn(root);
       await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
       await g("add", "-A");
       await g("commit", "-q", "-m", "seed");
       const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
@@ -3676,6 +3680,8 @@ describe("lint proposals — seeding and the group verbs", () => {
     async function gitWiki(): Promise<unknown[]> {
       await Bun.write(logPath(), "# Log\n");
       await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
       await g("config", "user.email", "t@example.invalid");
       await g("config", "user.name", "t");
       await g("add", "-A");
