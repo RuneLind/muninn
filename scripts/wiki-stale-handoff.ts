@@ -17,7 +17,8 @@
  *
  * - First call: per wiki, the gate (on the default branch: a pull
  *   `--ff-only` of `<remote> <default>`, as an unlocked fetch and then a
- *   fast-forward under the wiki write lock; never a stash, reset or switch; each page
+ *   fast-forward under the write locks of the checkout and every registered
+ *   wiki root inside it (`lockRootsFor`); never a stash, reset or switch; each page
  *   committed / uncommitted / carried / NOT carried / deleted), the fix path
  *   that fits the gate, the free report, then «fix by hand»: the hits and the
  *   To-check pages on the session's own pages, and nothing else. Nothing is
@@ -56,7 +57,7 @@ import {
   type PostSse,
   type StaleLedger,
 } from "./wiki-stale.ts";
-import { takeWikiWriteLock, type WikiLockOutcome } from "../src/wiki/lockfile.ts";
+import { takeWikiWriteLock, type WikiLockHandle, type WikiLockOutcome } from "../src/wiki/lockfile.ts";
 
 type Json = Record<string, any>;
 
@@ -105,11 +106,21 @@ function endLiveGroups() {
   for (const end = Date.now() + TERM_GRACE_MS; Date.now() < end && groups.some((g) => signalGroup(g, 0 as any)); ) Atomics.wait(tick, 0, 0, 20);
   for (const g of groups) signalGroup(g, "SIGKILL");
 }
+/** Wiki write locks the gate holds: the exit path releases them, so a signal never leaves one behind (F13). */
+const heldLocks = new Set<WikiLockHandle>();
+function releaseHeldLocks() {
+  const locks = [...heldLocks];
+  heldLocks.clear();
+  for (const l of locks.reverse()) l.release();
+}
 let exitHooked = false;
 function hookExit() {
   if (exitHooked) return;
   exitHooked = true;
-  process.on("exit", endLiveGroups);
+  process.on("exit", () => {
+    endLiveGroups();
+    releaseHeldLocks();
+  });
   for (const [sig, n] of [["SIGINT", 2], ["SIGTERM", 15], ["SIGHUP", 1]] as const) process.on(sig, () => process.exit(128 + n));
 }
 /** The ssh a network call gets when the user configured none. */
@@ -257,11 +268,75 @@ export interface Gate {
   pages: (PageRef & { state: PageState })[];
 }
 
+/** The roots muninn's wiki registry names (bot `wikiDir`s and `WIKI_EXTRA`), resolved as muninn resolves them; [] when it cannot be read. */
+async function registeredWikiRoots(): Promise<string[]> {
+  try {
+    const { getWikiRegistry } = await import("../src/wiki/registry-memo.ts");
+    return getWikiRegistry().map((e) => e.root);
+  } catch {
+    return [];
+  }
+}
+
+const realOrSelf = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+};
+
+/**
+ * The roots whose `.wiki-write.lock` the fast-forward takes (F13): the checkout
+ * itself, where `wiki-stamp` locks a stamp root at the repo's top, and every
+ * registered wiki root inside it, where muninn's page write locks (jarvis's
+ * wiki is `data/wiki` inside its repo). Realpaths, deduped, sorted: every
+ * holder of several takes them in one order, so two never deadlock.
+ */
+export function lockRootsFor(main: string, roots: readonly string[]): string[] {
+  const top = realOrSelf(main);
+  const inside = roots.map(realOrSelf).filter((r) => r === top || r.startsWith(top + path.sep));
+  return [...new Set([top, ...inside])].sort();
+}
+
+/** Take every root's lock in order, or none: a held one releases those already taken. */
+async function takeGateLocks(
+  roots: readonly string[],
+  lock: (root: string) => Promise<WikiLockOutcome> = (root) => takeWikiWriteLock(root, { op: "stale-handoff-ff" }),
+): Promise<{ ok: true; release: () => void } | { ok: false; reason: string }> {
+  hookExit();
+  const mine: WikiLockHandle[] = [];
+  const release = () => {
+    for (const l of mine.reverse()) {
+      heldLocks.delete(l);
+      l.release();
+    }
+    mine.length = 0;
+  };
+  for (const root of roots) {
+    const t = await lock(root);
+    if (!t.ok) {
+      release();
+      return { ok: false, reason: roots.length > 1 ? `${t.reason}, on ${root}` : t.reason };
+    }
+    if (t.lock) {
+      mine.push(t.lock);
+      heldLocks.add(t.lock);
+    }
+  }
+  return { ok: true, release };
+}
+
 /**
  * The gate for one main checkout: pull on the default branch, then each
  * page's state. Pulls only (`--ff-only`); never stashes, resets or switches.
  */
-export async function runGate(main: string, pages: PageRef[], git: Git, opts: { pull?: boolean; lock?: (root: string) => Promise<WikiLockOutcome> } = {}): Promise<Gate> {
+export async function runGate(
+  main: string,
+  pages: PageRef[],
+  git: Git,
+  opts: { pull?: boolean; lock?: (root: string) => Promise<WikiLockOutcome>; roots?: readonly string[] } = {},
+): Promise<Gate> {
   const lines: string[] = [];
   const g: Gate = { main, fixPath: "", lines, pages: [] };
   const skip = (why: string) => (g.skip ??= why);
@@ -305,7 +380,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
     const r = await git(["fetch", "--quiet", "--no-write-fetch-head", g.remote, `+refs/heads/${def}:refs/remotes/${g.remote}/${def}`], main, PULL_TIMEOUT_MS);
     const err = gitError(r.stderr) || `exit ${r.code}`;
     if (r.code === 0) {
-      const taken = await (opts.lock ?? ((root: string) => takeWikiWriteLock(root, { op: "stale-handoff-ff" })))(main);
+      const taken = await takeGateLocks(lockRootsFor(main, opts.roots ?? (await registeredWikiRoots())), opts.lock);
       if (!taken.ok) {
         g.note = `fetched ${g.remote}/${def}, but the wiki write lock is held (${taken.reason}); the main checkout is as last pulled`;
       } else {
@@ -321,7 +396,7 @@ export async function runGate(main: string, pages: PageRef[], git: Git, opts: { 
             g.note = g.skip;
           }
         } finally {
-          taken.lock?.release();
+          taken.release();
         }
       }
     } else if (!r.timedOut && AUTH_FAILURE.test(r.stderr)) {

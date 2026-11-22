@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
-import { COSTED_PAGE_CAP, gitRunner, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
+import { COSTED_PAGE_CAP, gitRunner, lockRootsFor, planChecks, resolvePage, runGate, runHandoff, type Git, type PageRef } from "./wiki-stale-handoff.ts";
 import type { FetchJson, PostJson, PostSse } from "./wiki-stale.ts";
 import { takeWikiWriteLock } from "../src/wiki/lockfile.ts";
 
@@ -120,6 +120,80 @@ describe("the gate", () => {
     expect(gate.note).toBe("fetched origin/main, but the wiki write lock is held (held by pid 1); the main checkout is as last pulled");
     expect(gate.skip).toBeUndefined();
     expect(await g(main, "rev-parse", "HEAD")).toBe(before);
+  });
+
+  test("F13 fix round 1: a registered wiki root inside the checkout (jarvis's data/wiki) is locked too; the fast-forward waits for it", async () => {
+    const { up, main } = await withRemote();
+    write(up, "plans/a.md", "# A\nnew\n");
+    await g(up, "commit", "-qam", "upstream");
+    await g(up, "push", "-q", "origin", "main");
+    const sub = path.join(main, "data/wiki");
+    mkdirSync(sub, { recursive: true });
+    const held = await takeWikiWriteLock(sub, { op: "test-page-write" });
+    if (!held.ok || !held.lock) throw new Error("the test could not take the lock");
+    const events: string[] = [];
+    let released = false;
+    const watched: Git = async (args, cwd, ms) => {
+      const verb = args.find((a) => ["fetch", "merge", "pull"].includes(a));
+      if (verb) events.push(`${verb} start, lock ${released ? "free" : "held"}`);
+      const r = await git(args, cwd, ms);
+      if (verb === "fetch") setTimeout(() => ((released = true), held.lock!.release()), 300);
+      return r;
+    };
+    const gate = await runGate(main, [], watched, { roots: [sub, path.join(tmp(), "elsewhere")] });
+    expect(events).toEqual(["fetch start, lock held", "merge start, lock free"]);
+    expect(gate.note).toBe("pulled 1 commit(s) from origin/main");
+    expect([existsSync(path.join(main, ".wiki-write.lock")), existsSync(path.join(sub, ".wiki-write.lock"))]).toEqual([false, false]);
+  });
+
+  test("F13 fix round 1: lockRootsFor takes the checkout and the registered roots inside it, in one sorted order", () => {
+    const main = tmp();
+    mkdirSync(path.join(main, "data/wiki"), { recursive: true });
+    mkdirSync(path.join(main, "b"), { recursive: true });
+    const outside = tmp();
+    expect(lockRootsFor(main, [path.join(main, "data/wiki"), outside, path.join(main, "b"), main + "-sibling", path.join(main, "data/wiki")])).toEqual([
+      main,
+      path.join(main, "b"),
+      path.join(main, "data/wiki"),
+    ]);
+  });
+
+  test("F13 fix round 1: a SIGINT while the fast-forward holds the lock leaves no .wiki-write.lock behind", async () => {
+    const main = tmp();
+    const child = path.join(tmp(), "gate-child.ts");
+    writeFileSync(
+      child,
+      `import { runGate } from ${JSON.stringify(path.resolve(import.meta.dir, "wiki-stale-handoff.ts"))};
+const main = process.argv[2];
+const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+await runGate(main, [], async (args) => {
+  const a = args.join(" ");
+  if (a === "rev-parse --show-toplevel") return ok(main);
+  if (a === "symbolic-ref --short -q HEAD") return ok("main");
+  if (a === "remote") return ok("origin");
+  if (a.startsWith("symbolic-ref --short -q refs/remotes/origin/HEAD")) return ok("origin/main");
+  if (a === "rev-parse HEAD") return ok("abc");
+  if (args.includes("merge")) {
+    console.log("READY");
+    return new Promise((r) => setTimeout(() => r(ok()), 60_000));
+  }
+  return ok();
+}, { roots: [] });
+`,
+    );
+    const proc = Bun.spawn([process.execPath, "--no-env-file", child, main], { cwd: path.dirname(child), stdout: "pipe", stderr: "pipe", detached: true });
+    const reader = proc.stdout.getReader();
+    let out = "";
+    while (!out.includes("READY")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += new TextDecoder().decode(value);
+    }
+    expect(out).toContain("READY");
+    expect(existsSync(path.join(main, ".wiki-write.lock"))).toBe(true);
+    proc.kill("SIGINT");
+    const code = await proc.exited;
+    expect({ code, lock: existsSync(path.join(main, ".wiki-write.lock")) }).toEqual({ code: 130, lock: false });
   });
 
   test("gap: no upstream — a default branch with no tracking info still pulls, a remote without the branch is a note, not a skip", async () => {
