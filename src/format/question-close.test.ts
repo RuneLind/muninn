@@ -421,6 +421,8 @@ describe("closeCardEdit: owner text stays text in every state (F50 matrix)", () 
   test("grammar a parser reads inside the owner's code span (a struck lead closing in a span) is refused, not written", () => {
     const r = closeCardEdit(base, "O1", answer({ choice: null, body: "~~Old. `x.~~ superseded` y" }), TODAY);
     expect(r).toMatchObject({ ok: false, code: "unplaceable" });
+    // The cause is the answer, so the reason names it, not the page.
+    expect(!r.ok && r.reason).toContain("the answer reads as decision-log grammar");
   });
 
   test("the three reported shapes: backslash before a tag, a tag after a span, a comparison before Closes, a stray before a tag in the author", () => {
@@ -439,5 +441,45 @@ describe("closeCardEdit: owner text stays text in every state (F50 matrix)", () 
       const d1 = analyzeDecisionChains(parseBlocks(stripFm(r.content)), []).chains.find((c) => c.decision === "D1")!;
       expect(d1.questions.map((x) => x.id)).toEqual(["O1"]);
     }
+  });
+
+  // Fix round 2: the parsers read the item in NFC (`maskCodeSpans`), so the scan does too.
+  test("a decomposed (NFD) close or reopen word before a date is broken like the NFC one", () => {
+    const r = ok(closeCardEdit(base, "O1", answer({ choice: null, body: "Gjenåpnet 02.01.2026 if B fails".normalize("NFD") }), TODAY));
+    const d1 = parseQuestionPage(parseBlocks(stripFm(r.content))).entries.find((e) => e.id === "D1")!;
+    expect(lastCanonicalPhrase(d1.text)).toBeNull();
+    expect(r.content).toContain(`G${J}jenåpnet 02.01.2026 if B fails.`);
+  });
+
+  test("a character NFC maps to a backtick (U+1FEF) pairs spans as the reader does: no PR edge, no refusal", () => {
+    const r = ok(closeCardEdit(base, "O1", answer({ choice: null, body: "` `PR 4` x" }), TODAY));
+    const blocks = parseBlocks(stripFm(r.content));
+    const d1 = analyzeDecisionChains(blocks, []).chains.find((c) => c.decision === "D1")!;
+    expect([d1.reversed, d1.outputs, d1.questions.map((x) => x.id)]).toEqual([null, [], ["O1"]]);
+    expect(parseQuestionPage(blocks).entries.find((e) => e.id === "D1")!.dim).toBe(false);
+  });
+});
+
+describe("closeCardEdit: the new decision's id", () => {
+  test("skips an id an orphan close already names, so a plain choice closes and ties nothing else", () => {
+    const text = page(q("O1"), q("O2"), "<DecisionLog>\n\n- **O1** — Which one?\n- **O2** — And this? Closed 2026-01-01 (D1).\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer(), TODAY));
+    expect(r.decision).toBe("D2");
+    expect(r.content).toContain("- **D2** — Answer B on card O1. Rune Lind, 06.11.2026.");
+    const blocks = parseBlocks(r.content.replace(/^---\n[\s\S]*?\n---\n/, ""));
+    expect(analyzeDecisionChains(blocks, []).chains.find((c) => c.decision === "D2")!.questions.map((x) => x.id)).toEqual(["O1"]);
+    expect(stateOf(r.content, "O1")).toEqual({ kind: "decided", decision: "D2" });
+    expect(stateOf(r.content, "O2")).toEqual({ kind: "closed" });
+  });
+
+  test("skips an id another log item names in a reversal, so the answer is not born superseded", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n- **D1** — Old. Superseded by D2.\n\n</DecisionLog>\n");
+    const r = ok(closeCardEdit(text, "O1", answer(), TODAY));
+    expect(r.decision).toBe("D3");
+  });
+
+  test("does not skip past an id cited in a code span (another plan's `D39`, as mimir's settled-questions plan has it)", () => {
+    const text = page(q("O1"), "<DecisionLog>\n\n- **O1** — Which one?\n- **D1** — Keep `D39`'s rule of the other plan.\n\n</DecisionLog>\n");
+    expect(ok(closeCardEdit(text, "O1", answer(), TODAY)).decision).toBe("D2");
   });
 });

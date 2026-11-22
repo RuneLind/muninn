@@ -289,6 +289,32 @@ describe("remove takes the page's data files", () => {
     expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["plans/a.mdx"]);
   });
 
+  // Arch review 2026-11-16 F48, fix round 2: the index lists the page's own
+  // diagram sibling as a page attached to it (`pairAttachments` rule 3), so
+  // "is an indexed page" alone kept every sibling. Another page's use keeps it.
+  test("the page's own diagram sibling goes with it, though the real index lists it as a page", async () => {
+    await Bun.write(path.join(root, "flows", "side.mdx"), "# Side\n\n<Diagram src=\"flow.workflow.json\" />\n");
+    await Bun.write(path.join(root, "flows", "flow.workflow.json"), "{}\n");
+    await Bun.write(path.join(root, "flows", "flow.html"), "<html><body>flow</body></html>\n");
+    __resetWikiCacheForTest();
+    const res = await post(appWith(), { wiki: "kode", relPath: "flows/side.mdx", dryRun: true, action: "remove" });
+    const body = (await res.json()) as { removes?: string[]; keptShared?: string[] };
+    expect(body.removes).toEqual(["flows/side.mdx", "flows/flow.workflow.json", "flows/flow.html"]);
+    expect(body.keptShared).toEqual([]);
+  });
+
+  test("a sibling another page owns stays: it folds under a same-stem page", async () => {
+    await Bun.write(path.join(root, "flows2", "side.mdx"), "# Side\n\n<Diagram src=\"flow.workflow.json\" />\n");
+    await Bun.write(path.join(root, "flows2", "flow.workflow.json"), "{}\n");
+    await Bun.write(path.join(root, "flows2", "flow.html"), "<html><body>flow</body></html>\n");
+    await Bun.write(path.join(root, "flows2", "flow.md"), "# Flow\n");
+    __resetWikiCacheForTest();
+    const res = await post(appWith(), { wiki: "kode", relPath: "flows2/side.mdx", dryRun: true, action: "remove" });
+    const body = (await res.json()) as { removes?: string[]; keptShared?: string[] };
+    expect(body.removes).toEqual(["flows2/side.mdx", "flows2/flow.workflow.json"]);
+    expect(body.keptShared).toEqual(["flows2/flow.html"]);
+  });
+
 });
 
 // The decision table's OUTCOMES, route half (src/wiki/CLAUDE.md, felles

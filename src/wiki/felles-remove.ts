@@ -158,17 +158,25 @@ const readText = async (abs: string): Promise<string | null> => {
   }
 };
 
+/** One page of the local index, as `fellesRemoveDataFiles` reads it:
+ *  `parent` is the page it folds under (`pairAttachments`), if any. */
+export interface IndexedPage {
+  relPath: string;
+  parent?: string;
+}
+
 /**
  * The data files to delete with `pageRelPath` (NFC object names): the ones
- * publish uploads for the page as it stands, minus the ones another page in
- * `pageRelPaths` (the local index) also reads, `<Embed>`s, or is (`shared`). `refused` lists the
- * names the script's `sjekkStiform` refuses — never uploaded, and one such
- * name in a `--fjern` argv makes it delete nothing.
+ * publish uploads for the page as it stands, minus the ones another page of
+ * `pages` (the local index) uses (`shared`): it reads them, `<Embed>`s them, or
+ * is one of them as a page of its own, i.e. not folded under `pageRelPath`.
+ * `refused` lists the names the script's `sjekkStiform` refuses — never
+ * uploaded, and one such name in a `--fjern` argv makes it delete nothing.
  */
 export async function fellesRemoveDataFiles(
   root: string,
   pageRelPath: string,
-  pageRelPaths: readonly string[],
+  pages: readonly IndexedPage[],
   read: (abs: string) => Promise<string | null> = readText,
   probe: FsProbe = realFsProbe,
 ): Promise<{ dataFiles: string[]; shared: string[]; refused: string[] }> {
@@ -204,13 +212,16 @@ export async function fellesRemoveDataFiles(
   if (candidates.length === 0) return { dataFiles: [], shared: [], refused };
 
   const others = new Set<string>();
-  // Keyed by `collisionKey`: another indexed page (a standalone `.html`
-  // explainer that is also a diagram's sibling) and another page's `<Embed>`
-  // target, which `extractEmbedTargets` reads lowercased. Either keeps the file.
+  // Keyed by `collisionKey`: another page's `<Embed>` target, which
+  // `extractEmbedTargets` reads lowercased, and an indexed page that is not
+  // this page's own attachment. The index lists every `.html`, this page's
+  // diagram sibling too, folded under this page (`pairAttachments` rule 3):
+  // that one goes with the page (F48 fix round 2). A sibling folded under
+  // another page, or under none, is a page of its own and stays.
   const otherKeys = new Set<string>();
-  for (const other of pageRelPaths) {
+  for (const { relPath: other, parent } of pages) {
     if (other.normalize("NFC") === page) continue;
-    otherKeys.add(collisionKey(other));
+    if (parent?.normalize("NFC") !== page) otherKeys.add(collisionKey(other));
     if (!/\.mdx?$/i.test(other)) continue;
     const text = await read(path.join(root, other));
     if (text === null) continue;

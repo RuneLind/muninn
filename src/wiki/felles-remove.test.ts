@@ -78,7 +78,7 @@ const TARGET_SET: [string, string, Record<string, Entry>, (s: string) => string,
 
 describe("TARGET SET: remove targets what publish uploads for the page as it stands", () => {
   test.each(TARGET_SET)("%s", async (_name, md, entries, key, dataFiles, refused) => {
-    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx"], pageAt(md), probe(entries, key));
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }], pageAt(md), probe(entries, key));
     expect({ dataFiles: got.dataFiles, refused: got.refused }).toEqual({ dataFiles, refused });
   });
 
@@ -91,14 +91,14 @@ describe("TARGET SET: remove targets what publish uploads for the page as it sta
     ["a Steps over the same diagram names its sibling once", diagram("flow.workflow.json") + `<Steps src="./flow.workflow.json" />\n`, { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ["p/flow.workflow.json", "p/flow.html"]],
     ["a symlinked sibling is not targeted", diagram("flow.workflow.json"), { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": LINK }, ["p/flow.workflow.json"]],
   ] as [string, string, Record<string, Entry>, string[]][])("%s", async (_n, md, entries, dataFiles) => {
-    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx"], pageAt(md), probe(entries, ext4));
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }], pageAt(md), probe(entries, ext4));
     expect(got.dataFiles).toEqual(dataFiles);
   });
 
   test("a sibling another local page's diagram draws is kept", async () => {
     const read = async (abs: string) =>
       abs === "/w/p/page.mdx" ? diagram("flow.workflow.json") : abs === "/w/q/other.md" ? diagram("../p/flow.architecture.json") : null;
-    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "q/other.md"], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "q/other.md" }], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
     expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
   });
 
@@ -107,22 +107,26 @@ describe("TARGET SET: remove targets what publish uploads for the page as it sta
   test("a sibling another local page <Embed>s is kept as shared", async () => {
     const read = async (abs: string) =>
       abs === "/w/p/page.mdx" ? diagram("flow.workflow.json") : abs === "/w/q/other.md" ? `<Embed src="../p/flow.html" />\n` : null;
-    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "q/other.md"], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "q/other.md" }], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
     expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
   });
 
-  test("a sibling that is itself an indexed page is kept as shared, also with its diagram JSON missing", async () => {
-    for (const entries of [{ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, { "/w/p/flow.html": F() }] as Record<string, Entry>[]) {
-      const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "p/flow.html"], pageAt(diagram("flow.workflow.json")), probe(entries, ext4));
-      expect(got.shared).toEqual(["p/flow.html"]);
-      expect(got.dataFiles).not.toContain("p/flow.html");
+  // F48 fix round 2: the index lists the page's own sibling as a page attached
+  // to it, so being indexed keeps a sibling only when it folds under ANOTHER page.
+  test("a sibling indexed as the page's own attachment is targeted; one folded under another page is kept", async () => {
+    const entries = { "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() };
+    const own = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "p/flow.html", parent: "p/page.mdx" }], pageAt(diagram("flow.workflow.json")), probe(entries, ext4));
+    expect(own).toEqual({ dataFiles: ["p/flow.workflow.json", "p/flow.html"], shared: [], refused: [] });
+    for (const sibling of [{ relPath: "p/flow.html", parent: "p/flow.md" }, { relPath: "p/flow.html" }]) {
+      const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, sibling], pageAt(diagram("flow.workflow.json")), probe(entries, ext4));
+      expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
     }
   });
 
   test("a data file another local page reads is kept, also across NFC and NFD spellings", async () => {
     const read = async (abs: string) =>
       abs === "/w/p/page.mdx" ? refs("d.csv", NFC) : abs === "/w/q/other.md" ? refs(`../p/${NFD}`) : null;
-    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "q/other.md"], read, probe({ "/w/p/d.csv": F(), [`/w/p/${NFC}`]: F() }, apfs));
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", [{ relPath: "p/page.mdx" }, { relPath: "q/other.md" }], read, probe({ "/w/p/d.csv": F(), [`/w/p/${NFC}`]: F() }, apfs));
     expect(got).toEqual({ dataFiles: ["p/d.csv"], shared: [`p/${NFC}`], refused: [] });
   });
 });
@@ -165,7 +169,7 @@ describe("TARGET SET on this disk", () => {
     if (process.platform === "darwin") expect([insensitive, finds(NFC)]).toEqual([true, true]);
     // root can read a mode-000 file; publish then uploads it.
     const lockedReadable = process.getuid?.() === 0;
-    const got = await fellesRemoveDataFiles(root, "p/page.mdx", ["p/page.mdx"]);
+    const got = await fellesRemoveDataFiles(root, "p/page.mdx", [{ relPath: "p/page.mdx" }]);
     expect(got).toEqual({
       // NFC first or not, the NFD file is one object in NFC. Data.csv and
       // data.csv collide where both resolve; via/ is a symlinked folder;

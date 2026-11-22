@@ -10,7 +10,7 @@
  */
 import { parseBlocks } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
-import { DECISION_ID_RE, eachComponent, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
+import { DECISION_ID_RE, eachComponent, maskCodeSpans, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
 import { analyzeDecisionChains } from "./decision-chain.ts";
@@ -122,6 +122,8 @@ function regionItems(lines: string[], r: Region, fenced: Set<number>): Item[] {
 }
 
 const decisionNumber = (id: string) => Number(id.slice(1));
+/** A D id named anywhere in a log item's text, as a word. */
+const NAMED_DECISION_RE = /(?<![\p{L}\p{N}_])D(\d{1,4})(?![\p{L}\p{N}_])/gu;
 
 /**
  * Where the page's parsers would read the owner's prose as grammar: an inline
@@ -153,9 +155,11 @@ type Seg =
 /**
  * One owner text as segments: on one line (it can open no item of its own),
  * split by its OWN code spans, which is what the owner sees in that text alone.
+ * In NFC, the form every parser reads (`maskCodeSpans`), so the scan sees a
+ * decomposed «Gjenåpnet» and a U+1FEF that NFC turns into a backtick as they do.
  */
 function ownerSegs(text: string): Seg[] {
-  const one = text.replace(/\s+/g, " ").trim();
+  const one = text.normalize("NFC").replace(/\s+/g, " ").trim();
   const out: Seg[] = [];
   let last = 0;
   for (const r of lineCodeSpanRanges(one)) {
@@ -277,6 +281,11 @@ function withStop(line: string): string {
  * `today` is `YYYY-MM-DD`.
  */
 export function closeCardEdit(text: string, id: string, ruling: CloseRuling, today: string): CloseEdit {
+  return closeEdit(text, id, ruling, today, false);
+}
+
+/** {@link closeCardEdit}; `neutralProbe` marks the run that tells a refusal's cause, which never probes again. */
+function closeEdit(text: string, id: string, ruling: CloseRuling, today: string, neutralProbe: boolean): CloseEdit {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const lines = text.split(/\r?\n/);
   // Where the reader and lint end the frontmatter (`splitFrontmatter`).
@@ -308,7 +317,11 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
     decision = ruling.decision;
   } else {
     const ds = items.filter((it) => it.id && DECISION_ID_RE.test(it.id));
-    const max = Math.max(0, ...[...before.decisions].map(decisionNumber));
+    // Past every D id the log defines AND names outside code (an orphan «Closed …
+    // (D2)» or a «superseded by D2» would otherwise tie that entry to the new
+    // decision; a `D39` citing another plan is masked, as every parser masks it).
+    const named = before.entries.flatMap((e) => [...maskCodeSpans(e.text).matchAll(NAMED_DECISION_RE)].map((m) => Number(m[1])));
+    const max = Math.max(0, ...[...before.decisions].map(decisionNumber), ...named);
     decision = `D${max + 1}`;
     // After the log's last decision item, else after the card's own item, else at the end of the first log.
     const anchor = ds.at(-1) ?? own ?? items.filter((it) => it.region === regions[0]).at(-1);
@@ -380,7 +393,17 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
       chain.outputs.length === 0 &&
       chain.questions.length === 1 &&
       chain.questions[0]!.id === id;
-    if (!clean) return { ok: false, code: "unplaceable", reason: `the answer reads as decision-log grammar the close cannot neutralize: close ${id} on the page` };
+    if (!clean) {
+      // Blame the answer only when an answer with no owner words would pass.
+      const neutral = neutralProbe || closeEdit(text, id, NEUTRAL_ANSWER, today, true).ok;
+      const reason = neutral
+        ?`the answer reads as decision-log grammar the close cannot neutralize: close ${id} on the page`
+        : `the page's log already ties ${decision} to another entry: close ${id} on the page`;
+      return { ok: false, code: "unplaceable", reason };
+    }
   }
   return { ok: true, content, decision, lines: shown };
 }
+
+/** An answer with no owner grammar: what a refusal's cause is measured against. */
+const NEUTRAL_ANSWER: CloseRuling = { kind: "answer", choice: "A", body: "", author: "A", date: "01.01.2000" };
