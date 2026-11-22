@@ -14,7 +14,7 @@ import { getWikiRegistry } from "../registry-memo.ts";
 import { osloDay } from "../work-map/ids.ts";
 import type { WorkMapState } from "../work-map/state.ts";
 import { appendLogLines, DECISION_TRIAGE_DIR, nightlyLogPath, readLog, triageStateStore } from "./log.ts";
-import { runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
+import { processRss, runDecisionTriage, type TriageProgress, type TriageRunDeps, type TriageRunResult } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, MODEL_OFF_MODEL, MODEL_OFF_VERSION, type RunLine } from "./schema.ts";
 import { NIGHTLY_MODEL_OFF, realTriageRunDeps, triageScope } from "./scope.ts";
 
@@ -98,7 +98,7 @@ export type TriagePassTracer = Pick<Tracer, "finish" | "traceId">;
 export function realTriageLoopDeps(
   config: Config,
   dir: string = DECISION_TRIAGE_DIR,
-  over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append" | "git">> = {},
+  over: Partial<Pick<TriageRunDeps, "call" | "answers" | "floor" | "append" | "git" | "rss" | "now">> = {},
   tracer: (wiki: string) => TriagePassTracer = () => new Tracer("decision-triage-pass", { botName: TRIAGE_AGENT_BOT, platform: "wiki" }),
 ): TriageLoopDeps | null {
   if (!config.decisionTriageRepoRoots) {
@@ -264,10 +264,16 @@ export function realTriageLoopDeps(
       }
       finishLine(held, turn.mine, true);
     };
-    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, append, track }), signal, (error) => {
+    const rss = over.rss ?? processRss;
+    const day = osloDay((over.now ?? Date.now)());
+    if (rssDay?.day !== day) rssDay = { day, used: 0 };
+    const budget = rssDay;
+    const passStart = rss();
+    const result = await settleTriageRun(() => runDecisionTriage({ ...deps, ...over, append, track, rssAtStart: passStart - budget.used }), signal, (error) => {
       log.warn("Decision triage threw for {wiki}: {error}", { wiki, error });
       return recordFailed(wiki, error);
     });
+    budget.used += Math.max(0, rss() - passStart);
     try {
       // A record holding the line (a throw's or the bound's) is the run's end once it lands;
       // if its write fails, the line has already moved on to whoever queued next.
@@ -326,6 +332,11 @@ async function observedPass(wiki: string, tracer: TriagePassTracer, config: Pick
     throw err;
   }
 }
+
+/** The memory guard's day budget: each pass measures growth from its own start plus what the
+ *  day's earlier passes grew inside themselves (growth between passes never counts), and stops
+ *  past `RSS_GROWTH_GUARD_BYTES`. Module state: a restart starts a fresh budget (F5). */
+let rssDay: { day: string; used: number } | null = null;
 
 let loopDepsMemo: { config: Config; deps: TriageLoopDeps | null } | null = null;
 /** One loop half per config, shared by the loop and Run now: one set of once-only

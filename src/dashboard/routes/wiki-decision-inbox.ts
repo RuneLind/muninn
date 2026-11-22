@@ -331,9 +331,18 @@ function registerDecisionCloseRoute(app: Hono, config: Config, depsFor: () => De
     if (dirty) return c.json({ error: dirty, dirty: true }, 409);
     if (refusal) return c.json({ error: refusal, refused: true }, 409);
     if (result.outcome !== "written") return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
+    const committed = result.commit?.committed ?? false;
+    const commitReason = result.commit?.reason ?? "error";
     // Rebuilt after the commit tail, as Apply does: the write's own refresh read an uncommitted page.
     await getWikiIndex({ root: entry.root, refresh: true }).catch(() => null);
-    return c.json({ ok: true, page: target.relPath, decision, committed: result.commit?.committed ?? false });
+    return c.json({
+      ok: true,
+      page: target.relPath,
+      decision,
+      committed,
+      // `uncommitted` (Done's shape): the commit failed, so the page carries edits no commit holds.
+      ...(committed ? {} : { commitReason, uncommitted: commitReason === "error" || commitReason === "not-default-branch" }),
+    });
   }
 }
 

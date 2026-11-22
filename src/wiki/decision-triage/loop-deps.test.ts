@@ -17,7 +17,7 @@ const LOOP = path.join(import.meta.dir, "..", "work-map", "loop.ts");
 const REGISTRY = path.join(import.meta.dir, "..", "registry-memo.ts");
 
 /** Runs `steps` (a function body over `deps`, `step`, `root`), returning what each `step(...)` saw and the log lines. `model` is more of the run's seams. */
-async function drive(steps: string, env: Record<string, string>, tmp: string, model = "") {
+async function drive(steps: string, env: Record<string, string>, tmp: string, model = "", prelude = "") {
   const driver = path.join(tmp, "driver.ts");
   writeFileSync(driver, `
 import { configure } from ${JSON.stringify(LOGTAPE)};
@@ -47,6 +47,7 @@ const gate = () => {
   return { open, reached, pass: async () => { hit(); await opened; } };
 };
 const g1 = gate();
+${prelude}
 let appends = 0;
 let floorHits = 0;
 const deps = realTriageLoopDeps(config as never, logs, { ...seams, ${model} }, tracer)!;
@@ -379,6 +380,52 @@ seen.push(await deps.readState("a"));
         expect(attempts(seen[1])).toBe(1);
         expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "ok" })]);
       }
+    });
+
+    test("a model-off night where the memory guard stopped every card is stored failed, not ok (F6)", async () => {
+      const { tmp, env } = withCards(3);
+      const { seen, lines } = await drive(`seen.push(await deps.run("a", new AbortController().signal));\n${SETTLED}`, env, tmp, `call: null, rss: (() => { let n = 0; return () => (n++ === 0 ? 0 : 3 * 1024 ** 3); })()`);
+      expect(runLines(tmp).map((r) => r.outcome)).toEqual(["failed"]);
+      expect(seen[0]).toMatchObject({ outcome: "failed" });
+      expect((seen[1] as State)!.attempts.map((a) => a.outcome)).toEqual(["failed"]);
+      expect(rows(seen[2])).toEqual([expect.objectContaining({ completed: true, status: "error" })]);
+      // One warn for the night that is not clean; `runPass` logs info only for ok and partial.
+      expect(lines.filter((l) => l.startsWith("warning "))).toEqual(["warning Decision triage for a: failed: the model call is off (D19), 3 card(s) with no facts"]);
+    });
+
+    test("the memory guard counts only growth inside triage passes: a 2.5 GiB jump between two same-day passes still gathers (F5)", async () => {
+      const { tmp, env } = withCards(2);
+      const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+level = 3 * G;
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: () => level`, `const G = 1024 ** 3; let level = 0.5 * G;`);
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "ok"]);
+    });
+
+    test("the memory guard's day budget sums the passes' own growth: a pass stops once the day's passes together grew past it (F5)", async () => {
+      const { tmp, env } = withCards(2);
+      // Each reading adds 0.6 GiB; RSS falls back to 1 GiB between the passes, so a day-wide baseline would see little growth.
+      const { seen } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+level = G;
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => Date.parse("2026-10-20T05:00:00Z"), rss: () => { const r = level; level += 0.6 * G; return r; }`, `const G = 1024 ** 3; let level = G;`);
+      // Pass 1 grows 1.8 GiB (start 1, cards 1.6 and 2.2, end 2.8); pass 2's first card adds 0.6 more: 2.4 > 2.
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["ok", "failed"]);
+      expect(logOf(tmp).filter((l) => l.reason === "the memory guard stopped the gather").map((l) => l.id)).toEqual(["O1", "O2"]);
+    });
+
+    test("a new Oslo day starts a new budget: the guard does not carry yesterday's growth, and a model-off partial night warns", async () => {
+      const { tmp, env } = withCards(2);
+      const { seen, lines } = await drive(`
+seen.push(await deps.run("a", new AbortController().signal));
+day = Date.parse("2026-10-21T05:00:00Z");
+seen.push(await deps.run("a", new AbortController().signal));
+`, env, tmp, `call: null, now: () => day, rss: (() => { let n = 0; return () => 1.5 * 1024 ** 3 * n++; })()`, `let day = Date.parse("2026-10-20T05:00:00Z");`);
+      // Each day: start, then card readings 1.5 GiB (gathers) and 3.0 GiB (stopped) above it.
+      expect(seen.map((r) => (r as { outcome: string }).outcome)).toEqual(["partial", "partial"]);
+      expect(lines.filter((l) => l.startsWith("warning "))).toEqual(Array(2).fill("warning Decision triage for a: partial: the model call is off (D19), 1 card(s) with no facts"));
     });
 
     test("b: the bound fires while the pass writes its run line, and the pass returns normally: one line, one state record", async () => {

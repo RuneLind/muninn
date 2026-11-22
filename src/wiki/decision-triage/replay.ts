@@ -15,7 +15,7 @@ import { sha256 } from "../../utils/date-hash.ts";
 import { commitView, gatherCardFacts, GitReadFailed, isCommitId, gatherPageFacts, readPageText, type GatherContext, type PageFacts, type PageRead, type ReplayCard, type WikiView } from "./facts.ts";
 import { failureOf, parseRepoRoots, type GitRun } from "./git.ts";
 import { buildBatches, CHARS_PER_CALL, renderBatch, soloChars, type Batch, type BatchItem } from "./prompt.ts";
-import { callBatch, noVerdictReason, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
+import { callBatch, MEMORY_GUARD_REASON, noVerdictReason, overRss, repoResolver, verdictFields, withTimeout, type TriageModel } from "./run.ts";
 import { DECISION_TRIAGE_PROMPT_VERSION, replayKey, type CardLine, type LogLine, type RepoFact, type RunLine, type SearchFailure, type TriageUsage } from "./schema.ts";
 
 const CARD_GATHER_TIMEOUT_MS = 90_000;
@@ -94,7 +94,7 @@ export async function gatherReplay(cards: readonly ReplayCard[], deps: ReplayDep
       continue;
     }
     if (overRss()) {
-      out.refused.push({ card, reason: "the memory guard stopped the gather" });
+      out.refused.push({ card, reason: MEMORY_GUARD_REASON });
       continue;
     }
     const lostBecause = lost.get(`${card.wiki}\0${card.commit}`);
