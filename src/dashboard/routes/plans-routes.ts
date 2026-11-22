@@ -30,9 +30,11 @@
  *     confinement admits `.md`/`.mdx` only.
  *
  * **Neither passes a `commit`.** Where `SYNC_REPOS` covers mimir in `wiki` mode
- * the sync loop is the committer, behind its 5-minute quiet period; where it does
- * not, nothing commits these writes unattended (the daily sweeper sweeps bot
- * wikis only), and the page stays dirty until a human commits it. Until then
+ * the sync loop is the committer, behind its 5-minute quiet period; otherwise the
+ * daily `wiki-committer` sweeper is, where `sweeperCommits` says it commits that
+ * root (it also runs beside a loop with no commit pass in ~26h,
+ * `syncSubsumesSweeper`); otherwise nothing commits these writes unattended, and
+ * the page stays dirty until a human commits it. Until then
  * Done refuses the page, and its refusal names the board's pending write and the
  * committers this instance actually runs (`src/plans/board-dirt.ts`, F36).
  *

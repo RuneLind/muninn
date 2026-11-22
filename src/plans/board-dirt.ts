@@ -55,22 +55,29 @@ export interface BoardWriteCommitters {
 
 /** Done's refusal for a page whose only dirt is the board's pending write,
  *  naming only the remedies that exist on this instance, and the loop only as
- *  far as its ledger is evidence. */
+ *  far as its ledger is evidence. The sweep is named only when it commits the
+ *  root AND the loop's outlook says the sweeper does not stand down for the
+ *  same ledger entry (`sweeperStandsDown`, the rule `syncSubsumesSweeper`
+ *  applies), so the message never promises a sweep that is stood down. */
 export function pendingBoardWriteMessage(relPath: string, committers: BoardWriteCommitters): string {
-  const { syncLoop, sweeper } = committers;
-  const orSweep = sweeper ? " (or the daily wiki sweep does)" : "";
+  const { syncLoop } = committers;
+  const sweeps = committers.sweeper && (syncLoop === null || !syncLoop.sweeperStandsDown);
+  const orSweep = sweeps ? " (or the daily wiki sweep does)" : "";
   let who: string;
   if (syncLoop === null) {
-    who = sweeper ? "The daily wiki sweep commits it, or commit it by hand." : "Nothing on this instance commits it automatically: commit it by hand.";
+    who = sweeps ? "The daily wiki sweep commits it, or commit it by hand." : "Nothing on this instance commits it automatically: commit it by hand.";
   } else if (syncLoop.kind === "healthy") {
     who = `The repo-sync loop commits it after its quiet period${orSweep}, or commit it by hand.`;
   } else if (syncLoop.kind === "never-run") {
     who = `The repo-sync loop commits it after its quiet period if it is running (it has not run since muninn started)${orSweep}, or commit it by hand.`;
   } else if (syncLoop.kind === "idle") {
     who = `The repo-sync loop commits it after its quiet period if it is still running (its last run was ${syncLoop.lastRunHoursAgo} h ago)${orSweep}, or commit it by hand.`;
+  } else if (syncLoop.kind === "unpushed") {
+    // The commit step passed and the tick failed after it (rebase or push): the next tick commits this page too.
+    who = `The repo-sync loop commits it after its quiet period${orSweep}, or commit it by hand. Its last run stopped after the commit step and did not push, so the commit stays on this machine until that is cleared: ${syncLoop.reason}.`;
   } else {
     const word = syncLoop.state === "error" ? "failing" : syncLoop.state;
-    const rest = sweeper && !syncLoop.stopsSweeper ? "The daily wiki sweep commits it, or commit it by hand." : "Clear that, or commit it by hand.";
+    const rest = sweeps ? "The daily wiki sweep commits it, or commit it by hand." : "Clear that, or commit it by hand.";
     who = `The repo-sync loop is ${word} and will not commit it until that is cleared: ${syncLoop.reason}. ${rest}`;
   }
   return `${relPath} carries a priority or status change from the plans board that is not committed yet. ${who} Then try again.`;

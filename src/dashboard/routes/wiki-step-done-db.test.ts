@@ -336,6 +336,7 @@ describe("/api/wiki/step-done", () => {
         lastSuccessMs: NOW - 60_000,
         lastRunMs: NOW - 60_000,
         lastLocalSectionMs: NOW - 60_000,
+        lastCommitStep: "passed",
         ...over,
       });
       afterAll(() => __resetSyncStateForTest());
@@ -350,7 +351,7 @@ describe("/api/wiki/step-done", () => {
 
       test("paused on a feature branch: it will not commit until that is cleared", async () => {
         syncRepos(`${PLANS}=${root}:wiki`);
-        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "paused", reason: "off default branch (feature)", lastLocalSectionMs: NOW - 86_400_000 }));
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "paused", reason: "off default branch (feature)", lastLocalSectionMs: NOW - 86_400_000, lastCommitStep: "not-reached" }));
         const { body } = await doneAfter(flipped());
         expect(body.error).toBe(
           `${BOARD} The repo-sync loop is paused and will not commit it until that is cleared: off default branch (feature). Clear that, or commit it by hand. Then try again.`,
@@ -360,7 +361,7 @@ describe("/api/wiki/step-done", () => {
       test("blocked by a bisect: it will not commit until the bisect is reset", async () => {
         syncRepos(`${PLANS}=${root}:wiki`);
         const reason = "a git operation is in progress (BISECT_LOG) — end the bisect with `git bisect reset`";
-        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "blocked", reason, lastLocalSectionMs: null }));
+        __setSyncLedgerEntryForTest(PLANS, ticked({ state: "blocked", reason, lastLocalSectionMs: null, lastCommitStep: "not-reached" }));
         const { body } = await doneAfter(flipped());
         expect(body.error).toBe(`${BOARD} The repo-sync loop is blocked and will not commit it until that is cleared: ${reason}. Clear that, or commit it by hand. Then try again.`);
       });

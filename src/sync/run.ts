@@ -38,8 +38,11 @@ import {
   isFreshMtimeHold,
   isTransientGitLockFailure,
   isUnmergedStatus,
+  SYNC_SUBSUME_MAX_AGE_MS,
+  sweeperSubsumption,
   syncTone,
   type DirtyItem,
+  type SyncCommitStep,
   type SyncLedgerEntry,
   type SyncState,
   type SyncTone,
@@ -191,6 +194,7 @@ export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
       lastSuccessMs: null,
       lastRunMs: null,
       lastLocalSectionMs: null,
+      lastCommitStep: "not-reached",
     }
   );
 }
@@ -217,12 +221,18 @@ export function __resetSyncStateForTest(): void {
  * trying", which is what let a repo whose every commit failed renew the sweeper
  * stand-down forever, and not "the whole tick succeeded" either: a push failure
  * stamps, because the sweeper could add nothing the loop did not already commit.
+ *
+ * `commitStep` is the narrower fact beside it: did the tick's `git add` +
+ * `git commit` refuse, whatever failed after them. A rebase conflict withholds
+ * the stamp but its commit landed, and Done must not call that loop one that
+ * "will not commit" (`syncLoopOutlook`, F36 fix round 2).
  */
 function recordLedger(
   name: string,
   result: RepoSyncResult,
   now: number,
   commitPathOk: boolean,
+  commitStep: SyncCommitStep,
 ): SyncLedgerEntry {
   const prev = getSyncLedgerEntry(name);
   const entry: SyncLedgerEntry = {
@@ -233,6 +243,7 @@ function recordLedger(
       result.state === "ok" || result.state === "status-only" ? now : prev.lastSuccessMs,
     lastRunMs: now,
     lastLocalSectionMs: commitPathOk ? now : prev.lastLocalSectionMs,
+    lastCommitStep: commitStep,
     lastError: result.error ?? (result.state === "blocked" ? result.reason : undefined),
   };
   ledger.set(name, entry);
@@ -599,6 +610,10 @@ interface LocalSectionOutcome {
    * daily sweeper down.
    */
   sectionSkipped?: true;
+  /** The section stopped at `git add` or `git commit` (`error` or `transient`),
+   *  as opposed to the rebase after a commit that landed: the ledger's
+   *  `lastCommitStep`. */
+  commitFailed?: true;
   /**
    * A SOFT deferral: real work happened (commit / rebase / push all still run),
    * but something was held back, so the tick must not report `ok`. Quiet-held
@@ -792,6 +807,7 @@ async function localSection(
           out.state = lock ? "transient" : "error";
           out.reason = clampReason(`git add failed: ${staged.error}`);
           out.error = staged.error;
+          out.commitFailed = true;
           return out;
         }
         if (staged.skipped.length > 0) {
@@ -834,11 +850,13 @@ async function localSection(
               out.state = "transient";
               out.reason = clampReason(`git commit failed: ${committed.stderr}`);
               out.error = committed.stderr;
+              out.commitFailed = true;
               return out;
             } else {
               out.state = "error";
               out.reason = clampReason(`git commit failed: ${committed.stderr}`);
               out.error = committed.stderr;
+              out.commitFailed = true;
               return out;
             }
           } else {
@@ -1114,12 +1132,16 @@ export async function syncRepo(
    * committing loop, which is the same collision two machines already survive,
    * and it is strictly safer than the alternative of claiming a commit pass that
    * a `git rebase` explosion may have rolled back.
+   *
+   * `commitStep` (the ledger's `lastCommitStep`) defaults to `not-reached`
+   * for the same reason.
    */
   const finish = (
     card: RepoCard,
     state: SyncState,
     extra: Partial<RepoSyncResult> = {},
     commitPathOk = false,
+    commitStep: SyncCommitStep = "not-reached",
   ): RepoSyncResult => {
     const now = deps.now();
     const result: RepoSyncResult = {
@@ -1151,7 +1173,7 @@ export async function syncRepo(
     const observeOnly = dryRun || state === "running";
     const led = observeOnly
       ? getSyncLedgerEntry(repo.name)
-      : recordLedger(repo.name, result, now, commitPathOk);
+      : recordLedger(repo.name, result, now, commitPathOk, commitStep);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
     result.lastLocalSectionMs = led.lastLocalSectionMs;
@@ -1270,6 +1292,9 @@ export async function syncRepo(
       //     sweeper stand-down off a tick that did strictly less than a tick
       //     which errored at the fetch.
       const commitPathOk = local.state === "deferred" && !local.sectionSkipped;
+      // The commit step is narrower: a rebase conflict or a rebase that never
+      // started fails AFTER the commit step, so the next tick commits too.
+      const commitStep: SyncCommitStep = local.sectionSkipped ? "not-reached" : local.commitFailed ? "failed" : "passed";
       return finish(
         after,
         local.state,
@@ -1280,6 +1305,7 @@ export async function syncRepo(
           ...(local.error ? { error: local.error } : {}),
         },
         commitPathOk,
+        commitStep,
       );
     }
 
@@ -1295,6 +1321,9 @@ export async function syncRepo(
     // key reached through the remote-moved door), so it must not count. A hard
     // `deferred` from the retry stamps, for the same reason the first pass's does.
     let commitPathOk = true;
+    // The first section's commit step passed (it returned no state); only the
+    // retry's refusing at `git add`/`git commit` makes it `failed`.
+    let commitStep: SyncCommitStep = "passed";
     let pushReason: string | undefined;
     let pushError: string | undefined;
     /** HEAD moved in EITHER local section — see the retry merge below. */
@@ -1342,6 +1371,7 @@ export async function syncRepo(
         if (res.local?.state && (res.local.state !== "deferred" || res.local.sectionSkipped)) {
           commitPathOk = false;
         }
+        if (res.local?.commitFailed) commitStep = "failed";
         if (res.local) {
           carry.committed = [...carry.committed, ...res.local.committed];
           carry.rebased = carry.rebased || res.local.rebased;
@@ -1382,6 +1412,7 @@ export async function syncRepo(
         ...(pushError ? { error: pushError } : {}),
       },
       commitPathOk,
+      commitStep,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1479,13 +1510,8 @@ async function pushWithRetry(
   };
 }
 
-/**
- * How recent a sync run must be for the daily `wiki-committer` sweeper to stand
- * down. Sized just over the sweeper's own 24h cadence, so a loop running every 15
- * minutes clears it by two orders of magnitude and a loop that has stopped fails
- * it within one sweeper period.
- */
-export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
+// Defined beside the pure `sweeperSubsumption` in `decide.ts`; re-exported for existing importers.
+export { SYNC_SUBSUME_MAX_AGE_MS };
 
 /**
  * Does the sync loop OWN this repo — i.e. may the daily sweeper stand down?
@@ -1569,13 +1595,10 @@ export async function syncSubsumesSweeper(
 ): Promise<{ subsumed: boolean; configuredButIdle: boolean; name?: string }> {
   const covering = await findSyncRepoCoveringToplevel(top, opts.repos);
   if (!covering) return { subsumed: false, configuredButIdle: false };
-  const now = opts.now ?? Date.now();
-  const led = getSyncLedgerEntry(covering.name);
-  const fresh = (at: number | null) => at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
-  const committedRecently = fresh(led.lastLocalSectionMs);
-  const subsumed = committedRecently || led.state === "blocked";
-  // Not `!subsumed`: a blocked loop stands the sweeper down AND is idle.
-  return { subsumed, configuredButIdle: !committedRecently, name: covering.name };
+  // The ledger half is pure and shared with Done's message (`syncLoopOutlook`),
+  // so one entry and one `now` give one answer.
+  const { subsumed, configuredButIdle } = sweeperSubsumption(getSyncLedgerEntry(covering.name), opts.now ?? Date.now());
+  return { subsumed, configuredButIdle, name: covering.name };
 }
 
 /** Sync every configured repo, sequentially (they contend on disk and on the

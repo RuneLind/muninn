@@ -382,7 +382,50 @@ export interface SyncLedgerEntry {
    * stamp — and "inside" includes the push retry's second local section. Full rule + its two accepted residuals: `syncSubsumesSweeper`.
    */
   lastLocalSectionMs: number | null;
+  /**
+   * How the LAST tick's commit step (`git add` + `git commit` in a local
+   * section) ended, apart from whatever failed after it. `lastLocalSectionMs`
+   * cannot say this: a rebase conflict or a rebase that never started fails
+   * INSIDE the section after the commit landed, and stamps nothing, exactly
+   * like a refused `git commit` (F36 fix round 2). `syncLoopOutlook` reads it
+   * to tell "commits, cannot push" from "commits nothing".
+   *
+   *  - `passed`: a local section ran its commit step without a failure there
+   *    (a commit, "nothing to commit", or nothing staged at all, the residual
+   *    (b) shape of `syncSubsumesSweeper`).
+   *  - `failed`: `git add` or `git commit` refused, in the first section or the
+   *    push retry's second one.
+   *  - `not-reached`: the tick stopped before a local section ran, the section
+   *    was skipped on a held wiki lock, or the tick threw.
+   */
+  lastCommitStep: SyncCommitStep;
   lastError?: string;
+}
+
+/** See {@link SyncLedgerEntry.lastCommitStep}. */
+export type SyncCommitStep = "passed" | "failed" | "not-reached";
+
+/**
+ * How recent a commit pass must be for the daily `wiki-committer` sweeper to
+ * stand down. Sized just over the sweeper's own 24h cadence, so a loop running
+ * every 15 minutes clears it by two orders of magnitude and a loop that has
+ * stopped fails it within one sweeper period.
+ */
+export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
+
+/**
+ * The ledger half of `syncSubsumesSweeper` (`run.ts`, where the rule and its
+ * residuals are written down): pure, so Done's message reads the SAME answer
+ * for the same entry and `now` instead of keeping a second rule.
+ */
+export function sweeperSubsumption(
+  entry: SyncLedgerEntry,
+  now: number,
+): { subsumed: boolean; configuredButIdle: boolean } {
+  const at = entry.lastLocalSectionMs;
+  const committedRecently = at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
+  // Not `!subsumed`: a blocked loop stands the sweeper down AND is idle.
+  return { subsumed: committedRecently || entry.state === "blocked", configuredButIdle: !committedRecently };
 }
 
 /**
@@ -426,39 +469,46 @@ export function describeSyncState(state: SyncState, reason?: string): string {
 /**
  * What the ledger says about whether the loop will commit a page left dirty
  * now — for a writer that names the loop as a page's committer (Done's refusal
- * of a pending plans-board write, F36 fix round 1). Configuration is not
- * evidence (`syncSubsumesSweeper`), so this reads the last tick:
+ * of a pending plans-board write, F36). Configuration is not evidence
+ * (`syncSubsumesSweeper`), so this reads the last tick:
  *
  *  - `never-run`: no tick since boot (`unknown`) — the launchd tick may not be
  *    installed, so the promise is conditional.
- *  - `healthy`: the last tick got through its commit path (`lastLocalSectionMs`
- *    equals `lastRunMs`: a failed push or the no-upstream `blocked` still
- *    committed), or ended in a state the next tick resolves on its own
- *    (`ok`, `deferred`, `transient`, `retrying`).
- *  - `idle`: healthy, but the last tick is older than `SYNC_STALE_SUCCESS_MS`
- *    (eight missed 15-minute ticks), so the loop may no longer be running.
- *  - `stopped`: `paused`, `blocked` or `error` before or inside the commit
- *    path. `stopsSweeper` is true for `paused` and `blocked`: the sweeper runs
- *    the same branch and tree checks on the same repo and stands down too.
+ *  - `stopped`: `paused`, `blocked` or `error` with the last tick's commit step
+ *    failed or not reached (`lastCommitStep`): the next tick commits nothing
+ *    until that is cleared.
+ *  - `idle`: the last tick is older than `SYNC_STALE_SUCCESS_MS` (eight missed
+ *    15-minute ticks), so the loop may no longer be running.
+ *  - `unpushed`: `blocked` or `error` AFTER a commit step that passed — a
+ *    rebase conflict, a rebase that never started, a failed push, the
+ *    no-upstream refusal. The next tick commits the page and stops at the same
+ *    place, so the commit stays on this machine (F36 fix round 2).
+ *  - `healthy`: everything else — `ok`, `deferred`, `transient`, `retrying`,
+ *    which the next tick resolves on its own.
+ *
+ * `sweeperStandsDown` is the daily sweeper's answer for the SAME entry and
+ * `now`: `sweeperSubsumption` (the rule `syncSubsumesSweeper` applies), or a
+ * `paused` tick, since the sweeper no-ops off the default branch too. A caller
+ * names the sweep only when it is false.
  */
-export type SyncLoopOutlook =
+export type SyncLoopOutlook = (
   | { kind: "healthy" }
   | { kind: "never-run" }
   | { kind: "idle"; lastRunHoursAgo: number }
-  | { kind: "stopped"; state: "paused" | "blocked" | "error"; reason: string; stopsSweeper: boolean };
+  | { kind: "unpushed"; state: "blocked" | "error"; reason: string }
+  | { kind: "stopped"; state: "paused" | "blocked" | "error"; reason: string }
+) & { sweeperStandsDown: boolean };
 
 export function syncLoopOutlook(entry: SyncLedgerEntry, now: number): SyncLoopOutlook {
-  if (entry.state === "unknown" || entry.lastRunMs === null) return { kind: "never-run" };
-  const committedLastTick = entry.lastLocalSectionMs !== null && entry.lastLocalSectionMs === entry.lastRunMs;
-  if (!committedLastTick && (entry.state === "paused" || entry.state === "blocked" || entry.state === "error")) {
-    return {
-      kind: "stopped",
-      state: entry.state,
-      reason: entry.reason ?? entry.state,
-      stopsSweeper: entry.state !== "error",
-    };
+  const sweeperStandsDown = sweeperSubsumption(entry, now).subsumed || entry.state === "paused";
+  if (entry.state === "unknown" || entry.lastRunMs === null) return { kind: "never-run", sweeperStandsDown };
+  const reason = entry.reason ?? entry.state;
+  const commits = entry.lastCommitStep === "passed";
+  if (!commits && (entry.state === "paused" || entry.state === "blocked" || entry.state === "error")) {
+    return { kind: "stopped", state: entry.state, reason, sweeperStandsDown };
   }
   const age = now - entry.lastRunMs;
-  if (age > SYNC_STALE_SUCCESS_MS) return { kind: "idle", lastRunHoursAgo: Math.round(age / 3_600_000) };
-  return { kind: "healthy" };
+  if (age > SYNC_STALE_SUCCESS_MS) return { kind: "idle", lastRunHoursAgo: Math.round(age / 3_600_000), sweeperStandsDown };
+  if (entry.state === "blocked" || entry.state === "error") return { kind: "unpushed", state: entry.state, reason, sweeperStandsDown };
+  return { kind: "healthy", sweeperStandsDown };
 }

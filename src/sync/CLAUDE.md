@@ -243,6 +243,14 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   silent stand-down over a wiki nothing is committing. Residual, accepted: a healthy
   pass still buys ~26h of grace, so at most ONE daily sweep is skipped after the remote
   goes away; and `blocked` subsumes for as long as it lasts, but never silently.
+- **The evidence stamp is not the answer to "will the next tick commit this page".**
+  A rebase-conflict `blocked` and an in-section `rebase failed` withhold the stamp
+  although their commit landed, and the next tick commits again. So the ledger also
+  records `lastCommitStep` (`passed` / `failed` at `git add`/`git commit`, either
+  section / `not-reached`), and `syncLoopOutlook` (`decide.ts`, read by Done) calls a
+  `blocked`/`error` after a passed step `unpushed`, not `stopped`. Its
+  `sweeperStandsDown` comes from `sweeperSubsumption`, the pure half of
+  `syncSubsumesSweeper`, so Done names the sweep only where the sweeper runs (F36).
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The
