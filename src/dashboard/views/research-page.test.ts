@@ -1,6 +1,8 @@
 import { test, expect } from "bun:test";
 import { renderResearchPage } from "./research-page.ts";
 import { DECLINE_REASONS } from "../../wiki/ask-chat.ts";
+import { isSafeLinkHref } from "../../format/safe-link-href.ts";
+import { escHtml } from "../../utils/escape-html.ts";
 
 // The /research client is an inline-script string (no DOM harness), so we pin the
 // `answer_html` listener's behaviour at the source level: it must be wired, swap
@@ -154,4 +156,61 @@ test("every function injected into the page can actually run there, on EVERY arm
   expect(decline({ noHits: false, lowConfidence: false })).toBeUndefined();
   expect(status(undefined, 2)).toBe("Answered from 2 sources");
   expect(status("unreachable", 0)).toMatch(/Search unavailable/);
+});
+
+/**
+ * Browse's tag chips and document rows (arch review 2026-11-16, F69): a title,
+ * url or tag name rides a data-* attribute read by one delegated listener per
+ * container, never an inline onclick — the HTML-escaped quote decoded back
+ * before the handler compiled, so a crafted title ran as script. Executes the
+ * page's own renderTags/renderDocuments and listeners against stub elements.
+ */
+test("Browse renders values into data-* attributes and the delegated listeners read them back", async () => {
+  const html = await pageHtml();
+  const start = html.indexOf("    function renderTags()");
+  const end = html.indexOf("// === Doc panel ===", start);
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const browse = html.slice(start, end);
+  // Neither sink may build an inline handler from data again.
+  expect(browse).not.toMatch(/onclick="(toggleTag|openDoc)/);
+
+  const PWN = "x');window.__pwn=1;('";
+  type El = { innerHTML: string; value: string; handlers: Array<(e: unknown) => void>; addEventListener(t: string, h: (e: unknown) => void): void };
+  const els: Record<string, El> = {};
+  const el = (id: string): El =>
+    (els[id] ??= { innerHTML: "", value: "c'1", handlers: [], addEventListener(_t, h) { this.handlers.push(h); } });
+  const opened: unknown[][] = [];
+  const api = new Function(
+    "document", "esc", "docPanelSafeHref", "openDocPanel",
+    `var activeTag = null; var allTags = []; var allDocuments = [];\n${browse}\n` +
+      "return { renderTags, renderDocuments, set: function(t, d) { allTags = t; allDocuments = d; }, tag: function() { return activeTag; } };",
+  )({ getElementById: el }, escHtml, isSafeLinkHref, (...a: unknown[]) => opened.push(a)) as {
+    renderTags(): void; renderDocuments(): void; set(t: unknown[], d: unknown[]): void; tag(): string | null;
+  };
+
+  api.set([{ name: PWN, count: 1 }], [
+    { id: `e2e/${PWN}.md`, url: "javascript:window.__pwn=1" },
+    { id: "e2e/Rune's notes.md", url: "https://example.com/a" },
+  ]);
+  api.renderTags();
+  api.renderDocuments();
+  const grid = els.documentsGrid!.innerHTML;
+  expect(grid).toContain('data-doc-id="e2e/x&#39;);window.__pwn=1;(&#39;.md"');
+  expect(grid).toContain('data-collection="c&#39;1"');
+  // The unsafe url is neither the row's data-url nor an Open link; the https one is both.
+  expect(grid).not.toContain("javascript:");
+  expect(grid).toContain('href="https://example.com/a"');
+  expect(grid).toContain('data-url="https://example.com/a"');
+  expect(els.tagChips!.innerHTML).toContain('data-tag="x&#39;);window.__pwn=1;(&#39;"');
+
+  // The delegated listeners pass the DECODED dataset values through untouched.
+  const target = (dataset: Record<string, string>) => ({ target: { closest: () => ({ dataset }) } });
+  els.documentsGrid!.handlers[0]!(target({ collection: "c'1", docId: `e2e/${PWN}.md`, url: "" }));
+  expect(opened).toEqual([["c'1", `e2e/${PWN}.md`, ""]]);
+  els.tagChips!.handlers[0]!(target({ tag: PWN }));
+  expect(api.tag()).toBe(PWN);
+  // A click outside a row or chip does nothing.
+  els.documentsGrid!.handlers[0]!({ target: { closest: () => null } });
+  expect(opened).toHaveLength(1);
 });

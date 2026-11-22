@@ -28,6 +28,7 @@ import {
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 import { SIMILAR_CHUNK_CHARS, SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
 import { docPanelMenuScript } from "./doc-panel-menu.ts";
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
 
 /**
  * How many times, and how far apart, the doc panel re-reads a document after a
@@ -275,6 +276,9 @@ export function sumArticleLibraryScript(): string {
   return `
     ${docPanelMenuScript()}
 
+    // A summary's \`url\` is stored data of any scheme: a live href only when safe.
+    var sumSafeHref = ${isSafeLinkHref.toString()};
+
     // --- Shared doc helpers (used across all summaries components) ---
 
     function docTitle(docId) {
@@ -362,7 +366,7 @@ export function sumArticleLibraryScript(): string {
 
     // "Open original" anchor. cls picks the row style (recent vs library list).
     function sourceLink(doc, cls) {
-      if (!doc.url) return '';
+      if (!doc.url || !sumSafeHref(doc.url)) return '';
       var s = SOURCES[doc.source];
       var label = s ? s.linkLabel : 'Open ↗';
       return '<a class="' + (cls || 'recent-item-link') + '" href="' + esc(doc.url) +
@@ -1387,7 +1391,7 @@ export function sumArticleLibraryScript(): string {
         followEl.href = '/research?q=' + encodeURIComponent(title) +
           (_shareDoc ? '&factcheck=' + encodeURIComponent(source + ':' + docId) : '');
       }
-      linksEl.innerHTML = url && linkLabel
+      linksEl.innerHTML = url && linkLabel && sumSafeHref(url)
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';
 
@@ -1464,7 +1468,7 @@ export function sumArticleLibraryScript(): string {
         // A per-document label (x-article: a transcript means an X video)
         // is known now.
         linkLabel = labelFor(splitTranscript(cleaned).transcript !== null);
-        if (videoUrl && linkLabel && (!url || (src && src.docLinkLabels))) {
+        if (videoUrl && linkLabel && (!url || (src && src.docLinkLabels)) && sumSafeHref(url || videoUrl)) {
           linksEl.innerHTML = '<a href="' + esc(url || videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
         }
         var mainEl = document.getElementById('sumArticleMain');
@@ -1493,7 +1497,7 @@ export function sumArticleLibraryScript(): string {
         // No body to read: the rail's searches go out on the title.
         scheduleRightRail(title, docId, myRequest, source);
         // Unread, a per-document source falls back to its registry label.
-        if (url && src && !linksEl.querySelector('a')) {
+        if (url && src && !linksEl.querySelector('a') && sumSafeHref(url)) {
           linksEl.innerHTML = '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(src.linkLabel) + '</a>';
         }
         var failEl = document.getElementById('sumArticleMain');

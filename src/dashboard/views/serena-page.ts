@@ -335,9 +335,9 @@ export async function renderSerenaPage(): Promise<string> {
           '</div>' +
           '<div class="instance-actions">' +
             (running
-              ? '<button class="btn btn-stop" onclick="stopInstance(\\'' + esc(inst.name) + '\\')">Stop</button>'
-              : '<button class="btn btn-start" onclick="startInstance(\\'' + esc(inst.name) + '\\')"' + (busy ? ' disabled' : '') + '>Start</button>') +
-            '<button class="btn btn-index" onclick="indexInstance(\\'' + esc(inst.name) + '\\')"' + (running || busy ? ' disabled' : '') + '>Index</button>' +
+              ? '<button class="btn btn-stop" data-instance-action="stop" data-instance="' + esc(inst.name) + '">Stop</button>'
+              : '<button class="btn btn-start" data-instance-action="start" data-instance="' + esc(inst.name) + '"' + (busy ? ' disabled' : '') + '>Start</button>') +
+            '<button class="btn btn-index" data-instance-action="index" data-instance="' + esc(inst.name) + '"' + (running || busy ? ' disabled' : '') + '>Index</button>' +
           '</div>' +
         '</div>';
       }).join('');
@@ -355,6 +355,19 @@ export async function renderSerenaPage(): Promise<string> {
         console.error('Failed to refresh Serena instances', e);
       }
     }
+
+    // One delegated listener for the per-instance buttons: the name rides a
+    // data attribute, never an inline handler's JS string (an HTML-escaped
+    // quote decodes back before the handler compiles).
+    document.getElementById('instanceList').addEventListener('click', function(e) {
+      var btn = e.target.closest('[data-instance-action]');
+      if (!btn || btn.disabled) return;
+      var name = btn.dataset.instance;
+      var action = btn.dataset.instanceAction;
+      if (action === 'start') startInstance(name);
+      else if (action === 'stop') stopInstance(name);
+      else if (action === 'index') indexInstance(name);
+    });
 
     async function startInstance(name) {
       // Immediately update UI to show starting

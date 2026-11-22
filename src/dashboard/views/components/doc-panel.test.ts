@@ -103,6 +103,41 @@ describe("docPanelHtml askFollowUp", () => {
   });
 });
 
+// A document's stored `url` is any scheme; "Open source" links only when
+// isSafeLinkHref allows it (arch review 2026-11-16, F70).
+describe("openDocPanel: the source link is gated", () => {
+  async function open(webUrl: string, fetchedUrl: string): Promise<{ before: string; after: string }> {
+    const els: Record<string, { innerHTML: string; textContent: string; href: string; classList: { add(): void; contains(): boolean } }> = {};
+    const el = (id: string) =>
+      (els[id] ??= { innerHTML: "", textContent: "", href: "", classList: { add() {}, contains: () => false } });
+    const doc = { getElementById: el, addEventListener: () => {}, body: { style: {} } };
+    let resolve!: () => void;
+    const done = new Promise<void>((r) => (resolve = r));
+    const fetchStub = () =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "a/T.md", text: "x", url: fetchedUrl }) });
+    const openDocPanel = new Function("document", "fetch", "esc", "marked", `${docPanelScript()}; return openDocPanel;`)(
+      doc, fetchStub, (s: string) => String(s).replace(/"/g, "&quot;"), undefined,
+    ) as (c: string, d: string, u: string) => void;
+    openDocPanel("c", "a/T.md", webUrl);
+    const before = els.docPanelLinks!.innerHTML;
+    setTimeout(resolve, 10);
+    await done;
+    return { before, after: els.docPanelLinks!.innerHTML };
+  }
+
+  test("a javascript: url renders no link, before or after the fetch", async () => {
+    const r = await open("javascript:window.__pwn=1", "javascript:window.__pwn=1");
+    expect(r.before).toBe("");
+    expect(r.after).toBe("");
+  });
+
+  test("an https url links, before and after the fetch", async () => {
+    const r = await open("https://example.com/a", "https://example.com/b");
+    expect(r.before).toContain('href="https://example.com/a"');
+    expect(r.after).toContain('href="https://example.com/b"');
+  });
+});
+
 describe("docPanelHtml moreMenu", () => {
   const menuOf = (html: string) => {
     const start = html.indexOf(`id="${DOC_PANEL_MORE_MENU_ID}"`);
