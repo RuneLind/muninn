@@ -333,6 +333,18 @@ describe("a save refused for good", () => {
     expect(en.composer.questionChanged).toContain("Reload the page");
     expect(no.composer.questionChanged).toContain("Last siden på nytt");
   });
+
+  // Arch review 2026-11-16 F51: the role-user limits, never the server's English.
+  test("a 422 version_cap and a 429 rate_limited show the card's own line, in its language", () => {
+    const cap = { error: "this answer has 50 versions, the most it takes", code: "version_cap" };
+    const rate = { error: "more than 20 saves in 10 minutes: wait a few minutes and save again", code: "rate_limited" };
+    expect(saveErrorText(422, cap, en)).toBe("The answer was not saved: it already has the most versions an answer can hold.");
+    expect(saveErrorText(422, cap, no)).toBe("Svaret ble ikke lagret: det har allerede så mange versjoner som et svar kan ha.");
+    expect(saveErrorText(429, rate, en)).toBe(en.composer.rateLimited);
+    expect(saveErrorText(429, rate, no)).toBe(no.composer.rateLimited);
+    expect(no.composer.rateLimited).toContain("Vent noen minutter");
+    for (const L of [en, no]) for (const [s, p] of [[422, cap], [429, rate]] as const) expect(saveErrorText(s, p, L)).not.toContain(p.error);
+  });
 });
 
 describe("answer cards PR 5 fix round 1", () => {

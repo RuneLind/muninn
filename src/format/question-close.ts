@@ -13,6 +13,7 @@ import { parseLogItem } from "./genre-lists.ts";
 import { DECISION_ID_RE, eachComponent, parseQuestionPage, type DecisionLogEntry } from "./question.ts";
 import { frontmatterBodyLine } from "./frontmatter-fence.ts";
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { analyzeDecisionChains } from "./decision-chain.ts";
 
 /** What closes the card: a decision the page already holds (the P1 hint), or an answer to record as a new one. */
 export type CloseRuling =
@@ -126,12 +127,21 @@ const decisionNumber = (id: string) => Number(id.slice(1));
  * Where the page's parsers would read the owner's prose as grammar: an inline
  * tag's `<` (the reader renders `<Fact …>`, `<Check/>`), the first letter of a
  * decision's «Lukker/Closes On» (a decision-chain edge) and of a canonical
- * close or reopen word before a date (the close rule). A WORD JOINER goes
- * after the match: invisible in the reader, and no parser's tag or word
- * pattern spans it.
+ * close or reopen word before a date (the close rule), the first letter of a
+ * reversal word (`parseLogItem`'s «superseded by Dn» / «erstattet av Dn» dim
+ * and the chain's word after a struck lead), and of a prose «PR n» /
+ * «oppgave n» (a decision → PR edge: the owner adds a real link instead). A
+ * WORD JOINER goes after the match: invisible in the reader, and no parser's
+ * tag or word pattern spans it.
  */
-const GRAMMAR_RE =
-  /<(?=[A-Za-z/!?>])|(?<![\p{L}\p{N}_])(?=(?:[Ll]ukker|[Cc]loses)[ \t\u00a0]+[SO]\d)\p{L}|(?<![\p{L}\p{N}_])(?=(?:Closed|Lukket|Reopened|Gjenåpnet)[ \t\u00a0]+\d)\p{L}/gu;
+/** Any case and any neighbour, as `REVERSAL_FOLLOWER_RE` (decision-chain.ts) and `SUPERSEDED_RE` (genre-lists.ts) read them. */
+const REVERSAL_WORD_RE = /(?=snudd|reversed|superseded|erstattet)\p{L}/giu;
+const GRAMMAR_RES = [
+  REVERSAL_WORD_RE,
+  // `PROSE_PR_RE` (decision-chain.ts): `PR` in capitals, `oppgave` with either first letter.
+  /(?<![\p{L}\p{N}_[])(?=(?:PR|[Oo]ppgave)[ \t\u00a0]+\d)\p{L}/gu,
+  /<(?=[A-Za-z/!?>])|(?<![\p{L}\p{N}_])(?=(?:[Ll]ukker|[Cc]loses)[ \t\u00a0]+[SO]\d)\p{L}|(?<![\p{L}\p{N}_])(?=(?:Closed|Lukket|Reopened|Gjenåpnet)[ \t\u00a0]+\d)\p{L}/gu,
+];
 const JOINER = "\u2060";
 
 type Seg =
@@ -222,7 +232,20 @@ function inertLine(parts: Seg[][]): string | null {
   // from one text into the next is seen.
   const masked = segs.map((s) => (s.kind === "code" ? "\n".repeat(segText(s).length) : s.text)).join("");
   const cuts = new Set<number>();
-  for (const m of masked.matchAll(GRAMMAR_RE)) cuts.add(m.index! + m[0].length);
+  for (const re of GRAMMAR_RES) for (const m of masked.matchAll(re)) cuts.add(m.index! + m[0].length);
+  // `parseLogItem` reads «superseded by» with every `(`+)…\1` stretch deleted
+  // (`withoutCodeSpans`), which joins `superse``ded` and pairs runs no reader
+  // pairs. A cut goes after a letter, so it moves no backtick and that reading
+  // stays the one scanned here.
+  const line = segs.map(segText).join("");
+  const kept: number[] = [];
+  let last = 0;
+  for (const m of line.matchAll(/(`+)[\s\S]*?\1/g)) {
+    for (let k = last; k < m.index!; k++) kept.push(k);
+    last = m.index! + m[0].length;
+  }
+  for (let k = last; k < line.length; k++) kept.push(k);
+  for (const m of kept.map((k) => line[k]).join("").matchAll(REVERSAL_WORD_RE)) cuts.add(kept[m.index!]! + 1);
   let out = "";
   let at = 0;
   for (const s of segs) {
@@ -324,7 +347,8 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
   // item gains the phrase at the end of its first paragraph, and the inserted
   // items are exactly the ones written. Anything else (a fence, a lazy line or a
   // log the line scan reads differently) is refused, never written.
-  const after = parseQuestionPage(parseBlocks(content.split(/\r?\n/).slice(from).join("\n")));
+  const afterBlocks = parseBlocks(content.split(/\r?\n/).slice(from).join("\n"));
+  const after = parseQuestionPage(afterBlocks);
   const phrase = `Closed ${today} (${decision}).`;
   const ownAt = before.entries.findIndex((e) => e.id === id);
   const expected: { id: string; itemText: string; text: string }[] = before.entries.map((e: DecisionLogEntry, k) =>
@@ -342,6 +366,21 @@ export function closeCardEdit(text: string, id: string, ruling: CloseRuling, tod
     after.states.get(id)?.kind === "decided";
   if (!placed) {
     return { ok: false, code: "unplaceable", reason: `the page's log has a shape the close cannot place: close ${id} on the page` };
+  }
+  // A new decision carries no grammar of the owner's: it is not dimmed, and its
+  // chain is the close's own edge, no reversal and no PR (ledgers left out, so
+  // every prose number counts). Grammar the joiners could not break (a parser
+  // reading a code span as prose) is refused, never written.
+  if (ruling.kind === "answer") {
+    const chain = analyzeDecisionChains(afterBlocks, []).chains.find((c) => c.decision === decision);
+    const clean =
+      after.entries.find((e) => e.id === decision)?.dim === false &&
+      chain !== undefined &&
+      chain.reversed === null &&
+      chain.outputs.length === 0 &&
+      chain.questions.length === 1 &&
+      chain.questions[0]!.id === id;
+    if (!clean) return { ok: false, code: "unplaceable", reason: `the answer reads as decision-log grammar the close cannot neutralize: close ${id} on the page` };
   }
   return { ok: true, content, decision, lines: shown };
 }

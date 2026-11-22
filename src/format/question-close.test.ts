@@ -255,11 +255,28 @@ describe("closeCardEdit: owner text stays text in every state (F50 matrix)", () 
     lukket: "Lukket 01.01.2026 (D9)",
     reopened: "Reopened 2026-01-02",
     gjenapnet: "Gjenåpnet 02.01.2026",
+    // Fix round 1 batch 2: the log's other grammar. A reversal word dims the item
+    // (`parseLogItem`) or, after a struck lead sentence, reverses it in the chain;
+    // a prose «PR n» / «oppgave n» is a decision → PR edge.
+    superseded: "superseded by D3",
+    erstattet: "ERSTATTET AV D3",
+    struckSuperseded: "~~Old plan.~~ superseded: do B",
+    struckReversed: "~~Go with A.~~ Reversed",
+    struckSnudd: "~~Gammel plan.~~ — «Snudd»",
+    struckErstattet: "~~Plan.~~ erstattet",
+    pr: "Ship it in PR 4 and PR 5",
+    prSlash: "PR 22/23",
+    oppgave: "gjør oppgave 2 og 3",
+    oppgaveCap: "Oppgave 7",
   };
+  /** Hits whose `~~` the reader draws as a strike: the owner's own formatting. */
+  const STRIKE = new Set(["struckSuperseded", "struckReversed", "struckSnudd", "struckErstattet"]);
   /** `other`: another field's text on the line; `strayPair`: two stray runs that would pair across fields. */
   type Ctx = { name: string; here: (hit: string) => string; other?: string; strayPair?: boolean };
   const mid = (hit: string, run: string) => hit.slice(0, Math.ceil(hit.length / 2)) + run + hit.slice(Math.ceil(hit.length / 2));
   const CTX: Ctx[] = [
+    // Where a struck lead sentence counts: the start of the decision's text.
+    { name: "the whole text", here: (h) => h },
     { name: "no backticks", here: (h) => `pre ${h} post` },
     { name: "own span right before", here: (h) => `see \`x\`${h}` },
     { name: "own span right after", here: (h) => `${h}\`y\` z` },
@@ -346,21 +363,29 @@ describe("closeCardEdit: owner text stays text in every state (F50 matrix)", () 
             expect(d1.questions.map((x) => `${x.id}:${x.source}`)).toEqual(["O1:close"]);
             expect(d1.reversed).toBeNull();
             expect(d1.outputs).toEqual([]);
+            expect(chains.proseEdges).toBe(0);
             expect(chains.orphans).toEqual([]);
             expect(chains.conflicts).toEqual([]);
             const parsed = parseQuestionPage(blocks);
             expect(parsed.states.get("O1")).toEqual({ kind: "decided", decision: "D1" });
             expect(parsed.states.get("O2")).toEqual({ kind: "open" });
             expect(parsed.decisions).toEqual(new Set(["D1"]));
-            expect(lastCanonicalPhrase(parsed.entries.find((e) => e.id === "D1")!.itemText)).toBeNull();
+            const d1Entry = parsed.entries.find((e) => e.id === "D1")!;
+            expect(lastCanonicalPhrase(d1Entry.itemText)).toBeNull();
+            expect(d1Entry.dim).toBe(false);
+            expect(parseLogItem(d1Lines[0]!.slice(2)).dim).toBe(false);
             expect(componentsOf(r.content)).toEqual(componentsOf(baseline));
             expect(lintChecks(r.content)).toEqual(lintChecks(baseline));
             // (a) and (c): no element drawn from the text, the text shown as each
             // field shows on its own, and code only where the owner wrote a span.
             const li = d1Html(r.content);
-            for (const tag of li.match(/<[^>]*>/g) ?? []) expect(tag).toMatch(ALLOWED_TAG);
+            expect(/<li class="(dl-item[^"]*)" id="d1"/.exec(renderWikiHtml(r.content, () => undefined, {}))![1]).not.toContain("dl-dim");
+            const strike = STRIKE.has(kind);
+            for (const tag of li.match(/<[^>]*>/g) ?? []) if (!(strike && /^<\/?s>$/.test(tag))) expect(tag).toMatch(ALLOWED_TAG);
             const want = expectedOf(ruling);
-            expect(decode(li.replace(/<[^>]*>/g, "")).replaceAll(J, "")).toBe(want.text);
+            // A strike's `~~` is drawn, or shown where a backtick splits it: compared without it.
+            const unstrike = (t: string) => (strike ? t.replaceAll("~~", "") : t);
+            expect(unstrike(decode(li.replace(/<[^>]*>/g, "")).replaceAll(J, ""))).toBe(unstrike(want.text));
             // Code keeps its bytes (no joiner in it), so it copies as written.
             const codes = [...li.matchAll(/<code>([\s\S]*?)<\/code>/g)].map((m) => decode(m[1]!));
             // Two stray runs in different fields would pair; one gets a span of its own.
@@ -370,6 +395,33 @@ describe("closeCardEdit: owner text stays text in every state (F50 matrix)", () 
       }
     }
   }
+
+  test("the reported reversal and PR shapes: no dim, no reversal, no output, and the text shows as written", () => {
+    for (const body of ["Keep A for now; this is superseded by D3 once B lands", "~~Old plan.~~ superseded: do B", "~~Go with A.~~ Reversed: B", "Ship it in PR 4 and PR 5"]) {
+      const r = ok(closeCardEdit(base, "O1", answer({ choice: null, body }), TODAY));
+      const blocks = parseBlocks(stripFm(r.content));
+      const d1 = analyzeDecisionChains(blocks, []).chains.find((c) => c.decision === "D1")!;
+      expect([d1.reversed, d1.outputs]).toEqual([null, []]);
+      expect(parseQuestionPage(blocks).entries.find((e) => e.id === "D1")!.dim).toBe(false);
+      expect(decode(d1Html(r.content).replace(/<[^>]*>/g, "")).replaceAll(J, "")).toBe(`${body.replace(/~~/g, "")}. Rune Lind, 06.11.2026.`);
+    }
+  });
+
+  test("both readings of backticks are scanned: runs only `withoutCodeSpans` pairs, and a run only it deletes", () => {
+    // `parseLogItem` deletes `` ` plan.~~ superseded: ` `` (runs of 1 and 2, which no reader pairs); the chain reads the raw text.
+    for (const body of ["~~Old ` plan.~~ superseded: `` z", "superse``ded by D3"]) {
+      const r = ok(closeCardEdit(base, "O1", answer({ choice: null, body }), TODAY));
+      const blocks = parseBlocks(stripFm(r.content));
+      const d1 = analyzeDecisionChains(blocks, []).chains.find((c) => c.decision === "D1")!;
+      expect(d1.reversed).toBeNull();
+      expect(parseQuestionPage(blocks).entries.find((e) => e.id === "D1")!.dim).toBe(false);
+    }
+  });
+
+  test("grammar a parser reads inside the owner's code span (a struck lead closing in a span) is refused, not written", () => {
+    const r = closeCardEdit(base, "O1", answer({ choice: null, body: "~~Old. `x.~~ superseded` y" }), TODAY);
+    expect(r).toMatchObject({ ok: false, code: "unplaceable" });
+  });
 
   test("the three reported shapes: backslash before a tag, a tag after a span, a comparison before Closes, a stray before a tag in the author", () => {
     const cases: [Partial<Answer>, string, string[]][] = [
