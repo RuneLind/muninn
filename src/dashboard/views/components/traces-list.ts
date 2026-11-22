@@ -142,8 +142,8 @@ export function tracesListScript(): string {
         // Model-call legibility (stamped by the watcher runner): a failed
         // attempt is the actionable signal, so it beats the quiet-hours label
         // when a tick carries both; all three beat an ambiguous dash.
-        if (attrs?.modelErrors) return '<span class="badge badge-error" title="' + attrs.modelErrors + ' model call(s) failed (timeout / crash / unparseable output) — the run completed without a usable model response">model call failed</span>';
-        if (attrs?.quietSkips) return '<span class="badge badge-quiet" title="' + attrs.quietSkips + ' due watcher(s) skipped by quiet hours — no model call ran">quiet hours</span>';
+        if (attrs?.modelErrors) return '<span class="badge badge-error" title="' + esc(String(attrs.modelErrors)) + ' model call(s) failed (timeout / crash / unparseable output) — the run completed without a usable model response">model call failed</span>';
+        if (attrs?.quietSkips) return '<span class="badge badge-quiet" title="' + esc(String(attrs.quietSkips)) + ' due watcher(s) skipped by quiet hours — no model call ran">quiet hours</span>';
         if (attrs?.noModelCall) return '<span class="badge badge-quiet" title="Run completed without invoking a model — nothing new to score/summarize this tick">no model call</span>';
         return '<span style="color:var(--text-disabled)">-</span>';
       }
@@ -201,16 +201,19 @@ export function tracesListScript(): string {
         const toolsBadge = toolCount > 0
           ? '<span class="badge badge-tools">' + toolCount + '</span>'
           : '<span style="color:var(--text-disabled)">-</span>';
-        return '<tr onclick="loadWaterfall(\\'' + t.traceId + '\\')" data-trace="' + t.traceId + '">' +
+        // Stored values (a Telegram first_name is the username when there is no
+        // @handle) go into innerHTML, so every data field is escaped; the trace id
+        // reaches the handler through the dataset, never compiled into it.
+        return '<tr onclick="loadWaterfall(this.dataset.trace)" data-trace="' + esc(t.traceId) + '">' +
           '<td>' + fmtDate(t.startedAt) + '</td>' +
           '<td>' + fmtName(t) + '</td>' +
           '<td>' + (t.botName ? '<span class="badge badge-bot">' + esc(t.botName) + '</span>' : '-') + '</td>' +
-          '<td>' + (t.username || t.userId || '-') + '</td>' +
+          '<td>' + esc(String(t.username || t.userId || '-')) + '</td>' +
           '<td>' + fmtBackend(t.attributes) + '</td>' +
           '<td>' + fmtDuration(t.durationMs) + '</td>' +
-          '<td><span class="badge badge-' + t.status + '">' + t.status + '</span></td>' +
+          '<td><span class="badge badge-' + esc(t.status) + '">' + esc(t.status) + '</span></td>' +
           '<td>' + toolsBadge + '</td>' +
-          '<td class="tokens">' + tokens + '</td>' +
+          '<td class="tokens">' + esc(tokens) + '</td>' +
           '</tr>';
       }).join('');
       if (typeof refreshWaterfallPlacement === 'function') refreshWaterfallPlacement();

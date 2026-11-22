@@ -449,6 +449,10 @@ export function docPanelScript(): string {
     }
     ${factcheckCalloutScript()}
 
+    // A document's \`url\` is stored data of any scheme: it becomes a live href
+    // only when isSafeLinkHref allows it; otherwise no "Open source" link.
+    var docPanelSafeHref = ${isSafeLinkHref.toString()};
+
     // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
     // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).
     // A document in a registered summary source's collection (SUMMARY_SOURCES)
@@ -473,7 +477,7 @@ export function docPanelScript(): string {
 
       titleEl.textContent = docId.replace(/\\.md$/, '').split('/').pop();
       setFollowUpHref(titleEl.textContent, collection, docId);
-      linksEl.innerHTML = webUrl
+      linksEl.innerHTML = webUrl && docPanelSafeHref(webUrl)
         ? '<a href="' + esc(webUrl) + '" target="_blank" rel="noopener">Open source &rarr;</a>'
         : '';
       bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading document...</div>';
@@ -489,7 +493,7 @@ export function docPanelScript(): string {
         .then(function(doc) {
           titleEl.textContent = (doc.id || docId).replace(/\\.md$/, '').split('/').pop();
           setFollowUpHref(titleEl.textContent, collection, docId);
-          if (doc.url) {
+          if (doc.url && docPanelSafeHref(doc.url)) {
             linksEl.innerHTML = '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener">Open source &rarr;</a>';
           }
           var text = doc.text || '';

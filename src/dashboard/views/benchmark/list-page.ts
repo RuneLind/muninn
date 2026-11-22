@@ -302,7 +302,7 @@ function renderPreview(p) {
     </div>
 
     <div class="preview-actions">
-      <button id="previewRunBtn" onclick="runFromPreview('\${esc(p.issue.issueKey)}', '\${esc(p.treatmentPath)}')">Run this cell</button>
+      <button id="previewRunBtn" data-issue="\${esc(p.issue.issueKey)}" data-treatment="\${esc(p.treatmentPath)}" onclick="runFromPreview(this.dataset.issue, this.dataset.treatment)">Run this cell</button>
       <button class="secondary" onclick="closePreview()">Close</button>
       <span class="hint">The preview is pure-reads — no tokens spent. Pressing Run this cell spawns the same subprocess as Run cell (live).</span>
     </div>

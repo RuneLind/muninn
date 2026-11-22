@@ -149,6 +149,7 @@ import { abortAgentRuns, snapshotAgentPane, type AgentPaneSnapshot } from "./wik
 import { enhanceNewSince } from "./wiki-new-since.ts";
 import { mountSectionBar } from "./wiki-section-bar.ts";
 import { resolveLens, type Lens } from "../../../format/reader-lens.ts";
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
 import { EXPLAINER_SANDBOX } from "../../../wiki/explainer-sandbox.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { enhanceAnswerCards } from "./wiki-answer-cards.ts";
@@ -1430,7 +1431,7 @@ function placeRetiredBanner(m: WikiListing): void {
  * strip rendered here is the PLACEHOLDER; `loadProvStrip` fills it once the
  * page is on screen.
  */
-function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
+export function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   // Explainer-style subtitle under the H1 for blog pages that declared a
   // `description` (user text → escaped into innerHTML). Non-blog pages are unchanged.
   const subtitle =
@@ -1450,7 +1451,8 @@ function articleHeadHtml(m: WikiListing, provenancePending?: boolean): string {
   if (m.created || m.updated) {
     head += `<span class="wiki-dates">${esc(m.created || "")}${m.updated && m.updated !== m.created ? " · upd " + esc(m.updated) : ""}</span>`;
   }
-  if (m.url) {
+  // Frontmatter `url:` is any scheme an author or drafter wrote; a link only when it is safe.
+  if (m.url && isSafeLinkHref(m.url)) {
     head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
   }
   head += projectHubChipHtml(m);
