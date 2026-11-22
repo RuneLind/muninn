@@ -4,14 +4,13 @@
  * the next request builds again. Plus the pin that keeps the reader's client
  * files in the server's module graph, which is what `bun --watch` watches.
  */
-import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { testTempDirSync } from "../../../test/temp-dir.ts";
 import { makeBundledClientScript } from "./bundle-browser-iife.ts";
 
-const dir = mkdtempSync(join(tmpdir(), "bundle-iife-"));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const dir = testTempDirSync("bundle-iife-");
 
 test("a failed build names the entry and is retried on the next request; a good one is shared and kept", async () => {
   writeFileSync(join(dir, "entry.ts"), "export const x = ;\n");
