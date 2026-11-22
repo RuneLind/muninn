@@ -63,6 +63,10 @@ export interface InboxCard {
    *  live answer to (`authorKeyOf`), so an inbox answer would 409. */
   viewerAnswered: boolean;
   lane: InboxLane;
+  /** sha256 of the card's `hashInput`, as `/api/wiki/page` renders it
+   *  (`data-question-hash`): an inbox answer sends it, and the answer route
+   *  refuses it with 409 question_changed once the wording moved (F49). */
+  questionHash: string;
 }
 
 export interface InboxStructured {
@@ -146,6 +150,8 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
     const { card } = await gatherCardFacts({ wiki: entry.name, ...ref, answeredAt: null, commit: null }, { ...read, repos: [] }, view, ctx);
     const itemText = (id: string | null) => (id ? (read.page.entries.find((e) => e.id === id)?.itemText ?? null) : null);
     const hint = read.hints.find((h) => h.id === ref.id) ?? null;
+    // An open card is never a duplicated id, so the first block is the one the route hashes.
+    const question = read.page.questions.find((x) => x.id === ref.id)!;
     cards.push({
       relPath: ref.relPath,
       id: ref.id,
@@ -161,6 +167,7 @@ export async function readDecisionInbox(entry: WikiRegistryEntry, deps: Decision
       hint: hint ? { decision: hint.decision, decisionText: itemText(hint.decision), namedBy: hint.namedBy, word: hint.word, ownItem: itemText(ref.id) } : null,
       viewerAnswered: viewerHas(ref.relPath, ref.id),
       lane: inboxLane({ wiki: entry.name, answers: card.answers, hinted: hint !== null, ownerAsked: card.ownerAsked }),
+      questionHash: sha256(question.hashInput),
     });
   }
   return { wiki: entry.name, cards: sortByAge(cards, deps.now()) };

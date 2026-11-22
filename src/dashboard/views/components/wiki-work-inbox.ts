@@ -388,6 +388,9 @@ export function inboxHtml(hrefFor: (rel: string) => string, now: number): string
   return `<div class="wiki-wm-section wiki-wi" id="wikiWorkInbox"><div class="wiki-wm-section-title">Decisions · ${cards.length} open</div>${statusHtml(now)}${failed}${lanes}${emptyLine}</div>`;
 }
 
+const isQuestionChanged = (status: number, data: unknown) =>
+  status === 409 && !!data && typeof data === "object" && (data as { code?: unknown }).code === "question_changed";
+
 async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: string): Promise<void> {
   const s = st!;
   s.sending[k] = true;
@@ -399,7 +402,7 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
     const res = await fetch("/api/wiki/answers", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wiki: s.body!.wiki, relPath: c.relPath, questionId: c.id, choice, body: note }),
+      body: JSON.stringify({ wiki: s.body!.wiki, relPath: c.relPath, questionId: c.id, choice, body: note, ...(c.questionHash ? { questionHash: c.questionHash } : {}) }),
     });
     status = res.status;
     data = await res.json().catch(() => null);
@@ -412,6 +415,10 @@ async function sendAnswer(c: InboxCard, k: string, choice: string | null, note: 
     delete s.picked[k];
     delete s.notes[k];
     s.msg[k] = { text: `Answered ${c.id}.`, warn: false, page: false };
+  } else if (isQuestionChanged(status, data)) {
+    // The pick was made against the old wording: the reload shows the new one.
+    delete s.picked[k];
+    s.msg[k] = { text: `Not saved: ${c.id} was reworded after the inbox loaded. Read the new wording below and answer again.`, warn: true, page: false };
   } else if (alreadyAnsweredOf(status, data) || isVersionConflict(status, data)) {
     s.msg[k] = { text: "This card already has your answer from elsewhere: change it on the page.", warn: true, page: true };
   } else {

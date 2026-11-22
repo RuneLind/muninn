@@ -23,6 +23,7 @@ import { resolveEmbedRelPath } from "../format/embed.ts";
 import { checkPageFileRef, diagramSiblingRelPath, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
 import { DIAGRAM_HTML_MAX_BYTES } from "./page-files.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { extractEmbedTargets } from "./store.ts";
 
 /** The data-file refs a page's markdown reads, resolved to wiki-relative
  *  paths in the page's own spelling, in source order, each spelling once.
@@ -160,7 +161,7 @@ const readText = async (abs: string): Promise<string | null> => {
 /**
  * The data files to delete with `pageRelPath` (NFC object names): the ones
  * publish uploads for the page as it stands, minus the ones another page in
- * `pageRelPaths` (the local index) also reads (`shared`). `refused` lists the
+ * `pageRelPaths` (the local index) also reads, `<Embed>`s, or is (`shared`). `refused` lists the
  * names the script's `sjekkStiform` refuses — never uploaded, and one such
  * name in a `--fjern` argv makes it delete nothing.
  */
@@ -203,15 +204,23 @@ export async function fellesRemoveDataFiles(
   if (candidates.length === 0) return { dataFiles: [], shared: [], refused };
 
   const others = new Set<string>();
+  // Keyed by `collisionKey`: another indexed page (a standalone `.html`
+  // explainer that is also a diagram's sibling) and another page's `<Embed>`
+  // target, which `extractEmbedTargets` reads lowercased. Either keeps the file.
+  const otherKeys = new Set<string>();
   for (const other of pageRelPaths) {
-    if (other.normalize("NFC") === page || !/\.mdx?$/i.test(other)) continue;
+    if (other.normalize("NFC") === page) continue;
+    otherKeys.add(collisionKey(other));
+    if (!/\.mdx?$/i.test(other)) continue;
     const text = await read(path.join(root, other));
     if (text === null) continue;
     for (const rel of pageDataFileRelPaths(other, text)) others.add(rel);
+    for (const rel of extractEmbedTargets(text, other)) otherKeys.add(collisionKey(rel));
   }
+  const isShared = (rel: string) => others.has(rel) || otherKeys.has(collisionKey(rel));
   return {
-    dataFiles: candidates.filter((rel) => !others.has(rel)),
-    shared: candidates.filter((rel) => others.has(rel)),
+    dataFiles: candidates.filter((rel) => !isShared(rel)),
+    shared: candidates.filter(isShared),
     refused,
   };
 }

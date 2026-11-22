@@ -102,6 +102,23 @@ describe("TARGET SET: remove targets what publish uploads for the page as it sta
     expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
   });
 
+  // F48 fix round 1: a sibling is also a standalone `.html` another page embeds,
+  // or a page of its own; deleting it breaks that embed or that page on the pod.
+  test("a sibling another local page <Embed>s is kept as shared", async () => {
+    const read = async (abs: string) =>
+      abs === "/w/p/page.mdx" ? diagram("flow.workflow.json") : abs === "/w/q/other.md" ? `<Embed src="../p/flow.html" />\n` : null;
+    const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "q/other.md"], read, probe({ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, ext4));
+    expect(got).toEqual({ dataFiles: ["p/flow.workflow.json"], shared: ["p/flow.html"], refused: [] });
+  });
+
+  test("a sibling that is itself an indexed page is kept as shared, also with its diagram JSON missing", async () => {
+    for (const entries of [{ "/w/p/flow.workflow.json": F(), "/w/p/flow.html": F() }, { "/w/p/flow.html": F() }] as Record<string, Entry>[]) {
+      const got = await fellesRemoveDataFiles("/w", "p/page.mdx", ["p/page.mdx", "p/flow.html"], pageAt(diagram("flow.workflow.json")), probe(entries, ext4));
+      expect(got.shared).toEqual(["p/flow.html"]);
+      expect(got.dataFiles).not.toContain("p/flow.html");
+    }
+  });
+
   test("a data file another local page reads is kept, also across NFC and NFD spellings", async () => {
     const read = async (abs: string) =>
       abs === "/w/p/page.mdx" ? refs("d.csv", NFC) : abs === "/w/q/other.md" ? refs(`../p/${NFD}`) : null;
