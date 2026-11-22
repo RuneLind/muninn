@@ -14,6 +14,7 @@
  */
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { nextNeedle } from "./linear-scan.ts";
 import {
   COMPONENT_ATTRS,
   COMPONENT_NAMES,
@@ -672,7 +673,7 @@ export interface MarkupToken {
 }
 
 /** Any known component's tag in the parser's own attribute grammar
- *  ({@link COMPONENT_OPEN_RE}, `INLINE_COMPONENT_RE`): double-quoted values and
+ *  ({@link COMPONENT_OPEN_RE}, `INLINE_COMPONENT_OPEN_RE`): double-quoted values and
  *  white space between them, line breaks included, so a multi-line opener is
  *  one token. A failed match stops at the first character the grammar rejects,
  *  except an open quote, which runs to the next `"`. */
@@ -1914,36 +1915,59 @@ export type InlineSegment =
   | { kind: "component"; name: InlineComponentName; attrs: Record<string, string>; text: string };
 
 // `<Name …>text</Name>` or `<Name …/>` for the inline whitelist only. Attr shape
-// mirrors COMPONENT_OPEN_RE (double-quoted values); the paired form's inner text
-// is captured non-greedily so the FIRST matching close wins. Built from the name
-// list so the whitelist lives in one place. Global — callers reset lastIndex.
-const INLINE_COMPONENT_RE = new RegExp(
-  `<(${INLINE_COMPONENT_NAMES.join("|")})((?:\\s+[A-Za-z][\\w-]*="[^"]*")*)\\s*(?:/>|>([\\s\\S]*?)</\\1>)`,
+// mirrors COMPONENT_OPEN_RE (double-quoted values). The regex matches the OPEN
+// tag only; the paired form's close is found by a memoized `indexOf`, the FIRST
+// matching close winning — the old single regex's lazy `([\s\S]*?)</\1>` rescanned
+// to the end of the text from every unclosed opener (F30: quadratic). Built from
+// the name list so the whitelist lives in one place. Global — callers reset lastIndex.
+const INLINE_COMPONENT_OPEN_RE = new RegExp(
+  `<(${INLINE_COMPONENT_NAMES.join("|")})((?:\\s+[A-Za-z][\\w-]*="[^"]*")*)\\s*(\\/>|>)`,
   "g",
 );
 
 /**
  * Split an inline string into literal-text runs and inline-component tokens.
- * Linear in input length (one global-regex sweep), so a page of thousands of
- * inline components stays single-pass — this runs on every streaming delta the
- * same way the block parser does. A string with no `<` short-circuits to a
- * single text run.
+ * Linear in input length (one global-regex sweep for the open tags, and one
+ * memoized close search per name), so a page of thousands of inline components
+ * — or of unclosed open tags — stays single-pass; this runs on every streaming
+ * delta the same way the block parser does. A string with no `<` short-circuits
+ * to a single text run.
  */
 export function scanInlineComponents(text: string): InlineSegment[] {
   if (text.indexOf("<") === -1) return [{ kind: "text", text }];
 
   const segments: InlineSegment[] = [];
-  INLINE_COMPONENT_RE.lastIndex = 0;
+  const closes = new Map<string, (from: number) => number>();
+  const re = INLINE_COMPONENT_OPEN_RE;
+  re.lastIndex = 0;
   let last = 0;
   let m: RegExpExecArray | null;
-  while ((m = INLINE_COMPONENT_RE.exec(text)) !== null) {
-    if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
+  while ((m = re.exec(text)) !== null) {
     const name = m[1] as InlineComponentName;
+    const openEnd = re.lastIndex;
+    let inner = "";
+    let end = openEnd;
+    if (m[3] === ">") {
+      const close = `</${name}>`;
+      let next = closes.get(name);
+      if (!next) closes.set(name, (next = nextNeedle(text, close)));
+      const at = next(openEnd);
+      if (at < 0) {
+        // Unclosed: literal text, and the scan resumes one character on, as the
+        // single regex did.
+        re.lastIndex = m.index + 1;
+        continue;
+      }
+      inner = text.slice(openEnd, at);
+      end = at + close.length;
+    }
+    if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
     if (observingComponentTags()) reportComponentTag({ name, rawAttrs: m[2] ?? "", inline: true });
     const attrs = parseAttrs(m[2] ?? "", name);
-    // Self-closing → group 3 is undefined; treat as empty inner text.
-    segments.push({ kind: "component", name, attrs, text: m[3] ?? "" });
-    last = INLINE_COMPONENT_RE.lastIndex;
+    // Self-closing → empty inner text.
+    segments.push({ kind: "component", name, attrs, text: inner });
+    last = end;
+    re.lastIndex = end;
   }
   if (segments.length === 0) return [{ kind: "text", text }];
   if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });

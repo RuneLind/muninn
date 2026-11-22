@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { safeFetchPage, safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
+import { decodeBody, safeFetchPage, safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
 
 /**
  * `safeFetchPage` — `safeFetchText`'s guards with the landing URL and the
@@ -8,6 +8,10 @@ import { safeFetchPage, safeFetchText, type SafeFetchOptions } from "./safe-fetc
  * `pub.test` to a public address, and a `fetchImpl` that sends the request to
  * the loopback server below.
  */
+
+const LATIN1_PAGE = "<title>Blåbær på Øya - «café»</title><p>Smørbrød</p>";
+/** `text` as ISO-8859-1 bytes (every character here is in its range). */
+const latin1 = (text: string) => Uint8Array.from(text, (ch) => ch.charCodeAt(0));
 
 let server: ReturnType<typeof Bun.serve>;
 let port = 0;
@@ -38,6 +42,15 @@ beforeAll(() => {
       if (p === "/archive.zip") return new Response("PK", { headers: { "content-type": "application/zip" } });
       if (p === "/untyped") return new Response(new Uint8Array([1, 2, 3]));
       if (p === "/private") return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/x" } });
+      // F61: the same Latin-1 page, its charset declared three ways.
+      if (p === "/latin1-header") return new Response(latin1(LATIN1_PAGE), { headers: { "content-type": "text/html; charset=ISO-8859-1" } });
+      if (p === "/latin1-meta") return new Response(latin1(`<meta charset="iso-8859-1">${LATIN1_PAGE}`), { headers: { "content-type": "text/html" } });
+      if (p === "/latin1-equiv") {
+        const head = `<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">`;
+        return new Response(latin1(head + LATIN1_PAGE), { headers: { "content-type": "text/html" } });
+      }
+      if (p === "/utf8-unknown-label") return new Response(`<title>Blåbær</title>`, { headers: { "content-type": "text/html; charset=x-no-such-charset" } });
+      if (p === "/utf8-plain") return new Response(`<title>Blåbær</title>`, { headers: { "content-type": "text/plain" } });
       return new Response("gone", { status: 404, headers: { "content-type": "text/plain" } });
     },
   });
@@ -73,5 +86,39 @@ describe("safeFetchPage", () => {
   test("a 404 and a redirect onto a private address are refused (null)", async () => {
     expect(await safeFetchPage("http://pub.test/missing", opts())).toBeNull();
     expect(await safeFetchPage("http://pub.test/private", opts())).toBeNull();
+  });
+});
+
+describe("F61: the body is decoded in the charset the answer declares", () => {
+  test("a Latin-1 page declared in the content-type header", async () => {
+    expect((await safeFetchPage("http://pub.test/latin1-header", opts()))?.text).toBe(LATIN1_PAGE);
+  });
+
+  test("a Latin-1 page declared only by <meta charset>", async () => {
+    expect((await safeFetchPage("http://pub.test/latin1-meta", opts()))?.text).toBe(`<meta charset="iso-8859-1">${LATIN1_PAGE}`);
+  });
+
+  test("a Latin-1 page declared only by an http-equiv content-type", async () => {
+    const text = (await safeFetchPage("http://pub.test/latin1-equiv", opts()))?.text ?? "";
+    expect(text.endsWith(LATIN1_PAGE)).toBe(true);
+    expect(text).not.toContain("�");
+  });
+
+  test("a byte-order mark wins over the declarations; a meta tag naming UTF-16 reads as UTF-8", () => {
+    const utf16le = new Uint8Array([0xff, 0xfe, 0x68, 0x00, 0xe5, 0x00]);
+    expect(decodeBody(utf16le, "text/html; charset=iso-8859-1")).toBe("hå");
+    const utf8bom = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("blå")]);
+    expect(decodeBody(utf8bom, "text/html; charset=iso-8859-1")).toBe("blå");
+    const metaUtf16 = new TextEncoder().encode('<meta charset="utf-16"><p>blå</p>');
+    expect(decodeBody(metaUtf16, "text/html")).toBe('<meta charset="utf-16"><p>blå</p>');
+  });
+
+  test("a <meta charset> on a non-HTML answer is not read", () => {
+    expect(decodeBody(latin1('<meta charset="iso-8859-1">å'), "text/plain")).toBe('<meta charset="iso-8859-1">�');
+  });
+
+  test("an unknown label and an undeclared body stay UTF-8", async () => {
+    expect((await safeFetchPage("http://pub.test/utf8-unknown-label", opts()))?.text).toBe("<title>Blåbær</title>");
+    expect(await safeFetchText("http://pub.test/utf8-plain", opts())).toBe("<title>Blåbær</title>");
   });
 });

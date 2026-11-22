@@ -34,6 +34,7 @@ import { highlightCode } from "../format/highlight.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
 import { questionCardAnchors, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { replaceAngleLinks, replaceAnglePipeLinks, replaceMarkdownLinks } from "../format/linear-scan.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
@@ -2806,8 +2807,10 @@ function renderInlineWith(text: string, chips: boolean): string {
   // Defensive: Claude occasionally outputs Slack-style angle-bracket links;
   // normalize them to markdown form before HTML-escaping (which would otherwise
   // turn the angle brackets into entities and hide the link).
-  result = result.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "[$2]($1)");
-  result = result.replace(/<(https?:\/\/[^>]+)>/g, "[$1]($1)");
+  // Linear matchers for `<(https?:\/\/[^|>]+)\|([^>]+)>` and `<(https?:\/\/[^>]+)>`
+  // (F30: the regexes rescanned the line from every unclosed opener).
+  result = replaceAnglePipeLinks(result, (_m, url, label) => `[${label}](${url})`);
+  result = replaceAngleLinks(result, (_m, url) => `[${url}](${url})`);
 
   // Escape HTML entities — prevents raw HTML in Claude's response from being
   // interpreted as tags. Must happen before generated tags are emitted below.
@@ -2816,7 +2819,7 @@ function renderInlineWith(text: string, chips: boolean): string {
   // Markdown links → <a>. Only http/https to prevent javascript: injection,
   // plus an in-page `#fragment` (no quote or space can reach the attribute:
   // the text is escaped above and the class below excludes whitespace).
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+  result = replaceMarkdownLinks(result, (_m, label, url) => {
     if (/^https?:\/\//.test(url)) {
       return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
     }

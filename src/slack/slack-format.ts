@@ -16,6 +16,14 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
+import {
+  replaceAngleLinks,
+  replaceAnglePipeLinks,
+  replaceDelimitedOnLine,
+  replaceHtmlAnchors,
+  replaceMarkdownLinks,
+  stripTagShapesNoNul,
+} from "../format/linear-scan.ts";
 import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
@@ -374,7 +382,7 @@ function renderInline(text: string): string {
   // and `>` delimiters are parked (sentinels carry no `<`/`>`, so the trailing
   // tag-strip leaves them alone); the LABEL stays in the stream so bold/italics
   // still render inside link text, as they did when this pass ran last.
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+  result = replaceMarkdownLinks(result, (_m, label, url) => {
     const target = url.trim();
     if (!LINKABLE_TARGET_RE.test(target)) return label;
     return ph.add("LINKOPEN", `<${target}|`) + label + ph.add("LINKCLOSE", ">");
@@ -402,26 +410,25 @@ function renderInline(text: string): string {
 
   // Claude occasionally emits raw HTML tags; convert the recognised ones to
   // mrkdwn before the catch-all strip below removes them.
-  result = result.replace(/<b>(.*?)<\/b>/g, "*$1*");
-  result = result.replace(/<i>(.*?)<\/i>/g, "_$1_");
-  result = result.replace(/<s>(.*?)<\/s>/g, "~$1~");
-  result = result.replace(/<code>(.*?)<\/code>/g, "`$1`");
-  result = result.replace(/<a href="([^"]+)">(.*?)<\/a>/g, "<$1|$2>");
+  // Each of these, and the link parks and the strip below, is a linear matcher
+  // for the regex it names (F30: `<b>(.*?)<\/b>` and the rest rescanned the
+  // line from every unclosed opener).
+  result = replaceDelimitedOnLine(result, "<b>", "</b>", (_m, t) => `*${t}*`);
+  result = replaceDelimitedOnLine(result, "<i>", "</i>", (_m, t) => `_${t}_`);
+  result = replaceDelimitedOnLine(result, "<s>", "</s>", (_m, t) => `~${t}~`);
+  result = replaceDelimitedOnLine(result, "<code>", "</code>", (_m, t) => `\`${t}\``);
+  result = replaceHtmlAnchors(result, (_m, href, label) => `<${href}|${label}>`);
 
   // Park Slack-style links so the next pass doesn't strip them.
-  result = result.replace(/<(https?:\/\/[^>|]+)\|([^>]+)>/g, (_m, url: string, label: string) =>
-    ph.add("LINK", `<${url}|${label}>`),
-  );
-  result = result.replace(/<(https?:\/\/[^>]+)>/g, (_m, url: string) =>
-    ph.add("LINK", `<${url}>`),
-  );
+  result = replaceAnglePipeLinks(result, (_m, url, label) => ph.add("LINK", `<${url}|${label}>`));
+  result = replaceAngleLinks(result, (_m, url) => ph.add("LINK", `<${url}>`));
 
   // Catch-all strip for whatever tag-shaped text is left. `[^>\x00]` is
   // load-bearing: without the NUL exclusion the "tag" body runs THROUGH a
   // placeholder sentinel, so a `<` in a link LABEL swallows the parked `>` and
   // every character up to the next `>` in the document — measured on
   // `[a<b](https://x.com) then more > text`, which lost its trailing prose.
-  result = result.replace(/<\/?[^>\x00]+>/g, "");
+  result = stripTagShapesNoNul(result);
 
   return ph.restore(result);
 }

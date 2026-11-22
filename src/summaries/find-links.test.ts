@@ -661,3 +661,73 @@ describe("D20: table defects fixed with the rule", () => {
     expect(namesRepo("karpathy/nanoGPT", { title: null, topic: "karpathy/nanoGPT.git" })).toBe(true);
   });
 });
+
+describe("F59: judgePage is linear on a hostile body", () => {
+  // 256 KB per shape. On the regex readers one body of unclosed `<style `
+  // openers stalled the event loop 14.2 s; each shape here took 1-2 s at
+  // 64 KB (quadratic). The linear readers take tens of ms.
+  const body = (token: string) => token.repeat(Math.ceil(262_144 / token.length));
+  const SHAPES: [string, string][] = [
+    ["unclosed <style openers", "<style "],
+    ["unclosed <script openers", "<script "],
+    ["unclosed <svg openers", "<svg "],
+    ["unclosed comments", "<!--"],
+    ["unclosed tags", "< "],
+    ["unclosed <meta tags", "<meta "],
+    ["unclosed <title>", "<title>"],
+    ["unclosed <h1>", "<h1>"],
+    ["unclosed JSON-LD scripts", '<script type="application/ld+json">'],
+    ["markdown openers in the visible text", "[a "],
+    ["unclosed link targets in the visible text", "[x](a"],
+  ];
+  for (const [name, token] of SHAPES) {
+    test(name, () => {
+      const p = page(body(token));
+      const t = performance.now();
+      judgePage(LYDIA, p, "Start with the defaults and adjust from there.");
+      expect(performance.now() - t).toBeLessThan(500);
+    });
+  }
+});
+
+describe("F62: a stored line's title and detail are clipped", () => {
+  test("a megabyte og:title and og:site_name reach the line as 300 characters each", () => {
+    const huge = "word ".repeat(200_000);
+    const p = page(`<meta property="og:title" content="${huge}"><meta property="og:site_name" content="${huge}">${filler("Start with the defaults and adjust from there.")}`);
+    const v = judgePage(LYDIA, p, "Start with the defaults and adjust from there.");
+    const line = foundLinkFrom(LYDIA, p, { url: p.finalUrl, title: "", quote: "" }, v);
+    expect(line?.label).toBe("reachable");
+    expect(line!.title.length).toBe(300);
+    expect(line!.detail.length).toBeLessThanOrEqual(300);
+  });
+
+  test("an ordinary title is stored as it was", () => {
+    const p = page(`<title>Effort levels | Example</title><meta property="og:site_name" content="Example">${filler("Start with the defaults and adjust from there.")}`);
+    const line = foundLinkFrom(LYDIA, p, { url: p.finalUrl, title: "", quote: "" }, judgePage(LYDIA, p, "Start with the defaults and adjust from there."));
+    expect(line).toMatchObject({ title: "Effort levels", detail: "Example" });
+  });
+});
+
+describe("F63: nested JSON that closes but does not parse", () => {
+  // Retried from every opener inside it: depth 20,000 took 4.7 s
+  // (parseCandidates) and 7.1 s (parseManifest, objects).
+  test("a deep invalid array before the real list", () => {
+    const raw = `${"[".repeat(20_000)}x${"]".repeat(20_000)} then [{"title":"T","author":null,"topic":"t","kind":"post"}]`;
+    const t = performance.now();
+    expect(parseCandidates(raw)).toEqual([{ title: "T", author: null, topic: "t", kind: "post" }]);
+    expect(performance.now() - t).toBeLessThan(250);
+  });
+
+  test("a deep invalid object before the manifest", () => {
+    const raw = `${'{"a":'.repeat(20_000)}x${"}".repeat(20_000)} {"results":[{"url":"https://a.test/x","title":"t","quote":"q"}]}`;
+    const t = performance.now();
+    expect(parseManifest(raw)).toEqual([{ url: "https://a.test/x", title: "t", quote: "q" }]);
+    expect(performance.now() - t).toBeLessThan(250);
+  });
+
+  test("a value inside a shallow one that does not parse is still found", () => {
+    expect(parseCandidates('[see [{"title":"T","author":null,"topic":"t","kind":"post"}]]')).toEqual([
+      { title: "T", author: null, topic: "t", kind: "post" },
+    ]);
+  });
+});

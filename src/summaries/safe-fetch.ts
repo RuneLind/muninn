@@ -107,6 +107,48 @@ function isAllowedContentType(raw: string | null): boolean {
   return type.startsWith("text/") || type === "application/json" || type === "application/xhtml+xml";
 }
 
+/** A decoder for `label`, or `null` when the runtime does not know it. */
+function decoderFor(label: string): TextDecoder | null {
+  try {
+    return new TextDecoder(label.trim().toLowerCase());
+  } catch {
+    return null;
+  }
+}
+
+/** How far into an HTML body a `<meta charset>` is looked for (the HTML prescan's 1024 bytes). */
+const META_PRESCAN_BYTES = 1024;
+
+/**
+ * The body as text, in the encoding the answer declares (F61; a Latin-1 page
+ * decoded as UTF-8 lost every non-ASCII letter to U+FFFD): a byte-order mark
+ * first, then the content-type's `charset`, then — for HTML — a `<meta
+ * charset>` or `http-equiv` content-type in the first 1024 bytes, else UTF-8.
+ * A label the runtime does not know is skipped. A meta tag naming UTF-16 is
+ * read as UTF-8, as browsers do (the bytes that spelled the tag were ASCII).
+ */
+export function decodeBody(buf: Uint8Array, contentType: string | null): string {
+  const bom =
+    buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf
+      ? "utf-8"
+      : buf[0] === 0xfe && buf[1] === 0xff
+        ? "utf-16be"
+        : buf[0] === 0xff && buf[1] === 0xfe
+          ? "utf-16le"
+          : null;
+  const declared = /;\s*charset\s*=\s*["']?([^"';\s]+)/i.exec(contentType ?? "")?.[1];
+  let decoder = (bom && decoderFor(bom)) || (declared && decoderFor(declared)) || null;
+  const type = (contentType ?? "").split(";")[0]!.trim().toLowerCase();
+  if (!decoder && (type === "text/html" || type === "application/xhtml+xml")) {
+    const head = new TextDecoder("windows-1252").decode(buf.subarray(0, META_PRESCAN_BYTES));
+    const meta = /<meta\b[^>]*?\bcharset\s*=\s*["']?\s*([\w.:-]+)/i.exec(head)?.[1];
+    const found = meta ? decoderFor(meta) : null;
+    decoder = found && found.encoding.startsWith("utf-16") ? null : found;
+  }
+  // A UTF-16 decoder strips its own BOM; utf-8's `ignoreBOM: false` default does too.
+  return (decoder ?? new TextDecoder("utf-8")).decode(buf);
+}
+
 async function defaultLookup(hostname: string): Promise<string[]> {
   const res = await dnsLookup(hostname, { all: true, verbatim: true });
   return res.map((r) => r.address);
@@ -532,7 +574,7 @@ async function safeFetchCore(rawUrl: string, options: SafeFetchOptions, reportPd
         }
         // Non-fatal decode: cutting at a byte boundary can split a multi-byte
         // codepoint, and one U+FFFD at the tail is not worth losing the article over.
-        return { finalUrl: url.toString(), contentType: contentType ?? "", text: new TextDecoder("utf-8").decode(buf) };
+        return { finalUrl: url.toString(), contentType: contentType ?? "", text: decodeBody(buf, contentType) };
       } finally {
         hopChain.dispose();
       }

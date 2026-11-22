@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findXrefRun, isTrackerKey, isXrefId, parseXrefIds, XREF_MAX_IDS } from "./cross-ref.ts";
+import { findXrefRun, isTrackerKey, isXrefId, parseXrefIds, RUN_GAP_SRC, XREF_MAX_IDS } from "./cross-ref.ts";
 
 const ids = (text: string, projects: string[] = []) => findXrefRun(text, projects)?.map((r) => r.id) ?? null;
 
@@ -71,6 +71,28 @@ describe("findXrefRun — the run before `i`/`in`/`på`/`on` and a wikilink", ()
     const row = `${Array.from({ length: 200 }, (_, k) => `A${k}`).join(" ")} x `;
     const t = performance.now();
     expect(ids(row)).toBeNull();
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  // F9 (architecture review 2026-11-16): the gap `\s*(?:sep)?\s*` backtracked
+  // exponentially, 24 space-separated ids took 9.4 s. Fixed on main by #872;
+  // this pins every gap shape the run grammar allows, at sizes past the
+  // 240-character scan window, and the in-page linker's anchored use.
+  test("every gap shape answers at once, at 24, 100 and 1000 ids, with or without a connector", () => {
+    const gaps = [" ", "  ", " \t ", ", ", " , ", "  ,  ", " og ", "   og   ", " -", "- ", "\n"];
+    const tails = [" i ", " x", ", ", " og", "", " i"];
+    const t = performance.now();
+    for (const n of [24, 100, 1000]) {
+      const run = Array.from({ length: n }, (_, k) => `D${k + 1}`);
+      for (const gap of gaps) for (const tail of tails) findXrefRun(run.join(gap) + tail);
+    }
+    expect(performance.now() - t).toBeLessThan(500);
+  });
+
+  test("the in-page linker's anchored gap is linear on long white-space and separator runs", () => {
+    const gapRe = new RegExp(`^${RUN_GAP_SRC}$`, "u");
+    const t = performance.now();
+    for (const s of [" ".repeat(100_000), `${" ".repeat(100_000)}x`, ", ".repeat(50_000), `${" ".repeat(50_000)}og${" ".repeat(50_000)}x`]) gapRe.test(s);
     expect(performance.now() - t).toBeLessThan(500);
   });
 
