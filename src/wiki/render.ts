@@ -24,7 +24,7 @@
  */
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
-import { escapeHtml } from "../format/markdown-core.ts";
+import { escapeHtml, withoutSentinelDelimiters } from "../format/markdown-core.ts";
 import { checkSlotHtml } from "../format/check-tag.ts";
 import { observingComponentTags, reportComponentTag } from "../format/component-observer.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
@@ -38,7 +38,7 @@ import { timelineLanesHtml } from "../format/timeline-lanes.ts";
 import { glossaryTerms, readGlossaries, type GlossaryBlockRead } from "../format/glossary.ts";
 import { markGlossaryTerms } from "../format/glossary-view.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
-import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
+import { renderedCodeRegions, inRenderedCode, restoreParkedSentinels } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
@@ -58,13 +58,13 @@ export { stripFrontmatter } from "./store.ts";
 export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 
 /**
- * The markdown the reader renders for a page: NULs, fact-check sentinels and
+ * The markdown the reader renders for a page: NULs and U+0001, fact-check sentinels and
  * frontmatter dropped, and a leading H1 that repeats the reader's own title
  * header removed. Exported so the Walk-me-through route cuts its sections out
  * of the same text the reader drew its headings from.
  */
 export function readerBody(markdown: string, stripTitle?: string): string {
-  let body = stripFrontmatter(stripSentinelLines(markdown.replaceAll("\0", "")));
+  let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
@@ -141,11 +141,13 @@ export function renderWikiHtml(
   // carrying a persisted fact-check block they rendered as a visible literal
   // `<!-- factcheck:start -->` line in the reader (live on all three annotated
   // pages before this).
-  // A NUL is never content: the renderer's own sentinels (`\x00WIKIPAGELINK<n>\x00`,
-  // the parked picture) are NUL-delimited and restored by search, so a NUL the
-  // page carries could forge one. Dropped, as the browser drops one in body
-  // text and the lane peek already did; with none left, none can reassemble.
-  markdown = markdown.replaceAll("\0", "");
+  // A NUL or U+0001 is never content: the renderer's own sentinels
+  // (`\x00WIKIPAGELINK<n>\x00`, the parked picture, `formatWebHtml`'s
+  // `\x00…\x01` placeholders) are delimited by them and restored by search, so
+  // one the page carries could forge one. Dropped, as the browser drops a NUL in
+  // body text; with none left, none can reassemble. The sibling files' parsers
+  // drop both from every value they read (`withoutSentinelDelimiters`).
+  markdown = withoutSentinelDelimiters(markdown);
   const body = readerBody(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
@@ -190,8 +192,7 @@ export function renderWikiHtml(
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const renderedHtml = restoreSentinelsInAttributes(
-    formatWebHtml(withTokens, {
+  const renderedHtml = formatWebHtml(withTokens, {
       files: opts?.files,
       question: opts?.question,
       idLabels: opts?.idLabels,
@@ -203,23 +204,14 @@ export function renderWikiHtml(
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
       ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, stepsView: stepsViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml, systemMapView: systemMapViewHtml, systemMapNodes: systemMapNodeLinks(resolve, wikiQuery) } : {}),
-    }),
-    literal,
-  );
-  const codeRegions = renderedCodeRegions(renderedHtml);
-  const html = renderedHtml.replace(
-    /\x00WIKIPAGELINK(\d+)\x00/g,
-    (_m, idx: string, offset: number) => {
-      const i = parseInt(idx, 10);
-      // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
-      // not render-exact: `textContent` matches an unparked render byte for byte
-      // — the acceptance — but the restored run is not tokenized, so the brackets
-      // are uncoloured where the code around them is highlighted. Cosmetic, and
-      // stated because the first spelling of this comment claimed more.
-      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
-      return rendered[i] ?? "";
-    },
-  );
+    });
+  // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
+  // not render-exact: `textContent` matches an unparked render byte for byte
+  // — the acceptance — but the restored run is not tokenized, so the brackets
+  // are uncoloured where the code around them is highlighted. In an attribute
+  // value (a `<Question>` card echoes `choices=`/`to=` into `data-question-*`)
+  // the source text goes back too: link HTML there would end the value.
+  const html = restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal);
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
   // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
@@ -231,7 +223,9 @@ export function renderWikiHtml(
   const guarded = parkDiagramPictures(html, parked);
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
   const glossed = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
-  return restoreDiagramPictures(glossed, parked);
+  // Backstop: every sentinel is restored by now, and the body and the parsed
+  // file values carry no NUL; one left (a source not yet covered) is never served.
+  return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
 }
 
 /** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared
@@ -312,22 +306,6 @@ function itemDateDaysOf(markdown: string, today: string | undefined): ItemDateDa
   if (!/<(?:DecisionLog|Query|NextMoves)\b/.test(markdown)) return undefined;
   const day = today ?? renderDay();
   return { ref: itemDateReference(readStatusDate(parseFrontmatter(markdown).status_date), day), today: day };
-}
-
-const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;
-
-/**
- * A sentinel the renderer copied into an ATTRIBUTE value — a `<Question>`
- * card echoes `choices=`/`to=` into `data-question-*` — goes back as the
- * source text, escaped: link HTML there would end the value and break the
- * tag. Every `"` in rendered text is escaped (`&quot;`), so a `="…"` run is an
- * attribute value and nothing else.
- */
-function restoreSentinelsInAttributes(html: string, literal: string[]): string {
-  if (!html.includes("\x00WIKIPAGELINK")) return html;
-  return html.replace(/="[^"]*"/g, (value) =>
-    value.includes("\x00") ? value.replace(SENTINEL_RE, (_m, i: string) => escapeHtml(literal[parseInt(i, 10)] ?? "")) : value,
-  );
 }
 
 /**

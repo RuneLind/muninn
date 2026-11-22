@@ -11,6 +11,7 @@
 import type { QuestionLanguage } from "./question-labels.ts";
 import { anchorSlug, formatCount } from "./query-block.ts";
 import { maskSpans, SEGMENT_PROTECTED_RES, splitOutside } from "./report-top.ts";
+import { parsedWithoutSentinelDelimiters } from "./markdown-core.ts";
 
 /** The status vocabulary, in the board's group order. */
 export const CASE_STATUSES = ["hold", "wait", "wrong", "none", "ok"] as const;
@@ -100,15 +101,21 @@ function field(name: string, v: unknown, notes: Notes): string {
   return t;
 }
 
+/** A field as one inline run. */
+const oneLine = (s: string) => s.replace(/\s*[\r\n]\s*/g, " ");
+
 /** One list entry as a case; `"skip"` when it is not a mapping with an `id`
  *  key, `"empty"` when that id is empty. */
 function toCase(entry: unknown, notes: Notes): Omit<BoardCase, "anchor"> | "skip" | "empty" {
   if (!isMapping(entry) || !("id" in entry)) return "skip";
   const idNotes: Notes = { coerced: [], dropped: 0 };
-  const id = field("id", entry.id, idNotes);
+  // A YAML scalar keeps its line ends; every field is one inline run. The id,
+  // status and owner also land in attribute values (title, aria-label), where
+  // the reader's paragraph pass would write `<br><br>` for a blank line (F56).
+  const id = oneLine(field("id", entry.id, idNotes));
   if (!id) return idNotes.dropped ? "skip" : "empty";
   notes.coerced.push(...idNotes.coerced);
-  const rawStatus = scalarText(entry.status) ?? "";
+  const rawStatus = oneLine(scalarText(entry.status) ?? "");
   const s = rawStatus.toLowerCase();
   const status = (CASE_STATUSES as readonly string[]).includes(s) ? (s as CaseStatus) : "unknown";
   const refsRaw = Array.isArray(entry.refs) ? entry.refs : entry.refs === undefined ? [] : [entry.refs];
@@ -116,11 +123,10 @@ function toCase(entry: unknown, notes: Notes): Omit<BoardCase, "anchor"> | "skip
     id,
     status,
     rawStatus,
-    owner: field("owner", entry.owner, notes),
-    // A YAML block scalar keeps its line ends; a note is one inline run.
-    note: field("note", entry.note, notes).replace(/\s*\n\s*/g, " "),
-    kort: field("kort", entry.kort, notes).replace(/\s*\n\s*/g, " "),
-    refs: refsRaw.map((r) => field("refs", r, notes)).filter(Boolean),
+    owner: oneLine(field("owner", entry.owner, notes)),
+    note: oneLine(field("note", entry.note, notes)),
+    kort: oneLine(field("kort", entry.kort, notes)),
+    refs: refsRaw.map((r) => oneLine(field("refs", r, notes))).filter(Boolean),
   };
 }
 
@@ -159,7 +165,9 @@ export function parseCaseBoard(text: string, parse: YamlParse | null = bunYaml()
   if (hasSeveralDocuments(text)) return { ok: false, reason: "Multiple YAML documents (---); use one list" };
   let doc: unknown;
   try {
-    doc = parse(text);
+    // Every string without a NUL or U+0001 (a `\0`/`\x01` escape): no field
+    // can spell a render sentinel (F29).
+    doc = parsedWithoutSentinelDelimiters(parse(text));
   } catch (e) {
     const msg = (e instanceof Error ? e.message : String(e)).replace(/^YAML Parse error:\s*/, "");
     return { ok: false, reason: `YAML error: ${msg.split("\n")[0]}` };

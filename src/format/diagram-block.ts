@@ -8,7 +8,7 @@
  * Pure: imported by the reader's render (`views: true`) only, through the
  * `diagramView` option of `formatWebHtml`, so the chat bundle never carries it.
  */
-import { escapeHtml } from "./markdown-core.ts";
+import { escapeHtml, withoutSentinelDelimiters } from "./markdown-core.ts";
 import { diagramClassStyles } from "./diagram-styles.ts";
 import { READER_ONLY_ATTR } from "./reader-lens.ts";
 import {
@@ -230,11 +230,15 @@ function lifecycleSections(doc: Obj): DiagramTextSection[] {
   return sections;
 }
 
+/** A JSON reviver: every parsed string without a NUL or U+0001, so a
+ *  `\u0000`/`\u0001` escape in a label spells no render sentinel (F29). */
+const dropDelimiters = (_key: string, v: unknown) => (typeof v === "string" ? withoutSentinelDelimiters(v) : v);
+
 /** Read one diagram file's text. Null when it is not a JSON object. */
 export function readDiagram(flavor: DiagramFlavor, text: string): DiagramRead | null {
   let doc: unknown;
   try {
-    doc = JSON.parse(text);
+    doc = JSON.parse(text, dropDelimiters);
   } catch {
     return null;
   }
@@ -362,7 +366,7 @@ const siblingRead = (svg: DiagramSvgResult | undefined) => !!svg && (svg.svg !==
 export function diagramNodeIds(flavor: DiagramFlavor, text: string): Set<string> | null {
   let doc: unknown;
   try {
-    doc = JSON.parse(text);
+    doc = JSON.parse(text, dropDelimiters);
   } catch {
     return null;
   }

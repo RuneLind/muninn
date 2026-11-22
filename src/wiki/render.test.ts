@@ -3,6 +3,7 @@ import { paragraphGaps, readerPayload, renderWikiHtml, stripFrontmatter } from "
 import { parseWikiDefaultLens } from "../format/reader-lens.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
+import { locateSection } from "./walkthrough.ts";
 
 const page = (name: string): WikiPageMeta => ({
   name,
@@ -582,5 +583,61 @@ describe("renderWikiHtml on a long line of `[` (architecture review 2026-11-16, 
       renderWikiHtml(s, () => undefined);
       expect(performance.now() - t0).toBeLessThan(250);
     }
+  });
+});
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  const yaml = '- id: "x\\n\\ny"\n  status: "a\\n\\nb"\n- id: "n\\0ul"\n  status: "s\\0t"\n';
+  const files = {
+    get: (ref: string) =>
+      ref.endsWith(".yaml") ? { ok: true as const, text: yaml } : ref.endsWith(".csv") ? { ok: true as const, text: "a\0b,c\x01d\n1,2\n" } : undefined,
+  };
+  test("F56: a CaseBoard value holding a blank line takes no <br> in an attribute", () => {
+    for (const view of ["", ' view="dots"']) {
+      const html = renderWikiHtml(`<CaseBoard src="cases.yaml"${view} />\n`, () => undefined, { files, views: true });
+      expect(html).not.toMatch(/="[^"]*<br>/);
+      expect(html).toContain('title="status: a b"');
+    }
+  });
+
+  test("F29: a raw U+0001 after a wikilink forges no placeholder sentinel", () => {
+    const html = renderWikiHtml("# T\n\nSee [[Claude Code]]INLINE0\u0001 and `c` here.\n", resolve);
+    expect(html).toContain('class="wiki-link"');
+    expect(html).toContain("INLINE0 and <code>c</code> here.");
+    expect(html).not.toContain("WIKIPAGELINK");
+    expect(html).not.toMatch(/[\x00\x01]/);
+  });
+
+  test("F29: a wikilink then a raw U+0001 in a link's URL keeps the link and no live wikilink", () => {
+    const html = renderWikiHtml("# T\n\n[l](https://ex.com/[[Claude Code]]\u0001x)\n", resolve);
+    expect(html.match(/<a href="https:\/\/ex\.com\//g)?.length).toBe(1);
+    expect(html).not.toContain('class="wiki-link"');
+  });
+
+  test("a NUL or U+0001 that reaches a parsed sibling-file value is never served", () => {
+    const md = '<CaseBoard src="cases.yaml" />\n\n<Query id="Q-1" csv="q.csv">\n\nx\n\n</Query>\n';
+    const html = renderWikiHtml(md, () => undefined, { files, views: true });
+    expect(html).not.toContain("\0");
+    expect(html).toContain('<th scope="col">ab</th>');
+    expect(html).toContain('<th scope="col">cd</th>');
+  });
+
+  // Each strip covers one path the other does not reach.
+  test("the page-entry strip: a PR ledger label the decision views read carries no U+0001", () => {
+    const md = [
+      "# Plan", "",
+      "<NextMoves>", "", '<Lane kind="you">', "", "1. Run it.", "", "</Lane>", "", "</NextMoves>", "",
+      "<DecisionLog>", "", "- **O1** — Which store? Closed 2026-10-01 (D1).", "- **D1** — Use the flat file.", "", "</DecisionLog>", "",
+      "**PR ledger.**", "", "| PR | State | Decisions |", "|---|---|---|",
+      "| 1 — a\x01b | merged | D1 |", "| 2 — c | open | D1 |", "| 3 — d | open | D1 |", "| 4 — e | planned | D1 |", "",
+    ].join("\n");
+    const html = renderWikiHtml(md, () => undefined, { views: true });
+    expect(html).toContain('title="PR 1 · merged · ab"');
+    expect(html).not.toContain("\x01");
+  });
+
+  test("readerBody's strip: the Walk-me-through section carries no NUL or U+0001", () => {
+    const r = locateSection("# T\n\n## A\n\nx\x01y\x00z\n", { heading: "A", ordinal: 0, count: 1 });
+    expect(r).toEqual({ ok: true, section: { level: 2, headingText: "A", markdown: "\nxyz\n" } });
   });
 });

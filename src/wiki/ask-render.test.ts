@@ -254,3 +254,33 @@ describe("an [n] marker inside code is CODE", () => {
     expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
   });
 });
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  const cites = [{ n: 1, pageName: "P", title: "T" } as Citation];
+  test("F55: a citation inside an attribute value comes back as its source text", () => {
+    const html = renderAskAnswerHtml('<Question id="Q [1]">\n\nq?\n\n</Question>\n\n[t](https://e.com/x[1]y) and [1]', cites);
+    expect(html).toContain('data-question-id="Q [1]"');
+    expect(html).toContain('<a href="https://e.com/x[1]y" target="_blank" rel="noopener">t</a>');
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(2);
+  });
+
+  test("F29: a raw U+0001 after a citation forges no placeholder sentinel", () => {
+    const html = renderAskAnswerHtml("See [1]INLINE0\u0001 and `c` here.", cites);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(html).toContain("INLINE0 and <code>c</code> here.");
+    expect(html).not.toContain("ASKCITE");
+    expect(html).not.toMatch(/[\x00\x01]/);
+  });
+
+  test("an answer's NUL is never served", () => {
+    const html = renderAskAnswerHtml('<Question id="a\0b">\n\nq?\n\n</Question>\n\nx\0y', []);
+    expect(html).not.toContain("\0");
+    expect(html).toContain('data-question-id="ab"');
+  });
+
+  test("a NUL-spelled citation token in the answer forges no citation", () => {
+    const html = renderAskAnswerHtml("x \x00ASKCITE0\x00 y [1]", cites);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(html).toStartWith("x ASKCITE0 y <sup");
+  });
+});

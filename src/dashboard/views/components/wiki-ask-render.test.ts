@@ -122,3 +122,23 @@ test("askAnswerBodyHtml enhances a server-rendered answer_html carrying a confid
   const body = askAnswerBodyHtml(serverHtml, "", "");
   expect(body).toContain('wiki-fc-conf-chip mid">73/100');
 });
+
+test("F71: a Confidence line inside a fence or a code span stays code", () => {
+  const html = enhanceConfidenceHtml("<pre><code>Confidence: 80/100</code></pre>\n<code>Confidence: 70/100</code>\n\nConfidence: 60/100");
+  expect(html).toContain("<pre><code>Confidence: 80/100</code></pre>");
+  expect(html).toContain("<code>Confidence: 70/100</code>");
+  expect(html).toContain('wiki-fc-conf-chip mid">60/100');
+});
+
+test("F29: the streaming buffer and a stored plain answer drop NUL and U+0001 before formatting", () => {
+  for (const html of [renderStreamingBody("a\0b\x01c"), askAnswerBodyHtml(null, "", "a\0b\x01c")]) {
+    expect(html).not.toMatch(/[\x00\x01]/);
+    expect(html).toBe("abc");
+  }
+  // Order, not just absence: stripped AFTER formatting, the forged sentinel
+  // restores as the code span (`<code>c</code> and <code>c</code>`).
+  const forged = "\x00INLINE0\x01 and `c`";
+  for (const html of [renderStreamingBody(forged), askAnswerBodyHtml(null, forged, "")]) {
+    expect(html).toBe("INLINE0 and <code>c</code>");
+  }
+});

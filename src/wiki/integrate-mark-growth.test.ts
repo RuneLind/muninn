@@ -96,8 +96,10 @@ describe("mark-span guard — the whole state space", () => {
     // A — where the mark would SIT. Both were measured as rendered corruption.
     ["code-span interior: tags render literally AND survive the zone-aware strip",
      "# T\n\nRun `bun test` now to check.\n", "bun test", false],
-    ["emphasis interior: the opener re-pairs with a neighbour's `_`",
-     "# T\n\n[beta](https://beta.example/x) _alpha_ [[eta]].\n", "alpha", false],
+    // The neighbour's `_` was the link's own `target="_blank"`, which the emphasis
+    // pass re-read until F53 parked the finished open tag: the mark is render-safe now.
+    ["emphasis interior beside a link: no neighbour `_` to re-pair with since F53",
+     "# T\n\n[beta](https://beta.example/x) _alpha_ [[eta]].\n", "alpha", true],
     // Each EDGE separately. Both fixtures above are delimited on BOTH sides, so
     // either half of rule A alone still refuses them and neither half is pinned —
     // measured: removing one edge check killed no test. These two are exact-tier

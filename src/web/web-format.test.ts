@@ -823,3 +823,80 @@ describe("formatWebHtml — inline code-span runs", () => {
     expect(formatWebHtml("a \\` b")).toBe("a \\` b");
   });
 });
+
+describe("post-passes (architecture review 2026-11-16, A2)", () => {
+  test("F53: a link's href is never re-read by the emphasis or code passes, in both branches", () => {
+    const html = formatWebHtml("see [x](https://example.com/**b**_e_/file.ts:12) and [y](#frag_a_b_) end");
+    expect(html).toContain('<a href="https://example.com/**b**_e_/file.ts:12" target="_blank" rel="noopener">x</a>');
+    expect(html).toContain('<a href="#frag_a_b_">y</a>');
+    // The label still takes emphasis.
+    expect(formatWebHtml("[**b** _e_](https://example.com/a)")).toBe('<a href="https://example.com/a" target="_blank" rel="noopener"><strong>b</strong> <em>e</em></a>');
+    // A code span or an inline component in the URL makes no link: the text stays as written.
+    expect(formatWebHtml("see [x](https://e.com/`c`/d)")).toBe("see [x](https://e.com/<code>c</code>/d)");
+    expect(formatWebHtml('[x](#a<Pill tone="good">p</Pill>)')).not.toContain("<a ");
+  });
+
+  test("F53: a before → after label inside a link keeps its chip, in both branches", () => {
+    const opts = { reader: true, readerShapes: true };
+    for (const url of ["https://x.com", "#frag"]) {
+      expect(formatWebHtml(`[3 → 5](${url})`, opts)).toMatch(/^<a href="[^"]+"[^>]*><span class="ba-chip"><span class="ba-old">3<\/span>/);
+      // After an opening bracket the chip drops its left padding, as it did with the `<a>` unparked.
+      expect(formatWebHtml(`([3 → 5](${url}))`, opts)).toContain('<span class="ba-chip ba-chip-o');
+    }
+    expect(formatWebHtml("Latency went [120 → 80 ms](https://ex.com/pr/1) after.", opts)).toContain('rel="noopener"><span class="ba-chip">');
+  });
+
+  test("F29: only an exact placeholder in a URL blocks the link, not a caller sentinel then a raw U+0001", () => {
+    const html = formatWebHtml("[l](https://ex.com/\x00WIKIPAGELINK0\x00\x01x)", { wikiLinkTexts: ["Page"] });
+    expect(html.match(/<a href="https:\/\/ex\.com\//g)?.length).toBe(1);
+  });
+
+  test("F54: blank lines inside fenced code survive", () => {
+    expect(formatWebHtml("```\na\n\n\n\nb\n```")).toBe("<pre><code>a\n\n\n\nb</code></pre>");
+    // Prose around it still folds.
+    expect(formatWebHtml("a\n\n\n\nb")).toBe("a\n\nb");
+  });
+
+  test("F29: a marker word between two sentinels forges no third", () => {
+    expect(formatWebHtml("<Pill>p</Pill>INLINE0`c`")).toBe('<span class="pill">p</span>INLINE0<code>c</code>');
+  });
+
+  test("a Query id holding a wikilink puts no link inside the id's anchor", () => {
+    const html = formatWebHtml('<Query id="\x00WIKIPAGELINK0\x00">\n\nx\n\n</Query>', { wikiLinkTexts: ["Page"] });
+    expect(html).toContain('<a class="query-id" href="#page">Page</a>');
+  });
+});
+
+describe("post-passes, fix round 1 batch 2 (A2)", () => {
+  const opts = { reader: true, readerShapes: true };
+  test("F53: an angle-bracket link whose URL holds a code span shows what was written, never [url](url)", () => {
+    expect(formatWebHtml("<https://e.com/`c`>")).toBe("&lt;https://e.com/<code>c</code>&gt;");
+    expect(formatWebHtml("<https://e.com/x#`a_b`|l>")).toBe("&lt;https://e.com/x#<code>a_b</code>|l&gt;");
+    // A plain one still links.
+    expect(formatWebHtml("<https://e.com/x>")).toBe('<a href="https://e.com/x" target="_blank" rel="noopener">https://e.com/x</a>');
+  });
+
+  test("F53: a #fragment href is parked from the emphasis pass", () => {
+    expect(formatWebHtml("[l](#_x_)")).toBe('<a href="#_x_">l</a>');
+  });
+
+  test("a parked code span reads as a letter before a before → after run: no chip", () => {
+    expect(formatWebHtml("`v`1.2 → 1.3", opts)).toBe("<code>v</code>1.2 → 1.3");
+  });
+
+  test("a parked link open tag reads as nothing: a letter before it still holds the chip off", () => {
+    expect(formatWebHtml("v[1 → 2](https://x.com)", opts)).toBe('v<a href="https://x.com" target="_blank" rel="noopener">1 → 2</a>');
+  });
+
+  // Fix round 2 (#896): inputs where the LINKOPEN read decides. Read as a
+  // letter (a placeholder's default), the open tag would hold both chips off.
+  test("a parked link open tag after a space or an opening bracket still draws the chip", () => {
+    const chip = '<span class="ba-old">1</span> <span class="ba-arr">→</span> <span class="ba-new">2</span></span></a>';
+    expect(formatWebHtml("see [1 → 2](https://x.com)", opts)).toBe(
+      `see <a href="https://x.com" target="_blank" rel="noopener"><span class="ba-chip">${chip}`,
+    );
+    expect(formatWebHtml("([1 → 2](https://x.com))", opts)).toBe(
+      `(<a href="https://x.com" target="_blank" rel="noopener"><span class="ba-chip ba-chip-o ba-chip-p">${chip})`,
+    );
+  });
+});

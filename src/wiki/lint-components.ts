@@ -94,8 +94,9 @@ interface Tag {
   offset?: number;
 }
 
-/** A parked wikilink or code span (`\u0000WIKIPAGELINK0\u0000`, `\u0000INLINE0\u0000`). */
-const SENTINEL_RE = /\u0000[A-Z]+\d+\u0000/g;
+/** A parked wikilink or code span (`\u0000WIKIPAGELINK0\u0000`, `\u0000INLINE0\u0001`:
+ *  a `Placeholders` sentinel closes on U+0001). */
+const SENTINEL_RE = /\u0000[A-Z]+\d+[\u0000\u0001]/g;
 
 const attrList = (attrs: string): [string, string][] => {
   const out: [string, string][] = [];
@@ -114,7 +115,7 @@ interface Spelling {
 }
 
 /** `value` with each wikilink and code-span sentinel's index dropped. */
-const sentinelShape = (value: string) => value.replace(/\u0000(WIKIPAGELINK|INLINE)\d+\u0000/g, "\u0000$1\u0000");
+const sentinelShape = (value: string) => value.replace(/\u0000(WIKIPAGELINK|INLINE)\d+[\u0000\u0001]/g, "\u0000$1\u0000");
 
 /** `written` parked the way the renderer parks it: wikilinks (the whole body,
  *  first), then, with `code`, code spans (`renderInline`, over the parked text). */
@@ -144,7 +145,7 @@ function spellings(tag: Tag): Spelling[] {
   return read.map(([key, value], i) => ({
     key,
     value,
-    shown: !value.includes("\u0000") ? value : aligned && reproduces(i) ? written[i]![1] : value.replace(SENTINEL_RE, "…").replaceAll("\u0000", ""),
+    shown: !value.includes("\u0000") ? value : aligned && reproduces(i) ? written[i]![1] : value.replace(SENTINEL_RE, "…").replace(/[\u0000\u0001]/g, ""),
   }));
 }
 

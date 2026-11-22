@@ -542,3 +542,11 @@ test("Embed: a bad height is an invalid embed, the src is not blamed", () => {
   expect(out).toContain("Embedded page: invalid embed");
   expect(out).not.toContain("./arch.html");
 });
+
+test("F29: a marker word between a link and a code span forges no placeholder", () => {
+  expect(formatSlackMrkdwn("[l](https://x.com)INLINE0`c`")).toBe("<https://x.com|l>INLINE0`c`");
+});
+
+test("a code span's placeholder close lets emphasis open right after it", () => {
+  expect(formatSlackMrkdwn("`y`*em*")).toBe("`y`_em_");
+});

@@ -148,6 +148,23 @@ describe("loadPageFiles", () => {
     expect(html).toContain("File not available: outside.yaml");
   });
 
+  test("fix round 2 (A2 #896): a 545-byte cases.yaml of 9 levels of 10 nested aliases renders in under 100 ms", async () => {
+    const lines = ["- &l0 {id: MEL-1, status: ok}"];
+    for (let i = 1; i < 9; i++) lines.push(`- &l${i} [${Array(10).fill(`*l${i - 1}`).join(",")}]`);
+    lines.push("- {id: MEL-2, status: wait, note: *l7}");
+    const y = lines.join("\n") + "\n";
+    const yaml = y + "#".padEnd(544 - y.length, "#") + "\n";
+    expect(yaml.length).toBe(545);
+    await writeFile(path.join(root, "plans", "res", "bomb.yaml"), yaml);
+    const md = '<CaseBoard src="res/bomb.yaml" />\n\n<CaseBoard src="res/bomb.yaml" view="dots" />\n';
+    const files = await loadPageFiles(root, PAGE, md);
+    const t0 = performance.now();
+    const html = renderWikiHtml(md, () => undefined, { files, views: true });
+    const ms = performance.now() - t0;
+    expect(html).toContain('id="case-mel-2"');
+    expect(ms).toBeLessThan(100);
+  });
+
   test("end to end: the outside file's content never reaches the rendered page", async () => {
     const md = `${q("../../outside.csv")}\n\n${q("link.csv")}`;
     const html = renderWikiHtml(md, () => undefined, { files: await loadPageFiles(root, PAGE, md) });

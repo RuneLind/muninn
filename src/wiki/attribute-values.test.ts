@@ -4,7 +4,9 @@ import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import { renderAskAnswerHtml } from "./ask-render.ts";
 import { diagramSvgFromHtml } from "./diagram-svg.ts";
 import { questionRenderOptionsFor, renderWikiHtml } from "./render.ts";
+import { pageFileText } from "./page-files.ts";
 import type { WikiPageMeta } from "./store.ts";
+import { SENTINEL_NAMES } from "../format/sentinel-names.ts";
 
 /**
  * F58 (architecture review 2026-11-16): the finished-HTML passes after the
@@ -13,9 +15,10 @@ import type { WikiPageMeta } from "./store.ts";
  * every attribute value to hold no raw `<`, `>` or `"`. One page per component,
  * setup and hostile fill goes through `renderWikiHtml` (views on and off) and
  * `renderAskAnswerHtml`; the output is parsed quote-aware, and a tag that does
- * not parse, a value holding `<` or `>`, a raw `<` in text, a NUL, an `on*` or
- * `data-pwn` attribute, or an element the same setup never renders with a
- * benign fill fails.
+ * not parse, a value holding `<` or `>`, a raw `<` in text, a NUL or U+0001,
+ * a sentinel's marker word in text or a value, an `on*` or `data-pwn`
+ * attribute, or an element the same setup never renders with a benign fill
+ * fails.
  *
  * Each component renders under its `hostile` setup (the fill in every
  * attribute: the fallback paths) and under setups that walk each enumerated
@@ -32,6 +35,7 @@ const F53_FILL = `[x](https://example.com/**b**_e_/file.ts:12)`;
 const F55_FILL = "**bold** _em_ `code` [1] Hold";
 const F56_FILL = "x\n\ny";
 const F29_FILL = "<Pill>p</Pill>INLINE0`c`";
+const NUL_FILL = "a\0b";
 /** What every hostile render is compared with: the same setup's elements. */
 const BENIGN_FILL = "Benign Hold";
 
@@ -58,6 +62,8 @@ const FILLS = [
   `x&quot; data-pwn=&quot;1`,
   // A lone `<`, one before a letter.
   `x <y and 1 < 2`,
+  // A raw NUL: the page body drops it, the sibling files and an Ask answer must too.
+  NUL_FILL,
 ] as const;
 
 type Mode = "views" | "plain" | "ask";
@@ -366,7 +372,14 @@ const TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)((?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]
 const ATTR_RE = /\s+([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>=`]+)))?/g;
 const RAW_TEXT = new Set(["script", "style"]);
 
-type ViolationKind = "nul" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
+type ViolationKind = "nul" | "soh" | "marker" | "unparsable" | "raw-lt" | "raw-gt" | "value-lt-gt" | "injected-attr" | "injected-element";
+
+/** A sentinel's marker word (`WIKIPAGELINK3`, `INLINECMP0`, `CB3`) left
+ *  visible in text or an attribute value: the NUL backstop turns an unrestored
+ *  `\x00WIKIPAGELINK3\x00` into it. Exactly the real names
+ *  (`SENTINEL_NAMES`, longest first so `INLINECMP` wins over `INLINE`) and
+ *  their digits; not word-bounded, since a leak sits flush against its text. */
+const MARKER_WORD_RE = new RegExp(`(?<![A-Z])(?:${[...SENTINEL_NAMES].sort((a, b) => b.length - a.length).join("|")})\\d+(?!\\d)`, "g");
 
 /** One break of the contract: what, on which element (name and `class`) and
  *  which attribute, and the page from there on. */
@@ -403,6 +416,7 @@ export function scanHtml(html: string): Scan {
   const textUpTo = (end: number) => {
     const k = html.indexOf(">", textFrom);
     if (k >= 0 && k < end) add("raw-gt", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
+    for (const w of html.slice(textFrom, end).matchAll(MARKER_WORD_RE)) add("marker", Math.max(0, textFrom + w.index - 80), lastOpen.tag, lastOpen.cls, "", w[0]);
   };
   const nulsUpTo = (end: number) => {
     for (let k = html.indexOf("\0", nulFrom); k >= 0 && k < end; k = html.indexOf("\0", k + 1)) add("nul", Math.max(0, k - 80), lastOpen.tag, lastOpen.cls, "", html.slice(Math.max(0, k - 40), k + 41));
@@ -446,6 +460,7 @@ export function scanHtml(html: string): Scan {
     for (const a of attrs) {
       if (/[<>]/.test(a.value)) add("value-lt-gt", i, name, cls, a.name, a.value);
       if (/^on/.test(a.name) || a.name === "data-pwn") add("injected-attr", i, name, cls, a.name, a.value);
+      for (const w of a.value.matchAll(MARKER_WORD_RE)) add("marker", i, name, cls, a.name, w[0]);
     }
     i = TAG_RE.lastIndex;
     if (!closing && RAW_TEXT.has(name)) {
@@ -456,6 +471,8 @@ export function scanHtml(html: string): Scan {
   }
   nulsUpTo(html.length);
   textUpTo(html.length);
+  // A U+0001 anywhere, text or attribute: an unrestored placeholder's close.
+  for (let k = html.indexOf("\x01"); k >= 0; k = html.indexOf("\x01", k + 1)) add("soh", Math.max(0, k - 80), "", "", "", html.slice(Math.max(0, k - 40), k + 41));
   return { violations, elements };
 }
 
@@ -470,16 +487,16 @@ const FILL_MARKDOWN_ELEMENTS = new Set(["a", "strong", "em", "code", "sup", "spa
 // ── Known gaps ──────────────────────────────────────────────────────────────
 
 /**
- * Findings the next PR (A2) fixes. A violation is excused only by a gap whose
+ * Known findings a later PR fixes. A violation is excused only by a gap whose
  * fill, mode and component match and whose kind, element, class and attribute
  * are the violation's own, so a gap never excuses another element or another
  * attribute of the same case; and each gap must still match on every component
  * it names, so its fix fails the last test until the entry (or that component)
- * is deleted. Only F53, F55, F56 and F29 belong here: any other failure is a
- * new finding.
+ * is deleted. A2 fixed the four it held (F53, F55, F56, F29) and the list is
+ * empty: any failure now is a new finding, to fix rather than excuse.
  */
 interface KnownGap {
-  finding: "F53" | "F55" | "F56" | "F29";
+  finding: string;
   fill: string;
   modes: readonly Mode[];
   components: readonly ComponentName[];
@@ -495,42 +512,7 @@ interface KnownGap {
    *  `>`, matched up to and including it). */
   near?: RegExp;
 }
-/** The components whose body, cells or file fields render the fill as inline
- *  markdown, where F53 and F29 trip (measured on this guard's pages). */
-const F53_COMPONENTS: readonly ComponentName[] = [
-  "AnnotatedCode", "Callout", "CaseBoard", "Chart", "Checklist", "ComparisonTable", "DecisionLog", "DeltaTable",
-  "FactCheck", "Figure", "FileTree", "Fold", "Glossary", "Historic", "Meter", "More", "Query", "Question", "RuleTree",
-  "RunChecklist", "StatusRows", "Steps", "SystemMap", "Timeline", "Tldr",
-];
-const F29_COMPONENTS: readonly ComponentName[] = [...F53_COMPONENTS, "Lane", "NextMoves"];
-
-const KNOWN_GAPS: KnownGap[] = [
-  // A markdown link's href re-processed by the emphasis pass (web-format.ts): a plain `<a>`'s href only.
-  {
-    finding: "F53", fill: F53_FILL, modes: ["views", "plain", "ask"], components: F53_COMPONENTS,
-    kind: "value-lt-gt", tag: "a", cls: /^$/, attrs: ["href"], value: /^https:\/\/example\.com\/<\/?strong>b<\/?strong><em>e<\/em>\/file\.ts:12$/,
-  },
-  // The Ask tab restores a citation's `<sup>` inside an attribute value (ask-render.ts): these three values.
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question"], kind: "unparsable", tag: "section", cls: /^question\b/, attrs: ["data-question-id"] },
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Lane", "NextMoves"], kind: "unparsable", tag: "div", cls: /^nm-lane\b/, attrs: ["data-who"] },
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Embed"], kind: "unparsable", tag: "figure", cls: /^embed$/, attrs: ["data-embed-title"] },
-  // The same restore into a fence's `language-` class, which a `lang=` reaches (its broken value hides the class).
-  { finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["AnnotatedCode"], kind: "unparsable", tag: "code", cls: /^$/, attrs: ["class"] },
-  // The broken value's own `" Hold">` tail, which then reads as text after the restored `</sup>`.
-  {
-    finding: "F55", fill: F55_FILL, modes: ["ask"], components: ["Question", "Lane", "NextMoves", "Embed", "AnnotatedCode"],
-    kind: "raw-gt", tag: "sup", cls: /^wiki-ask-cite$/, near: /\[1\]<\/sup> Hold">$/,
-  },
-  // `paragraphGaps` writes `<br><br>` into a value holding a blank line (render.ts): CaseBoard's status pill
-  // and, in dots view, the square's three values.
-  { finding: "F56", fill: F56_FILL, modes: ["views", "plain"], components: ["CaseBoard"], kind: "value-lt-gt", tag: "span", cls: /^cb-pill\b/, attrs: ["title"], value: /^status: x<br><br>y$/ },
-  {
-    finding: "F56", fill: F56_FILL, modes: ["views"], components: ["CaseBoard"],
-    kind: "value-lt-gt", tag: "button", cls: /^cb-dot cb-dot-unknown$/, attrs: ["title", "aria-label", "data-cb-say"], value: /^x<br><br>y(: | — )/,
-  },
-  // Two adjacent sentinels with a marker word between forge a third (markdown-core.ts): a NUL at the forged pair's edge.
-  { finding: "F29", fill: F29_FILL, modes: ["views", "plain", "ask"], components: F29_COMPONENTS, kind: "nul", near: /\0INLINECMP0<code>c<\/code>|<code>c<\/code>INLINE0\0/ },
-];
+const KNOWN_GAPS: KnownGap[] = [];
 
 interface Case {
   component: ComponentName;
@@ -566,10 +548,13 @@ function benign(c: Case): Set<string> {
 const injectedElements = (hostile: Set<string>, known: Set<string>) => [...hostile].filter((e) => !known.has(e) && !FILL_MARKDOWN_ELEMENTS.has(e));
 
 /** Every violation of `c`: the scanner's, and each element the hostile render
- *  opens that the benign one does not and the fill's markdown cannot make. */
+ *  opens that the benign one does not and the fill's markdown cannot make. A
+ *  marker word the fill itself spells (`INLINE0`) is its text, not a leak. */
 function violationsOf(c: Case): Violation[] {
   const html = render(page(c.component, c.fill, c.setup), c.mode, c.fill);
   const scan = scanHtml(html);
+  const fillWords = new Set(c.fill.match(MARKER_WORD_RE) ?? []);
+  scan.violations = scan.violations.filter((v) => v.kind !== "marker" || !fillWords.has(v.value));
   const extra = injectedElements(scan.elements, benign(c))
     .map((e): Violation => {
       const i = Math.max(0, html.search(new RegExp(`<${e}[\\s/>]`, "i")));
@@ -709,6 +694,15 @@ describe("rendered attribute values (F58)", () => {
     expect(attributeViolations(`<span class="cb-owner"><img src=x data-pwn onerror=alert(1)></span>`).map((v) => v.split(" ")[0])).toEqual(["injected-attr", "injected-attr"]);
     expect(attributeViolations(`<span title="x" onmouseover="y">t</span>`)).toHaveLength(1);
     expect(attributeViolations(`<section id="a" data-x="q &gt; 1"><p>x &lt; y</p><br><img src="x" alt=""/></section>`)).toEqual([]);
+    // A visible marker word, flush against its text or not, and a U+0001 anywhere.
+    expect(attributeViolations(`<p>pINLINECMP0<code>c</code> WIKIPAGELINK3.</p><a title="x\x01">Q-16 abc1234 MELO-12</a>`).map((v) => v.split(" ")[0])).toEqual(["marker", "marker", "soh"]);
+    // Fix round 2 (#896): a two-letter name (fenced code's `CB`), a leak in an
+    // attribute value, and words that only look like markers.
+    expect(attributeViolations(`<p>xCB3 and ABCB3</p><a href="https://e.com/CB0" title="LINKOPEN12">CBS1 HOLD12 MEL3</a>`).map((v) => v.split(" ").slice(0, 3).join(" "))).toEqual([
+      'marker <p> "CB3"',
+      'marker <a>[href] "CB0"',
+      'marker <a>[title] "LINKOPEN12"',
+    ]);
   });
 
   test("the real views render: each valid setup draws its view, never a fallback", () => {
@@ -927,5 +921,51 @@ describe("rendered attribute values (F58)", () => {
       }
     }
     expect(dead).toEqual([]);
+  });
+});
+
+describe("sentinel-shaped values in the sibling files (F29, A2 fix round 1)", () => {
+  // The loader's text (`pageFileText`) holds no raw NUL or U+0001, so one
+  // reaches a parsed value only through an escape: JSON `\u0000`, YAML
+  // `"\u0000"`. Each fill spells a sentinel: the reader's wikilink
+  // (`\x00…\x00`) or `formatWebHtml`'s placeholder (`\x00…\x01`).
+  const FORGES = ["\u0000WIKIPAGELINK0\u0000", "\u0000INLINECMP0\u0001", "INLINE0\u0001"];
+  const loaded = (fill: string): PageFiles => {
+    const inner = files(fill);
+    return {
+      get(ref: string) {
+        const r = inner.get(ref);
+        return r?.ok ? { ...r, text: pageFileText(r.text) } : r;
+      },
+    };
+  };
+  const pageWithLinks = (name: ComponentName, fill: string, setup: Setup) =>
+    `${page(name, fill, setup)}\nSee [[Hostile Page]] and <Pill tone="good">p</Pill> and \`c\`.\n`;
+  const renderLoaded = (md: string, mode: "views" | "plain", fill: string) =>
+    renderWikiHtml(md, pages, {
+      stripTitle: "Hostile",
+      wiki: "w",
+      files: loaded(fill),
+      question: questionRenderOptionsFor(md, null, true, "Owner Person"),
+      today: "2026-11-22",
+      ...(mode === "views" ? { views: true, readerShapes: true } : {}),
+    });
+  const marks = (html: string) =>
+    `wiki-link ${count(html, 'class="wiki-link"')} pill ${count(html, 'class="pill')} code ${count(html, "<code>c</code>")} ctrl ${/[\x00\x01]/.test(html)}`;
+
+  test("every diagram, Steps, CaseBoard, DeltaTable and Query field: the page's own links, pills and code only", () => {
+    const wrong: string[] = [];
+    for (const name of ["Diagram", "Steps", "CaseBoard", "DeltaTable", "Query"] as const) {
+      for (const setup of validSetups(name)) {
+        for (const mode of ["views", "plain"] as const) {
+          const own = marks(renderLoaded(pageWithLinks(name, BENIGN_FILL, setup), mode, BENIGN_FILL));
+          for (const fill of FORGES) {
+            const got = marks(renderLoaded(pageWithLinks(name, fill, setup), mode, fill));
+            if (got !== own) wrong.push(`${name} ${setup.name} ${mode} ${JSON.stringify(fill)}: ${got} (own: ${own})`);
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 });
