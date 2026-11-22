@@ -5,15 +5,18 @@
  * Like `temp-dir-scan.ts` it parses with the TypeScript compiler and refuses a
  * name, never an import path. Every value-position `runProc` or `spawn` (an
  * identifier, a property name, or a string that is exactly the name and used as
- * a property key, as in `x["spawn"]`) is a site, unless it is the callee of a call whose options object literal carries a
- * top-level `processGroup: true` (runProc's fourth argument) or `detached: true`
- * (spawn's last argument). The child_process module may be imported only for
- * `spawn`, `*Sync` names and types.
+ * a property key, as in `x["spawn"]`) is a site, unless it is the callee of a
+ * call whose options object literal carries a top-level `processGroup: true`
+ * (runProc's fourth argument) or `detached: true` (spawn's last argument). The
+ * child_process module may be imported only for `spawn`, `*Sync` names and
+ * types.
  *
  * Out of scope: the sync forms (they return on time and leak with or without
  * `detached`, so no option fixes them in place), `Bun.$`, `e2e/`, callers of a
  * listed alias, wrapper or injected dependency, module access built to avoid the
- * names (`createRequire`, a concatenated module string, `node:cluster`), and
+ * names (`createRequire`, a concatenated module string, `node:cluster`),
+ * property access built to avoid them (a key held in a variable, `Reflect.get`,
+ * an assignment, `await` or template substitution inside the index), and
  * whether a kill targets `-pid`. A tripwire for the forms the code uses, not a
  * sandbox.
  */
