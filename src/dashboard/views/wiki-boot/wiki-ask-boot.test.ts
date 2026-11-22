@@ -64,6 +64,8 @@ const STORED = [{ question: "What did we decide?", answer: "We decided X.", cita
 const fetched: string[] = [];
 /** The bodies of every `POST /api/wiki/series`, parsed. */
 const seriesPosts: Record<string, unknown>[] = [];
+/** The bodies of every `POST /api/wiki/remember`, parsed. */
+const rememberPosts: Record<string, unknown>[] = [];
 async function stubFetch(input: unknown, init?: { method?: string; body?: unknown }): Promise<unknown> {
   const raw = String(input);
   fetched.push(raw);
@@ -75,6 +77,10 @@ async function stubFetch(input: unknown, init?: { method?: string; body?: unknow
     body = { meta: LISTING.pages.find((p) => p.relPath === rel) ?? LISTING.pages[0], html: `<h1>${rel}</h1><p>Body.</p>`, outgoing: [], backlinks: [], hash: "h-" + rel };
   } else if (url.pathname === "/api/wiki/graph") body = { nodes: [], edges: [] };
   else if (url.pathname === "/api/wiki/factcheck/append") body = { written: true };
+  else if (url.pathname === "/api/wiki/remember" && init?.method === "POST") {
+    rememberPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    body = { saved: true, summary: "ok" };
+  }
   else if (url.pathname === "/api/wiki/series" && init?.method === "POST") {
     seriesPosts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
     body = { written: true };
@@ -324,5 +330,47 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     await until(() => seriesPosts.length > 0 || /changed since you opened it/.test(doc().getElementById("wikiSeriesMenu")?.textContent ?? ""), "the write or its refusal");
     expect(doc().getElementById("wikiSeriesMenu")?.textContent ?? "").not.toContain("changed since you opened it");
     expect(seriesPosts.map((b) => `${b.relPath} ${b.series} ${b.baseHash}`)).toEqual(["e.md fresh-key h-e.md"]);
+  });
+  test("a history item clicked while an answer streams keeps its own answer: the live turn's events update the turn, not the pane (F21)", async () => {
+    const { getAskShownTurn } = await import("../components/wiki-ask-controller.ts");
+    const histItem = (q: string) =>
+      Array.from(doc().querySelectorAll<HTMLElement>("#wikiAskHistory [data-ask-idx]")).find((el) => el.textContent === q)!;
+    const input = doc().getElementById("wikiAskInput") as HTMLTextAreaElement;
+    input.value = "Live question?";
+    doc().getElementById("wikiAskBtn")!.click();
+    const es = FakeEventSource.all.at(-1)!;
+    es.emit("delta", { text: "LIVE-ONE " });
+    await frame();
+    expect(doc().getElementById("askAnswerBody")!.innerHTML).toContain("LIVE-ONE");
+    // Mid-stream, the reader opens a stored turn.
+    histItem("What did we decide?").click();
+    expect(getAskShownTurn()?.question).toBe("What did we decide?");
+    const shownIsHistory = () => {
+      expect(wrap().innerHTML).toContain("We decided X.");
+      expect(wrap().innerHTML).not.toContain("LIVE");
+      expect(doc().getElementById("askAnswerMeta")!.textContent).toContain("0 sources");
+    };
+    es.emit("sources", { citations: [{ n: 1, collection: "c", docId: "d", title: "LIVE-SRC", badge: "b", relevance: 1 }] });
+    shownIsHistory();
+    es.emit("delta", { text: "LIVE-TWO" });
+    await frame();
+    shownIsHistory();
+    es.emit("done", { answer: "LIVE-ONE LIVE-TWO final", cited: [1] });
+    shownIsHistory();
+    es.emit("answer_html", { html: "<p>LIVE-HTML final</p>", cited: [1] });
+    await frame();
+    shownIsHistory();
+    expect(es.readyState).toBe(2);
+    // The live turn kept every event: re-opened, it shows the whole answer and its source.
+    histItem("Live question?").click();
+    expect(doc().getElementById("askAnswerBody")!.innerHTML).toContain("LIVE-HTML final");
+    expect(doc().getElementById("askAnswerSources")!.textContent).toContain("LIVE-SRC");
+    expect(doc().getElementById("askAnswerMeta")!.textContent).toContain("1 source");
+    // Remember on the stored turn sends the stored turn's answer, the one on screen.
+    histItem("What did we decide?").click();
+    rememberPosts.length = 0;
+    doc().getElementById("wikiRememberBtn")!.click();
+    await until(() => rememberPosts.length > 0, "the remember POST");
+    expect(rememberPosts.map((b) => `${b.question} | ${b.answer}`)).toEqual(["What did we decide? | We decided X."]);
   });
 });

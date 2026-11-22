@@ -241,6 +241,15 @@ let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
 const ASK_ANSWER_CHARS = 700;
 
+/** Is `turn` the one painted in the article pane right now? Every stream paint
+ *  site asks this, because the answer's nodes are found by id: a history item
+ *  clicked mid-stream (or a page opened) leaves the live turn's handlers running,
+ *  and they must update the TURN without writing into another view's nodes.
+ *  `askShownTurn` alone is not enough: navigating away never clears it. */
+function paneShows(turn: AskTurn): boolean {
+  return turn === askShownTurn && !!document.getElementById("askAnswerBody")?.isConnected;
+}
+
 /** Throttle progressive markdown renders of the streaming buffer to one per
  *  animation frame (as the web chat does), coalescing bursts of deltas. The
  *  frame re-checks identity + final-HTML at FIRE time: a frame scheduled just
@@ -252,6 +261,7 @@ function scheduleAskStreamRender(turn: AskTurn, conn: SseHandle): void {
     askRenderRaf = 0;
     if (askConn !== conn) return; // superseded by a newer ask
     if (turn.html) return; // final article already swapped in
+    if (!paneShows(turn)) return; // another view is on screen
     const b = document.getElementById("askAnswerBody");
     if (b) { b.innerHTML = renderStreamingBody(askBuffer); } // confidence chip baked into renderStreamingBody
   });
@@ -429,7 +439,7 @@ function askChatEscalateHtml(turn: AskTurn): string {
  *  turn is on screen. Nothing is lost by skipping — `showAskAnswer` renders the
  *  bar from the newly shown turn's own `chatEsc`. */
 export function refreshChatEscalateBar(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const bar = document.getElementById("wikiChatEscBar");
   if (bar) bar.innerHTML = chatEscBarHtml(turn);
 }
@@ -565,7 +575,7 @@ let integrateProposing: AskTurn | null = null;
  *  of bar state is held off the DOM (`turn.wrote`, `integrateBarMsgs`,
  *  `integratedNotes`, `integrateProposing`) so re-opening the turn reproduces it. */
 function refreshWriteActionBars(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const appendBar = document.getElementById("wikiFactcheckAppendBar");
   if (appendBar) appendBar.innerHTML = factcheckAppendInnerHtml(turn);
   const intBar = document.getElementById("wikiFactcheckIntegrateBar");
@@ -717,7 +727,7 @@ function claimRetryRowInnerHtml(turn: AskTurn, claim: RetryableClaim): string {
  * than no ↻ at all.
  */
 function applyRetryAffordances(bodyEl: HTMLElement | null, turn: AskTurn): void {
-  if (!bodyEl || turn !== askShownTurn) return;
+  if (!bodyEl || !paneShows(turn)) return;
   bodyEl.querySelectorAll(".wiki-fc-retry").forEach((n) => n.remove());
   if (turn.kind !== "factcheck" || !turn.answer || !turn.page) return;
   const claims = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes);
@@ -750,7 +760,7 @@ function applyRetryAffordances(bodyEl: HTMLElement | null, turn: AskTurn): void 
  *  Scoped to the answer body: `data-claim-retry` is unique THERE, but a bare
  *  `document.querySelector` would happily pick up a same-keyed node anywhere. */
 function paintClaimRetryRow(turn: AskTurn, index: number): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const body = document.getElementById("askAnswerBody");
   const row = body?.querySelector('.wiki-fc-retry[data-claim-retry="' + index + '"]');
   if (!row) return;
@@ -765,7 +775,7 @@ function paintClaimRetryRow(turn: AskTurn, index: number): void {
  *  row's `busy` disable, and repainting only the running row left the others
  *  looking enabled while their clicks no-opped. */
 function paintAllClaimRetryRows(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const body = document.getElementById("askAnswerBody");
   if (!body) return;
   body.querySelectorAll(".wiki-fc-retry[data-claim-retry]").forEach((row) => {
@@ -831,7 +841,7 @@ function claimRetryBarInnerHtml(turn: AskTurn): string {
  *  `refreshWriteActionBars` is — it is a singleton node owned by whichever turn is
  *  painted. */
 function refreshClaimRetryBar(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const bar = document.getElementById("wikiClaimRetryBar");
   if (bar) bar.innerHTML = claimRetryBarInnerHtml(turn);
 }
@@ -846,7 +856,7 @@ function refreshClaimRetryBar(turn: AskTurn): void {
  *  `renderStreamingBody` wraps (plus the confidence enhancement the client applies
  *  on every paint anyway). */
 function repaintAskAnswerBody(turn: AskTurn): void {
-  if (turn !== askShownTurn) return;
+  if (!paneShows(turn)) return;
   const b = document.getElementById("askAnswerBody");
   if (!b) return;
   b.innerHTML = renderStreamingBody(turn.answer);
@@ -1037,7 +1047,7 @@ function applyClaimRetryResult(
   // EVERY path (it also has to persist the tool chips a failed retry grew), so a
   // second call was one write of the same session per success.
   // Everything above is turn-scoped. Everything below touches singleton DOM nodes.
-  if (turn !== askShownTurn) return true;
+  if (!paneShows(turn)) return true;
   setClaimRetryMsg(turn, claim.index, "");
   repaintAskAnswerBody(turn);
   refreshAskSources(turn); // the meta line reads claimOutcomes / claimCount
@@ -1348,6 +1358,7 @@ function askToolLogHtml(turn: AskTurn): string {
  *  auto-scroll to the newest row (same as /agents' mini-log). The article body
  *  still streams separately, so only this container is repainted. */
 function refreshAskToolLog(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const el = document.getElementById("askToolLog");
   if (!el) return;
   el.innerHTML = toolLogRows(turn);
@@ -1358,6 +1369,7 @@ function refreshAskToolLog(turn: AskTurn): void {
 /** Update the on-screen "Consulting" chip row in place as WebFetch hosts arrive
  *  (the article body still streams, so re-render just this container). */
 function refreshAskToolSources(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const el = document.getElementById("askToolSources");
   if (!el) return;
   el.innerHTML = toolSourceChips(turn);
@@ -1452,6 +1464,7 @@ export function showAskAnswer(turn: AskTurn, buffer: string): void {
 /** Refresh the meta count + sources block of the on-screen answer in place
  *  (used when the `sources`/`done` events land while the body still streams). */
 function refreshAskSources(turn: AskTurn): void {
+  if (!paneShows(turn)) return;
   const meta = document.getElementById("askAnswerMeta");
   if (meta) meta.textContent = askMetaText(turn);
   const s = document.getElementById("askAnswerSources");
@@ -1624,7 +1637,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); } // chip baked into renderStreamingBody
+      if (b && !turn.html && paneShows(turn)) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); } // chip baked into renderStreamingBody
       refreshAskSources(turn);
       let statusText: string;
       // NB the ↻ rows are applied further down, AFTER `claimOutcomeByIndex` is
@@ -1681,7 +1694,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       renderAskHistory();
       persistAskSession();
       btn.disabled = false;
-      setFollowupDisabled(false); // committed — the follow-up bar is now usable
+      if (paneShows(turn)) setFollowupDisabled(false); // committed — the follow-up bar is now usable
       // The pane was painted before the answer existed, so neither write-action
       // gate could run (both read the committed answer). Re-derive them now.
       refreshWriteActionBars(turn);
@@ -1702,10 +1715,10 @@ export function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); applyRetryAffordances(b, turn); }
+      if (b && turn.html && paneShows(turn)) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); applyRetryAffordances(b, turn); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
-      setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
+      if (paneShows(turn)) setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       askActive = null;
       conn.close();
@@ -1718,7 +1731,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       setAskStatus(msg, "error");
       askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
       conn.close();
@@ -1732,7 +1745,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       askConn = null;
       askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
     },
     onerror: () => {
@@ -1741,7 +1754,7 @@ export function runAskStream(url: string, turn: AskTurn): void {
       askConn = null;
       askActive = null;
       btn.disabled = false;
-      setFollowupDisabled(false);
+      if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       const wrap = document.getElementById("wikiAskStatus");
       if (wrap && !wrap.classList.contains("done") && !wrap.classList.contains("error")) {

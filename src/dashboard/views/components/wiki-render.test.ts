@@ -328,6 +328,8 @@ test("wiki-browser.ts does not grow: line count and module-level lets", async ()
 // 2026-11-14, living facts PR 3b: the article controller 1,182 → 1,185, for
 // the page payload's `facts` field, its import, and the call that hands the
 // provenance rows' Jira status to the live chips (`wiki-live-facts.ts`).
+// 2026-11-22, architecture review B6 (F21): the Ask controller 2,503 → 2,516, for
+// `paneShows` and its guard at each stream paint site that had none.
 const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][] = [
   ["wiki-rail-controller.ts", 2_298, 16],
   ["wiki-shell-state.ts", 50, 3],
@@ -336,7 +338,7 @@ const SPLIT_MODULE_CEILINGS: [file: string, maxLines: number, maxLets: number][]
   ["wiki-effort-controller.ts", 237, 3],
   ["wiki-work-map-cache.ts", 124, 5],
   ["wiki-menus-controller.ts", 638, 2],
-  ["wiki-ask-controller.ts", 2_503, 10],
+  ["wiki-ask-controller.ts", 2_516, 10],
   ["wiki-article-controller.ts", 1_185, 10],
   ["wiki-series-controller.ts", 548, 3],
 ];
