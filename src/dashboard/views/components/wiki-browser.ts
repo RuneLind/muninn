@@ -388,6 +388,7 @@ import {
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
 import { initDiscussTab } from "./wiki-discuss-tab.ts";
+import { enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -590,23 +591,13 @@ function recencyNow(): number {
  * page other than the one on screen. Written only through `setCurrentRelPath`.
  */
 let currentRelPath: string | null = null;
-/**
- * Which view the article pane was last asked for. Raised by every view change
- * (`setCurrentRelPath`) and by every page fetch (`fetchAndRenderPage`), so a
- * page response compares the number it started with and drops itself once a
- * later view has begun: a page left behind that fails late must not paint its
- * error, or clear the STALE tab, over the page now on screen (R2B4).
- */
-let pageViewSeq = 0;
-/** The `pageViewSeq` of the newest page fetch. */
-let pageFetchSeq = 0;
 /** The one writer of `currentRelPath`. The shown page changing is what ends a
  *  Check that belongs to another page (A9), on every route off it: another
  *  page, an explainer, the start view, an Ask answer, an issue graph; the
- *  STALE tab follows it (`staleFollowShownPage`). */
+ *  STALE tab follows it (`staleFollowShownPage`). Which view is shown, and so
+ *  whether a late response may paint, is `enterView`'s token (R2B4). */
 function setCurrentRelPath(relPath: string | null): void {
   currentRelPath = relPath;
-  pageViewSeq++;
   staleFollowShownPage(relPath);
 }
 /**
@@ -1188,19 +1179,8 @@ function renderStart(): void {
   // Returning to the browse view is the moment a page set stashed during reading
   // becomes safe to apply — before anything below reads `allPages`.
   applyPendingPages();
-  // No article: a `?lens=` is spent, and a plan-card run in flight is dropped.
-  consumeUrlLens();
-  abortAgentRuns();
-  setCurrentName(null);
-  // The two identities are cleared together, always; the STALE tab and its count go with the page.
-  setCurrentRelPath(null);
-  currentPageHash = null;
-  // The overview has no graph, and its URL carries no `display=`: leaving an
-  // article for it leaves graph mode too. Back restores it from the URL.
-  graphMode = false;
-  graphIssue = "";
-  removeGraph();
-  hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
+  // No article and no graph (its URL carries no `display=`; Back restores it).
+  enterView("start");
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
@@ -1482,19 +1462,11 @@ export function articleHeadHtml(m: WikiListing, provenancePending?: boolean): st
  *  docs on a loopback-only dashboard), not the markdown pane. Its Connections
  *  come from /api/wiki/page like any page: backlinks and Similar, no outgoing. */
 function loadExplainer(m: WikiListing, push: boolean): void {
-  hideExplainPill(); // a page switch drops any stale pill from the prior page
-  // An explainer has no lens: a `?lens=` is spent, and a plan-card run dropped.
-  consumeUrlLens();
-  abortAgentRuns();
-  setAtlasFull(false);
-  setCurrentName(m.name);
-  // The listing IS the identity here, so the active row gets its relPath now; the
-  // previous page's hash is cleared with it (a series write compares it).
-  setCurrentRelPath(m.relPath);
-  currentPageHash = null;
-  /** This view's number: a later view drops this page's response (R2B4). */
-  const seq = pageViewSeq;
-  navInFlight = false; // `currentName` now carries the "article" signal on its own
+  // The listing IS the identity here: the active row gets its relPath now, and
+  // the previous page's hash goes (a series write compares it). A later view
+  // drops this page's response (R2B4).
+  const view = enterView("explainer", m.relPath);
+  setCurrentName(m.name); // `currentName` now carries the "article" signal on its own
   if (push) {
     graphIssue = ""; // a click opens a page: graph mode re-roots on it
     history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
@@ -1513,7 +1485,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       // A fast page flip may have moved on — don't clobber the new page's panel.
-      if (seq !== pageViewSeq) return;
+      if (!viewIsLive(view)) return;
       if (data.error) {
         staleForFailedPage();
         return;
@@ -1536,7 +1508,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       loadStale(m.relPath);
     })
     .catch(() => {
-      if (seq !== pageViewSeq) return;
+      if (!viewIsLive(view)) return;
       document.getElementById("connBody")!.innerHTML =
         '<div class="wiki-conn-empty">Connections unavailable.</div>';
       staleForFailedPage();
@@ -1584,7 +1556,6 @@ function openNavTarget(target: NavTarget, push: boolean): void {
 }
 
 function loadPage(name: string, push: boolean, revealHash = true): void {
-  hideExplainPill(); // a page switch drops any stale pill from the prior page
   // Raised BEFORE anything else: `currentName` is only set from the response, so
   // without this signal the whole round-trip reads as the "start" view and a
   // refetch resolving mid-click would re-sort the list under the row just clicked.
@@ -1613,7 +1584,6 @@ function loadPage(name: string, push: boolean, revealHash = true): void {
  *  pushed history entry so Back/reload/share re-resolve the SAME page;
  *  `push=false` on popstate/boot replays without re-pushing; `anchor` becomes its `#fragment`. */
 function loadPageByRelPath(relPath: string, push = true, revealHash = true, anchor?: string): void {
-  hideExplainPill();
   closeRailPanel();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
@@ -1637,24 +1607,14 @@ function loadPageByRelPath(relPath: string, push = true, revealHash = true, anch
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, hash?: string): void {
-  // The page being left stops boosting a find now: a load that fails (an error
-  // payload or a rejected fetch) leaves `currentRelPath` on it.
-  currentNear = null;
-  // Its Agent pane's plan-card run, if one is in flight, is no longer wanted.
-  abortAgentRuns();
   // Taken now, so a load that fails cannot leave it for the next one.
   const inPlace = inPlaceLens;
-  // This load's number. A later view (another load, an explainer, the start
-  // view, an Ask answer, an issue graph) drops this response whatever it is:
-  // a page left behind paints nothing, a late failure clears nothing (R2B4).
-  let seq = ++pageViewSeq;
-  pageFetchSeq = seq;
-  const superseded = () => {
-    if (seq === pageViewSeq) return false;
-    // Left for a view that fetches nothing: no navigation is in flight now.
-    if (pageFetchSeq === seq) navInFlight = false;
-    return true;
-  };
+  // This load's view. A later view (another load, an explainer, the start
+  // view, an Ask answer, an issue graph, an effort page) drops this response
+  // whatever it is: a page left behind paints nothing, a late failure clears
+  // nothing (R2B4). The shown page keeps its identity until the response.
+  const view = enterView("page");
+  const superseded = () => !viewIsLive(view);
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1688,7 +1648,6 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // resolves server-side, and the active row must key on the page that
       // actually came back.
       setCurrentRelPath(data.meta.relPath || null);
-      seq = pageViewSeq; // that view change is this load's own
       currentPageHash = typeof data.hash === "string" ? data.hash : null;
       currentNear = currentRelPath ? { relPath: currentRelPath, near: data.near ?? {} } : null;
       renderBreadcrumb(data.meta);
@@ -1760,8 +1719,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
           reload: () => reloadPageInPlace(wtRelPath),
         });
         // A Done write that returns after any later view started reloads nothing.
-        const view = pageViewSeq;
-        enhanceStepDone(articleRoot, { wiki: FIND_SELF_WIKI || WIKI, relPath: wtRelPath, hash: () => currentPageHash, reload: () => reloadPageInPlace(wtRelPath), current: () => view === pageViewSeq && currentRelPath === wtRelPath });
+        enhanceStepDone(articleRoot, { wiki: FIND_SELF_WIKI || WIKI, relPath: wtRelPath, hash: () => currentPageHash, reload: () => reloadPageInPlace(wtRelPath), current: () => viewIsLive(view) && currentRelPath === wtRelPath });
       }
       // The lens (D2's precedence): a `?lens=` the page was opened with, once,
       // then the viewer's stored choice, then the page's default. Before the
@@ -2075,17 +2033,10 @@ function focusGraphNode(id: string): void {
 /** `?display=graph&issue=jira:KEY` with no page open: the issue's own head and
  *  its graph fill the article pane. */
 function renderIssueGraph(): void {
-  consumeUrlLens();
-  abortAgentRuns();
   const wrap = document.getElementById("articleWrap");
   const root = parseIssueRoot(graphIssue);
   if (!wrap || !root) return;
-  setAtlasFull(false);
-  setCurrentName(null);
-  setCurrentRelPath(null);
-  currentPageHash = null;
-  hideBreadcrumb();
-  removeGraph();
+  enterView("graph");
   wrap.innerHTML =
     `<div class="wiki-article-head"><h1>${esc(root.key)}</h1><div class="wiki-meta-row">` +
     `<span class="wiki-dates">${esc(trackerLabels[root.tracker] || root.tracker)} issue</span>${graphToggleHtml(true)}</div></div>`;
@@ -2690,15 +2641,26 @@ function staleDeps(): StaleDeps {
   };
 }
 
-/** No page is shown, for the effort page (`EffortDeps.clearShownPage`) and an
- *  Ask answer (`AskTurnPort.clearShownPage`, from `showAskAnswer`): the shell's
- *  own lets, cleared in `renderEffort`'s original order, which is also
- *  `showAskAnswer`'s. */
-function clearShownPage(): void {
-  setCurrentRelPath(null);
+/** What leaving the shown view means, run once by every `enterView` (F22). A
+ *  page entered by its fetch keeps the shown identity until the response; the
+ *  rest set it now, the shown page's hash cleared with its relPath (#829). An
+ *  explainer renders its own breadcrumb; the other kinds show no page. */
+function leaveView(kind: PaneViewKind, relPath: string | null): void {
+  hideExplainPill();
+  abortAgentRuns(); // the Agent pane's plan-card run belongs to the page left
+  currentNear = null; // the page left stops boosting a find
+  if (kind === "page") return;
+  navInFlight = false; // no page navigation is in flight now
+  if (kind !== "start") setAtlasFull(false); // the start view sets it per tab
+  consumeUrlLens(); // a `?lens=` is spent by the first view that renders
+  setCurrentName(null);
+  setCurrentRelPath(relPath);
   currentPageHash = null;
-  graphMode = false;
-  graphIssue = "";
+  if (kind === "explainer") return;
+  if (kind !== "graph") {
+    graphMode = false;
+    graphIssue = "";
+  }
   removeGraph();
   hideBreadcrumb();
 }
@@ -2709,15 +2671,11 @@ function effortDeps(): EffortDeps {
     WIKI: () => WIKI,
     allPages: () => allPages,
     filters,
-    pageViewSeq: () => pageViewSeq,
     workMapThemes: () => workMapThemes,
     withWiki,
     pageUrlByRelPath,
     currentStartUrl,
     applyPendingPages,
-    consumeUrlLens,
-    setAtlasFull,
-    clearShownPage,
   };
 }
 
@@ -2725,7 +2683,6 @@ function effortDeps(): EffortDeps {
 function askDeps(): AskTurnPort {
   return {
     WIKI: () => WIKI,
-    clearShownPage,
     switchConnTab,
     reloadPageInPlace,
   };
@@ -2828,6 +2785,7 @@ export function boot(): { dispose(): void } {
   purgeRecentsKeys();
   initRail(railDeps());
   initStale(staleDeps());
+  setViewTeardown(leaveView);
   initEffort(effortDeps());
   initAsk(askDeps());
   initMenus(menusDeps());

@@ -16,12 +16,12 @@ import type { WorkMapGetBody } from "./wiki-work-card.ts";
 import { isThemeMap, type AnyWorkMap } from "../../../wiki/work-map/join.ts";
 import { adoptIfNewer, effortHrefFor as cacheEffortHref, getWorkMapCache, workMapFetchFor } from "./wiki-work-map-cache.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
-import { abortAgentRuns } from "./wiki-agent-pane.ts";
 import { workMapDoneSet } from "./wiki-start-cards.ts";
 import { statusPillHtml } from "./wiki-status-pills.ts";
 import { closeRailPanel } from "./wiki-pane-toggle.ts";
 import { renderList } from "./wiki-rail-controller.ts";
-import { getWorkMapRunAt, setCurrentName } from "./wiki-shell-state.ts";
+import { getWorkMapRunAt } from "./wiki-shell-state.ts";
+import { enterView, viewIsLive } from "./wiki-pane-view.ts";
 
 /** What the effort page reads and calls on the shell, read live. */
 export interface EffortDeps {
@@ -29,28 +29,24 @@ export interface EffortDeps {
   allPages(): WikiListing[];
   /** The shell's one filter object: read for the facets an effort URL carries. */
   readonly filters: WikiFilters;
-  /** The shell's page-view counter: a paint for an older view is dropped. */
-  pageViewSeq(): number;
   /** The listing's `workMap.kind === "themes"`: the status panes say theme. */
   workMapThemes(): boolean;
   withWiki(url: string): string;
   pageUrlByRelPath(relPath: string): string;
   currentStartUrl(): string;
   applyPendingPages(): void;
-  consumeUrlLens(): void;
-  setAtlasFull(on: boolean): void;
-  /** No page is shown: the shown page, its hash, graph mode and the breadcrumb
-   *  are cleared, in `renderEffort`'s original order. */
-  clearShownPage(): void;
 }
 
 /** Set once, by {@link initEffort}, before anything here runs. */
 let deps!: EffortDeps;
 
 // ── Effort page (work map P3) ─────────────────────────────────────────
-/** The effort the article pane shows, or null. Read only while
- *  `#wikiEffortPage` is in the pane: every other view replaces it. */
-let effortOpen: string | null = null;
+/** The effort last opened and its `enterView` token: shown while that token is live. */
+let effortOpen: { id: string; view: number } | null = null;
+/** The effort the article pane shows, or null. */
+function shownEffort(): string | null {
+  return effortOpen && viewIsLive(effortOpen.view) ? effortOpen.id : null;
+}
 /** An effort's reader URL, carrying the facets an article URL carries. */
 export function effortHrefFor(id: string): string {
   return cacheEffortHref(deps.WIKI(), deps.filters, id);
@@ -62,7 +58,8 @@ export function effortHrefFor(id: string): string {
 export function adoptWorkMap(body: WorkMapGetBody): void {
   if (!adoptIfNewer(body)) return;
   renderList();
-  if (effortOpen !== null && document.getElementById("wikiEffortPage")) paintEffort(effortOpen, true);
+  const id = shownEffort();
+  if (id !== null) paintEffort(id, true);
 }
 
 /** The effort a URL's `?effort=` names, or null for none. A blank value is
@@ -126,16 +123,11 @@ export function renderEffort(id: string): void {
   // A listing stashed while an article was open lands now, before the map is
   // joined to `allPages`; the list is repainted from it like `renderStart` does.
   deps.applyPendingPages();
-  deps.consumeUrlLens();
-  abortAgentRuns();
   if (!document.getElementById("articleWrap")) return;
-  deps.setAtlasFull(false);
-  setCurrentName(null);
-  deps.clearShownPage();
+  effortOpen = { id, view: enterView("effort") };
   // No page is open: repaint the rail, so the highlight goes and a fold the
   // page forced open gets its caret back.
   renderList();
-  effortOpen = id;
   paintEffort(id, false);
 }
 
@@ -146,7 +138,7 @@ export function renderEffort(id: string): void {
 function paintEffort(id: string, background: boolean): void {
   const wrap = document.getElementById("articleWrap");
   if (!wrap) return;
-  const seq = deps.pageViewSeq();
+  const view = effortOpen?.view ?? 0;
   // Built at each write, so a pane painted after the GET carries the facets
   // set while it was in flight.
   // The listing's map kind is known before the map loads, so a themes wiki's
@@ -196,7 +188,7 @@ function paintEffort(id: string, background: boolean): void {
     return;
   }
   if (!background) writeEffortPanes(wrap, effortStatusHtml(head(), "loading"), '<div class="wiki-ef-conn-empty">Loading…</div>', false);
-  const current = () => effortOpen === id && deps.pageViewSeq() === seq && !!document.getElementById("wikiEffortPage");
+  const current = () => viewIsLive(view);
   workMapFetchFor(runAt, deps.withWiki)
     .then((r) => {
       const body = r.body;
@@ -222,12 +214,12 @@ function paintEffort(id: string, background: boolean): void {
  *  carry another facet). Paint only: no navigation side effects, and nothing
  *  written when the markup is unchanged. */
 export function refreshEffortFromListing(): void {
-  if (effortOpen === null || !document.getElementById("wikiEffortPage")) return;
-  paintEffort(effortOpen, true);
+  const id = shownEffort();
+  if (id !== null) paintEffort(id, true);
 }
 /** The effort the article pane shows, or null (the body click delegate's Retry). */
 export function getEffortOpen(): string | null {
-  return effortOpen;
+  return shownEffort();
 }
 
 // ── Boot: called by the shell's boot() ────────────────────────────────

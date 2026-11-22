@@ -1378,7 +1378,7 @@ describe("wiki reader chat-dialog wiring", () => {
         .sort();
     };
     const expected: Record<string, string[]> = {
-      askDeps: ["WIKI: () => WIKI", "clearShownPage", "switchConnTab", "reloadPageInPlace"],
+      askDeps: ["WIKI: () => WIKI", "switchConnTab", "reloadPageInPlace"],
       menusDeps: [
         "WIKI: () => WIKI",
         "allPages: () => allPages",

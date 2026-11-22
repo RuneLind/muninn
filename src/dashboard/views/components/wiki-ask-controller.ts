@@ -13,8 +13,8 @@
  * shape. Ask owns its turn state (`askTurns`, `askShownTurn`, `integratePreview`)
  * and exports getters for the first two, so the port carries no
  * `getShownTurn()` or `repaintBody()`: those flow the other way. Leaf imports
- * (`wiki-ask-render.ts`, `wiki-ask-session.ts`, `wiki-shell-state.ts`'s
- * `setCurrentName`, the rail's `renderList`) are imported directly and are not
+ * (`wiki-ask-render.ts`, `wiki-ask-session.ts`, `wiki-pane-view.ts`'s
+ * `enterView`, the rail's `renderList`) are imported directly and are not
  * port members.
  */
 import { escHtml as esc } from "./escape.ts";
@@ -95,21 +95,13 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import { renderList } from "./wiki-rail-controller.ts";
-import { setCurrentName } from "./wiki-shell-state.ts";
+import { enterView, viewIsLive } from "./wiki-pane-view.ts";
 
 /** What Ask reads and calls on the shell, read live through a function so a
  *  value the shell reassigns is never a stale copy. */
 export interface AskTurnPort {
   /** The shell's `WIKI` let (the active wiki's name), read for every Ask URL. */
   WIKI(): string;
-  /** The shell's `clearShownPage()`: an Ask answer replaces the page, so
-   *  `showAskAnswer` clears `currentRelPath`, `currentPageHash`, graph mode and
-   *  the breadcrumb, the C3 command `renderEffort` already uses. Its
-   *  `removeGraph()` aborts the graph fetch and drops its section, and its
-   *  `hideBreadcrumb()` does more than its name says: `abortProvLoad()`,
-   *  `unmountAnswerExport()`, `closeWalkthroughOnNavigate(null)` and
-   *  `currentArticle = null` (with `clearOutgoingTitles()`) run inside it. */
-  clearShownPage(): void;
   /** The article controller's `switchConnTab()`, relayed by the shell (right-rail tabs, C5): `runAskStream` shows the Ask tab. */
   switchConnTab(tab: string): void;
   /** The shell's `reloadPageInPlace()` (page loading; the walkthrough's Reload
@@ -233,9 +225,9 @@ export interface AskTurn {
 interface ClaimRow { index: number; title: string; status: string; block: string; outcome?: string; }
 const askTurns: AskTurn[] = [];
 let askConn: SseHandle | null = null;
-let askActive: AskTurn | null = null; // the turn currently streaming, or null
-let askShownTurn: AskTurn | null = null; // the turn currently painted in the pane
-let askBuffer = ""; // streamed plain-text accumulator for askActive
+let askShownTurn: AskTurn | null = null; // the turn painted in the pane last
+let askView = 0; // its `enterView` token: the pane shows it while the token is live
+let askBuffer = ""; // streamed plain-text accumulator for the streaming turn
 let composeText = ""; // fact-check compose lede accumulator (Phase 3 deltas)
 let askRenderRaf = 0; // pending progressive-render frame (0 = none)
 const ASK_MAX_HISTORY = 4;
@@ -244,10 +236,9 @@ const ASK_ANSWER_CHARS = 700;
 /** Is `turn` the one painted in the article pane right now? Every stream paint
  *  site asks this, because the answer's nodes are found by id: a history item
  *  clicked mid-stream (or a page opened) leaves the live turn's handlers running,
- *  and they must update the TURN without writing into another view's nodes.
- *  `askShownTurn` alone is not enough: navigating away never clears it. */
+ *  and they must update the TURN without writing into another view's nodes. */
 function paneShows(turn: AskTurn): boolean {
-  return turn === askShownTurn && !!document.getElementById("askAnswerBody")?.isConnected;
+  return turn === askShownTurn && viewIsLive(askView);
 }
 
 /** Throttle progressive markdown renders of the streaming buffer to one per
@@ -1167,14 +1158,11 @@ async function driveClaimRetry(
   }
 }
 
-/** True while the ↻ bar this batch is driving is still in the document. Navigating
- *  away does NOT clear `askShownTurn` (see `currentViewState`), so without a DOM
- *  liveness test a batch kept launching claims — up to ~24 minutes of model spend —
- *  with the Cancel button long since destroyed. */
+/** True while the Ask view this batch is driving is still on screen. Navigating
+ *  away does NOT clear `askShownTurn`, so without this a batch kept launching
+ *  claims — up to ~24 minutes of model spend — with Cancel long since destroyed. */
 function claimRetryPaneAlive(): boolean {
-  const bar = document.getElementById("wikiClaimRetryBar");
-  const body = document.getElementById("askAnswerBody");
-  return !!(bar?.isConnected && body?.isConnected);
+  return viewIsLive(askView);
 }
 
 /** Retry every unverified claim on the shown turn, SEQUENTIALLY (concurrency 1):
@@ -1431,10 +1419,9 @@ function setFollowupDisabled(disabled: boolean): void {
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 export function showAskAnswer(turn: AskTurn, buffer: string): void {
-  setCurrentName(null);
-  // An answer replaces the article pane: graph mode ends with it, so a citation
-  // clicked below opens its page for reading.
-  deps.clearShownPage(); // an Ask answer replaces the page — no breadcrumb
+  // An answer replaces the article pane: no page, no breadcrumb, and graph mode
+  // ends with it, so a citation clicked below opens its page for reading.
+  askView = enterView("ask");
   askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
   // The preview is TURN-KEYED, not "whatever was last proposed": nulling it here
@@ -1507,7 +1494,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
   // for the reveal to mean anything: un-collapse it and leave focus mode first.
   revealRightPane();
   deps.switchConnTab("ask");
-  askActive = turn;
   askBuffer = "";
   composeText = "";
   showAskAnswer(turn, "");
@@ -1720,7 +1706,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       if (paneShows(turn)) setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
-      askActive = null;
       conn.close();
       askConn = null;
     },
@@ -1729,7 +1714,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
       let msg = "Something went wrong.";
       try { msg = JSON.parse((e as MessageEvent).data).message || msg; } catch {}
       setAskStatus(msg, "error");
-      askActive = null;
       btn.disabled = false;
       if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
@@ -1743,7 +1727,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
       if (askConn !== conn) return;
       askConn.close();
       askConn = null;
-      askActive = null;
       btn.disabled = false;
       if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
@@ -1752,7 +1735,6 @@ export function runAskStream(url: string, turn: AskTurn): void {
       if (askConn !== conn) return;
       conn.close();
       askConn = null;
-      askActive = null;
       btn.disabled = false;
       if (paneShows(turn)) setFollowupDisabled(false);
       refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons

@@ -66,10 +66,22 @@ const fetched: string[] = [];
 const seriesPosts: Record<string, unknown>[] = [];
 /** The bodies of every `POST /api/wiki/remember`, parsed. */
 const rememberPosts: Record<string, unknown>[] = [];
+/** A request held until the test releases it, by `<path>?relPath=<rel>`. */
+const holds = new Map<string, Promise<void>>();
+function hold(key: string): () => void {
+  let release!: () => void;
+  holds.set(key, new Promise<void>((r) => (release = r)));
+  return () => {
+    holds.delete(key);
+    release();
+  };
+}
 async function stubFetch(input: unknown, init?: { method?: string; body?: unknown }): Promise<unknown> {
   const raw = String(input);
   fetched.push(raw);
   const url = new URL(raw, "http://localhost:3011");
+  const held = holds.get(`${url.pathname}?relPath=${url.searchParams.get("relPath")}`);
+  if (held) await held;
   let body: unknown = {};
   if (url.pathname === "/api/wiki/pages") body = LISTING;
   else if (url.pathname === "/api/wiki/page") {
@@ -372,5 +384,34 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
     doc().getElementById("wikiRememberBtn")!.click();
     await until(() => rememberPosts.length > 0, "the remember POST");
     expect(rememberPosts.map((b) => `${b.question} | ${b.answer}`)).toEqual(["What did we decide? | We decided X."]);
+  });
+  test("a page response that lands after an Ask answer replaced its view paints nothing (F22)", async () => {
+    const { getCurrentName } = await import("../components/wiki-shell-state.ts");
+    popTo("/wiki?wiki=w&relPath=p.md");
+    await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#pmd"), "p.md to render");
+    const release = hold("/api/wiki/page?relPath=k.md");
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="k.md"]')!.click();
+    await until(() => fetched.some((u) => u.includes("relPath=k.md")), "the k.md fetch");
+    doc().querySelector<HTMLElement>("#wikiAskHistory [data-ask-idx]")!.click();
+    expect(!!doc().getElementById("askAnswerBody")).toBe(true);
+    release();
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+    expect(!!doc().getElementById("askAnswerBody")).toBe(true);
+    expect(doc().querySelector("#articleWrap h1#kmd")).toBe(null);
+    expect(getCurrentName()).toBe(null);
+    expect(doc().getElementById("wikiBreadcrumb")!.style.display).toBe("none");
+  });
+
+  test("an explainer's page payload that lands after an Ask answer replaced it leaves the answer's panes alone (F22)", async () => {
+    const release = hold("/api/wiki/page?relPath=e.md");
+    doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="e.md"]')!.click();
+    await until(() => !!doc().querySelector("#articleWrap iframe.wiki-explainer-frame"), "the explainer frame");
+    doc().querySelector<HTMLElement>("#wikiAskHistory [data-ask-idx]")!.click();
+    const conn = doc().getElementById("connBody")!.textContent;
+    expect(conn).toContain("Showing an Ask answer");
+    release();
+    await new Promise((r) => (g.setTimeout as typeof setTimeout)(r, 30));
+    expect(doc().getElementById("connBody")!.textContent).toBe(conn);
+    expect(!!doc().getElementById("askAnswerBody")).toBe(true);
   });
 });
