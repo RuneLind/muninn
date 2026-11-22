@@ -484,6 +484,9 @@ function chipOne(whole: string, before: string, run: string, after: string): str
   return `<span class="ba-chip">${spans.join("")}</span>${tail}`;
 }
 
+/** `formatWebHtml`'s parked link open tag (F53): read as the `<a>` it is. */
+const LINK_OPEN_RE = /^\x00LINKOPEN\d+\x01$/;
+
 /** Rendered inline HTML with the before → after chips drawn in its text:
  *  never inside a tag (an `href`, an attribute) and never across a parked
  *  placeholder (`\x00…\x01`: inline code, an inline component; `\x00…\x00`:
@@ -492,13 +495,15 @@ export function beforeAfterChipsHtml(html: string): string {
   if (!html.includes("→") && !html.includes("-&gt;")) return html;
   // The visible text so far, so a run's first value reads what precedes it
   // across a tag (`<em>v</em>1`); a parked placeholder reads as a letter
-  // (`` `v`1.2 ``), a `<br>` as a space.
+  // (`` `v`1.2 ``), a `<br>` as a space, and a parked link open tag
+  // (`LINKOPEN`) as the tag it stands for: nothing.
   let earlier = "";
   const chipped = html
     .split(/(<[^>]*>|\x00[^\x00\x01]*[\x00\x01])/)
     .map((seg, k) => {
       const out = k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg, earlier);
-      earlier = (earlier + (k % 2 === 0 ? seg : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "")).slice(-48);
+      const read = k % 2 === 0 ? seg : LINK_OPEN_RE.test(seg) ? "" : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "";
+      earlier = (earlier + read).slice(-48);
       return out;
     })
     .join("");
@@ -513,6 +518,7 @@ export function beforeAfterChipsHtml(html: string): string {
  *  text only, so `[^<]` or one span. */
 const CHIP_BEFORE_PUNCT_RE =
   /<span class="ba-chip">(?=(?:<span class="ba-(?:old|arr|new)">[^<]*<\/span>|[^<])*<\/span>(?:<\/[a-z]+>)*[,.;:!?)\]…»”’])/g;
-/** A chip right after an opening bracket or quote (past any opening tags):
- *  it drops its left padding (`ba-chip-o`), the mirror of `ba-chip-p`. */
-const CHIP_AFTER_OPEN_RE = /([(\[«“‘](?:<[a-z][^>]*>)*)<span class="ba-chip(?=[ "])/g;
+/** A chip right after an opening bracket or quote (past any opening tags, a
+ *  parked link open tag among them): it drops its left padding (`ba-chip-o`),
+ *  the mirror of `ba-chip-p`. */
+const CHIP_AFTER_OPEN_RE = /([(\[«“‘](?:<[a-z][^>]*>|\x00LINKOPEN\d+\x01)*)<span class="ba-chip(?=[ "])/g;

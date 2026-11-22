@@ -22,7 +22,7 @@
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
-import { escapeHtml } from "../format/markdown-core.ts";
+import { escapeHtml, withoutSentinelDelimiters } from "../format/markdown-core.ts";
 import { restoreParkedSentinels } from "../format/rendered-code.ts";
 import type { Citation } from "../research/answer.ts";
 
@@ -38,8 +38,8 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
   const tokens: string[] = [];
   /** The source text behind each token — restored where it lands inside code. */
   const literal: string[] = [];
-  // A NUL is never content, and one in the answer could forge a sentinel.
-  const withTokens = (answer ?? "").replaceAll("\0", "").replace(CITE_MARKER_RE, (whole, num: string) => {
+  // A NUL or U+0001 is never content, and one in the answer could forge a sentinel.
+  const withTokens = withoutSentinelDelimiters(answer ?? "").replace(CITE_MARKER_RE, (whole, num: string) => {
     const n = parseInt(num, 10);
     const c = citations[n - 1];
     // Only linkify in-range markers whose citation matched a wiki page — mirrors

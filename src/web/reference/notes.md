@@ -191,7 +191,11 @@ passes share one restore, `restoreParkedSentinels` (`src/format/rendered-code.ts
 since F55 (architecture review 2026-11-16): the Ask tab had no attribute rule,
 so a `[1]` in a link URL or a Question id cut the value. These caller sentinels
 are `\x00…\x00`; `Placeholders`' own are `\x00…\x01` (F29), so a marker word
-between two of them cannot spell a third.
+between two of them cannot spell a third. No input supplies either delimiter:
+the page body and an Ask answer drop both (`withoutSentinelDelimiters`,
+`src/format/markdown-core.ts`), the page-file loader turns both into U+FFFD
+(`pageFileText`), and the diagram JSON, CaseBoard YAML and CSV parsers drop the
+ones an escape spells from every parsed string.
 
 The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
 button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the

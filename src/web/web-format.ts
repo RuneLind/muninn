@@ -2838,7 +2838,7 @@ function renderInlineWith(text: string, chips: boolean): string {
   // back as its source text through `restoreParkedSentinels`.)
   result = replaceMarkdownLinks(result, (m, label, url) => {
     const linkable = /^https?:\/\//.test(url) || /^#[^\s#]+$/.test(url);
-    if (linkable && /\x00[^\x00\x01]*\x01/.test(url)) return m;
+    if (linkable && /\x00[A-Z]+\d+\x01/.test(url)) return m;
     if (/^https?:\/\//.test(url)) {
       return `${ph.add("LINKOPEN", `<a href="${url}" target="_blank" rel="noopener">`)}${label}</a>`;
     }

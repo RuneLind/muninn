@@ -4,6 +4,7 @@ import type { PageFileResult, PageFiles } from "../format/query-block.ts";
 import { renderAskAnswerHtml } from "./ask-render.ts";
 import { diagramSvgFromHtml } from "./diagram-svg.ts";
 import { questionRenderOptionsFor, renderWikiHtml } from "./render.ts";
+import { pageFileText } from "./page-files.ts";
 import type { WikiPageMeta } from "./store.ts";
 
 /**
@@ -895,5 +896,51 @@ describe("rendered attribute values (F58)", () => {
       }
     }
     expect(dead).toEqual([]);
+  });
+});
+
+describe("sentinel-shaped values in the sibling files (F29, A2 fix round 1)", () => {
+  // The loader's text (`pageFileText`) holds no raw NUL or U+0001, so one
+  // reaches a parsed value only through an escape: JSON `\u0000`, YAML
+  // `"\u0000"`. Each fill spells a sentinel: the reader's wikilink
+  // (`\x00…\x00`) or `formatWebHtml`'s placeholder (`\x00…\x01`).
+  const FORGES = ["\u0000WIKIPAGELINK0\u0000", "\u0000INLINECMP0\u0001", "INLINE0\u0001"];
+  const loaded = (fill: string): PageFiles => {
+    const inner = files(fill);
+    return {
+      get(ref: string) {
+        const r = inner.get(ref);
+        return r?.ok ? { ...r, text: pageFileText(r.text) } : r;
+      },
+    };
+  };
+  const pageWithLinks = (name: ComponentName, fill: string, setup: Setup) =>
+    `${page(name, fill, setup)}\nSee [[Hostile Page]] and <Pill tone="good">p</Pill> and \`c\`.\n`;
+  const renderLoaded = (md: string, mode: "views" | "plain", fill: string) =>
+    renderWikiHtml(md, pages, {
+      stripTitle: "Hostile",
+      wiki: "w",
+      files: loaded(fill),
+      question: questionRenderOptionsFor(md, null, true, "Owner Person"),
+      today: "2026-11-22",
+      ...(mode === "views" ? { views: true, readerShapes: true } : {}),
+    });
+  const marks = (html: string) =>
+    `wiki-link ${count(html, 'class="wiki-link"')} pill ${count(html, 'class="pill')} code ${count(html, "<code>c</code>")} ctrl ${/[\x00\x01]/.test(html)}`;
+
+  test("every diagram, Steps, CaseBoard, DeltaTable and Query field: the page's own links, pills and code only", () => {
+    const wrong: string[] = [];
+    for (const name of ["Diagram", "Steps", "CaseBoard", "DeltaTable", "Query"] as const) {
+      for (const setup of validSetups(name)) {
+        for (const mode of ["views", "plain"] as const) {
+          const own = marks(renderLoaded(pageWithLinks(name, BENIGN_FILL, setup), mode, BENIGN_FILL));
+          for (const fill of FORGES) {
+            const got = marks(renderLoaded(pageWithLinks(name, fill, setup), mode, fill));
+            if (got !== own) wrong.push(`${name} ${setup.name} ${mode} ${JSON.stringify(fill)}: ${got} (own: ${own})`);
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
   });
 });

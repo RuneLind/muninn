@@ -146,15 +146,21 @@ async function readGuarded(real: string, cap: number, budget: { left: number }):
     if (n > cap) return { ok: false, reason: "too-large" };
     if (n > budget.left) return { ok: false, reason: "budget" };
     budget.left -= n;
-    // A NUL is the wikilink sentinel's delimiter in `renderWikiHtml`; a
-    // leading BOM would reach the SQL disclosure and its Copy text.
-    const text = buf.toString("utf8", 0, n).replace(/^\uFEFF/, "").replace(/\0/g, "\uFFFD");
+    const text = pageFileText(buf.toString("utf8", 0, n));
     return { ok: true, text, size: n, mtimeMs: st.mtimeMs };
   } catch {
     return { ok: false, reason: "unavailable" };
   } finally {
     await fh?.close().catch(() => {});
   }
+}
+
+/** A page file's decoded text as the renderer gets it. A NUL or U+0001 is a
+ *  render sentinel's delimiter (`\x00…\x00`, `\x00…\x01`) and becomes U+FFFD;
+ *  the parsers drop the ones an escape spells (`withoutSentinelDelimiters`). A
+ *  leading BOM would reach the SQL disclosure and its Copy text. */
+export function pageFileText(decoded: string): string {
+  return decoded.replace(/^\uFEFF/, "").replace(/[\0\x01]/g, "\uFFFD");
 }
 
 const NO_SVG = (): DiagramSvgResult => ({ svg: null, unknownElements: [], unknownAttrs: [], unknownClasses: [] });

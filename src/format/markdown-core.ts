@@ -270,6 +270,27 @@ export function parkLeftoverStarRuns(text: string, ph: Placeholders): string {
 export const LINKABLE_TARGET_RE = /^(?:https?:\/\/|mailto:)/i;
 
 /**
+ * NUL and U+0001, the delimiters of every render sentinel (a placeholder's
+ * `\x00…\x01`, a caller's `\x00…\x00`). Never content: dropped from untrusted
+ * text — a page body, an Ask answer, every string a sibling file parses to —
+ * before any render, so no input can spell or close a sentinel (F29).
+ */
+export function withoutSentinelDelimiters(text: string): string {
+  return text.replace(/[\x00\x01]/g, "");
+}
+
+/** A parsed YAML or JSON value with {@link withoutSentinelDelimiters} applied
+ *  to every string in it (mapping keys stay as parsed). */
+export function parsedWithoutSentinelDelimiters(value: unknown): unknown {
+  if (typeof value === "string") return withoutSentinelDelimiters(value);
+  if (Array.isArray(value)) return value.map(parsedWithoutSentinelDelimiters);
+  if (value !== null && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, parsedWithoutSentinelDelimiters(v)]));
+  }
+  return value;
+}
+
+/**
  * Placeholder store using `\x00<MARKER><idx>\x01` sentinels. Use to protect
  * regions (code blocks, inline code, links) from further markdown processing,
  * then restore them at the end.

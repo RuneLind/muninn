@@ -11,6 +11,7 @@
 import type { QuestionLanguage } from "./question-labels.ts";
 import { anchorSlug, formatCount } from "./query-block.ts";
 import { maskSpans, SEGMENT_PROTECTED_RES, splitOutside } from "./report-top.ts";
+import { parsedWithoutSentinelDelimiters } from "./markdown-core.ts";
 
 /** The status vocabulary, in the board's group order. */
 export const CASE_STATUSES = ["hold", "wait", "wrong", "none", "ok"] as const;
@@ -100,8 +101,8 @@ function field(name: string, v: unknown, notes: Notes): string {
   return t;
 }
 
-/** A field as one inline run, its NULs (a YAML `\0` escape) dropped. */
-const oneLine = (s: string) => s.replace(/\s*[\r\n]\s*/g, " ").replaceAll("\0", "");
+/** A field as one inline run. */
+const oneLine = (s: string) => s.replace(/\s*[\r\n]\s*/g, " ");
 
 /** One list entry as a case; `"skip"` when it is not a mapping with an `id`
  *  key, `"empty"` when that id is empty. */
@@ -164,7 +165,9 @@ export function parseCaseBoard(text: string, parse: YamlParse | null = bunYaml()
   if (hasSeveralDocuments(text)) return { ok: false, reason: "Multiple YAML documents (---); use one list" };
   let doc: unknown;
   try {
-    doc = parse(text);
+    // Every string without a NUL or U+0001 (a `\0`/`\x01` escape): no field
+    // can spell a render sentinel (F29).
+    doc = parsedWithoutSentinelDelimiters(parse(text));
   } catch (e) {
     const msg = (e instanceof Error ? e.message : String(e)).replace(/^YAML Parse error:\s*/, "");
     return { ok: false, reason: `YAML error: ${msg.split("\n")[0]}` };

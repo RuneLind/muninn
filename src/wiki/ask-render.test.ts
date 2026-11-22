@@ -264,6 +264,14 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     expect(html.match(/wiki-ask-cite/g)?.length).toBe(2);
   });
 
+  test("F29: a raw U+0001 after a citation forges no placeholder sentinel", () => {
+    const html = renderAskAnswerHtml("See [1]INLINE0\u0001 and `c` here.", cites);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(html).toContain("INLINE0 and <code>c</code> here.");
+    expect(html).not.toContain("ASKCITE");
+    expect(html).not.toMatch(/[\x00\x01]/);
+  });
+
   test("an answer's NUL is never served", () => {
     const html = renderAskAnswerHtml('<Question id="a\0b">\n\nq?\n\n</Question>\n\nx\0y', []);
     expect(html).not.toContain("\0");

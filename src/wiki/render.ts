@@ -24,7 +24,7 @@
  */
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
-import { escapeHtml } from "../format/markdown-core.ts";
+import { escapeHtml, withoutSentinelDelimiters } from "../format/markdown-core.ts";
 import { checkSlotHtml } from "../format/check-tag.ts";
 import { observingComponentTags, reportComponentTag } from "../format/component-observer.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
@@ -58,13 +58,13 @@ export { stripFrontmatter } from "./store.ts";
 export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 
 /**
- * The markdown the reader renders for a page: NULs, fact-check sentinels and
+ * The markdown the reader renders for a page: NULs and U+0001, fact-check sentinels and
  * frontmatter dropped, and a leading H1 that repeats the reader's own title
  * header removed. Exported so the Walk-me-through route cuts its sections out
  * of the same text the reader drew its headings from.
  */
 export function readerBody(markdown: string, stripTitle?: string): string {
-  let body = stripFrontmatter(stripSentinelLines(markdown.replaceAll("\0", "")));
+  let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
@@ -141,11 +141,13 @@ export function renderWikiHtml(
   // carrying a persisted fact-check block they rendered as a visible literal
   // `<!-- factcheck:start -->` line in the reader (live on all three annotated
   // pages before this).
-  // A NUL is never content: the renderer's own sentinels (`\x00WIKIPAGELINK<n>\x00`,
-  // the parked picture) are NUL-delimited and restored by search, so a NUL the
-  // page carries could forge one. Dropped, as the browser drops one in body
-  // text and the lane peek already did; with none left, none can reassemble.
-  markdown = markdown.replaceAll("\0", "");
+  // A NUL or U+0001 is never content: the renderer's own sentinels
+  // (`\x00WIKIPAGELINK<n>\x00`, the parked picture, `formatWebHtml`'s
+  // `\x00…\x01` placeholders) are delimited by them and restored by search, so
+  // one the page carries could forge one. Dropped, as the browser drops a NUL in
+  // body text; with none left, none can reassemble. The sibling files' parsers
+  // drop both from every value they read (`withoutSentinelDelimiters`).
+  markdown = withoutSentinelDelimiters(markdown);
   const body = readerBody(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
@@ -191,7 +193,7 @@ export function renderWikiHtml(
   });
 
   const renderedHtml = formatWebHtml(withTokens, {
-      files: withoutNuls(opts?.files),
+      files: opts?.files,
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
@@ -221,8 +223,8 @@ export function renderWikiHtml(
   const guarded = parkDiagramPictures(html, parked);
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
   const glossed = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
-  // Every sentinel is restored by now, so a NUL left is a parsed file value's
-  // (a YAML or JSON `\0`/`\u0000` escape): never served.
+  // Backstop: every sentinel is restored by now, and the body and the parsed
+  // file values carry no NUL; one left (a source not yet covered) is never served.
   return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
 }
 
@@ -304,19 +306,6 @@ function itemDateDaysOf(markdown: string, today: string | undefined): ItemDateDa
   if (!/<(?:DecisionLog|Query|NextMoves)\b/.test(markdown)) return undefined;
   const day = today ?? renderDay();
   return { ref: itemDateReference(readStatusDate(parseFrontmatter(markdown).status_date), day), today: day };
-}
-
-/** The page's sibling files with every NUL dropped from their text, as the
- *  body's are: a CaseBoard yaml, a Query csv or a diagram json otherwise
- *  served one. (A diagram's svg comes sanitized, NULs replaced.) */
-function withoutNuls(files: PageFiles | undefined): PageFiles | undefined {
-  if (!files) return files;
-  return {
-    get(ref) {
-      const r = files.get(ref);
-      return r?.ok && r.text.includes("\0") ? { ...r, text: r.text.replaceAll("\0", "") } : r;
-    },
-  };
 }
 
 /**

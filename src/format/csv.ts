@@ -21,7 +21,8 @@ export interface Csv {
 }
 
 export function parseCsv(text: string): Csv {
-  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  // NUL and U+0001 are never cell text: they delimit the renderer's sentinels (F29).
+  const src = (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text).replace(/[\x00\x01]/g, "");
   const records: { cells: string[]; quoted: boolean }[] = [];
   let row: string[] = [];
   let field = "";

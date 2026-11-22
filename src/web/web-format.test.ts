@@ -836,6 +836,21 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     expect(formatWebHtml('[x](#a<Pill tone="good">p</Pill>)')).not.toContain("<a ");
   });
 
+  test("F53: a before → after label inside a link keeps its chip, in both branches", () => {
+    const opts = { reader: true, readerShapes: true };
+    for (const url of ["https://x.com", "#frag"]) {
+      expect(formatWebHtml(`[3 → 5](${url})`, opts)).toMatch(/^<a href="[^"]+"[^>]*><span class="ba-chip"><span class="ba-old">3<\/span>/);
+      // After an opening bracket the chip drops its left padding, as it did with the `<a>` unparked.
+      expect(formatWebHtml(`([3 → 5](${url}))`, opts)).toContain('<span class="ba-chip ba-chip-o');
+    }
+    expect(formatWebHtml("Latency went [120 → 80 ms](https://ex.com/pr/1) after.", opts)).toContain('rel="noopener"><span class="ba-chip">');
+  });
+
+  test("F29: only an exact placeholder in a URL blocks the link, not a caller sentinel then a raw U+0001", () => {
+    const html = formatWebHtml("[l](https://ex.com/\x00WIKIPAGELINK0\x00\x01x)", { wikiLinkTexts: ["Page"] });
+    expect(html.match(/<a href="https:\/\/ex\.com\//g)?.length).toBe(1);
+  });
+
   test("F54: blank lines inside fenced code survive", () => {
     expect(formatWebHtml("```\na\n\n\n\nb\n```")).toBe("<pre><code>a\n\n\n\nb</code></pre>");
     // Prose around it still folds.

@@ -589,7 +589,7 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
   const yaml = '- id: "x\\n\\ny"\n  status: "a\\n\\nb"\n- id: "n\\0ul"\n  status: "s\\0t"\n';
   const files = {
     get: (ref: string) =>
-      ref.endsWith(".yaml") ? { ok: true as const, text: yaml } : ref.endsWith(".csv") ? { ok: true as const, text: "a\0b,c\n1,2\n" } : undefined,
+      ref.endsWith(".yaml") ? { ok: true as const, text: yaml } : ref.endsWith(".csv") ? { ok: true as const, text: "a\0b,c\x01d\n1,2\n" } : undefined,
   };
   test("F56: a CaseBoard value holding a blank line takes no <br> in an attribute", () => {
     for (const view of ["", ' view="dots"']) {
@@ -599,10 +599,25 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     }
   });
 
-  test("a NUL in a sibling file is never served", () => {
+  test("F29: a raw U+0001 after a wikilink forges no placeholder sentinel", () => {
+    const html = renderWikiHtml("# T\n\nSee [[Claude Code]]INLINE0\u0001 and `c` here.\n", resolve);
+    expect(html).toContain('class="wiki-link"');
+    expect(html).toContain("INLINE0 and <code>c</code> here.");
+    expect(html).not.toContain("WIKIPAGELINK");
+    expect(html).not.toMatch(/[\x00\x01]/);
+  });
+
+  test("F29: a wikilink then a raw U+0001 in a link's URL keeps the link and no live wikilink", () => {
+    const html = renderWikiHtml("# T\n\n[l](https://ex.com/[[Claude Code]]\u0001x)\n", resolve);
+    expect(html.match(/<a href="https:\/\/ex\.com\//g)?.length).toBe(1);
+    expect(html).not.toContain('class="wiki-link"');
+  });
+
+  test("a NUL or U+0001 that reaches a parsed sibling-file value is never served", () => {
     const md = '<CaseBoard src="cases.yaml" />\n\n<Query id="Q-1" csv="q.csv">\n\nx\n\n</Query>\n';
     const html = renderWikiHtml(md, () => undefined, { files, views: true });
     expect(html).not.toContain("\0");
     expect(html).toContain('<th scope="col">ab</th>');
+    expect(html).toContain('<th scope="col">cd</th>');
   });
 });
