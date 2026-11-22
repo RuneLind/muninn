@@ -18,16 +18,19 @@
  * recorded in `watcher_snapshots` (`youtube-discovery:state`, {@link DiscoveryState})
  * and retried after this week's seeds, in the slots they left under `maxSeeds` plus
  * {@link MAX_RETRIES_PER_RUN} of its own, fewest attempts first, up to
- * {@link MAX_SEED_ATTEMPTS} failed attempts in all; the exhausted warning is logged
- * once. Retries stand down in a run whose week seeds all failed (the dependency is
- * down: an attempt then would only spend the seed's cap). A shelf whose searches
- * partly failed is kept, with its `failed` count, and is not retried. A record or a
- * carried seed that falls past the 28-day floor unsearched is warned about once and
+ * {@link MAX_SEED_ATTEMPTS} failed attempts in all, each one saved by a finished run;
+ * the exhausted warning is logged once, when the state marking it is saved. Retries
+ * stand down once a failure of an `outage` class ({@link FAILURE_CLASS}) has come
+ * with no shelf yet this run (an attempt then would only spend the seed's cap); a
+ * seed-specific failure never stands them down. A shelf whose searches partly failed
+ * is kept, with its `failed` count, and is not retried. A record or a carried seed
+ * that falls past the 28-day floor with no run of it stored is warned about once and
  * counted on `youtube:store`.
  *
- * The state is written BEFORE any seed runs (a checkpoint carrying every week seed and
- * every planned retry's attempt), so a run whose final save fails loses nothing; a run
- * that cannot read or checkpoint the state stands down and searches nothing.
+ * The state is written BEFORE any seed runs (a checkpoint carrying every week seed, and
+ * every planned retry stamped `pending`, uncharged), so a run that dies or whose final
+ * save fails loses no seed and charges none; a run that cannot read or checkpoint the
+ * state stands down and searches nothing.
  *
  * Health keys, each judged only over the seeds that reached its step:
  *   - `youtube:huginn` — the listing, then each seed's raw read (ok when no read ran)
@@ -104,7 +107,28 @@ export interface DiscoveryRetry {
   error: string;
   /** Set once attempts reach {@link MAX_SEED_ATTEMPTS}: not retried, and the warning is not logged again. */
   exhausted?: true;
+  /**
+   * Only in a checkpoint: the start of the run that planned this retry. A run that reads it finds
+   * a run that never saved its outcome; the planned attempt is not charged (`attempts` counts only
+   * failures a finished run saved).
+   */
+  pending?: number;
 }
+
+type DiscoverFailureCode = Extract<DiscoverRunOutcome, { ok: false }>["code"];
+/**
+ * What a failed seed says about its dependencies. `outage`: a service the next seed needs too
+ * failed (a retry now would spend its cap on the same fault). `seed`: this document alone.
+ * A shelf whose searches only partly failed is no failure at all.
+ */
+export const FAILURE_CLASS: Record<DiscoverFailureCode | "save_failed", "outage" | "seed"> = {
+  upstream: "outage", // huginn's raw read failed
+  model_failed: "outage", // the queries or rank call failed in transport (a deadline cut is neither: it ends the run)
+  search_failed: "outage", // every yt-dlp search of the seed failed
+  save_failed: "outage", // Postgres refused the shelf
+  model_unparseable: "seed", // the model answered this document with nothing usable
+  not_found: "seed", // the document was deleted since the listing
+};
 
 /** The watcher's carried state between weekly runs. */
 export interface DiscoveryState {
@@ -119,10 +143,16 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function parseRetry(v: unknown): DiscoveryRetry | null {
   if (!isObject(v)) return null;
-  const { attempts, lastAt, error, exhausted } = v;
+  const { attempts, lastAt, error, exhausted, pending } = v;
   if (typeof attempts !== "number" || !Number.isInteger(attempts) || attempts < 1) return null;
   if (typeof lastAt !== "number" || !Number.isFinite(lastAt)) return null;
-  return { attempts, lastAt, error: typeof error === "string" ? error : "", ...(exhausted === true ? { exhausted: true as const } : {}) };
+  return {
+    attempts,
+    lastAt,
+    error: typeof error === "string" ? error : "",
+    ...(exhausted === true ? { exhausted: true as const } : {}),
+    ...(typeof pending === "number" && Number.isFinite(pending) ? { pending } : {}),
+  };
 }
 
 /**
@@ -338,16 +368,22 @@ export async function checkYouTubeDiscovery(
   const docs = toSeedDocs(listed);
   const byId = new Map(docs.map((d) => [d.id, d]));
   const floor = carryFloorDay(runStart);
-  // A retry record lasts while its seed is listed and young enough to be in some window; one
-  // whose seed passed the floor before it was exhausted is a loss, reported below.
-  const retry: Record<string, DiscoveryRetry> = {};
-  const floorDropped: SeedDoc[] = [];
+  // A retry record lasts while its seed is listed (with a date). A `pending` stamp is a planned
+  // attempt of a run that never saved its outcome (it died, or both final saves failed): whether
+  // the seed was searched is unknown, so the attempt is not charged and the seed is retried.
+  const records: Record<string, DiscoveryRetry> = {};
+  let unfinished = 0;
   for (const [id, r] of Object.entries(prior.retry)) {
-    const d = byId.get(id);
-    if (!d?.date) continue;
-    if (d.date >= floor) retry[id] = r;
-    else if (!r.exhausted) floorDropped.push(d);
+    if (!byId.get(id)?.date) continue;
+    const { pending, ...rest } = r;
+    if (pending !== undefined) unfinished++;
+    records[id] = rest;
   }
+  if (unfinished > 0)
+    log.warn("YouTube discovery: an earlier run planned {n} retries and never saved their outcome; they are not charged and run again", {
+      botName,
+      n: unfinished,
+    });
   // Seeds the last run left (its cap, its deadline) that are now older than the floor.
   const priorCarry = prior.carryFrom;
   const carryBand =
@@ -358,16 +394,29 @@ export async function checkYouTubeDiscovery(
   let recent = new Map<string, number>();
   let recentRead = true;
   try {
-    recent = await deps.latestRunTimes([...new Set([...window.map((s) => s.id), ...Object.keys(retry), ...carryBand.map((d) => d.id)])]);
+    recent = await deps.latestRunTimes([...new Set([...window.map((s) => s.id), ...Object.keys(records), ...carryBand.map((d) => d.id)])]);
   } catch (err) {
     recentRead = false;
     log.warn("YouTube discovery: reading earlier runs failed, searching every seed: {error}", { botName, error: errText(err) });
   }
+  // A seed searched (any origin) at or after its failed attempt has a shelf now: its retry is over.
+  // Decided before the floor, so a seed with a shelf is never reported lost there.
+  for (const [id, r] of Object.entries(records)) if ((recent.get(id) ?? -Infinity) >= r.lastAt) delete records[id];
+  // A record whose seed passed the floor before it was exhausted is a loss, reported below. Without
+  // the run times it cannot be told from one that ended, so it is kept (not retried) for the next
+  // run to decide; an exhausted one was warned about when it was saved.
+  const retry: Record<string, DiscoveryRetry> = {};
+  const held: Record<string, DiscoveryRetry> = {};
+  const floorDropped: SeedDoc[] = [];
+  for (const [id, r] of Object.entries(records)) {
+    const d = byId.get(id)!;
+    if (d.date! >= floor) retry[id] = r;
+    else if (r.exhausted) continue;
+    else if (!recentRead) held[id] = r;
+    else floorDropped.push(d);
+  }
   // Without the run times a carried seed that was searched cannot be told from one that was not.
   if (recentRead) floorDropped.push(...carryBand.filter((d) => !recent.has(d.id)));
-  // A seed searched (any origin) at or after its failed attempt has a shelf now: its retry is over.
-  // `>=`: a checkpoint's pre-charged attempt is stamped with the run's start (see below).
-  for (const [id, r] of Object.entries(retry)) if ((recent.get(id) ?? -Infinity) >= r.lastAt) delete retry[id];
 
   const maxSeeds = resolveMaxSeeds(watcher.config, { botName, watcherId: watcher.id });
   // Searched once is enough: a doc in the window was captured inside it, so any search of it is this
@@ -393,14 +442,11 @@ export async function checkYouTubeDiscovery(
   const oldestDay = (seeds: readonly SeedDoc[]) =>
     seeds.reduce<string | null>((min, s) => (s.date && (!min || s.date < min) ? s.date : min), null);
   // The checkpoint, written before any seed runs: every week seed is still carried, and every
-  // planned retry's attempt is already counted. If the final save fails, the next run reads
-  // this, so no seed this run leaves is lost and no exhausted seed is retried (or warned) again.
-  const checkpoint: DiscoveryState = { carryFrom: oldestDay(week), retry: { ...retry } };
-  for (const seed of plannedRetries) {
-    const r = retry[seed.id]!;
-    const attempts = r.attempts + 1;
-    checkpoint.retry[seed.id] = { ...r, attempts, lastAt: runStart, ...(attempts >= MAX_SEED_ATTEMPTS ? { exhausted: true as const } : {}) };
-  }
+  // planned retry is stamped `pending` with its count unchanged. If the run dies or its final
+  // save fails, the next run reads this: no seed this run leaves is lost, and none is charged
+  // (or exhausted) for an attempt whose outcome was never saved.
+  const checkpoint: DiscoveryState = { carryFrom: oldestDay(week), retry: { ...held, ...retry } };
+  for (const seed of plannedRetries) checkpoint.retry[seed.id] = { ...retry[seed.id]!, pending: runStart };
   try {
     await deps.saveState(watcher.id, checkpoint);
   } catch (err) {
@@ -444,25 +490,28 @@ export async function checkYouTubeDiscovery(
   let profile: Promise<string | null> | null = null;
   const loadProfile = () => (profile ??= deps.profile(watcher.userId, botName));
 
-  const recordFailure = (seed: SeedDoc, error: string) => {
+  // Seeds this run exhausted: warned about only once the state that marks them is saved, so the
+  // warning is logged once, at the transition that lands (a lost save charges nothing, see above).
+  const exhaustedNow: { doc: string; attempts: number; error: string }[] = [];
+  // Failures of an `outage` class (FAILURE_CLASS) this run, whatever seed they came from.
+  let outages = 0;
+  const recordFailure = (seed: SeedDoc, code: keyof typeof FAILURE_CLASS, error: string) => {
+    if (FAILURE_CLASS[code] === "outage") outages++;
     const attempts = (retry[seed.id]?.attempts ?? 0) + 1;
     const exhausted = attempts >= MAX_SEED_ATTEMPTS;
     retry[seed.id] = { attempts, lastAt: now(), error, ...(exhausted ? { exhausted: true as const } : {}) };
-    if (exhausted)
-      log.warn("YouTube discovery: {doc} failed {attempts} times; not retried again: {error}", { botName, doc: seed.id, attempts, error });
+    if (exhausted) exhaustedNow.push({ doc: seed.id, attempts, error });
   };
 
   let shelves = 0;
   let retried = 0;
-  // Week seeds that reached an outcome (a seed deleted since the listing did not), and how many made a shelf.
-  let weekRan = 0;
-  let weekShelves = 0;
   let stoodDown = 0;
   const started = new Set<string>();
   for (const [i, { seed, retry: isRetry }] of plan.entries()) {
     if (deadlineAt - now() < MIN_SEED_MS) break;
-    // Every week seed failed: the dependency is down, and a retry now would only spend its cap.
-    if (isRetry && weekRan > 0 && weekShelves === 0) {
+    // A dependency failed this run and nothing has made a shelf since the run began: a retry now
+    // would only spend its cap on the same fault. A seed-specific failure says nothing about that.
+    if (isRetry && outages > 0 && shelves === 0) {
       stoodDown = plan.length - i;
       break;
     }
@@ -487,19 +536,17 @@ export async function checkYouTubeDiscovery(
     tallyOutcome(out, tally, deadlineCut);
     if (deadlineCut) {
       // The run ran out of time, not the seed: no attempt is charged, and a week seed stays a
-      // seed (carried). A retry keeps its record as it was; only a failed final save leaves the
-      // checkpoint's pre-charged attempt standing.
+      // seed (carried). A retry keeps its record as it was.
       log.warn("YouTube discovery: the run's deadline cut {doc}; left for the next run", { botName, doc: seed.id });
       started.delete(seed.id);
       if (isRetry) retried--;
       break;
     }
-    if (!isRetry && (out.ok || out.code !== "not_found")) weekRan++;
     if (!out.ok) {
       log.warn("YouTube discovery: {code} for {doc}: {error}", { botName, doc: seed.id, code: out.code, error: out.cause ?? out.error });
       // A seed deleted since the listing is gone, not failed: nothing to retry.
       if (out.code === "not_found") delete retry[seed.id];
-      else recordFailure(seed, out.cause ?? out.error);
+      else recordFailure(seed, out.code, out.cause ?? out.error);
       continue;
     }
     store.reached++;
@@ -522,14 +569,13 @@ export async function checkYouTubeDiscovery(
         out.results,
       );
       shelves++;
-      if (!isRetry) weekShelves++;
       delete retry[seed.id];
       for (const r of out.results) shelved.add(r.videoId);
     } catch (err) {
       store.failed++;
       store.detail ??= errText(err);
       log.warn("YouTube discovery: saving the run for {doc} failed: {error}", { botName, doc: seed.id, error: errText(err) });
-      recordFailure(seed, `save failed: ${errText(err)}`);
+      recordFailure(seed, "save_failed", `save failed: ${errText(err)}`);
     }
   }
 
@@ -538,7 +584,10 @@ export async function checkYouTubeDiscovery(
   const carryFrom = oldestDay(left);
   if (left.length > 0) log.warn("YouTube discovery: {left} of {week} seeds left for the next run", { botName, left: left.length, week: week.length });
   if (stoodDown > 0)
-    log.warn("YouTube discovery: every week seed failed; {n} retries stood down until a run with a shelf", { botName, n: stoodDown });
+    log.warn("YouTube discovery: a dependency failed and no seed made a shelf; {n} retries stood down until a run with a shelf", {
+      botName,
+      n: stoodDown,
+    });
   log.info("YouTube discovery: {shelves} shelves from {started} seeds ({retried} retries; {week} new in the window)", {
     botName,
     shelves,
@@ -546,11 +595,11 @@ export async function checkYouTubeDiscovery(
     retried,
     week: week.length,
   });
-  // One retry of the save; if both fail, the checkpoint stands (nothing lost, see above).
+  // One retry of the save; if both fail, the checkpoint stands (nothing lost, nothing charged, see above).
   let saveError: string | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await deps.saveState(watcher.id, { carryFrom, retry });
+      await deps.saveState(watcher.id, { carryFrom, retry: { ...held, ...retry } });
       saveError = null;
       break;
     } catch (err) {
@@ -558,6 +607,9 @@ export async function checkYouTubeDiscovery(
     }
   }
   if (saveError) log.warn("YouTube discovery: saving the retry state failed twice; the checkpoint stands: {error}", { botName, error: saveError });
+  else
+    for (const e of exhaustedNow)
+      log.warn("YouTube discovery: {doc} failed {attempts} times; not retried again: {error}", { botName, ...e });
 
   // The listing answered: huginn is ok unless half the raw reads that ran failed.
   if (tally.huginn.reached === 0) health.mark(HEALTH_HUGINN, "ok");

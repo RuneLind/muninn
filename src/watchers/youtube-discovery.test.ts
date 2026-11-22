@@ -836,7 +836,7 @@ describe("F14 fix round 1 batch 1: retry budget, floor drops, state robustness",
     await nextRuns();
   });
 
-  test("a seed exhausted in a run whose state save fails is not retried or warned about again", async () => {
+  test("a seed's last attempt in a run whose state save fails is not charged: retried next run, warned once when its exhaustion is saved", async () => {
     addDocs([1], () => day(NOW - 3 * DAY));
     state = { carryFrom: null, retry: { [id(1)]: { attempts: 2, lastAt: NOW - 7 * DAY, error: "x" } } };
     outage = true;
@@ -847,11 +847,15 @@ describe("F14 fix round 1 batch 1: retry budget, floor drops, state robustness",
       },
     });
     await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, d);
-    expect(warned(/not retried again/).length).toBe(1);
-    clock = NOW + 7 * DAY;
-    searched = [];
-    await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, weekly());
-    expect(searched).toEqual([]);
+    expect(warned(/not retried again/)).toEqual([]);
+    expect(state!.retry[id(1)]).toMatchObject({ attempts: 2, pending: NOW });
+    for (const k of [1, 2]) {
+      clock = NOW + k * 7 * DAY;
+      searched = [];
+      await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, weekly());
+      expect(searched).toEqual(k === 1 ? ["q1"] : []);
+    }
+    expect(state!.retry[id(1)]).toMatchObject({ attempts: 3, exhausted: true });
     expect(warned(/not retried again/).length).toBe(1);
   });
 
@@ -885,6 +889,145 @@ describe("F14 fix round 1 batch 1: retry budget, floor drops, state robustness",
     });
     await checkYouTubeDiscovery(watcher({ timeoutMs: 300_000 }), bot, undefined, d);
     expect(state!.retry[id(1)]).toMatchObject({ attempts: 1, error: expect.stringContaining("search") });
+  });
+
+  describe("fix round 2 batch 1: unfinished runs, the floor after the ended check, outage-class stand-down", () => {
+    const w = () => watcher({ timeoutMs: 300_000 });
+    const rec = (attempts: number, error = "every search failed") => ({ attempts, lastAt: NOW - 7 * DAY, error });
+
+    test("a run abandoned after its checkpoint charges nothing: a seed tried twice is searched again, and warned when it exhausts", async () => {
+      addDocs([1], () => day(NOW - 10 * DAY));
+      state = { carryFrom: null, retry: { [id(1)]: rec(2) } };
+      let reading!: () => void;
+      const inRead = new Promise<void>((r) => (reading = r));
+      const hung = weekly();
+      // The seed's raw read never answers (after the checkpoint): a restart or a `bun --watch` reload mid-run.
+      hung.services.readRaw = () => {
+        reading();
+        return new Promise(() => {});
+      };
+      void checkYouTubeDiscovery(w(), bot, undefined, hung);
+      await inRead;
+      clock = NOW + 3_600_000;
+      outage = true;
+      await checkYouTubeDiscovery(w(), bot, undefined, weekly());
+      expect(searched).toEqual(["q1"]);
+      expect(state!.retry[id(1)]).toMatchObject({ attempts: 3, exhausted: true });
+      expect(warned(/not retried again/).length).toBe(1);
+      expect(warned(/never saved their outcome/).length).toBe(1);
+    });
+
+    test("a retry record past the floor whose seed has a run stored after its failure is ended, not reported lost", async () => {
+      addDocs([1], () => day(NOW - 29 * DAY));
+      addDocs([2], () => day(NOW - DAY));
+      state = { carryFrom: null, retry: { [id(1)]: { attempts: 1, lastAt: NOW - 5 * DAY, error: "every search failed" } } };
+      recent.set(id(1), NOW - 2 * DAY); // the reader's Find, after the failure
+      await checkYouTubeDiscovery(w(), bot, undefined, weekly());
+      expect(warned(/carry floor/)).toEqual([]);
+      expect(marks.get(HEALTH_STORE)?.outcome).toBe("ok");
+      expect(marks.get(HEALTH_STORE)?.detail).toBeUndefined();
+      expect(state!.retry).toEqual({});
+    });
+
+    test("without the run times a record past the floor is kept, unretried and unwarned, for the next run to decide", async () => {
+      addDocs([1], () => day(NOW - 29 * DAY));
+      state = { carryFrom: null, retry: { [id(1)]: rec(1) } };
+      const noTimes = weekly({
+        latestRunTimes: async () => {
+          throw new Error("db down");
+        },
+      });
+      await checkYouTubeDiscovery(w(), bot, undefined, noTimes);
+      expect(warned(/carry floor/)).toEqual([]);
+      expect(searched).toEqual([]);
+      expect(state!.retry).toEqual({ [id(1)]: rec(1) });
+      // The next run reads the times: no run of the seed is stored, so it is reported lost then.
+      clock = NOW + 7 * DAY;
+      await checkYouTubeDiscovery(w(), bot, undefined, weekly());
+      expect(warned(/carry floor/).length).toBe(1);
+      expect(state!.retry).toEqual({});
+    });
+
+    test("a record held without the run times survives a run whose final saves fail (the checkpoint keeps it)", async () => {
+      addDocs([1], () => day(NOW - 29 * DAY));
+      addDocs([2], () => day(NOW - DAY));
+      state = { carryFrom: null, retry: { [id(1)]: rec(1) } };
+      const d = weekly({
+        latestRunTimes: async () => {
+          throw new Error("db down");
+        },
+        saveState: async (_id, next) => {
+          if (searched.length > 0) throw new Error("db gone mid-run");
+          state = structuredClone(next);
+        },
+      });
+      await checkYouTubeDiscovery(w(), bot, undefined, d);
+      expect(searched).toEqual(["q2"]);
+      expect(state!.retry[id(1)]).toEqual(rec(1));
+    });
+
+    test("an outage-class failure after a shelf this run does not stand the remaining retries down", async () => {
+      addDocs([1], () => day(NOW - DAY));
+      addDocs([2, 3, 4], () => day(NOW - 10 * DAY));
+      state = { carryFrom: null, retry: Object.fromEntries([2, 3, 4].map((k) => [id(k), rec(1)])) };
+      searchAnswer = async (q) => {
+        searched.push(q);
+        return q === "q2" ? null : [hit(vid(Number(q.slice(1)) * 10 + 1))];
+      };
+      await checkYouTubeDiscovery(w(), bot, undefined, weekly());
+      expect(searched).toEqual(["q1", "q2", "q3", "q4"]);
+      expect([...shelvedIds()].sort()).toEqual([id(1), id(3), id(4)]);
+      expect(warned(/stood down/)).toEqual([]);
+    });
+
+    test("the only week seed failing on its own document (model_unparseable) does not stand the retries down", async () => {
+      addDocs([9], () => day(NOW - DAY));
+      addDocs([1, 2], () => day(NOW - 10 * DAY));
+      state = { carryFrom: null, retry: { [id(1)]: rec(1), [id(2)]: rec(1) } };
+      queriesAnswer = async (p) => {
+        const n = /Title: Seed (\d+)/.exec(p)?.[1];
+        return n === "9" ? "I cannot help with that" : JSON.stringify([{ query: `q${n}`, why: "same topic" }]);
+      };
+      await checkYouTubeDiscovery(w(), bot, undefined, weekly());
+      expect([...shelvedIds()].sort()).toEqual([id(1), id(2)]);
+      expect(warned(/stood down/)).toEqual([]);
+      expect(state!.retry[id(9)]).toMatchObject({ attempts: 1 });
+    });
+
+    // Each outage class of FAILURE_CLASS, on the first retry of a run with no week seeds.
+    const outageCauses: [string, () => Partial<YouTubeDiscoveryDeps>][] = [
+      ["search_failed", () => ((outage = true), {})],
+      ["upstream (raw read)", () => ((raws = new Map([...raws].map(([k]) => [k, new Error("huginn 502")]))), {})],
+      [
+        "model_failed (queries)",
+        () => (
+          (queriesAnswer = async () => {
+            throw new Error("429 overloaded");
+          }),
+          {}
+        ),
+      ],
+      [
+        "save_failed",
+        () => ({
+          saveRun: async () => {
+            throw new Error("db refused");
+          },
+        }),
+      ],
+    ];
+    for (const [cause, arrange] of outageCauses) {
+      test(`no week seeds: the first retry failing with ${cause} stands the rest down, which keep their attempts`, async () => {
+        addDocs([1, 2, 3], () => day(NOW - 10 * DAY));
+        state = { carryFrom: null, retry: Object.fromEntries([1, 2, 3].map((k) => [id(k), rec(1)])) };
+        const over = arrange();
+        await checkYouTubeDiscovery(w(), bot, undefined, weekly(over));
+        expect(state!.retry[id(1)]).toMatchObject({ attempts: 2 });
+        expect(state!.retry[id(2)]).toEqual(rec(1));
+        expect(state!.retry[id(3)]).toEqual(rec(1));
+        expect(warned(/stood down/).length).toBe(1);
+      });
+    }
   });
 });
 
