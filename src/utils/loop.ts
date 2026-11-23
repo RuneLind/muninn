@@ -51,7 +51,9 @@ export interface LoopOptions {
   /** Delay before the first run. When given, its timer and the interval both
    *  start at `start()`: the interval does not wait for the first run. When
    *  omitted, no first timer is armed and the first run is the first interval
-   *  tick (a timer at `intervalMs` beside it would fire twice at that boundary). */
+   *  tick (a timer at `intervalMs` beside it would fire twice at that boundary).
+   *  A given value equal to `intervalMs`, or a multiple of it, still puts two
+   *  ticks on one boundary. */
   firstDelayMs?: number;
   /** One run. Its rejection (or synchronous throw) is caught, logged at error and
    *  recorded; `signal` aborts when the handle is stopped. */
@@ -59,8 +61,11 @@ export interface LoopOptions {
   log: Logger;
   /** Called for a tick skipped because a run is still in flight. */
   onSkip?: () => void;
-  /** An older (stopped) handle of the same loop: no run starts while its run is in
-   *  flight. The reference is dropped once that handle's chain has settled. */
+  /** An older handle of the same loop, already stopped: no run starts while its
+   *  run is in flight. The reference is dropped once that handle's chain has
+   *  settled, so a handle that is not stopped stops holding this one back at its
+   *  first idle moment. An injected handle is trusted, like injected `timers`: a
+   *  `settled()` or `busy()` that throws, or a throwing `clear*`, propagates. */
   after?: LoopHandle | null;
   timers?: LoopTimers;
   now?: () => number;
@@ -89,11 +94,13 @@ const errText = (err: unknown) => {
   }
 };
 
-// JSC keeps a function's `arguments` reachable from its closures (a heap
-// snapshot showed the handle's scope -> Arguments -> options -> after), so the
-// predecessor must not arrive as an argument of the function that builds the
-// closures: it comes in a box that is emptied at once, and `options` (which
-// holds it) stays in `createLoop`, which makes no closures.
+// Observed in Bun 1.3.10, cause not isolated: the options object, and through it
+// the predecessor, stayed reachable from the handle's closures (a heap snapshot
+// showed the handle's scope -> Arguments -> options -> after), also when it came
+// as a direct parameter set to null. So the predecessor must not arrive as an
+// argument of the function that builds the closures: it comes in a box that is
+// emptied at once, and `options` (which holds it) stays in `createLoop`, which
+// makes no closures.
 export function createLoop(options: LoopOptions): LoopHandle {
   const { after, ...opts } = options;
   return loop(opts, { after: after ?? null });
