@@ -8,7 +8,7 @@ The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:g
 
 - **Planned at the click, narrowed never widened.** The batch takes the cards on screen; a fresh listing read first only drops ids (settled elsewhere, now `drifted` or locked, gone), never adds one the reviewer did not see, and never replaces local rows (`narrowBatch`).
 - **Approve all leaves for a human:** a fact-check-locked card, a drifted one, both cards of a same-`target_path` pair, and a create draft whose page an applied row wrote at or after the draft's `createdAt` ("page written since drafting"). An older applied row does not block: the page was deleted or moved since. A row applied in this tab carries `resolvedAt: null` (later than any draft), never the browser clock.
-- **It stops on a 5xx, an `error` outcome, a read-only 403 or a network failure** (`batchStopReason`), since an `error` answer has already turned its row terminal and most of those are faults every later card shares; a 409 or `stale` is the card's own and the batch moves on. Stop ends it after the card in flight.
+- **It stops on a 5xx, an `error` outcome, a read-only 403, a network failure or `uncommitted: true`** (`batchStopReason`), since an `error` answer has already turned its row terminal and most of those are faults every later card shares; a 409 or `stale` is the card's own and the batch moves on. Stop ends it after the card in flight.
 - **One painter per card.** Every card's lock and note come from `paintCardState` in `render()`, read off `actsInFlight`, `redraftsInFlight`, `batchQueued` and `cardNotes`; `act()`, `redraft()` and `runBatch()` change that state and re-render. A batch re-renders after each card, so a painter that wrote to the element captured at click time left a failed click stuck on "Applying…".
 - **The result belongs to its view:** a filter change drops a finished batch's result, and a running one's when it ends.
 
@@ -459,9 +459,14 @@ check», A* and D* by id) and `src/db/wiki-proposals.test.ts` (S*).
 A competitor that takes the group after expiry is its own row from its own
 start: it sees the pages on disk and logs them through its `recovered` path.
 "After the log entry, before the commit" is not a separate cell: the commit
-is not checked (a logged page that stayed uncommitted would be logged again by
-the next verb), so a loss there surfaces at the marks (A10) or the settle
-(D7/S5). Residuals: the check is not atomic with the append, so a lease that
+does not gate the rows (a logged page that stayed uncommitted would be logged
+again by the next verb), so a loss there surfaces at the marks (A10) or the
+settle (D7/S5). It is REPORTED: every answer Accept, Dismiss and the
+single-row approve send after a commit was attempted carries Done's shape
+(`commitFailureFields`, `src/wiki/commit.ts`: `commitReason`, and
+`uncommitted: true` for `error`/`not-default-branch`), the card warns that the
+page needs a commit by hand, and a batch stops on it. The rows stay `applied`.
+The self-heal has no answer and logs it at `error`. Residuals: the check is not atomic with the append, so a lease that
 expires in that gap (its renewals failing for 90 s) lets one entry land, and
 the competitor may log the page again; a commit that fails after the entry
 leaves a logged, uncommitted page the next verb logs a second time; a dead

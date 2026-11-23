@@ -48,7 +48,7 @@ import {
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
 import { GroupLeaseLostError, settleWrittenGroupRows, type ApplyDeps } from "./apply.ts";
-import { commitWikiChange, pageHasUncommittedChanges } from "../wiki/commit.ts";
+import { commitFailureFields, commitWikiChange, pageHasUncommittedChanges } from "../wiki/commit.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintMeta, type LintSeeder } from "./lint-markers.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
@@ -294,7 +294,19 @@ async function retireClaimedLintGroup(
       live,
       settleDepsFor(deps),
       async (r) => (await settleWikiProposalApplied(r.id, lease)) !== null,
-      { leaseHeld: () => wikiProposalGroupLeaseHeld(wikiName, groupKey, token) },
+      {
+        leaseHeld: () => wikiProposalGroupLeaseHeld(wikiName, groupKey, token),
+        // No HTTP answer to carry it: the log line is the only report.
+        onCommit: (r) => {
+          if (commitFailureFields(r).uncommitted) {
+            log.error("Lint self-heal: group {group} on {wiki} is logged but its commit did not land ({reason})", {
+              group: groupKey,
+              wiki: wikiName,
+              reason: r.reason,
+            });
+          }
+        },
+      },
     );
   } catch (err) {
     if (err instanceof GroupLeaseLostError) return { staled: 0, settled: 0, held: true };

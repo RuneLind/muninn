@@ -131,7 +131,7 @@ describe("batchStopReason", () => {
 describe("uncommittedNote", () => {
   test("says the page is written and logged but needs a commit by hand", () => {
     const note = uncommittedNote({ uncommitted: true });
-    expect(note).toContain("written and logged");
+    expect(note?.toLowerCase()).toContain("written and logged");
     expect(note).toContain("commit it by hand");
   });
 

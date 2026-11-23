@@ -21,7 +21,13 @@ import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-cli
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
 import { proposalCategory, type ProposalCategory } from "../../gardener/category.ts";
 import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
-import { commitWikiChange, committedPageWithHash, pageHasUncommittedChanges } from "../../wiki/commit.ts";
+import {
+  commitFailureFields,
+  commitWikiChange,
+  committedPageWithHash,
+  pageHasUncommittedChanges,
+  type CommitWikiResult,
+} from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -2891,21 +2897,24 @@ export function registerWikiGardenerRoutes(
     }
 
     let result;
+    // The commit's result, when the apply attempted one: every answer below
+    // carries it in Done's shape when it did not land (`commitFailureFields`).
+    let commit: CommitWikiResult | undefined;
     try {
-      result = await applyWikiProposal(claimed, deps);
+      result = await applyWikiProposal(claimed, deps, { onCommit: (r) => (commit = r) });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       await finishProposal(id, markWikiProposalError, "error");
       log.error("Wiki-gardener apply threw for {id}: {error}", { id, error: reason });
-      return c.json({ outcome: "error", error: reason }, 500);
+      return c.json({ outcome: "error", error: reason, ...commitFailureFields(commit) }, 500);
     }
 
     if (result.outcome === "applied") {
       if (!(await finishProposal(id, markWikiProposalApplied, "applied"))) {
-        return c.json({ error: "proposal state changed during apply" }, 409);
+        return c.json({ error: "proposal state changed during apply", ...commitFailureFields(commit) }, 409);
       }
       log.info("Wiki-gardener applied proposal {id} → {path}", { id, path: result.writtenPath });
-      return c.json({ outcome: "applied", writtenPath: result.writtenPath });
+      return c.json({ outcome: "applied", writtenPath: result.writtenPath, ...commitFailureFields(commit) });
     }
     // Defense in depth behind the route guard above (which normally answers
     // first). A REFUSAL: the proposal keeps its `approved` status — which is
@@ -3200,6 +3209,11 @@ export function registerWikiGardenerRoutes(
     /** The pages this request wrote (or recovered) whose log entry it did not write. */
     const unlogged = () => rows.filter((r) => needsGroupLog(outcomes.get(r.id)) && !logged.has(r.id)).map((r) => r.targetPath);
     const landed = () => rows.filter((r) => outcomes.get(r.id)?.outcome.outcome === "applied").map((r) => r.targetPath);
+    // The group commit's result, once attempted; every answer after it carries
+    // a failure in Done's shape. The rows settle as they would on a landed
+    // commit: re-opening them would make the next verb log the pages again.
+    let commit: CommitWikiResult | undefined;
+    const commitFields = () => commitFailureFields(commit);
     try {
       await backlogDeps.approveProposalGroup(wikiName, groupKey, lease.ref);
       // Re-read rather than trusting the CAS's own RETURNING set: it does not
@@ -3234,6 +3248,7 @@ export function registerWikiGardenerRoutes(
         onRowOutcome: (o) => outcomes.set(o.id, o),
         onLogged: (ids) => ids.forEach((id) => logged.add(id)),
         leaseHeld: lease.held,
+        onCommit: (r) => (commit = r),
       });
 
       const { actions, applied, noop, recovered } = groupApplyActions(rows, result);
@@ -3277,6 +3292,7 @@ export function registerWikiGardenerRoutes(
             recovered,
             statuses: statusCounts(after),
             ...(fixed !== null ? { fixed } : {}),
+            ...commitFields(),
           },
           409,
         );
@@ -3309,12 +3325,13 @@ export function registerWikiGardenerRoutes(
             error: reason,
             ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
             ...(fixed !== null ? { fixed, notLanded } : {}),
+            ...commitFields(),
           },
           outcome.outcome === "forbidden" ? 403 : 409,
         );
       }
       log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-      return c.json({ outcome: "applied", applied, noop, recovered, skipped, ...(fixed !== null ? { fixed } : {}) });
+      return c.json({ outcome: "applied", applied, noop, recovered, skipped, ...(fixed !== null ? { fixed } : {}), ...commitFields() });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       if (err instanceof GroupLeaseLostError) {
@@ -3331,6 +3348,7 @@ export function registerWikiGardenerRoutes(
             applied: landed(),
             unlogged: unlogged(),
             statuses: statusCounts(await backlogDeps.listProposalsByGroup(wikiName, groupKey)),
+            ...commitFields(),
           },
           409,
         );
@@ -3347,7 +3365,7 @@ export function registerWikiGardenerRoutes(
       // their `fixed` verdicts, while the lease holds; this answer is a 500.
       const done = rows.filter((r) => logged.has(r.id)).map((r) => r.targetPath);
       if (done.length > 0 && (await lease.held())) await staleCheckFixedVerdicts(wikiEntry, rows, done, snapshots);
-      return c.json({ error: `group apply failed: ${reason}` }, 500);
+      return c.json({ error: `group apply failed: ${reason}`, ...commitFields() }, 500);
     } finally {
       await settleUnsettledGroupRows(unsettled, (id) => markableApplied(outcomes.get(id), logged.has(id)), groupKey, lease.ref);
       await lease.release();
@@ -3402,9 +3420,17 @@ export function registerWikiGardenerRoutes(
     }
     groupVerbsInFlight.add(flightKey);
     let lease: GroupLease | null = null;
+    // The settle's commit result, once attempted (as on Accept).
+    let commit: CommitWikiResult | undefined;
     const conflict = async (error: string, extra: Record<string, unknown>) =>
       c.json(
-        { outcome: "conflict", error, ...extra, statuses: statusCounts(await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey)) },
+        {
+          outcome: "conflict",
+          error,
+          ...extra,
+          statuses: statusCounts(await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey)),
+          ...commitFailureFields(commit),
+        },
         409,
       );
     try {
@@ -3431,7 +3457,7 @@ export function registerWikiGardenerRoutes(
         live,
         applyDepsForWiki(scope.wikiEntry, scope.bot),
         async (r) => (await backlogDeps.settleProposalApplied(r.id, ref)) !== null,
-        { leaseHeld: held },
+        { leaseHeld: held, onCommit: (r) => (commit = r) },
       );
       const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey, written.map((r) => r.id), ref);
       const alreadyWritten = written.length > 0 ? { alreadyWritten: written.map((r) => r.targetPath) } : {};
@@ -3468,6 +3494,7 @@ export function registerWikiGardenerRoutes(
         rejected: rejected.length,
         ...alreadyWritten,
         ...(kept ?? {}),
+        ...commitFailureFields(commit),
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -3478,7 +3505,10 @@ export function registerWikiGardenerRoutes(
         return await conflict("this Dismiss lost the group's lease; another Accept or Dismiss may hold the group", { rejected: 0 });
       }
       log.error("Lint group {group} Dismiss failed: {error}", { group: groupKey, error: reason });
-      return c.json({ error: `group dismiss failed: ${reason}`, ...(err instanceof GroupLogWriteError ? { logFailed: true } : {}) }, 500);
+      return c.json(
+        { error: `group dismiss failed: ${reason}`, ...(err instanceof GroupLogWriteError ? { logFailed: true } : {}), ...commitFailureFields(commit) },
+        500,
+      );
     } finally {
       await lease?.release();
       groupVerbsInFlight.delete(flightKey);

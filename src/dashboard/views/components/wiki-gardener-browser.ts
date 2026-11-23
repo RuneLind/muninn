@@ -48,6 +48,8 @@ import {
   sectionCounts,
   sectionLabel,
   sectionOf,
+  UNCOMMITTED_NOTE,
+  uncommittedNote,
   type BatchProgress,
   type BatchSection,
   type BatchVerb,
@@ -533,7 +535,7 @@ async function jsonOrNull(res: Response): Promise<Record<string, unknown> | null
 async function postAction(
   id: string,
   action: "approve" | "reject",
-): Promise<{ ok: boolean; status: number; outcome: string; error: string }> {
+): Promise<{ ok: boolean; status: number; outcome: string; error: string; uncommitted: boolean }> {
   try {
     const res = await fetch(
       withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
@@ -548,10 +550,11 @@ async function postAction(
       // server's: null counts as later than any listed draft (`pageTargets`).
       p.resolvedAt = null;
     }
-    if (!res.ok) return { ok: false, status: res.status, outcome, error: String(data.error || "Failed (" + res.status + ")") };
-    return { ok: true, status: res.status, outcome, error: "" };
+    const uncommitted = data.uncommitted === true;
+    if (!res.ok) return { ok: false, status: res.status, outcome, error: String(data.error || "Failed (" + res.status + ")"), uncommitted };
+    return { ok: true, status: res.status, outcome, error: "", uncommitted };
   } catch (err) {
-    return { ok: false, status: 0, outcome: "", error: "Network error: " + (err as Error).message };
+    return { ok: false, status: 0, outcome: "", error: "Network error: " + (err as Error).message, uncommitted: false };
   }
 }
 
@@ -569,7 +572,8 @@ async function act(id: string, action: CardAction): Promise<void> {
   actsInFlight.set(id, action);
   paintCardState(id);
   const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
-  if (!r.ok) cardNotes.set(id, { text: r.error, kind: "err" });
+  if (!r.ok) cardNotes.set(id, { text: r.uncommitted ? r.error + ". " + UNCOMMITTED_NOTE : r.error, kind: "err" });
+  else if (r.uncommitted) cardNotes.set(id, { text: UNCOMMITTED_NOTE, kind: "err" });
   // Re-render so the status chip, the filters and the card's lock reflect the outcome.
   render();
   // A draft that just got applied/rejected changes "drafts awaiting review".
@@ -642,6 +646,8 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
       } else if (r.outcome !== settled) {
         prog.failed++;
         cardNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
+      } else if (r.uncommitted) {
+        cardNotes.set(id, { text: UNCOMMITTED_NOTE, kind: "err" });
       }
       batchQueued.delete(id);
       prog.done++;
@@ -752,11 +758,12 @@ async function actOnGroup(
         p.resolvedAt = null; // server time unknown; see postAction
       }
     });
-    if (action === "approve" && (data.noop?.length || 0) > 0) {
-      groupOutcomes.set(groupKey, {
-        text: data.noop.length + " page(s) already carried the edit",
-        kind: "ok",
-      });
+    const uncommitted = uncommittedNote(data);
+    const noopNote = action === "approve" && (data.noop?.length || 0) > 0 ? data.noop.length + " page(s) already carried the edit" : "";
+    if (uncommitted) {
+      groupOutcomes.set(groupKey, { text: noopNote ? noopNote + ". " + uncommitted : uncommitted, kind: "err" });
+    } else if (noopNote) {
+      groupOutcomes.set(groupKey, { text: noopNote, kind: "ok" });
     }
     render();
     rerenderStrip();
