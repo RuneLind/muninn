@@ -37,12 +37,16 @@
  *    control that fixes the URL this popup may be hanging on.
  */
 import {
+  DEFAULT_CONNECTOR_ID,
   FALLBACK_CAPTURE_OPTIONS,
   OPTIONS_UNREACHABLE_MESSAGE,
+  optionsForConnector,
   parseCaptureOptions,
+  pickConnector,
   pickFrames,
   pickKind,
   pickVisualDetail,
+  restoredConnectorNote,
   restoredKindNote,
 } from './capture-rules.js';
 
@@ -58,6 +62,8 @@ const KIND_KEY = 'summaryKind';
 // separately from the kind. It is only ever consulted with Slides ticked, so it
 // has no effect on a transcript-only capture and is remembered across both.
 const VISUAL_KEY = 'visualDetail';
+// The named connector (and so the model) a capture runs on; '' is the default.
+const CONNECTOR_KEY = 'captureConnector';
 
 /**
  * The Slides label's ordinary tooltip, restored when the tick is usable — READ
@@ -89,9 +95,12 @@ const STORAGE_READ_TIMEOUT_MS = 2000;
  */
 const OPTIONS_READ_TIMEOUT_MS = 5000;
 
-/** Said when the remembered choices could not be read at all. */
-const STORAGE_LOST_MESSAGE =
-  "Could not read the remembered Kind, Slides tick and Visuals choice — showing this Muninn's defaults.";
+/**
+ * Marks, in the settle outcome's notes, that the remembered choices could not
+ * be read at all. Never shown as is: `storageNote` words the line from the
+ * controls the reader has not set yet.
+ */
+const STORAGE_LOST_MESSAGE = 'storage-lost';
 
 /** Said when the controls themselves could not be painted. */
 const CONTROLS_BROKEN_MESSAGE =
@@ -101,9 +110,16 @@ const CONTROLS_BROKEN_MESSAGE =
 const FRAMES_UNSUPPORTED_NOTE =
   "Slides are off: this Muninn's summarizer bot uses a connector that cannot read frames.";
 const FRAMES_UNSUPPORTED_TITLE = "Summarizer bot's connector cannot read frames.";
+const FRAMES_UNSUPPORTED_PICKED_NOTE = 'Slides are off: the picked connector cannot read frames.';
+const FRAMES_UNSUPPORTED_PICKED_TITLE = 'The picked connector cannot read frames.';
 
 let videoInfo = null;
-/** What this Muninn offers. Replaced once the options endpoint answers. */
+/** What this Muninn offers, connector picker included. Replaced once the options endpoint answers. */
+let baseOptions = FALLBACK_CAPTURE_OPTIONS;
+/**
+ * What the PICKED connector offers: `baseOptions` with that connector's kinds
+ * and Slides (`optionsForConnector`). Every kind/Slides rule reads this one.
+ */
 let captureOptions = FALLBACK_CAPTURE_OPTIONS;
 /**
  * The two lines that explain the controls, held rather than written straight
@@ -112,6 +128,25 @@ let captureOptions = FALLBACK_CAPTURE_OPTIONS;
  */
 let optionsNote = '';
 let framesNote = '';
+/**
+ * The options line, kept as parts so each control's listener updates only its
+ * own: the settle-time notes other than storage-lost (unreachable, controls
+ * broken), whether storage was lost, which controls the reader has set since,
+ * and the line about the current pick (a remembered connector or kind not
+ * offered, or a kind a connector narrowed away). `composeOptionsNote` joins them.
+ */
+let settleNotes = [];
+let storageLost = false;
+const touched = new Set();
+let pickNote = '';
+/**
+ * The kind and Slides tick the reader CHOSE: restored at settle, then updated
+ * only by the reader's own changes. A connector change narrows the controls
+ * from these, not from what a narrower connector left in the controls, so
+ * switching back restores them.
+ */
+let chosenKind = null;
+let chosenFrames = false;
 /** Whether the capture panel is on screen — the panel the notes describe. */
 let panelShown = false;
 /** Whether {@link settle} has already run. It runs once. */
@@ -270,7 +305,12 @@ async function readControlState() {
       // profile has stored — a remembered choice silently replaced by this
       // instance's default.
       Promise.resolve(
-        chrome.storage.sync.get({ [FRAMES_KEY]: false, [KIND_KEY]: null, [VISUAL_KEY]: null }),
+        chrome.storage.sync.get({
+          [FRAMES_KEY]: false,
+          [KIND_KEY]: null,
+          [VISUAL_KEY]: null,
+          [CONNECTOR_KEY]: null,
+        }),
       ).catch(
         (err) => {
           console.warn('Could not read the remembered capture settings', err);
@@ -344,6 +384,7 @@ function settle(outcome) {
     }
   }
   if (!painted) {
+    baseOptions = FALLBACK_CAPTURE_OPTIONS;
     captureOptions = FALLBACK_CAPTURE_OPTIONS;
     optionsNote = CONTROLS_BROKEN_MESSAGE;
     try {
@@ -374,21 +415,16 @@ function paintControls({ options, stored, notes }) {
   const frames = $('#chk-frames');
   if (!kindSelect || !frames) return false;
 
-  captureOptions = options;
+  baseOptions = options;
+  storageLost = notes.includes(STORAGE_LOST_MESSAGE);
+  settleNotes = notes.filter((n) => n !== STORAGE_LOST_MESSAGE);
+  touched.clear();
+  chosenKind = stored[KIND_KEY] ?? null;
+  chosenFrames = stored[FRAMES_KEY] === true;
+  const connector = paintConnector(stored[CONNECTOR_KEY], options);
+  captureOptions = optionsForConnector(options, connector);
 
-  kindSelect.replaceChildren(
-    ...options.kinds.map((kind) => {
-      const option = document.createElement('option');
-      option.value = kind.id;
-      option.textContent = kind.label;
-      return option;
-    }),
-  );
-  const picked = pickKind(stored[KIND_KEY], options);
-  kindSelect.value = picked;
-
-  frames.disabled = !options.framesSupported;
-  frames.checked = pickFrames(stored[FRAMES_KEY], options);
+  const picked = paintKindAndFrames(stored[KIND_KEY], stored[FRAMES_KEY]);
 
   // The visuals picker, on the instances that offer one. Guarded rather than
   // required, the `#lbl-frames` rule: a missing node must cost the reader that
@@ -408,21 +444,107 @@ function paintControls({ options, stored, notes }) {
   }
   renderVisualRow();
 
-  // A dimmed control with no explanation reads as a bug. The reason is the
-  // summarizer bot's CONNECTOR, which is a server fact the reader cannot infer.
-  framesNote = frames.disabled ? FRAMES_UNSUPPORTED_NOTE : '';
-  const label = $('#lbl-frames');
-  if (label) label.title = frames.disabled ? FRAMES_UNSUPPORTED_TITLE : FRAMES_LABEL_TITLE;
-
   // A remembered kind this instance no longer offers falls back silently
   // otherwise: the picker shows Standard and the reader reads the capture as
   // the kind they thought they had picked. Never shown under the unreachable
   // fallback — that line is the true explanation there, and `restoredKindNote`
   // returns null for it.
-  const restored = restoredKindNote(stored[KIND_KEY], picked, options);
-  optionsNote = [...notes, ...(restored ? [restored] : [])].join(' ');
+  const restored = restoredKindNote(stored[KIND_KEY], picked, captureOptions);
+  const restoredConnector = restoredConnectorNote(stored[CONNECTOR_KEY], connector, options);
+  pickNote = [restoredConnector, restored].filter(Boolean).join(' ');
+  composeOptionsNote();
   renderNotes();
   return true;
+}
+
+/**
+ * The storage-lost line, naming only the controls that still show this
+ * Muninn's defaults: a control the reader has set since is their choice, not a
+ * default, and saying otherwise is the false note this exists to avoid. Model
+ * is named only where there is a picker. Null when nothing is left to name.
+ */
+function storageNote() {
+  if (!storageLost) return null;
+  const left = [baseOptions.connectors ? 'Model' : null, 'Kind', 'Slides tick', 'Visuals choice'].filter(
+    (name) => name && !touched.has(name),
+  );
+  if (left.length === 0) return null;
+  const list = left.length === 1 ? left[0] : `${left.slice(0, -1).join(', ')} and ${left[left.length - 1]}`;
+  return `Could not read the remembered ${list} — showing this Muninn's defaults.`;
+}
+
+/** Rebuild the options line from its parts (see `settleNotes`). */
+function composeOptionsNote() {
+  optionsNote = [...settleNotes, storageNote(), pickNote].filter(Boolean).join(' ');
+}
+
+/**
+ * Paint the connector picker from `options` and select the remembered one if
+ * it is still listed; answer the id selected (`DEFAULT_CONNECTOR_ID` when there
+ * is no picker). Hidden, and empty, on an instance that offers none.
+ */
+function paintConnector(storedConnector, options) {
+  const label = $('#lbl-connector');
+  const select = $('#sel-connector');
+  const picker = options.connectors;
+  label?.classList.toggle('hidden', !picker);
+  if (!select) return DEFAULT_CONNECTOR_ID;
+  if (!picker) {
+    select.replaceChildren();
+    return DEFAULT_CONNECTOR_ID;
+  }
+  const rows = [{ id: DEFAULT_CONNECTOR_ID, label: picker.defaultLabel }, ...picker.options];
+  select.replaceChildren(
+    ...rows.map((row) => {
+      const option = document.createElement('option');
+      option.value = row.id;
+      option.textContent = row.label;
+      return option;
+    }),
+  );
+  const picked = pickConnector(storedConnector, options);
+  select.value = picked;
+  return picked;
+}
+
+/**
+ * Paint the kind picker and the Slides tick from `captureOptions`, restoring
+ * `wantedKind` / `wantedFrames` where the current connector offers them, and
+ * answer the kind selected. Shared by the first paint and a connector change,
+ * so both narrow the same way.
+ */
+function paintKindAndFrames(wantedKind, wantedFrames) {
+  const kindSelect = $('#sel-kind');
+  const frames = $('#chk-frames');
+  kindSelect.replaceChildren(
+    ...captureOptions.kinds.map((kind) => {
+      const option = document.createElement('option');
+      option.value = kind.id;
+      option.textContent = kind.label;
+      return option;
+    }),
+  );
+  const picked = pickKind(wantedKind, captureOptions);
+  kindSelect.value = picked;
+
+  frames.disabled = !captureOptions.framesSupported;
+  frames.checked = pickFrames(wantedFrames, captureOptions);
+
+  // A dimmed control with no explanation reads as a bug. The reason is the
+  // CONNECTOR, which is a server fact the reader cannot infer: the picked one
+  // when there is a pick, else the summarizer bot's.
+  const connectorPicked = Boolean($('#sel-connector')?.value);
+  framesNote = frames.disabled
+    ? (connectorPicked ? FRAMES_UNSUPPORTED_PICKED_NOTE : FRAMES_UNSUPPORTED_NOTE)
+    : '';
+  const label = $('#lbl-frames');
+  if (label) {
+    label.title = frames.disabled
+      ? (connectorPicked ? FRAMES_UNSUPPORTED_PICKED_TITLE : FRAMES_UNSUPPORTED_TITLE)
+      : FRAMES_LABEL_TITLE;
+  }
+  renderVisualRow();
+  return picked;
 }
 
 /**
@@ -438,11 +560,13 @@ function attachControlListeners() {
   listenersAttached = true;
 
   kindSelect.addEventListener('change', () => {
-    // The note explains a value the reader has now overridden.
-    if (optionsNote && captureOptions.fromServer) {
-      optionsNote = '';
-      renderNotes();
-    }
+    chosenKind = kindSelect.value;
+    // The pick note explains a kind the reader has now overridden, and Kind is
+    // no longer one of "this Muninn's defaults".
+    touched.add('Kind');
+    pickNote = '';
+    composeOptionsNote();
+    renderNotes();
     chrome.storage.sync
       .set({ [KIND_KEY]: kindSelect.value })
       .catch((err) => console.warn('Could not save the summary kind', err));
@@ -451,15 +575,42 @@ function attachControlListeners() {
     // Ticking Slides is what reveals the Visuals row, so the paint and this
     // listener both go through `renderVisualRow` rather than each toggling the
     // class on their own.
+    chosenFrames = frames.checked;
+    touched.add('Slides tick');
+    composeOptionsNote();
+    renderNotes();
     renderVisualRow();
     chrome.storage.sync
       .set({ [FRAMES_KEY]: frames.checked })
       .catch((err) => console.warn('Could not save the Slides preference', err));
   });
+  const connectorSelect = $('#sel-connector');
+  connectorSelect?.addEventListener('change', () => {
+    // The connector decides which kinds and whether Slides exist, so the two
+    // are repainted from its row, from what the reader CHOSE (`chosenKind`,
+    // `chosenFrames`), not from what the controls show now: a narrower
+    // connector and back restores the choice. Only the connector is persisted;
+    // a kind or tick the new connector lacks is narrowed in the controls and
+    // said, never erased. The pick note becomes the narrowing line (the
+    // "remembered connector not offered" one is answered by this pick), and
+    // Model drops out of the storage-lost line.
+    captureOptions = optionsForConnector(baseOptions, connectorSelect.value);
+    const picked = paintKindAndFrames(chosenKind, chosenFrames);
+    touched.add('Model');
+    pickNote = restoredKindNote(chosenKind, picked, captureOptions) ?? '';
+    composeOptionsNote();
+    renderNotes();
+    chrome.storage.sync
+      .set({ [CONNECTOR_KEY]: connectorSelect.value })
+      .catch((err) => console.warn('Could not save the connector', err));
+  });
   const visualSelect = $('#sel-visual');
   visualSelect?.addEventListener('change', () => {
     // The element, not `ev.target` — the same shape the kind listener uses, and
     // the one that does not depend on how the event was dispatched.
+    touched.add('Visuals choice');
+    composeOptionsNote();
+    renderNotes();
     chrome.storage.sync
       .set({ [VISUAL_KEY]: visualSelect.value })
       .catch((err) => console.warn('Could not save the visual detail preference', err));
@@ -481,6 +632,7 @@ async function handleSummarize() {
   const kindSelect = $('#sel-kind');
   const frames = $('#chk-frames');
   const visualSelect = $('#sel-visual');
+  const connectorSelect = $('#sel-connector');
   // Read once: the frames answer decides both the field it is sent as and
   // whether the visual-detail field is sent at all.
   const wantsFrames = pickFrames(frames?.checked, captureOptions);
@@ -523,6 +675,8 @@ async function handleSummarize() {
         // frames came out. Sending it anyway would put a value on the trace and
         // in the 400 surface that nothing this capture did could depend on.
         visualDetail: wantsFrames ? pickVisualDetail(visualSelect?.value, captureOptions) : null,
+        // Re-validated like the kind; the default ('') sends no such field.
+        connectorId: pickConnector(connectorSelect?.value, baseOptions),
       }, (response) => {
         if (response?.error) {
           reject(new Error(response.error));

@@ -36,7 +36,7 @@ import {
   type WikiProposal,
 } from "../db/wiki-proposals.ts";
 import { getSummaryFactcheck } from "../db/summary-factchecks.ts";
-import { todayOslo } from "./util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import {
   categoryFromDocId,
   DEFAULT_API_URL,
@@ -82,7 +82,10 @@ export function redraftTitle(old: Pick<WikiProposal, "draft" | "targetPath">): s
  * Old row id → the row that replaced it, for every row Redraft staled. Derived,
  * not stored: `replaceDraftProposal` stales the old row and inserts the new one
  * in one transaction, so the old row's `resolved_at` and the new row's
- * `created_at` are the same `now()`. No other path writes that pair.
+ * `created_at` are the same `now()`. `supersedeStaleCheckGroup` writes the
+ * same pair (it stales group n and inserts group n+1 in one transaction, and
+ * a carried-over row keeps its topic key); the `kind === "source"` filter
+ * below keeps those `stale-check` rows out of this map.
  */
 export function redraftReplacements(
   rows: Pick<WikiProposal, "id" | "botName" | "wikiName" | "topicKey" | "kind" | "status" | "createdAt" | "resolvedAt">[],

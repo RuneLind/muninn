@@ -22,6 +22,30 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
+import { localStore } from "./wiki-local-store.ts";
+import {
+  needKey,
+  parseDone,
+  writeDone,
+  pollState,
+  refreshRefusalText,
+  WORK_MAP_DONE_KEY_PREFIX,
+  STRIP_ROWS_SHOWN,
+  stripKey,
+  workCardHtml,
+  type CardPage,
+  type StripCell,
+  type GhFoldedGroup,
+  type StripView,
+  type RefreshView,
+  type WorkMapGetBody,
+} from "./wiki-work-card.ts";
+import type { WorkMapChecksBody } from "../../../wiki/work-map/gh-check.ts";
+import type { AnyWorkMap } from "../../../wiki/work-map/join.ts";
+import { declarationKey, isThemeMap } from "../../../wiki/work-map/join.ts";
+import { handleInboxClick, inboxHtml, initInbox, loadInbox } from "./wiki-work-inbox.ts";
+import { askBootLine, bootLineChanged, placeBootLine } from "./wiki-boot-line.ts";
+import { INITIAL_SLOT, isCardKind, nextSlot, slotLive, slotView, type SlotEvent, type SlotState } from "./wiki-start-slot.ts";
 
 export interface StartCardsDeps {
   /** The shell's `withWiki`: append the active `wiki` param to a URL so every
@@ -30,6 +54,24 @@ export interface StartCardsDeps {
   /** Map a coverage relPath back to a wiki page name (or null when it doesn't
    *  resolve). A callback, not a copy: it reads the shell's live page listing. */
   resolvePageName(relPath: string): string | null;
+  /** The listing's `workMap.runAt`, or null when the wiki has no work map —
+   *  then the start view shows What's new. */
+  workMapRunAt?(): number | null;
+  /** The map, from the cache the rail and the effort page share (P4);
+   *  `fresh` skips the cache (the ↻ poll). Absent, the card fetches itself.
+   *  `body` is the parsed JSON, or null when it was not JSON. */
+  fetchWorkMap?(fresh?: boolean): Promise<{ ok: boolean; status: number; body: unknown }>;
+  /** Hand a map the ↻ poll fetched to the shared cache, so the rail and the
+   *  effort page fold by the run the card shows. */
+  adoptWorkMap?(body: WorkMapGetBody): void;
+  /** The live listing the Your work card joins the map to. */
+  pages?(): readonly CardPage[];
+  /** The listing's `waitsCounted`: the strip's two wait cells apply here. */
+  waitsCounted?(): boolean;
+  /** The reader URL of a page, for a link's `href`. */
+  hrefFor?(relPath: string): string;
+  /** The reader URL of an effort page (P3); absent, effort names are text. */
+  effortHref?(id: string): string;
 }
 
 /** Injected at boot by `initStartCards`.
@@ -49,9 +91,52 @@ let deps: StartCardsDeps = {
   resolvePageName: () => null,
 };
 
-/** Wire the cards to the shell. Called once, at `wiki-browser.ts` module scope. */
+/** Wire the cards to the shell. Called once, from `boot()` in `wiki-browser.ts`. */
 export function initStartCards(d: StartCardsDeps): void {
   deps = d;
+  initInbox((focusSel, passive) => {
+    const focus = focusSel ? { sel: focusSel } : undefined;
+    if (!passive) return paintWorkCard(focus);
+    // After an await: a press or a selection on the card holds it until `flushWaitingPaint`.
+    const el = document.getElementById("wikiWorkCard");
+    if (pointerHeld || (el && selectionTouchesCard(el))) paintWaiting = true;
+    else if (focus) paintWorkCard(focus);
+    else paintWorkCardIfChanged();
+  });
+  // `toggle` does not bubble: capture it, so a lane the reader opens or closes
+  // is remembered across the card's repaints and the start view's rebuilds.
+  if (!laneListening && typeof document !== "undefined" && typeof document.addEventListener === "function") {
+    laneListening = true;
+    document.addEventListener(
+      "toggle",
+      (e) => {
+        const t = e.target as HTMLElement | null;
+        const lane = t && typeof t.closest === "function" && t.closest("#wikiWorkCard") ? t.getAttribute("data-wm-lane") : null;
+        if (lane) laneOpen.set(lane, (t as HTMLDetailsElement).open);
+      },
+      true,
+    );
+    // The reader's choice, ahead of `toggle`: a waiting paint can land between the
+    // click and that event, and would rebuild the lane from the old state.
+    document.addEventListener(
+      "click",
+      (e) => {
+        const t = e.target as HTMLElement | null;
+        const summary = t && typeof t.closest === "function" ? t.closest("#wikiWorkCard details[data-wm-lane] > summary") : null;
+        const lane = summary?.parentElement as HTMLDetailsElement | null | undefined;
+        if (lane) laneOpen.set(lane.getAttribute("data-wm-lane") ?? "", !lane.open);
+      },
+      true,
+    );
+    document.addEventListener("selectionchange", flushWaitingPaint);
+    // A release can miss this document (over an iframe, into a context menu), so a
+    // hover with no button down and `contextmenu` end the press too.
+    document.addEventListener("pointerdown", () => { pointerHeld = true; }, true);
+    document.addEventListener("pointerup", onPointerEnd, true);
+    document.addEventListener("pointercancel", onPointerEnd, true);
+    document.addEventListener("contextmenu", onPointerEnd, true);
+    document.addEventListener("pointermove", (e) => { if (pointerHeld && e.buttons === 0) onPointerEnd(); }, true);
+  }
 }
 
 /** Append the active `wiki` param to a URL — the shell's helper, via the deps. */
@@ -67,6 +152,9 @@ interface WikiDigest {
   entryCount: number;
   fromDate: string;
   toDate: string;
+  /** Batch mode: the syncs summarized, newest first. `count` is null when no
+   *  commit could be read for the entry; `html` is the server-rendered page list. */
+  syncs?: { date: string; title: string; count: number | null; html: string }[];
 }
 /** Cached rendered card body — reused across renderStart calls (tab switches).
  *  Retained across a failed refresh so a transient error never drops the last
@@ -102,8 +190,23 @@ function buildWhatsNewInner(d: WikiDigest): string {
     '<button class="wiki-wn-refresh" id="wikiWhatsNewRefresh" title="Regenerate digest">↻</button>' +
     "</div>" +
     '<div class="wiki-wn-bullets">' + d.html + "</div>" +
+    buildChangedPages(d) +
     (gen ? '<div class="wiki-wn-gen">' + esc(gen) + "</div>" : "")
   );
+}
+
+/** Batch mode: one collapsed «N pages changed» list per sync that has pages. */
+function buildChangedPages(d: WikiDigest): string {
+  if (!d.syncs) return "";
+  return d.syncs
+    .filter((s) => s.count)
+    .map(
+      (s) =>
+        '<details class="wiki-wn-changed"><summary>' +
+        esc(s.count + (s.count === 1 ? " page" : " pages") + " changed · " + s.date + " " + s.title) +
+        "</summary>" + s.html + "</details>",
+    )
+    .join("");
 }
 
 /** Paint an inline error + retry affordance, keeping the last good digest (if
@@ -115,7 +218,17 @@ function renderWhatsNewError(el: HTMLElement, message: string): void {
     (whatsNewHtml || "") +
     '<div class="wiki-wn-error"><span>' + esc(message) + "</span>" +
     '<button class="wiki-wn-retry" id="wikiWhatsNewRetry">Retry</button></div>';
-  el.style.display = "";
+  whatsNewLanded();
+}
+
+/** What's new's content changed: re-apply the slot, and take focus a card
+ *  that left the slot handed over. */
+function whatsNewLanded(): void {
+  applySlot();
+  if (!wnFocusPending) return;
+  const a = document.activeElement as HTMLElement | null;
+  if (a && a !== document.body && !a.hasAttribute(PARKED_ATTR)) return;
+  if (focusFirst(whatsNewFocusCandidates())) wnFocusPending = false;
 }
 
 /** Fetch (or refresh) the digest and paint the card. Hidden entirely when the
@@ -124,7 +237,8 @@ function renderWhatsNewError(el: HTMLElement, message: string): void {
  *  supersede an in-flight auto-load; duplicate loads/refreshes are coalesced. */
 export function loadDigest(refresh: boolean): void {
   const el = document.getElementById("wikiWhatsNew");
-  if (!el) return;
+  // A listed map holds the slot: no digest, so no model call (D1).
+  if (!el || !slotView(slot, false).digestAllowed) return;
   // Coalesce: if a load is in flight, only an explicit refresh (and only when a
   // refresh isn't already running) may supersede it — everything else is dropped.
   if (whatsNewLoading && !(refresh && !whatsNewRefreshInFlight)) return;
@@ -158,7 +272,8 @@ export function loadDigest(refresh: boolean): void {
         // do NOT clear `digestAttempted` — a retry can only 403 again.
         whatsNewHtml = null;
         cur.innerHTML = "";
-        cur.style.display = "none";
+        wnFocusPending = false;
+        applySlot();
         return;
       }
       if (!data.digest) {
@@ -172,12 +287,13 @@ export function loadDigest(refresh: boolean): void {
         // Genuine "no digest" (no log.md / no bot) — hide the card entirely.
         whatsNewHtml = null;
         cur.innerHTML = "";
-        cur.style.display = "none";
+        wnFocusPending = false;
+        applySlot();
         return;
       }
       whatsNewHtml = buildWhatsNewInner(data.digest);
       cur.innerHTML = whatsNewHtml;
-      cur.style.display = "";
+      whatsNewLanded();
     })
     .catch(() => {
       if (myId !== whatsNewFetchId) return;
@@ -642,16 +758,10 @@ export function startReindex(): void {
  * on the cached-HTML path, since a run in flight must survive a tab switch.
  */
 export function mountStartCards(): void {
-  const wn = document.getElementById("wikiWhatsNew");
-  if (wn) {
-    if (whatsNewHtml) {
-      wn.innerHTML = whatsNewHtml;
-      wn.style.display = "";
-    } else if (!digestAttempted) {
-      digestAttempted = true;
-      loadDigest(false);
-    }
-  }
+  const wc = document.getElementById("wikiWorkCard");
+  // A wiki with a work map shows the Your work card and never asks for the
+  // digest, so What's new's model call stops there (D1: no map ⇒ What's new).
+  syncCard({ type: "mount", runAt: wc && deps.workMapRunAt ? deps.workMapRunAt() : null, hasBody: workBody !== null });
   const ix = document.getElementById("wikiIndexCard");
   if (ix) {
     if (indexCovHtml) {
@@ -663,4 +773,683 @@ export function mountStartCards(): void {
       loadIndexCoverage(false);
     }
   }
+}
+
+// ── Your work card (start view, plan muninn-wiki-work-map P2) ─────────
+/** Which card holds the start slot (`wiki-start-slot.ts`). Every path changes
+ *  it through `transition`, and `applySlot` alone sets the two cards' visibility. */
+let slot: SlotState = INITIAL_SLOT;
+/** The last GET body with a map; reused across start-view renders. */
+let workBody: (WorkMapGetBody & { map: AnyWorkMap }) | null = null;
+let workRefresh: RefreshView = { phase: "idle" };
+let workPollTimer: ReturnType<typeof setTimeout> | null = null;
+/** The generation of the GET in flight, if any. */
+let workLoadGen: number | null = null;
+/** Lanes the reader opened or closed, by lane id; for the page's life. */
+const laneOpen = new Map<string, boolean>();
+let laneListening = false;
+/** Needs-you items whose why the reader opened, by `needKey`; for the page's life. */
+const whyOpen = new Set<string>();
+/** The strip's open cell and list: held here, so a repaint keeps them. */
+let stripView: StripView = { open: null, expanded: false };
+/** Cards whose resize re-checks which whys are clamped. */
+const whyObserved = new WeakSet<HTMLElement>();
+
+/** A card control to re-focus after a repaint, by what survives one. */
+type FocusKey = { sel: string } | { doneAt: number } | { why: string } | { link: string; nth: number } | { href: string; nth: number } | { heading: true };
+/** A control that could not take focus back (↻ disabled while running): focus
+ *  waits on the card's heading, and the next paint tries the control again. */
+let pendingFocus: FocusKey | null = null;
+/** Marks an element focus waits on for something better. */
+const PARKED_ATTR = "data-wm-parked";
+/** The card left the slot with focus inside it: What's new takes focus when it paints. */
+let wnFocusPending = false;
+
+/** How often ↻ polls the GET, and for how long before it stops waiting. */
+const WORK_POLL_MS = 5_000;
+const WORK_POLL_MAX_MS = 20 * 60_000;
+/** Consecutive failed poll GETs before ↻ stops waiting. */
+const WORK_POLL_MAX_FAILURES = 3;
+/** The wait before the first GET's one network retry, so a dev-server restart
+ *  or a wake-from-sleep blip can pass. */
+const WORK_GET_RETRY_MS = 1_500;
+
+function doneStorageKey(): string {
+  return WORK_MAP_DONE_KEY_PREFIX + readActiveWikiName();
+}
+/** The done store per key when storage fails: a dismiss then lasts the page's life. */
+const doneMemory = new Map<string, string | null>();
+function readDoneRaw(): string | null {
+  const key = doneStorageKey();
+  if (doneMemory.has(key)) return doneMemory.get(key)!;
+  try {
+    return localStore()?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+function writeDoneRaw(v: string | null): void {
+  const key = doneStorageKey();
+  try {
+    const store = localStore();
+    if (!store) throw new Error("no storage");
+    if (v === null) store.removeItem(key);
+    else store.setItem(key, v);
+    doneMemory.delete(key);
+  } catch {
+    doneMemory.set(key, v);
+  }
+}
+
+/** Feed the slot one event. A card leaving the slot drops its in-flight work
+ *  (a new generation) and hands focus it held to What's new. */
+function transition(e: SlotEvent): void {
+  const prev = slot;
+  const wc = document.getElementById("wikiWorkCard");
+  const focusInCard = !!wc && typeof wc.contains === "function" && wc.contains(document.activeElement);
+  slot = nextSlot(prev, e);
+  if (slot.gen !== prev.gen) {
+    workBody = null;
+    workRefresh = { phase: "idle" };
+    pendingFocus = null;
+    if (workPollTimer) clearTimeout(workPollTimer);
+    workPollTimer = null;
+    resetWorkChecks();
+  }
+  if (isCardKind(slot.kind)) wnFocusPending = false;
+  applySlot();
+  if (focusInCard && !slotView(slot, false).card) focusAfterCardLeft();
+}
+
+/** The one place the slot's visibility is set. What's new is filled (cache, or
+ *  one first load) only where the slot allows a digest. */
+function applySlot(): void {
+  const wc = document.getElementById("wikiWorkCard");
+  const wn = document.getElementById("wikiWhatsNew");
+  if (wn && slotView(slot, false).digestAllowed && wn.innerHTML === "") {
+    if (whatsNewHtml) wn.innerHTML = whatsNewHtml;
+    else if (!digestAttempted) {
+      digestAttempted = true;
+      loadDigest(false);
+    }
+  }
+  const v = slotView(slot, !!wn && wn.innerHTML !== "");
+  if (wc) wc.style.display = v.card ? "" : "none";
+  if (wn) wn.style.display = v.whatsNew ? "" : "none";
+}
+
+/** A listing event: transition, then paint or load what the new state needs.
+ *  An adopt that changes nothing touches nothing. */
+function syncCard(e: SlotEvent & { type: "mount" | "adopt" }): void {
+  const prev = slot;
+  transition(e);
+  // A start view after a check that left something unread asks again: the remedy
+  // may have been followed. Never on a repaint, so it cannot loop, and at most once
+  // a minute, since every tab click mounts and each ask can spawn `gh`.
+  if (e.type === "mount" && workChecks && checksLeftUnread(workChecks) && Date.now() - workChecks.startedAt >= WORK_CHECKS_REASK_MS) workChecks = { ...workChecks, fetchedAt: 0 };
+  if (e.type === "adopt" && slot === prev) {
+    // The run did not move, but a page may have declared an effort since it
+    // (P6): re-join, and only when something a join reads changed, so an
+    // ordinary adopt leaves the card's markup alone. A themes card has no strip.
+    if (slot.kind === "card" && workBody && (currentDeclarationKey(workBody.map.runAtMs) !== paintedDeclarationKey || (!isThemeMap(workBody.map) && currentStripKey() !== paintedStripKey))) paintWorkCard(undefined, true);
+    return;
+  }
+  if (slot.kind === "card") paintWorkCard();
+  if ((slot.kind === "card" || slot.kind === "card-loading") && (!workBody || workBody.map.runAtMs < slot.runAt!)) loadWorkMap();
+  // The card shown again from the cached body (a return from an article) loads no map, so the line asks here.
+  else if (e.type === "mount" && slot.kind === "card" && workBody) askBootLine(placeLandedBootLine, workCardShowing);
+}
+
+/** `declarationKey` of the listing the card last painted from (P6). */
+let paintedDeclarationKey: string | null = null;
+function currentDeclarationKey(runAt: number): string {
+  return declarationKey(deps.pages ? deps.pages() : [], runAt);
+}
+/** `stripKey` of the listing the card last painted from: the strip counts the live listing. */
+let paintedStripKey: string | null = null;
+function currentStripKey(): string {
+  return stripKey(deps.pages ? deps.pages() : [], deps.waitsCounted ? deps.waitsCounted() : false);
+}
+
+/** The adopt path's half of `mountStartCards`: the card follows the listing,
+ *  and the Index card is not touched. */
+export function refreshWorkCardFromListing(): void {
+  if (!document.getElementById("wikiWorkCard")) return;
+  syncCard({ type: "adopt", runAt: deps.workMapRunAt ? deps.workMapRunAt() : null, hasBody: workBody !== null });
+}
+
+/** The Needs-you keys marked done on the card for run `runAt` (the effort
+ *  page shows the same items, so it reads the same store). */
+export function workMapDoneSet(runAt: number): Set<string> {
+  return parseDone(readDoneRaw(), runAt);
+}
+
+// ── Focus: one resolver, an ordered chain of visible, focusable targets ──
+function focusable(t: HTMLElement | null | undefined): t is HTMLElement {
+  if (!t || !t.isConnected || t.hidden || (t as HTMLButtonElement).disabled || t.getClientRects().length === 0) return false;
+  // Inside a shut fold an element still has client rects; only this call says it is skipped.
+  return typeof t.checkVisibility !== "function" || t.checkVisibility();
+}
+
+/** Focus `t`, giving a non-control (a heading, a why's text) `tabindex=-1` when
+ *  it needs one, and taking it back when focus still did not land: a link left
+ *  with it drops out of the tab order. */
+function focusOn(t: HTMLElement): boolean {
+  t.focus({ preventScroll: true });
+  if (document.activeElement !== t && !t.hasAttribute("tabindex")) {
+    t.setAttribute("tabindex", "-1");
+    t.focus({ preventScroll: true });
+    if (document.activeElement !== t) t.removeAttribute("tabindex");
+  }
+  return document.activeElement === t;
+}
+
+/** Focus the first candidate that is present, visible and focusable. */
+function focusFirst(candidates: readonly (HTMLElement | null | undefined)[]): HTMLElement | null {
+  for (const c of candidates) if (focusable(c) && focusOn(c)) return c;
+  return null;
+}
+
+function whatsNewFocusCandidates(): (HTMLElement | null)[] {
+  const wn = document.getElementById("wikiWhatsNew");
+  return [wn?.querySelector<HTMLElement>(".wiki-wn-title") ?? null, wn?.querySelector<HTMLElement>("#wikiWhatsNewRetry") ?? null];
+}
+
+/** The card left the slot while it held focus: What's new's heading, else the
+ *  start view's heading until What's new paints. */
+function focusAfterCardLeft(): void {
+  if (focusFirst(whatsNewFocusCandidates())) return;
+  wnFocusPending = true;
+  focusFirst([document.querySelector<HTMLElement>(".wiki-start h1")])?.setAttribute(PARKED_ATTR, "");
+}
+
+/** The targets for `key`, best first; every chain ends at the card's heading. */
+function focusCandidates(el: HTMLElement, key: FocusKey): (HTMLElement | null | undefined)[] {
+  const heading = el.querySelector<HTMLElement>(".wiki-wn-title");
+  if ("doneAt" in key) {
+    // By position, not key: two items can share a key and leave together.
+    const done = Array.from(el.querySelectorAll<HTMLElement>("[data-wm-done]")).filter(focusable);
+    const at = (b: HTMLElement) => Number(b.getAttribute("data-wm-done"));
+    const prev = done.filter((b) => at(b) < key.doneAt);
+    return [done.find((b) => at(b) >= key.doneAt), prev[prev.length - 1], el.querySelector<HTMLElement>("#wikiWorkMapRestore"), heading];
+  }
+  if ("why" in key) {
+    const btn = Array.from(el.querySelectorAll<HTMLElement>("[data-wm-why]")).find((b) => b.getAttribute("data-wm-why") === key.why);
+    return [btn, btn?.parentElement?.querySelector<HTMLElement>(".wiki-wm-why-text"), heading];
+  }
+  // A control in a shut board column takes no focus: the column's head does.
+  // A themes lane is not one: there focus parks on the heading and the next paint retries.
+  const orFold = (t: HTMLElement | null | undefined) => [t, t?.closest(".wiki-wm-col")?.querySelector<HTMLElement>(":scope > summary"), heading];
+  if ("sel" in key) return orFold(el.querySelector<HTMLElement>(key.sel));
+  if ("link" in key) return orFold(cardLinks(el, key.link)[key.nth]);
+  if ("href" in key) return orFold(hrefLinks(el, key.href)[key.nth]);
+  return [heading];
+}
+
+/** The focused control inside the card, to re-focus after a repaint. */
+function focusedCardControl(el: HTMLElement): FocusKey | null {
+  const active = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+  if (!active || active === el || typeof el.contains !== "function" || !el.contains(active)) return null;
+  if (active.id) return { sel: "#" + active.id };
+  const doneAt = active.getAttribute("data-wm-done");
+  if (doneAt !== null) return { doneAt: Number(doneAt) };
+  const whyKey = active.getAttribute("data-wm-why") ?? (active.classList.contains("wiki-wm-why-text") ? active.parentElement?.querySelector("[data-wm-why]")?.getAttribute("data-wm-why") : null);
+  if (whyKey != null) return { why: whyKey };
+  // An effort id matches EFFORT_ID_RE, so it needs no escaping in a selector.
+  // A themes card names a theme in its lane and in 0..N Connected rows: the
+  // key picks the same copy, a Connected one by its row's pair.
+  const effort = active.getAttribute("data-effort-link");
+  if (effort !== null) {
+    if (!active.hasAttribute("data-wm-conn-link")) return { sel: `[data-effort-link="${effort}"]:not([data-wm-conn-link])` };
+    const pair = active.parentElement?.getAttribute("data-wm-conn");
+    if (pair != null) return { sel: `[data-wm-conn="${pair}"] [data-effort-link="${effort}"]` };
+  }
+  const rel = active.getAttribute("data-relpath");
+  const cell = active.getAttribute("data-wm-cell");
+  if (cell !== null) return { sel: `[data-wm-cell="${cell}"]` };
+  if (active.hasAttribute("data-wm-drill-more")) return { sel: "[data-wm-drill-more]" };
+  const ghMore = active.getAttribute("data-wm-gh-more");
+  if (ghMore !== null) return { sel: `[data-wm-gh-more="${ghMore}"]` };
+  if (rel !== null) return { link: rel, nth: cardLinks(el, rel).indexOf(active) };
+  // A link off the wiki, such as a PR in the GitHub list, has no page to key on.
+  const href = active.tagName === "A" ? active.getAttribute("href") : null;
+  if (href !== null) return { href, nth: hrefLinks(el, href).indexOf(active) };
+  if (active.classList.contains("wiki-wn-title")) return { heading: true };
+  const lane = active.tagName === "SUMMARY" ? active.parentElement?.getAttribute("data-wm-lane") : null;
+  return lane ? { sel: `[data-wm-lane="${lane}"] > summary` } : null;
+}
+
+function cardLinks(el: HTMLElement, rel: string): HTMLElement[] {
+  return Array.from(el.querySelectorAll<HTMLElement>("a[data-relpath]")).filter((a) => a.getAttribute("data-relpath") === rel);
+}
+
+function hrefLinks(el: HTMLElement, href: string): HTMLElement[] {
+  return Array.from(el.querySelectorAll<HTMLElement>("a[href]:not([data-relpath])")).filter((a) => a.getAttribute("href") === href);
+}
+
+/** Re-focus `key` in the freshly painted card, by the fallback chain. A control
+ *  still there but disabled leaves focus parked on the heading for the next paint. */
+function resolveFocus(el: HTMLElement, key: FocusKey): void {
+  const t = focusFirst(focusCandidates(el, key));
+  const wanted = "sel" in key ? el.querySelector<HTMLElement>(key.sel) : null;
+  if (t && wanted && t !== wanted && !wanted.closest(".wiki-wm-col")) {
+    pendingFocus = key;
+    t.setAttribute(PARKED_ATTR, "");
+  }
+}
+
+/** The markup the card last got: a checks answer or an adopt that renders the same leaves the DOM alone. */
+let paintedCardHtml: string | null = null;
+
+/** A checks answer's paint: a selection or a focus inside the card outlives an answer that changes nothing,
+ *  and an answer that changes something waits until the reader's selection ends. An adopt whose keys moved
+ *  paints the same way. */
+function paintWorkCardIfChanged(): void {
+  paintWorkCard(undefined, true);
+}
+
+/** Does the reader have text selected that touches the card? `innerHTML` would wipe it. */
+function selectionTouchesCard(el: HTMLElement): boolean {
+  const sel = globalThis.getSelection?.();
+  return !!sel && !sel.isCollapsed && sel.rangeCount > 0 && sel.getRangeAt(0).intersectsNode(el);
+}
+
+let paintWaiting = false;
+let pointerHeld = false;
+
+/** Try what waited again, once the pointer is up: a drag can pass back over its start and collapse its selection,
+ *  and a paint then would end the drag. `paintWorkCard` waits on if a selection still touches the card. */
+function flushWaitingPaint(): void {
+  if (paintWaiting && !pointerHeld) paintWorkCardIfChanged();
+  if (bootLineWaiting) placeLandedBootLine();
+}
+
+let bootLineWaiting = false;
+
+/** A landed boot line that changed waits out a press or a selection on the card, as the card's own repaint does. */
+function placeLandedBootLine(): void {
+  const el = document.getElementById("wikiWorkCard");
+  bootLineWaiting = false;
+  if (slot.kind !== "card" || !el || !bootLineChanged(el)) return;
+  if (pointerHeld || selectionTouchesCard(el)) bootLineWaiting = true;
+  else placeBootLine(el);
+}
+
+/** The card is on screen: the slot holds it and its element is in the document and laid out. */
+function workCardShowing(): boolean {
+  const el = document.getElementById("wikiWorkCard");
+  return slot.kind === "card" && !!el && el.isConnected && el.getClientRects().length > 0;
+}
+
+/** After any click: the browser dispatches it right after this event, ahead of a timer. */
+function onPointerEnd(): void {
+  pointerHeld = false;
+  if (paintWaiting || bootLineWaiting) setTimeout(flushWaitingPaint, 0);
+}
+
+function pageHref(rel: string): string {
+  return deps.hrefFor ? deps.hrefFor(rel) : withWiki("/wiki?relPath=" + encodeURIComponent(rel));
+}
+
+function paintWorkCard(override?: FocusKey, onlyIfChanged = false): void {
+  const el = document.getElementById("wikiWorkCard");
+  if (!el || !workBody || slot.kind !== "card") return;
+  const runAt = workBody.map.runAtMs;
+  const pages = deps.pages ? deps.pages() : [];
+  const now = Date.now();
+  const html = workCardHtml({
+    body: workBody,
+    pages,
+    now,
+    done: parseDone(readDoneRaw(), runAt),
+    openWhy: whyOpen,
+    hrefFor: pageHref,
+    ...(deps.effortHref ? { effortHref: deps.effortHref } : {}),
+    refresh: workRefresh,
+    waitsCounted: deps.waitsCounted ? deps.waitsCounted() : false,
+    strip: stripView,
+    checks: {
+      body: workChecks?.body ?? null,
+      answerRunAt: workChecks?.answerRunAt ?? null,
+      failed: !!workChecks?.failed,
+      retrying: workChecksTimer !== null || workChecksGen === slot.gen,
+    },
+  }) + inboxHtml(pageHref, now);
+  // Before the early return: this listing has been rendered, so the next adopt
+  // compares against it and does not render the card again for the same keys.
+  paintedDeclarationKey = declarationKey(pages, runAt);
+  paintedStripKey = currentStripKey();
+  // A held press waits too: a drag back over its start collapses the selection, and a paint ends the drag.
+  if (onlyIfChanged && (paintedCardHtml === html || pointerHeld || selectionTouchesCard(el))) {
+    paintWaiting = paintedCardHtml !== html;
+    ensureWorkChecks();
+    return;
+  }
+  paintWaiting = false;
+  const active = document.activeElement as HTMLElement | null;
+  const lost = !active || active === document.body;
+  const parked = !!active && active.hasAttribute(PARKED_ATTR) && el.contains(active);
+  const refocus = override ?? (parked ? pendingFocus : null) ?? focusedCardControl(el) ?? (lost ? pendingFocus : null);
+  pendingFocus = null;
+  el.innerHTML = html;
+  paintedCardHtml = html;
+  // Outside `html`: the line's own landing places it, so it never repaints the card under a press or a selection.
+  placeBootLine(el);
+  bootLineWaiting = false;
+  ensureWorkChecks();
+  if (typeof el.querySelectorAll === "function") {
+    el.querySelectorAll<HTMLDetailsElement>("details[data-wm-lane]").forEach((d) => {
+      const open = laneOpen.get(d.getAttribute("data-wm-lane") ?? "");
+      if (open !== undefined) d.open = open;
+    });
+  }
+  applySlot();
+  // Before focus: a why control hidden here must not be the focus target.
+  syncWhyControls(el);
+  if (typeof ResizeObserver !== "undefined" && !whyObserved.has(el)) {
+    whyObserved.add(el);
+    new ResizeObserver(() => syncWhyControls(el)).observe(el);
+  }
+  if (refocus) resolveFocus(el, refocus);
+}
+
+/** Shows a closed why's expand control only while its text is clamped; an open
+ *  why always shows "less". A focused control that hides hands focus to its text. */
+function syncWhyControls(el: HTMLElement): void {
+  if (typeof el.querySelectorAll !== "function") return;
+  el.querySelectorAll<HTMLElement>(".wiki-wm-why:not(.open)").forEach((why) => {
+    const text = why.querySelector<HTMLElement>(".wiki-wm-why-text");
+    const more = why.querySelector<HTMLElement>(".wiki-wm-why-more");
+    if (!text || !more) return;
+    const hadFocus = document.activeElement === more;
+    more.hidden = text.scrollHeight <= text.clientHeight;
+    if (hadFocus && more.hidden) focusFirst([text]);
+  });
+}
+
+/** Paint the card's 5xx error with its Retry, keeping focus on Retry. */
+function paintWorkError(el: HTMLElement): void {
+  const refocus = focusedCardControl(el);
+  el.innerHTML =
+    '<div class="wiki-wn-head"><span class="wiki-wn-title">Your work</span></div>' +
+    '<div class="wiki-wn-error"><span>Couldn’t load the work map.</span>' +
+    '<button class="wiki-wn-retry" id="wikiWorkMapRetry">Retry</button></div>';
+  applySlot();
+  if (refocus) resolveFocus(el, refocus);
+}
+
+// ── The GitHub check (plan muninn-wiki-your-work-board, P2) ───────────
+/** The last answer; it repaints through `paintWorkCard`, so `stripKey` stays out of it. */
+let workChecks: {
+  body: WorkMapChecksBody | null;
+  fetchedAt: number;
+  /** When the fetch behind this answer started. */
+  startedAt: number;
+  /** The map of the last fetch, whatever it answered. */
+  runAt: number;
+  /** The map `body` answered for: a failed fetch keeps the older pair. */
+  answerRunAt: number | null;
+  failed: boolean;
+} | null = null;
+/** The generation of the fetch in flight, if any. */
+let workChecksGen: number | null = null;
+let workChecksTimer: ReturnType<typeof setTimeout> | null = null;
+/** Fetches made because the last answer said `refreshing`. */
+let workChecksRetries = 0;
+
+/** An answer older than this is fetched again when the start view renders. */
+const WORK_CHECKS_TTL_MS = 60 * 60_000;
+/** An answer that left something unread is asked again this long after its fetch started. */
+const WORK_CHECKS_REASK_MS = 60_000;
+const WORK_CHECKS_RETRY_MS = 15_000;
+const WORK_CHECKS_RETRIES_MAX = 3;
+
+function checksLeftUnread(c: { body: WorkMapChecksBody | null; failed: boolean }): boolean {
+  if (c.failed || c.body?.refreshing) return true;
+  const reason = c.body?.notChecked?.reason;
+  return (!!reason && reason !== "disabled") || (c.body?.unchecked ?? 0) > 0;
+}
+
+function resetWorkChecks(): void {
+  workChecks = null;
+  workChecksGen = null;
+  workChecksRetries = 0;
+  if (workChecksTimer) clearTimeout(workChecksTimer);
+  workChecksTimer = null;
+}
+
+/** Fetch unless an answer for this map is young enough. A new map's marks are
+ *  the server's to compute, so a new `runAt` fetches at once. */
+function ensureWorkChecks(): void {
+  if (!workBody || isThemeMap(workBody.map) || workChecksGen === slot.gen || workChecksTimer) return;
+  if (workChecks && workChecks.runAt === workBody.map.runAtMs && Date.now() - workChecks.fetchedAt < WORK_CHECKS_TTL_MS) return;
+  workChecksRetries = 0;
+  fetchWorkChecks();
+}
+
+function fetchWorkChecks(): void {
+  if (!workBody) return;
+  const gen = slot.gen;
+  const runAt = workBody.map.runAtMs;
+  const startedAt = Date.now();
+  workChecksGen = gen;
+  fetch(withWiki("/api/wiki/work-map/checks"))
+    .then(async (res) => {
+      const body = (await res.json().catch(() => null)) as WorkMapChecksBody | null;
+      if (!res.ok || !body || typeof body.checked !== "number") throw new Error("HTTP " + res.status);
+      return body;
+    })
+    .then((body) => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: runAt, failed: false };
+      if (body.refreshing && workChecksRetries < WORK_CHECKS_RETRIES_MAX) {
+        workChecksRetries++;
+        workChecksTimer = setTimeout(() => {
+          workChecksTimer = null;
+          fetchWorkChecks();
+        }, WORK_CHECKS_RETRY_MS);
+      }
+      paintWorkCardIfChanged();
+    })
+    .catch(() => {
+      if (!slotLive(slot, gen)) return;
+      workChecksGen = null;
+      workChecks = { body: workChecks?.body ?? null, fetchedAt: Date.now(), startedAt, runAt, answerRunAt: workChecks?.answerRunAt ?? null, failed: true };
+      paintWorkCardIfChanged();
+    });
+}
+
+/** A GET this instance answered without a map body: an HTTP error, or a 2xx
+ *  whose body is not a JSON object (a proxy's login page). */
+class WorkMapHttpError extends Error {
+  constructor(readonly status: number) {
+    super("HTTP " + status);
+  }
+}
+
+async function fetchWorkMapBody(fresh = false): Promise<WorkMapGetBody> {
+  const r = deps.fetchWorkMap
+    ? await deps.fetchWorkMap(fresh)
+    : await fetch(withWiki("/api/wiki/work-map")).then(async (res) => ({ ok: res.ok, status: res.status, body: (await res.json().catch(() => null)) as unknown }));
+  if (!r.ok) throw new WorkMapHttpError(r.status);
+  const body = r.body;
+  if (!body || typeof body !== "object") throw new WorkMapHttpError(r.status);
+  return body as WorkMapGetBody;
+}
+
+/** One GET, retried once after `WORK_GET_RETRY_MS` when the request itself
+ *  failed (not when the instance answered). */
+async function fetchWorkMapBodyRetry(): Promise<WorkMapGetBody> {
+  try {
+    return await fetchWorkMapBody();
+  } catch (err) {
+    if (err instanceof WorkMapHttpError) throw err;
+    await new Promise((r) => setTimeout(r, WORK_GET_RETRY_MS));
+    return fetchWorkMapBody();
+  }
+}
+
+function loadWorkMap(): void {
+  const gen = slot.gen;
+  if (workLoadGen === gen) return;
+  workLoadGen = gen;
+  const settle = (): boolean => {
+    if (workLoadGen === gen) workLoadGen = null;
+    return slotLive(slot, gen);
+  };
+  fetchWorkMapBodyRetry()
+    .then((body) => {
+      if (!settle()) return;
+      if (!body.map) return transition({ type: "get-refused", gen });
+      transition({ type: "get-map", gen });
+      if (slot.kind !== "card") return;
+      workBody = body as WorkMapGetBody & { map: AnyWorkMap };
+      paintWorkCard();
+      askBootLine(placeLandedBootLine, workCardShowing);
+      // A wiki outside the decision triage's scope answers 404: the card shows no Decisions section.
+      if (!isThemeMap(workBody.map)) loadInbox(withWiki("/api/wiki/decision-inbox"));
+    })
+    .catch((err) => {
+      if (!settle()) return;
+      // The instance will not serve this map (4xx, or a 2xx that is not JSON),
+      // or the network failed twice: What's new takes the slot. A 5xx keeps
+      // the card's Retry.
+      if (!(err instanceof WorkMapHttpError) || err.status < 500) return transition({ type: "get-refused", gen });
+      transition({ type: "get-5xx", gen });
+      const el = document.getElementById("wikiWorkCard");
+      if (el && slot.kind === "card-error") paintWorkError(el);
+    });
+}
+
+function startWorkMapRefresh(): void {
+  if (!workBody || workRefresh.phase === "running") return;
+  const prevRunAt = workBody.map.runAtMs;
+  const gen = slot.gen;
+  workRefresh = { phase: "running", startedAt: Date.now() };
+  paintWorkCard();
+  // Never `force`: the route's 10-minute cooldown answers a second click.
+  fetch(withWiki("/api/wiki/work-map/refresh"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  })
+    .then(async (r) => {
+      const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!slotLive(slot, gen)) return;
+      if (r.status !== 202) {
+        workRefresh = { phase: "message", text: refreshRefusalText(r.status, body, Date.now()), tone: "warn" };
+        paintWorkCard();
+        return;
+      }
+      const startedAt = typeof body.startedAt === "number" ? body.startedAt : Date.now();
+      workRefresh = { phase: "running", startedAt };
+      paintWorkCard();
+      pollWorkMap(prevRunAt, startedAt, Date.now());
+    })
+    .catch(() => {
+      if (!slotLive(slot, gen)) return;
+      workRefresh = { phase: "message", text: "Re-organize failed: the server did not answer.", tone: "warn" };
+      paintWorkCard();
+    });
+}
+
+function pollWorkMap(prevRunAt: number, startedAt: number, since: number, failures = 0): void {
+  if (workPollTimer) clearTimeout(workPollTimer);
+  const gen = slot.gen;
+  workPollTimer = setTimeout(() => {
+    workPollTimer = null;
+    fetchWorkMapBody(true)
+      .then((body) => {
+        if (!slotLive(slot, gen)) return;
+        const st = pollState(body, prevRunAt, startedAt);
+        if (body.map) workBody = body as WorkMapGetBody & { map: AnyWorkMap };
+        deps.adoptWorkMap?.(body);
+        if (st.state === "updated") {
+          workRefresh = { phase: "idle" };
+        } else if (st.state === "settled") {
+          const a = st.attempt;
+          workRefresh =
+            a.outcome === "ok"
+              ? { phase: "message", text: "Re-organized — nothing changed.", tone: "info" }
+              : { phase: "message", text: `Re-organize ${a.outcome}${a.error ? ": " + a.error : ""}.`, tone: "warn" };
+        } else if (Date.now() - since > WORK_POLL_MAX_MS) {
+          workRefresh = { phase: "message", text: "Still organizing — reload later to see the new map.", tone: "info" };
+        } else {
+          paintWorkCard();
+          return pollWorkMap(prevRunAt, startedAt, since);
+        }
+        paintWorkCard();
+      })
+      .catch(() => {
+        if (!slotLive(slot, gen)) return;
+        if (failures + 1 >= WORK_POLL_MAX_FAILURES || Date.now() - since > WORK_POLL_MAX_MS) {
+          workRefresh = { phase: "message", text: "Couldn’t check on the re-organize — reload to see the new map.", tone: "warn" };
+          paintWorkCard();
+          return;
+        }
+        pollWorkMap(prevRunAt, startedAt, since, failures + 1);
+      });
+  }, WORK_POLL_MS);
+}
+
+/** The Your work card's clicks, from the shell's click delegate. True when
+ *  the click was the card's. */
+export function handleWorkCardClick(target: Element): boolean {
+  if (handleInboxClick(target, pageHref)) return true;
+  if (target.closest("#wikiWorkMapRefresh")) {
+    startWorkMapRefresh();
+    return true;
+  }
+  if (target.closest("#wikiWorkMapRetry")) {
+    loadWorkMap();
+    return true;
+  }
+  const done = target.closest("[data-wm-done]");
+  if (done && workBody) {
+    const at = Number(done.getAttribute("data-wm-done"));
+    const item = workBody.map.needsYou[at];
+    if (item) {
+      writeDoneRaw(writeDone(readDoneRaw(), workBody.map.runAtMs, needKey(item), true));
+      paintWorkCard({ doneAt: at });
+    }
+    return true;
+  }
+  const cell = target.closest("[data-wm-cell]");
+  if (cell) {
+    const name = cell.getAttribute("data-wm-cell") as StripCell;
+    stripView = { open: stripView.open === name ? null : name, expanded: false };
+    paintWorkCard({ sel: `[data-wm-cell="${name}"]` });
+    return true;
+  }
+  if (target.closest("[data-wm-drill-more]")) {
+    const shown = STRIP_ROWS_SHOWN;
+    stripView = { ...stripView, expanded: true };
+    // The button goes with the expansion; focus lands on the first row it hid.
+    paintWorkCard({ sel: `.wiki-wm-drill-row:nth-child(${shown + 1}) a` });
+    return true;
+  }
+  const ghMore = target.closest("[data-wm-gh-more]");
+  if (ghMore) {
+    const group = ghMore.getAttribute("data-wm-gh-more") as GhFoldedGroup;
+    const was = stripView.ghGroups?.[group];
+    stripView = { ...stripView, ghGroups: { ...stripView.ghGroups, [group]: was ? "all" : "window" } };
+    // As with +N more: the first row the line or the button hid takes focus.
+    paintWorkCard({ sel: `[data-wm-gh-group="${group}"] .wiki-wm-drill-row:nth-child(${was ? STRIP_ROWS_SHOWN + 1 : 1}) a` });
+    return true;
+  }
+  const why = target.closest("[data-wm-why]");
+  if (why) {
+    const key = why.getAttribute("data-wm-why") ?? "";
+    if (whyOpen.has(key)) whyOpen.delete(key);
+    else whyOpen.add(key);
+    paintWorkCard({ why: key });
+    return true;
+  }
+  if (target.closest("#wikiWorkMapRestore")) {
+    writeDoneRaw(null);
+    paintWorkCard();
+    return true;
+  }
+  return false;
 }

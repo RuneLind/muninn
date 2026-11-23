@@ -142,17 +142,24 @@ describe("extractCadenceFrames", () => {
     ).rejects.toThrow(/ffmpeg frame grab failed/);
     expect(calls).toBe(3);
 
+    // The budget binds in the FRAME phase only: 6 s ⇒ ticks 0–5, all in segment
+    // 0, so its one download runs first with the whole budget and no later
+    // download can draw on what the grabs left (CI run 42468648619 timed one
+    // out at 1 ms). 6 grabs × 40 ms run past 100 ms before the last tick.
+    const slowFetch = stubs();
     const slow = async (_s: string, _o: number, out: string) => {
-      await new Promise((r) => setTimeout(r, 12));
+      await new Promise((r) => setTimeout(r, 40));
       writeFileSync(out, "x");
     };
     await expect(
-      extractCadenceFrames({ manifestUrl: MANIFEST_URL, manifest: m, durationSec, workDir: dir() }, {
-        fetchImpl,
+      extractCadenceFrames({ manifestUrl: MANIFEST_URL, manifest: m, durationSec: 6, workDir: dir() }, {
+        fetchImpl: slowFetch.fetchImpl,
         grabFrame: slow,
-        timeoutMs: 30,
+        timeoutMs: 100,
       }),
-    ).rejects.toThrow(/Frame extraction timed out after 30ms \(\d+\/\d+ frames\)/);
+    ).rejects.toThrow(/Frame extraction timed out after 100ms \(\d+\/6 frames\)/);
+    // One download, before the first grab: the timeout above is the frame phase's.
+    expect(slowFetch.fetched.length).toBe(1);
   });
 
   test("the rendition is the smallest at least VIMEO_FRAME_HEIGHT tall — 720p when present, 1080p when 720p is missing", async () => {

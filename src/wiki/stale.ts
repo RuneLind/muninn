@@ -41,29 +41,13 @@ export const MOVED_WITH_WINDOW_MS = 28 * DAY_MS;
 /** At most this many *Moved with* rows per page. */
 export const MOVED_WITH_MAX = 10;
 
-export type StatusKind = "proposed" | "in-flight" | "shipped" | "blocked";
+import { saidSpan as sharedSaidSpan, STATUS_WORDS, type StatusKind } from "./status-words.ts";
 
-/** Edges that work on `æøå`: JS `\b` treats them as non-word characters. */
-const L = "(?<![\\p{L}\\p{N}_])";
-const R = "(?![\\p{L}\\p{N}_])";
-const words = (xs: string) => new RegExp(`${L}(?:${xs})${R}`, "iu");
+/** {@link sharedSaidSpan} with `[0, 0]` for no match. A segment can run for
+ *  thousands of characters (one HTML line), so the window anchors on one
+ *  word, not all. */
+const saidSpan = (seg: string, said: readonly StatusKind[]): [number, number] => sharedSaidSpan(seg, said) ?? [0, 0];
 
-/** A negation (F7a): the word `ikke`/`not`, any whitespace run, at most one
- *  adverb (`yet`, `ennå`, `enda`, `still`, `fortsatt`) and whitespace again. */
-const NEGATION = `${L}(?:ikke|not)(?:\\s+(?:yet|ennå|enda|still|fortsatt))?\\s+`;
-
-/**
- * The status words (D18): the measured union of English and Norwegian, read on
- * every wiki whatever its `language`. A shipped word right after a
- * {@link NEGATION} is not shipped; a negated `merget`/`merged` is in-flight,
- * any other negated shipped word (`not yet shipped`) names no status.
- */
-export const STATUS_WORDS: readonly (readonly [StatusKind, RegExp])[] = [
-  ["proposed", words("proposed|forslag|foreslått|utkast|draft")],
-  ["in-flight", new RegExp(`${L}(?:in[- ]flight|pågår|i gang|påbegynt|under arbeid|open PRs?|åpen PR|åpne PR-er|åpne PR-ene)${R}|${NEGATION}(?:merget|merged)${R}`, "iu")],
-  ["shipped", new RegExp(`(?<!${NEGATION})${L}(?:shipped|levert|landet|ferdig|done|merget|merged)${R}`, "iu")],
-  ["blocked", words("blocked|blokkert")],
-];
 /** The prefilter: a plain, edge-free alternation over every status word's
  *  stem — a superset of {@link STATUS_WORDS}, and ~8× cheaper per line than
  *  the edged `u` regexes, which measured 12 ms over mimir's 282 link lines. */
@@ -103,6 +87,9 @@ export interface StatusLineCandidate {
   /** The source line, trimmed; a long one is cut to a window around the
    *  segment ({@link hitWindow}). */
   text: string;
+  /** The line is in the frontmatter, which the reader does not render, so
+   *  the reader places no mark for it (D21). */
+  frontmatter?: true;
 }
 
 const TEXT_CAP = 360;
@@ -139,18 +126,6 @@ export function hitWindow(source: string, linkStart: number, linkEnd: number, wo
   return cut(s, e, `${t.slice(s, left)} … ${t.slice(right, e)}`);
 }
 
-/** The status word of `seg` nearest its link: the earliest first match of
- *  a kind in `said`, as `[start, end]`. A segment can run for thousands of
- *  characters (one HTML line), so the window anchors on one word, not all. */
-function saidSpan(seg: string, said: readonly StatusKind[]): [number, number] {
-  let best: [number, number] | null = null;
-  for (const [kind, re] of STATUS_WORDS) {
-    if (!said.includes(kind)) continue;
-    const m = re.exec(seg);
-    if (m && (!best || m.index < best[0])) best = [m.index, m.index + m[0].length];
-  }
-  return best ?? [0, 0];
-}
 
 /** The `[[link]] … status word` segments of one line (1-based `line`). */
 function lineSegments(lineText: string, line: number, sourceText: string): StatusLineCandidate[] {
@@ -221,7 +196,8 @@ export function statusLineCandidates(content: string): StatusLineCandidate[] {
   const out: StatusLineCandidate[] = [];
   for (const i of probe) {
     if (exempt.has(i)) continue;
-    out.push(...lineSegments(maskLine(lines[i]!), i + 1, lines[i]!));
+    const segs = lineSegments(maskLine(lines[i]!), i + 1, lines[i]!);
+    out.push(...(i < body ? segs.map((c) => ({ ...c, frontmatter: true as const })) : segs));
   }
   return out;
 }
@@ -235,6 +211,8 @@ export interface StatusLineHit {
   /** The target's `plan_status` as the index keeps it. */
   now: PlanStatus;
   text: string;
+  /** As on {@link StatusLineCandidate}. */
+  frontmatter?: true;
 }
 
 /** `plan_status` as a status word reads it: ready is proposed; superseded and
@@ -266,7 +244,7 @@ export function resolveStatusLineHits(
     const key = `${c.line}\0${t.relPath}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ line: c.line, target: t.relPath, said: c.said, now: t.plan_status, text: c.text });
+    out.push({ line: c.line, target: t.relPath, said: c.said, now: t.plan_status, text: c.text, ...(c.frontmatter ? { frontmatter: true as const } : {}) });
   }
   return out;
 }
@@ -360,6 +338,13 @@ export interface LinkingPage {
   lastChangeMs?: number;
   bucket: Bucket;
   passages: LinkPassage[];
+}
+
+/** The passage lines a To-check linking page is judged on: those that make
+ *  a claim, else all, in line order. */
+export function linkingPassageRows(lp: Pick<LinkingPage, "passages">): LinkingPage["passages"] {
+  const claims = lp.passages.filter((p) => p.claim !== undefined);
+  return claims.length ? claims : lp.passages;
 }
 
 export interface StaleBuckets {
@@ -588,6 +573,17 @@ function linkPassages(parsed: ParsedPage, fromRelPath: string, targetKey: string
   return out;
 }
 
+/** A linking page's passages on `targetRelPath`, read from `content` as the
+ *  buckets read them. PR 3's Apply, Send and Accept recompute the windows on
+ *  the live file under the write queue through this. */
+export function linkPassagesIn(content: string, fromRelPath: string, targetRelPath: string, index: Pick<WikiIndex, "resolve">): LinkPassage[] {
+  return linkPassages(stateExemptLines(content), fromRelPath, normalizeRelPath(targetRelPath), index).map(({ line, text, claim }) => ({
+    line,
+    text,
+    ...(claim ? { claim } : {}),
+  }));
+}
+
 export type StaleReadFile = (absPath: string) => Promise<string | null>;
 
 const defaultReadFile: StaleReadFile = async (abs) => {
@@ -621,6 +617,28 @@ export function linkingBuckets(
   const p = computeBuckets(index, relPath, nowMs, opts.asOfMs, opts.readFile ?? defaultReadFile);
   if (!opts.readFile) cache.set(key, p);
   return p;
+}
+
+/**
+ * Every linking page of `relPath` with its passages on it, read as the
+ * buckets read them, whether or not `relPath` is a changed page (and under
+ * any `asOf`): what a verdict carry across a Stale check fix reads
+ * (`carryPassageVerdicts`). Reserved pages are never changed pages, so none.
+ */
+export async function linkingPassagesOf(
+  index: WikiIndex,
+  relPath: string,
+  readFile: StaleReadFile = defaultReadFile,
+): Promise<Pick<LinkingPage, "relPath" | "passages">[]> {
+  const page = index.resolveRelPath(relPath);
+  if (!page || isReservedBasename(page.relPath)) return [];
+  const out: Pick<LinkingPage, "relPath" | "passages">[] = [];
+  for (const from of linkingPagesOf(index, normalizeRelPath(page.relPath))) {
+    const content = await readFile(path.join(index.root, from.relPath));
+    if (content === null) continue;
+    out.push({ relPath: from.relPath, passages: linkPassagesIn(content, from.relPath, page.relPath, index) });
+  }
+  return out;
 }
 
 /** The changed page behind a bucket request, or null when it is none. */

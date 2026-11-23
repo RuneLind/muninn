@@ -1,5 +1,6 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
+import { isSafeLinkHref } from "../../format/safe-link-href.ts";
 
 export async function renderGraphPage(): Promise<string> {
   const helpers = await helpersClientScript();
@@ -286,6 +287,7 @@ export async function renderGraphPage(): Promise<string> {
   <script>
   (function() {
     ${helpers}
+    var graphSafeHref = ${isSafeLinkHref.toString()};
 
     // Category colors
     const CAT_COLORS = {
@@ -562,7 +564,7 @@ export async function renderGraphPage(): Promise<string> {
         html += ' <span class="cat-badge" style="background:' + commColor(node.community) + '25;color:' + commColor(node.community) + '">' + esc(commName) + '</span>';
       }
       if (node.date) html += ' &middot; ' + esc(node.date);
-      if (node.url) html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
+      if (node.url && graphSafeHref(node.url)) html += '<br><a href="' + esc(node.url) + '" target="_blank">Open source &rarr;</a>';
       const coll = selectedCollection();
       html += '<br><a href="/search/document/' + encodeURIComponent(coll) + '/' + encodeURIComponent(node.id) + '" target="_blank">View article &rarr;</a>';
       html += '</div>';

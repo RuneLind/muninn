@@ -27,8 +27,8 @@
  *    rather than saying nothing. NB a **HEAD** request carries no body either,
  *    so it lands in that same "refused, unexplained" branch by construction.
  *  - **The WebSocket** has neither status nor body — a `close` event carries a
- *    CODE. So it keys on the provider `/chat/me` already returns, cached here
- *    at load. Two closes reach the rule: the server's own 4401 cap, and a
+ *    CODE. So it keys on the provider cached here, from the page render and
+ *    then `/chat/me`. Two closes reach the rule: the server's own 4401 cap, and a
  *    handshake REFUSED by the middleware, which the browser reports as an
  *    ordinary 1006 — see `page.ts`'s `connectWs`, which probes the session
  *    before it believes a socket that never opened.
@@ -39,12 +39,17 @@
  *    and is indistinguishable here — the breaker and the LATCH below are what
  *    bound that.)
  *
- * ## `provider === null` is TWO states, and neither reloads
+ * ## `provider === null` means auth is off, and it never reloads
  *
- * It is "auth is off" and "`/chat/me` has not answered yet". For `ws`/`sse` the
- * verdict there is **`ignore`** — today's silent reconnect. Banner'ing instead
- * put "Your session expired" in front of readers of an auth-OFF instance, which
- * has no sessions at all, on any permanent stream failure (a 500, a restart).
+ * For `ws`/`sse` the verdict there is **`ignore`** — today's silent reconnect.
+ * Banner'ing instead put "Your session expired" in front of readers of an
+ * auth-OFF instance, which has no sessions at all, on any permanent stream
+ * failure (a 500, a restart).
+ *
+ * The page render writes the session's provider into this script, the same value
+ * `/chat/me` answers. It used to start at null until `/chat/me` answered, so a
+ * `/chat/me` refused with a non-JSON 401 never published one: every later refusal
+ * read as auth off, and the page died with no banner.
  *
  * ## The breaker, and why it is a TIMESTAMP
  *
@@ -110,7 +115,10 @@
  * clears it once NOTHING is latched. So `authedFetch` routes a 2xx response
  * through the same recovery, and only while `http` is latched: an ordinary
  * successful request on a page where nothing was refused must not become a
- * second, decision-free door onto removing someone else's banner.
+ * second, decision-free door onto removing someone else's banner. And only a
+ * request STARTED after the refusal landed counts: an older request's 2xx says
+ * what the credential was when it left, so it used to take the banner down on a
+ * session that was still expired.
  *
  * ## Accepted: a FLAPPING stream on an `entra` instance
  *
@@ -125,6 +133,7 @@
  * stream settles either way.
  */
 
+import type { IdentityProvider } from "../../../auth/introspect.ts";
 import { LOGIN_URL_HINT } from "../../../auth/zones.ts";
 
 /** At most one automatic reload per this window, across all three channels. */
@@ -149,7 +158,7 @@ export const EXPIRED_BANNER_ID = "authExpiredBanner";
  * every other script constant: a call site that ran before the definition would
  * be a `ReferenceError` on a path whose whole job is to degrade gracefully.
  */
-export function authedFetchScript(): string {
+export function authedFetchScript(initialProvider: IdentityProvider | null = null): string {
   return `
 (function() {
   var RELOAD_WINDOW_MS = ${RELOAD_WINDOW_MS};
@@ -159,10 +168,10 @@ export function authedFetchScript(): string {
   // the same exported constant, not a second copy of the string.
   var LOGIN_URL_HINT = ${JSON.stringify(LOGIN_URL_HINT)};
 
-  // The provider from GET /chat/me — "entra", "local", or null. NB null is BOTH
-  // "auth is off" and "/chat/me has not answered yet", and neither of those is
-  // a session that can expire: ws/sse refusals are IGNORED while it is null.
-  var authProvider = null;
+  // "entra", "local", or null when auth is off: from the page render, then from
+  // GET /chat/me. Auth off has no session to expire, so ws/sse refusals are
+  // IGNORED while it is null.
+  var authProvider = ${JSON.stringify(initialProvider)};
   window.__muninnSetAuthProvider = function(provider) {
     authProvider = provider || null;
   };
@@ -176,6 +185,15 @@ export function authedFetchScript(): string {
   // long as the refusal lasts.
   var latched = {};
   window.__muninnAuthLatched = function(channel) { return latched[channel] === true; };
+
+  // authedFetch numbers its requests. A 2xx recovers 'http' only when its number
+  // is above the one taken when the channel latched.
+  var requestsStarted = 0;
+  var httpLatchMark = 0;
+  function latch(channel) {
+    latched[channel] = true;
+    if (channel === 'http') httpLatchMark = requestsStarted;
+  }
 
   function readStamp() {
     var stored = 0;
@@ -266,7 +284,7 @@ export function authedFetchScript(): string {
   }
 
   function banner(channel) {
-    latched[channel] = true;
+    latch(channel);
     showExpiredBanner();
     return 'banner';
   }
@@ -283,8 +301,7 @@ export function authedFetchScript(): string {
    * is unchanged, exactly as before this module existed. It is the answer for
    * an HTTP 401 on a non-entra instance (in local mode a reload would replace
    * the chat with raw 401 JSON) and for a ws/sse failure while the provider is
-   * null — auth off, or /chat/me not yet answered, neither of which is an
-   * expired session.
+   * null: auth is off, so no session can have expired.
    */
   window.__muninnAuthRefusal = function(channel, hint) {
     if (channel === 'http') {
@@ -298,7 +315,7 @@ export function authedFetchScript(): string {
       return authProvider === null ? 'ignore' : banner(channel);
     }
     if (!armReload()) return banner(channel);
-    latched[channel] = true;
+    latch(channel);
     window.location.reload();
     return 'reload';
   };
@@ -319,14 +336,16 @@ export function authedFetchScript(): string {
    * A 2xx is the one thing this channel has instead of an open event, so it
    * releases a latched 'http' — see the module doc. Only while it IS latched:
    * on an ordinary page every response would otherwise be a decision-free door
-   * onto removing another channel's banner.
+   * onto removing another channel's banner. And only from a request started
+   * after the latch: an older one proves nothing about the session now.
    */
   window.authedFetch = function(input, init) {
+    var started = ++requestsStarted;
     var p = fetch(input, init);
     p.then(function(res) {
       if (!res) return;
       if (res.status >= 200 && res.status < 300) {
-        if (latched['http'] === true) window.__muninnAuthChannelRecovered('http');
+        if (latched['http'] === true && started > httpLatchMark) window.__muninnAuthChannelRecovered('http');
         return;
       }
       if (res.status !== 401) return;

@@ -32,6 +32,7 @@ import { sumLatestRailStyles, sumLatestRailScript } from "./components/sum-lates
 import { sumReaderStyles, sumReaderScript } from "./components/sum-reader.ts";
 import { sumFactcheckStyles, sumFactcheckClientScript } from "./components/sum-factcheck.ts";
 import { sumLinksStyles, sumLinksClientScript } from "./components/sum-links.ts";
+import { sumDiscoverStyles, sumDiscoverClientScript } from "./components/sum-discover.ts";
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { shareDialogClientScript } from "./components/share-dialog-client.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
@@ -95,6 +96,8 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
   const factcheckClient = await sumFactcheckClientScript();
   // The doc panel's 🔎 Find links section (sum-links-client.ts).
   const linksClient = await sumLinksClientScript();
+  // The doc panel's ▶ Find on YouTube section (sum-discover-client.ts).
+  const discoverClient = await sumDiscoverClientScript();
   // Percentile cuts on the CURRENT huginn author ranking, computed once at render and
   // embedded — the page is fully server-rendered, so the X author tier badges + "Top
   // authors" filter read these directly (no extra endpoint). null when the scores file
@@ -132,6 +135,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     ${sumReaderStyles()}
     ${sumFactcheckStyles()}
     ${sumLinksStyles()}
+    ${sumDiscoverStyles()}
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
@@ -159,6 +163,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     /* Page head: title + live presence + the collapsed paste-article affordance. */
     .sum-page-head {
       display: flex;
+      flex-wrap: wrap; /* the Discover + Prompts links overflowed 390 px by 43 px */
       align-items: center;
       gap: 12px;
       margin-bottom: 16px;
@@ -181,6 +186,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
       white-space: nowrap;
     }
     .prompts-link:hover { color: var(--accent-light); }
+    .prompts-link + .prompts-link { margin-left: 0; }
     .paste-toggle {
       display: inline-flex;
       align-items: center;
@@ -244,8 +250,9 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     <div class="sum-page-head">
       <h2>Summaries</h2>
       <span class="sum-presence-slot">${agentPresenceHtml("sumPresence")}</span>
-      <!-- The only entry point to /summaries/prompts: it is a sub-page of this
-           one, and the top-level nav row already carries ten links. -->
+      <!-- The entry points to /summaries/discover and /summaries/prompts: both are
+           sub-pages of this one, and the top-level nav row already carries ten links. -->
+      <a class="prompts-link" id="discoverLink" href="/summaries/discover">Discover</a>
       <a class="prompts-link" id="promptsLink" href="/summaries/prompts">Prompts</a>
       <button class="paste-toggle" id="pasteToggleBtn" type="button" aria-expanded="false" aria-controls="pasteFormWrap">+ Paste article</button>
     </div>
@@ -280,7 +287,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true, factcheck: true, findLinks: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true, remove: deleteTarget !== null, exportPage: true, rerun: true, moreMenu: true, factcheck: true, findLinks: true, discover: true })}
   ${tracesPromptModalHtml()}
 
   ${MARKED_CDN_SCRIPT}
@@ -289,6 +296,7 @@ export async function renderSummariesPage(opts: SummariesPageOptions = {}): Prom
   <script>${shareDialog}</script>
   <script>${factcheckClient}</script>
   <script>${linksClient}</script>
+  <script>${discoverClient}</script>
   <script>
     // Summary-source registry projection (from src/summaries/sources.ts).
     const SOURCES = ${clientSourcesJson()};

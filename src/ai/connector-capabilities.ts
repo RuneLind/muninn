@@ -51,6 +51,23 @@ export interface ConnectorCapabilities {
    * (mirrors the `supportsExtraDirs` TikTok pre-flight precedent).
    */
   supportsWebTools: boolean;
+  /**
+   * Whether the connector can run a `{ readSearch: [dirs] }` tool surface:
+   * Read, Grep and Glob with every path confined to those directories (the
+   * snapshots of `src/ai/snapshots.ts`). `claude-cli` runs it as `--restricted
+   * --tools Read,Grep,Glob --add-dir <dir>`, `claude-sdk` as
+   * `additionalDirectories` plus `fencedCanUseTool` and a PreToolUse hook
+   * (`readSearchDenial`). The same CLI version floor as `{ read }` applies.
+   */
+  supportsReadSearch: boolean;
+  /**
+   * Whether the connector can run a `{ mcpTools: { server: [tool] } }` surface:
+   * a session that holds only the listed tools of the listed `.mcp.json`
+   * servers. Only `copilot-sdk`, whose session takes an allow list of tool
+   * names (`availableTools`); the Claude connectors and `openai-compat` refuse
+   * it.
+   */
+  supportsNamedMcpTools: boolean;
 }
 
 /**
@@ -69,5 +86,7 @@ export function capabilitiesForConnectorType(connector: ConnectorType): Connecto
     supportsExtraDirs: isClaude,
     supportsThinkingBudget: isClaude,
     supportsWebTools: isClaude,
+    supportsReadSearch: isClaude,
+    supportsNamedMcpTools: connector === "copilot-sdk",
   };
 }

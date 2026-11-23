@@ -22,7 +22,7 @@
  */
 
 import { callHaikuWithFallback, resolveBackend, type HaikuBackend } from "../ai/haiku-direct.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { inProtectedRegion, markdownCodeRegions } from "../format/markdown-ast.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { Tracer } from "../tracing/tracer.ts";

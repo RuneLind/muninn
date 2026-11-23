@@ -5,7 +5,7 @@ import path from "node:path";
 import { appendBlockToPage, spliceSentinelBlock, type AppendBlockOptions } from "./append-block.ts";
 import { buildFactcheckBlock, FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
-import { sha256 } from "../gardener/util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 const BLOCK = buildFactcheckBlock("Overall: mostly accurate.\n\n✅ **Claim A**\nReasoning.", "2026-07-22");

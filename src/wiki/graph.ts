@@ -30,8 +30,8 @@ import {
   type MergeLedgerResult,
   type SessionLedgerResult,
 } from "./session-ledger.ts";
-import { pageTimeMs } from "../dashboard/views/components/wiki-filter.ts";
-import { seriesCensusKey } from "../dashboard/views/components/wiki-groups.ts";
+import { pageTimeMs } from "./core/wiki-filter.ts";
+import { seriesCensusKey } from "./core/wiki-groups.ts";
 // A bookkeeping page (`index`, `log`, `CLAUDE`) is never a graph node.
 import { isBookkeeping } from "./strength.ts";
 import { trackerAdapter } from "./trackers/index.ts";

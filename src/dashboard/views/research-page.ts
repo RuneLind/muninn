@@ -958,11 +958,11 @@ export async function renderResearchPage(): Promise<string> {
       if (allTags.length === 0) { el.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">No tags available</div>'; return; }
       el.innerHTML = allTags.map(function(t) {
         var active = activeTag === t.name ? ' active' : '';
-        return '<span class="cat-chip' + active + '" onclick="toggleTag(this, \\'' + esc(t.name).replace(/'/g, "\\\\'") + '\\')">' + esc(t.name) + ' <span class="chip-count">' + t.count + '</span></span>';
+        return '<span class="cat-chip' + active + '" data-tag="' + esc(t.name) + '">' + esc(t.name) + ' <span class="chip-count">' + t.count + '</span></span>';
       }).join('');
     }
 
-    function toggleTag(chip, tag) {
+    function toggleTag(tag) {
       activeTag = activeTag === tag ? null : tag;
       renderTags();
       renderDocuments();
@@ -981,16 +981,25 @@ export async function renderResearchPage(): Promise<string> {
       var collection = document.getElementById('collectionSelect').value;
       el.innerHTML = docs.map(function(d) {
         var title = d.id.split('/').pop().replace(/\\.md$/, '');
-        var externalUrl = d.url || '';
-        var linkHtml = externalUrl ? '<a class="article-row-link" href="' + esc(externalUrl) + '" target="_blank" onclick="event.stopPropagation()">Open &rarr;</a>' : '';
-        return '<div class="article-row" onclick="openDoc(\\'' + esc(collection) + '\\', \\'' + esc(d.id).replace(/'/g, "\\\\'") + '\\', \\'' + esc(externalUrl).replace(/'/g, "\\\\'") + '\\')">' +
+        var externalUrl = d.url && docPanelSafeHref(d.url) ? d.url : '';
+        var linkHtml = externalUrl ? '<a class="article-row-link" href="' + esc(externalUrl) + '" target="_blank" rel="noopener" onclick="event.stopPropagation()">Open &rarr;</a>' : '';
+        return '<div class="article-row" data-collection="' + esc(collection) + '" data-doc-id="' + esc(d.id) + '" data-url="' + esc(externalUrl) + '">' +
           '<span class="article-row-title">' + esc(title) + '</span>' + linkHtml + '</div>';
       }).join('');
     }
 
-    function openDoc(collection, docId, url) {
-      openDocPanel(collection, docId, url || '');
-    }
+    // Tag chips and document rows carry their values in data-* attributes and
+    // share one delegated listener each: an inline onclick would compile the
+    // HTML-decoded value as script (a title with a quote breaks out of its JS
+    // string).
+    document.getElementById('tagChips').addEventListener('click', function(e) {
+      var chip = e.target.closest('.cat-chip[data-tag]');
+      if (chip) toggleTag(chip.dataset.tag);
+    });
+    document.getElementById('documentsGrid').addEventListener('click', function(e) {
+      var row = e.target.closest('.article-row[data-doc-id]');
+      if (row) openDocPanel(row.dataset.collection, row.dataset.docId, row.dataset.url || '');
+    });
 
     // === Doc panel ===
     ${docPanelScript()}

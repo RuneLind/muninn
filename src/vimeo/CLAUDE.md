@@ -68,8 +68,8 @@ Spanish measure `null` and the tag decides. Deterministic, no model call. The
 "text wins" info line names the caption language's SOURCE (a track tag, or
 whisper's detection on the no-captions path) and is logged only for `talk`.
 The committed 53-min fixture is Norwegian auto-captions and reads `nb` at a
-95 % share, so a `VIMEO_HARVEST_STUB` acceptance run left on `talk` now
-produces a bokmål summary where it produced English.
+95 % share, so a `VIMEO_HARVEST_STUB` acceptance run left on `talk`
+produces a bokmål summary.
 The document carries the RESOLVED language (`summary_lang: nb|en`), never
 `talk`, and the kind id (`summary_kind`); huginn allowlists both (huginn #126,
 merged first).
@@ -83,7 +83,8 @@ so `/summaries/prompts` can show it without importing the harvest pipeline.
 
 **A kind is instruction + run options, and a file on disk can only replace the
 instruction.** `deep` is `standard`'s structure on `claude-opus-5-5` with the
-thinking cap lifted (`thinkingMaxTokens: null`, the TikTok mechanism); a per-bot
+capture cap lifted (`captureThinkingFor` → `null`, the TikTok mechanism: no 8 k
+budget and no `low` capture effort, so the bot's own thinking settings govern); a per-bot
 `captureSummary.deep.md` keeps those run options, and a NEW per-bot id runs like
 `standard`. The model swap applies only on connectors whose model ids are
 Anthropic's (`claude-cli`, `claude-sdk`, `copilot-sdk`); on `openai-compat` the
@@ -122,8 +123,8 @@ Table + queries: muninn #520.
 
 ## Metadata + deep links (v2 PR 2)
 
-**What oEmbed knew is on the document.** The route already held `author_name`,
-`upload_date` and `thumbnail_url` and threw them away; they now ride on
+**What oEmbed knew is on the document.** oEmbed's `author_name`,
+`upload_date` and `thumbnail_url`, plus the derived speaker, ride on
 `VimeoJobMeta` and the ingest body as `author`, `upload_date`, `speaker`,
 `thumbnail_url` (huginn #127 allowlists the four — `author` globally, which
 also surfaces the x/tiktok/article authors that were written and never
@@ -187,15 +188,14 @@ frame pulled from it is stamped with its place in the talk with no arithmetic �
 and one Opus segment probes as `opus/48000`, which is what PR 5's Whisper
 fallback needs. The whole harvest → manifest → segment → JPEG walk is ~4 s.
 
-**One download engine, three hosts' worth of rules.** `downloadVtt`'s body
-moved to `download.ts` as `downloadPinned(url, {host, maxBytes, timeoutMs,
-what, error})` and is now what the manifest AND every segment go through: https
+**One download engine, three hosts' worth of rules.** `downloadPinned(url,
+{host, maxBytes, timeoutMs, what, error})` in `download.ts` is what the
+captions, the manifest AND every segment go through: https
 only, hostname compared exactly, `redirect: "error"`, the budget RACED at every
 read, the cap REFUSING and ABORTING the request at the byte it is crossed.
 `downloadVtt` is a six-line caller of it (`what: "Caption"`, its own error
-subclass, so its callers' `instanceof VimeoVttDownloadError` still holds — the
-44 captions tests pass unchanged, bar one stub that faked `text()` and now fakes
-`arrayBuffer()`, because the engine reads bytes and the caller decodes). A
+subclass, so its callers' `instanceof VimeoVttDownloadError` holds; the engine
+reads bytes and the caller decodes). A
 second copy of that engine with a different host string is how the two would
 have drifted on the next fix round.
 
@@ -752,10 +752,8 @@ was not running, for as long as every harvest ahead of it took.
 **The document's `date` is the CAPTURE day, never oEmbed's `upload_date`.**
 The `/summaries` shelf buckets and sorts on `date`, and youtube/tiktok/article
 stamp today; stamping the upload date filed a talk captured today under the week
-it was uploaded, below the fold (#519). `uploadDate` stays on the job meta with
-no consumer: it has no frontmatter field yet, because huginn's converter metadata
-allowlist is global (the `anthropic` vertical, which prefers the SOURCE's own
-publish date, is the precedent for adding one). A title-less oEmbed
+it was uploaded, below the fold (#519). oEmbed's upload date rides as its own
+`upload_date` key instead (see Metadata + deep links). A title-less oEmbed
 answer falls back to the canonical url, because huginn derives the document
 FILENAME from the title and `""` would collide with every other title-less
 capture.
@@ -1083,9 +1081,9 @@ so its **9.6 MB ships in every image**, nais included. What the pod avoids is th
 browser BINARY (`bunx playwright install chromium` is an operator step, never a
 build step) and the code path; the driver package itself is carried. Dropping that
 weight would take an optional dependency or a separate image, and neither is in
-this PR.
+place.
 
-`probeChallenge` (was `looksLikeBotPage`) answers **three** things, not two —
+`probeChallenge` answers **three** things, not two —
 `bot`, `clean`, or `unknown`: an evaluate that fails is not evidence about the
 video, and swallowing it into "clean" reported an unreadable page as a private
 one. It matches the three measured interstitials on the `h1`, and the same three
@@ -1135,12 +1133,13 @@ inherits a developer's value.
 The chains name the `src/vimeo/*.test.ts` files **individually**, not the
 directory. That is load-bearing: `summarizer.test.ts` uses `mock.module` on
 `../ai/one-shot.ts` and `../gardener/source-drafter-run.ts`, which a large share
-of the suite imports transitively, so it needs its OWN `bun test` process — and
-the `src/vimeo/` directory entry the chains used to carry would have swept it
-into the first chunk. `url` / `oembed` / `vtt` / `captions` / `state` stay in that
-chunk (`media` too — its download half is driven through `fetchImpl`, no
-network — and `whisper`, whose download is `fetchImpl` and whose two spawns are
-the `run` seam); `summarizer` has its own `&&` link at the end of both chains. The route's
+of the suite imports transitively, so it needs its OWN `bun test` process, and a
+`src/vimeo/` directory argument would sweep it into a shared one. `url` / `oembed` /
+`vtt` / `state` mock nothing and sit in shared links (`media` too — its
+download half is driven through `fetchImpl`, no network — and `whisper`, whose
+download is `fetchImpl` and whose two spawns are the `run` seam); `captions` mocks
+nothing either but has its own pinned link (its entry in `scripts/test-chain.ts` says why); `summarizer` gets
+its own link, which `bun scripts/test-chain.ts write` keeps for every `mock.module` file. The route's
 own cases live in `src/dashboard/routes/capture-route-job-ordering.test.ts`,
 which already runs in a process of its own for the same reason.
 

@@ -1,5 +1,5 @@
 /**
- * The two primitives a wiki page's BYTES are read with, in a module that imports
+ * What a wiki page's BYTES are read with, in a module that imports
  * nothing — so both sides of the `store.ts` ↔ `git-dates.ts` edge can use them.
  *
  * `store.ts` imports `git-dates.ts` (the index build asks for a page's git
@@ -11,8 +11,21 @@
  * `src/dashboard/route-groups.ts`, which exists because a view importing the route
  * factory would be a cycle.
  *
- * Both functions are re-exported from `store.ts`, so its importers are untouched.
+ * `store.ts` re-exports `isMarkdownWikiPath` for its importers; everything else
+ * is imported from here. The fence itself is read in the render-layer leaf
+ * `src/format/frontmatter-fence.ts`, which imports nothing either.
  */
+
+import { closingFenceAt, frontmatterBodyLine } from "../format/frontmatter-fence.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
+
+/** A `[[wikilink]]` with an optional `|label`, target and label both NEWLINE-FREE
+ *  — `WIKILINK_RE`'s exclusion (`store.ts`), and the reader is where its absence
+ *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
+ *  NEXT line's `]]`, so five index.md entries rendered as one merged
+ *  `wiki-link-missing` span that ate the following entry's real link. Matched
+ *  in linear time (`wikilink-scan.ts`). */
+export const WIKILINK_WITH_LABEL_RE = wikilinkRegExp("label");
 
 /** A page split at its frontmatter fence. `frontmatter` is `null` for a page that
  *  has none — there is no fence, so there is nothing to have been written into —
@@ -45,30 +58,8 @@ export function splitFrontmatter(content: string): FrontmatterSplit {
   return { frontmatter, body: afterFence === -1 ? "" : content.slice(afterFence + 1) };
 }
 
-/** The offset of the `\n` before the closing fence, or -1 for a page with no
- *  frontmatter. A closing fence starts at column 0, so an indented `---` inside
- *  a block scalar does not end the block. */
-function closingFenceAt(content: string): number {
-  return content.startsWith("---") ? content.indexOf("\n---", 3) : -1;
-}
-
-/**
- * The 0-based line the body starts on — the line after the closing fence
- * {@link splitFrontmatter} finds — or 0 for a page with no frontmatter. The
- * line-indexed form of the same boundary, for readers that walk lines: the
- * `owns:`/`related:` readers and lint check 14. `frontmatterEndLine`
- * (`wiki-integrate.ts`) is an older rule that also ends at an indented `---`;
- * the fact-check paths and the other line-walking lint checks (9, 10, 11, 12,
- * 16 and the index-truncation and fact-mark checks) still read it, so the
- * linter has two frontmatter boundaries.
- */
-export function frontmatterBodyLine(content: string): number {
-  const end = closingFenceAt(content);
-  if (end === -1) return 0;
-  let closer = 0;
-  for (let i = content.indexOf("\n"); i !== -1 && i <= end; i = content.indexOf("\n", i + 1)) closer++;
-  return closer + 1;
-}
+// `closingFenceAt` and `frontmatterBodyLine`: `src/format/frontmatter-fence.ts`.
+export { frontmatterBodyLine };
 
 /**
  * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`

@@ -24,7 +24,9 @@
  */
 
 import { formatWebHtml, type ItemDateDays } from "../web/web-format.ts";
-import { escapeHtml } from "../format/markdown-core.ts";
+import { escapeHtml, withoutSentinelDelimiters } from "../format/markdown-core.ts";
+import { checkSlotHtml } from "../format/check-tag.ts";
+import { observingComponentTags, reportComponentTag } from "../format/component-observer.ts";
 import { chartViewHtml } from "../format/chart-view.ts";
 import { diagramViewHtml } from "../format/diagram-block.ts";
 import { stepsViewHtml } from "../format/steps-block.ts";
@@ -36,13 +38,15 @@ import { timelineLanesHtml } from "../format/timeline-lanes.ts";
 import { glossaryTerms, readGlossaries, type GlossaryBlockRead } from "../format/glossary.ts";
 import { markGlossaryTerms } from "../format/glossary-view.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
-import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
+import { renderedCodeRegions, inRenderedCode, restoreParkedSentinels } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
+import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
-import { parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
+import { parseQuestionPage, parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
 import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
 
@@ -54,13 +58,13 @@ export { stripFrontmatter } from "./store.ts";
 export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
 
 /**
- * The markdown the reader renders for a page: NULs, fact-check sentinels and
+ * The markdown the reader renders for a page: NULs and U+0001, fact-check sentinels and
  * frontmatter dropped, and a leading H1 that repeats the reader's own title
  * header removed. Exported so the Walk-me-through route cuts its sections out
  * of the same text the reader drew its headings from.
  */
 export function readerBody(markdown: string, stripTitle?: string): string {
-  let body = stripFrontmatter(stripSentinelLines(markdown.replaceAll("\0", "")));
+  let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
@@ -71,6 +75,22 @@ export function readerBody(markdown: string, stripTitle?: string): string {
     }
   }
   return body;
+}
+
+/** A step's trailing `<Check>` as the reader's slot. The inline scanner never
+ *  sees that tag (`renderList` took it off), so it is reported to the lint
+ *  observer here, for its values (`lint-components.ts`); its placement lint
+ *  reads from the page's steps. The client bundle carries neither. */
+function readerCheckSlot(rawAttrs: string): string {
+  if (observingComponentTags()) reportComponentTag({ name: "Check", rawAttrs, inline: true });
+  return checkSlotHtml(rawAttrs);
+}
+
+/** The reader's link to one page, showing `text` (escaped here). `wiki` is the
+ *  registered wiki name for the `href`; omit it for the default wiki. */
+export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string): string {
+  const wikiQuery = wiki ? `wiki=${encodeURIComponent(wiki)}&` : "";
+  return `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`;
 }
 
 export function renderWikiHtml(
@@ -100,9 +120,20 @@ export function renderWikiHtml(
     /** The reader's page render: the decision chain view and the PR strip.
      *  Set by `GET /api/wiki/page` alone. */
     views?: boolean;
+    /** The render lands in the reader's article (`.wiki-article`), whose CSS
+     *  styles the reader shapes: number columns, verdict cells, the label grid
+     *  (`reader-shapes.ts`). Set by `GET /api/wiki/page` alone: the gardener
+     *  preview and the What's-new card have no such CSS, and the walkthrough's
+     *  plain text and the component lint read the source's shape. */
+    readerShapes?: boolean;
     /** With `views`: the index's `plan_status` is `proposed`, so a page with
      *  no ledger draws its at-a-glance slate (`pageLedgers`). */
     proposedPlan?: boolean;
+    /** The live chips' pass (`live-facts.ts`): an empty `.fact-chip` after each
+     *  PR or key mention the wiki's facts file covers. Set by `GET /api/wiki/page`
+     *  alone: the walkthrough, the gardener preview, the component lint and
+     *  `GET /api/wiki/ref` read the page without chips. */
+    liveFacts?: LiveFactsInput;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -110,11 +141,13 @@ export function renderWikiHtml(
   // carrying a persisted fact-check block they rendered as a visible literal
   // `<!-- factcheck:start -->` line in the reader (live on all three annotated
   // pages before this).
-  // A NUL is never content: the renderer's own sentinels (`\x00WIKIPAGELINK<n>\x00`,
-  // the parked picture) are NUL-delimited and restored by search, so a NUL the
-  // page carries could forge one. Dropped, as the browser drops one in body
-  // text and the lane peek already did; with none left, none can reassemble.
-  markdown = markdown.replaceAll("\0", "");
+  // A NUL or U+0001 is never content: the renderer's own sentinels
+  // (`\x00WIKIPAGELINK<n>\x00`, the parked picture, `formatWebHtml`'s
+  // `\x00…\x01` placeholders) are delimited by them and restored by search, so
+  // one the page carries could forge one. Dropped, as the browser drops a NUL in
+  // body text; with none left, none can reassemble. The sibling files' parsers
+  // drop both from every value they read (`withoutSentinelDelimiters`).
+  markdown = withoutSentinelDelimiters(markdown);
   const body = readerBody(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
@@ -124,7 +157,22 @@ export function renderWikiHtml(
   const literal: string[] = [];
   // The text each link shows: a lane's plain-text peek reads a link as this.
   const linkTexts: string[] = [];
-  const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
+  // A chip rides the wikilink sentinel with an empty literal and an empty link
+  // text, so code, an attribute value and every plain-text reader of a
+  // sentinel give nothing for it. Inserted first: its offsets are `body`'s.
+  let marked = body;
+  if (opts?.liveFacts) {
+    const plan = planLiveChips(body, markdown, opts.liveFacts);
+    marked = applyChipInsertions(body, plan.insertions, (html) => {
+      literal.push("");
+      linkTexts.push("");
+      rendered.push(html);
+      return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
+    });
+    opts.liveFacts.collect?.(plan.facts);
+    chipPassCollected();
+  }
+  const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
     const text = wikiLinkText(target, label);
     linkTexts.push(text);
@@ -137,41 +185,33 @@ export function renderWikiHtml(
         // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
         // link on mimir opened jarvis) and the page (the stem re-resolved to
         // whichever registered first).
-        `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
+        wikiPageAnchor(meta, text, opts?.wiki)
       : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const renderedHtml = restoreSentinelsInAttributes(
-    formatWebHtml(withTokens, {
+  const renderedHtml = formatWebHtml(withTokens, {
       files: opts?.files,
       question: opts?.question,
       idLabels: opts?.idLabels,
       reader: true,
+      checkSlot: readerCheckSlot,
+      ...(opts?.readerShapes ? { readerShapes: true } : {}),
       wikiLinkTexts: linkTexts,
       wikiLinkSources: literal,
       itemDates: itemDateDaysOf(markdown, opts?.today),
       ...(opts?.language ? { language: opts.language } : {}),
       ...(opts?.views ? { views: true, proposedPlan: opts.proposedPlan === true, decisionText: decisionText(markdown), chartView: chartViewHtml, diagramView: diagramViewHtml, stepsView: stepsViewHtml, ruleTreeView: ruleTreeViewHtml, caseDotsView: caseDotsViewHtml, timelineLanes: timelineLanesHtml, systemMapView: systemMapViewHtml, systemMapNodes: systemMapNodeLinks(resolve, wikiQuery) } : {}),
-    }),
-    literal,
-  );
-  const codeRegions = renderedCodeRegions(renderedHtml);
-  const html = renderedHtml.replace(
-    /\x00WIKIPAGELINK(\d+)\x00/g,
-    (_m, idx: string, offset: number) => {
-      const i = parseInt(idx, 10);
-      // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
-      // not render-exact: `textContent` matches an unparked render byte for byte
-      // — the acceptance — but the restored run is not tokenized, so the brackets
-      // are uncoloured where the code around them is highlighted. Cosmetic, and
-      // stated because the first spelling of this comment claimed more.
-      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
-      return rendered[i] ?? "";
-    },
-  );
+    });
+  // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
+  // not render-exact: `textContent` matches an unparked render byte for byte
+  // — the acceptance — but the restored run is not tokenized, so the brackets
+  // are uncoloured where the code around them is highlighted. In an attribute
+  // value (a `<Question>` card echoes `choices=`/`to=` into `data-question-*`)
+  // the source text goes back too: link HTML there would end the value.
+  const html = restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal);
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
   // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
@@ -182,8 +222,10 @@ export function renderWikiHtml(
   const parked: ParkedPicture[] = [];
   const guarded = parkDiagramPictures(html, parked);
   const finished = paragraphGaps(upgradeObsidianCallouts(chipLineRefs(guarded, codeAtFromPage(markdown))));
-  const marked = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
-  return restoreDiagramPictures(marked, parked);
+  const glossed = opts?.views && body.includes("<Glossary") ? markGlossaryTerms(finished, glossaryTerms(pageGlossaries(body))) : finished;
+  // Backstop: every sentinel is restored by now, and the body and the parsed
+  // file values carry no NUL; one left (a source not yet covered) is never served.
+  return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
 }
 
 /** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared
@@ -266,22 +308,6 @@ function itemDateDaysOf(markdown: string, today: string | undefined): ItemDateDa
   return { ref: itemDateReference(readStatusDate(parseFrontmatter(markdown).status_date), day), today: day };
 }
 
-const SENTINEL_RE = /\x00WIKIPAGELINK(\d+)\x00/g;
-
-/**
- * A sentinel the renderer copied into an ATTRIBUTE value — a `<Question>`
- * card echoes `choices=`/`to=` into `data-question-*` — goes back as the
- * source text, escaped: link HTML there would end the value and break the
- * tag. Every `"` in rendered text is escaped (`&quot;`), so a `="…"` run is an
- * attribute value and nothing else.
- */
-function restoreSentinelsInAttributes(html: string, literal: string[]): string {
-  if (!html.includes("\x00WIKIPAGELINK")) return html;
-  return html.replace(/="[^"]*"/g, (value) =>
-    value.includes("\x00") ? value.replace(SENTINEL_RE, (_m, i: string) => escapeHtml(literal[parseInt(i, 10)] ?? "")) : value,
-  );
-}
-
 /**
  * The `<Question>` render option for one page: the frontmatter
  * `questions_to:` (read here because `renderWikiHtml` strips the frontmatter
@@ -296,11 +322,20 @@ export function questionRenderOptionsFor(
   /** `WIKI_ANSWER_OWNER`; used only when `answerable`. */
   owner: string | null = null,
 ): QuestionRenderOptions {
+  // The answer route's own reading (`questionTargetsOf`): the same parse, the
+  // first block per id, the same hash — so the card's hash is the one it checks.
+  const questionHashes = new Map<string, string>();
+  if (answerable && markdown.includes("<Question")) {
+    for (const q of parseQuestionPage(parseBlocks(stripFrontmatter(markdown))).questions) {
+      if (q.id !== null && !questionHashes.has(q.id)) questionHashes.set(q.id, sha256(q.hashInput));
+    }
+  }
   return {
     questionsTo: parseQuestionsTo(parseFrontmatter(markdown).questions_to),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     answerable,
     ...(answerable && owner ? { owner } : {}),
+    ...(questionHashes.size ? { questionHashes } : {}),
   };
 }
 
@@ -317,6 +352,20 @@ export interface ReaderPayload {
    *  keys (whose lanes the reader puts first and marks «deg»), and whether the
    *  viewer gets «Se som rolle» (admin). Keys only, never a group member. */
   roles: ViewerRoles;
+  /** The configured tracker projects (`trackers[].projects`): a key such as
+   *  `MELOSYS-8308` before a wikilink is never a cross-page id. Absent on a
+   *  wiki with no trackers. */
+  trackerProjects?: string[];
+  /** Discuss's «Ask Claude Code» (P1): its route is registered (the tool
+   *  half), the wiki sets `discuss.handoff` and the viewer is admin, since the
+   *  route answers an absolute path. */
+  discussHandoff: boolean;
+  /** Discuss's tab (P3): the wiki has a wiki agent the route accepts (a
+   *  `.wiki-agent.md` at its root that `readWikiAgentRules` reads as `ok`),
+   *  the discuss route is registered (the tool half) and the viewer is admin.
+   *  The route's rules refusals (404 `no-agent`, 422, 503) stay, for a file
+   *  changed after the page loaded. */
+  discussAgent: boolean;
 }
 
 export interface ViewerRoles {
@@ -333,13 +382,24 @@ export function readerPayload(
   /** D7, computed by the caller (`agentLensFor`): `PLAN_CARD_BIN` set, the
    *  page carries `plan_status`, its root is a plan-card root, viewer admin. */
   agentLens = false,
+  /** Whether the handoff route is registered here (the tool half: not under
+   *  the read slice, which drops the `wiki` group). */
+  handoffRoute = false,
+  /** Whether the wiki root holds a `.wiki-agent.md` the discuss route
+   *  accepts (`readWikiAgentRules` state `ok`), computed by the caller. */
+  agentRules = false,
 ): ReaderPayload {
+  const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
   return {
+    ...(trackerProjects.length ? { trackerProjects } : {}),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
     agentLens,
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
+    discussHandoff: handoffRoute && readerConfig?.discuss?.handoff === true && viewer.admin,
+    // The discuss route sits in the same tool half as the handoff's.
+    discussAgent: handoffRoute && agentRules && viewer.admin,
   };
 }
 
@@ -442,8 +502,11 @@ function upgradeObsidianCallouts(html: string): string {
       const brIdx = rest.indexOf("<br>");
       let title = (brIdx === -1 ? rest : rest.slice(0, brIdx)).trim();
       let body = brIdx === -1 ? "" : rest.slice(brIdx + 4).replace(/^(?:\s*<br>)+/, "").trim();
-      if (!title) title = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
-      const titleHtml = `<strong class="callout-title">${title}</strong>`;
+      // A fallback title is the reader's, not the file's: its own class keeps
+      // it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
+      const fallback = !title;
+      if (fallback) title = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+      const titleHtml = `<strong class="callout-title${fallback ? " callout-title-default" : ""}">${title}</strong>`;
       const bodyHtml = body ? `<div class="callout-body">${body}</div>` : "";
       return `<div class="callout callout-${tone}">${titleHtml}${bodyHtml}</div>`;
     },

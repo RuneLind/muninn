@@ -308,18 +308,79 @@ export async function refreshWorkedLedger(
   if (!deps.urlConfigured) return memos.get(root) ?? null;
   const existing = inFlight.get(root);
   if (existing) return existing;
-  const task = runRefresh(root, deps).finally(() => inFlight.delete(root));
+  const seq = ++refreshSeq;
+  const task = runRefresh(root, deps, seq).finally(() => {
+    inFlight.delete(root);
+    inFlightSeq.delete(root);
+  });
   inFlight.set(root, task);
+  inFlightSeq.set(root, seq);
   return task;
+}
+
+/** Refresh numbers, process-wide, so a caller can tell a refresh that started
+ *  after it from one already in flight (`workedLedgerStartedAfter`). */
+let refreshSeq = 0;
+const inFlightSeq = new Map<string, number>();
+/** How each root's newest settled refresh ended, by refresh number. `answeredAt`
+ *  alone cannot say: it is stamped when a refresh ends, and a held empty answer
+ *  keeps the old one. */
+const settled = new Map<string, { seq: number; outcome: "answered" | "held-empty" | "failed" }>();
+
+/** The longest {@link workedLedgerStartedAfter} waits by default. */
+export const WORKED_STARTED_AFTER_TIMEOUT_MS = 15_000;
+
+export type WorkedStartedAfter =
+  | { ok: true; memo: WorkedLedgerMemo }
+  | { ok: false; reason: string };
+
+/**
+ * The ledger as answered by a refresh that STARTED after this call: an older
+ * in-flight refresh is waited out, not joined, and then a new one runs. The
+ * answer is `ok` only when that refresh committed rows; a failed refresh, a
+ * held empty answer (the memo keeps its old `answeredAt`), an unset
+ * `CLAUDE_USAGE_URL` or `timeoutMs` passing each refuse with a reason. The work
+ * map's run calls it before it rebuilds the index, so the rebuild folds in a
+ * ledger at least as new as the run.
+ */
+export async function workedLedgerStartedAfter(
+  root: string,
+  opts: { deps?: WorkedLedgerDeps; timeoutMs?: number } = {},
+): Promise<WorkedStartedAfter> {
+  const deps = opts.deps ?? workedLedgerDepsFromEnv();
+  if (!deps.urlConfigured) return { ok: false, reason: "claude-usage not configured (CLAUDE_USAGE_URL is unset)" };
+  const from = refreshSeq + 1;
+  const startedFrom = (): Promise<WorkedLedgerMemo | null> => {
+    const existing = inFlight.get(root);
+    const seq = inFlightSeq.get(root);
+    if (existing && seq !== undefined && seq < from) return existing.then(startedFrom, startedFrom);
+    return refreshWorkedLedger(root, deps);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), opts.timeoutMs ?? WORKED_STARTED_AFTER_TIMEOUT_MS);
+  });
+  const done = await Promise.race([startedFrom().catch(() => null), timeout]);
+  clearTimeout(timer);
+  if (done === "timeout") return { ok: false, reason: "the worked ledger did not answer in time" };
+  const last = settled.get(root);
+  const memo = memos.get(root);
+  if (!last || last.seq < from) return { ok: false, reason: "the worked ledger gave no fresh answer" };
+  if (last.outcome === "failed") return { ok: false, reason: "the worked ledger refresh failed" };
+  if (last.outcome === "held-empty") return { ok: false, reason: "the worked ledger answered empty for a root it had rows for" };
+  if (!memo) return { ok: false, reason: "the worked ledger holds no answer" };
+  return { ok: true, memo };
 }
 
 async function runRefresh(
   root: string,
   deps: WorkedLedgerDeps,
+  seq: number,
 ): Promise<WorkedLedgerMemo | null> {
   const prev = memos.get(root) ?? null;
   const fail = (): WorkedLedgerMemo | null => {
     lastFailureAt.set(root, nowOf(deps));
+    settled.set(root, { seq, outcome: "failed" });
     return prev;
   };
   // The spelling that answered last time, else the canonical configured root.
@@ -382,6 +443,7 @@ async function runRefresh(
       );
       const held: WorkedLedgerMemo = { ...prev, fetchedAt: at };
       memos.set(root, held);
+      settled.set(root, { seq, outcome: "held-empty" });
       return held;
     }
     warnDegraded(
@@ -403,6 +465,7 @@ async function runRefresh(
     truncated: parsed.truncated,
   };
   memos.set(root, memo);
+  settled.set(root, { seq, outcome: "answered" });
   if (memo.truncated) {
     // The clip drops the pages with the OLDEST write, and every row that DID
     // arrive still matches — so the match-rate warn cannot see this one.
@@ -512,6 +575,8 @@ export function kickWorkedLedgerRefresh(
 export function __resetWorkedLedgerForTest(): void {
   memos.clear();
   inFlight.clear();
+  inFlightSeq.clear();
+  settled.clear();
   lastFailureAt.clear();
   lastNonEmptyAt.clear();
 }

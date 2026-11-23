@@ -10,7 +10,7 @@ import type { Config } from "../config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import type { SemanticOverlay } from "../wiki/atlas-semantic.ts";
-import { synthesisTopicKey } from "../dashboard/views/components/wiki-atlas-semantic.ts";
+import { synthesisTopicKey } from "../wiki/core/wiki-atlas-semantic.ts";
 import type { DraftSynthesisResult } from "../gardener/synthesis-drafter.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────

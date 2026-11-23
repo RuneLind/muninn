@@ -1,10 +1,11 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, symlink } from "node:fs/promises";
+import { rm, mkdir, symlink, chmod } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import {
   registerWikiRoutes,
   __resetWikiDigestCacheForTest,
@@ -34,10 +35,11 @@ import {
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
 import { countFactWrappers, stripFactWrappers } from "../../format/markdown-ast.ts";
 import { integrateBodyLen, pageHasComponentVocabulary } from "../../wiki/integrate-edits.ts";
+import { WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
-import { __resetWikiCacheForTest, getWikiIndex } from "../../wiki/store.ts";
+import { __resetWikiCacheForTest, __setWikiIndexAnswerConfigForTest, getWikiIndex } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
 import { ASK_CHAT_SEED_MAX } from "../../wiki/ask-chat.ts";
@@ -414,6 +416,9 @@ describe("GET /api/wiki/html", () => {
       agentLens: false,
       // Auth off with no owner: no viewer role; auth off is admin, so «Se som rolle».
       roles: { keys: ["fag", "utvikler"], viewer: [], preview: true },
+      // The wiki's `.wiki-reader.json` sets no `discuss` block.
+      discussHandoff: false,
+      discussAgent: false,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
@@ -496,6 +501,81 @@ describe("GET /api/wiki/html", () => {
       restore("PLAN_CARD_BIN", saved.bin);
       restore("WIKI_STAMP_ROOTS", saved.roots);
       restore("MUNINN_PROFILE", saved.profile);
+    }
+  });
+
+  // Discuss P1 (finding 10): «Ask Claude Code» only where its route is
+  // registered — the tool half, which MUNINN_PROFILE=nais drops.
+  test("/api/wiki/page discussHandoff follows the profile's route groups", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ discuss: { handoff: true } }));
+    await Bun.write(path.join(root, "concepts/Handoff Page.mdx"), "---\ntitle: Handoff Page\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const flag = async (profile: "default" | "nais") => {
+      const a = new Hono();
+      registerWikiRoutes(a, { profile } as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Handoff Page.mdx"));
+      return ((await res.json()) as { reader: { discussHandoff: boolean } }).reader.discussHandoff;
+    };
+    try {
+      expect(await flag("default")).toBe(true);
+      // The read slice serves only a read-only root.
+      __setReadonlyWikiRootsForTest([root]);
+      expect(await flag("default")).toBe(true);
+      expect(await flag("nais")).toBe(false);
+    } finally {
+      __setReadonlyWikiRootsForTest(undefined);
+      await Bun.write(path.join(root, ".wiki-reader.json"), "{}");
+      __resetWikiCacheForTest();
+    }
+  });
+
+  // Discuss P3: the tab's flag is the rules file at the wiki root, the tool
+  // half registered and an admin viewer — all four cases of file × role.
+  test("/api/wiki/page discussAgent: a .wiki-agent.md and an admin viewer, where the route is", async () => {
+    await Bun.write(path.join(root, "concepts/Agent Page.mdx"), "---\ntitle: Agent Page\n---\n\nBody.\n");
+    __resetWikiCacheForTest();
+    const flag = async (role: "admin" | "user", profile: "default" | "nais" = "default") => {
+      const a = new Hono();
+      a.use(async (c, next) => {
+        c.set("role" as never, role as never);
+        await next();
+      });
+      registerWikiRoutes(a, { profile } as Parameters<typeof registerWikiRoutes>[1]);
+      const res = await a.request("/api/wiki/page?relPath=" + encodeURIComponent("concepts/Agent Page.mdx"));
+      return ((await res.json()) as { reader: { discussAgent: boolean } }).reader.discussAgent;
+    };
+    const rules = path.join(root, ".wiki-agent.md");
+    try {
+      expect(await flag("admin")).toBe(false);
+      expect(await flag("user")).toBe(false);
+      await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
+      expect(await flag("admin")).toBe(true);
+      expect(await flag("user")).toBe(false);
+      // A rules file the discuss route refuses (422/503) is no agent: the tab
+      // would show while every ask fails.
+      await Bun.write(rules, "x".repeat(WIKI_AGENT_RULES_MAX_BYTES + 1));
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await Bun.write(path.join(root, "agent-rules-target.md"), "# Rules\n");
+      await symlink(path.join(root, "agent-rules-target.md"), rules);
+      expect(await flag("admin")).toBe(false);
+      await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
+      await Bun.write(rules, "# Rules\n\nAnswer the passage first.\n");
+      // Root reads a mode-000 file, so the unreadable case needs a plain user.
+      await chmod(rules, 0o000);
+      if (process.getuid?.() !== 0) expect(await flag("admin")).toBe(false);
+      await chmod(rules, 0o644);
+      expect(await flag("admin")).toBe(true);
+      // The read slice registers no discuss route.
+      __setReadonlyWikiRootsForTest([root]);
+      expect(await flag("admin", "nais")).toBe(false);
+    } finally {
+      __setReadonlyWikiRootsForTest(undefined);
+      await chmod(rules, 0o644).catch(() => {});
+      await rm(rules, { force: true });
+      await rm(path.join(root, "agent-rules-target.md"), { force: true });
+      __resetWikiCacheForTest();
     }
   });
 
@@ -637,6 +717,111 @@ describe("GET /api/wiki/html", () => {
       nodes: Record<string, unknown>;
     };
     expect(Object.keys(refreshed.nodes).length).toBe(firstCount + 1);
+  });
+});
+
+/**
+ * The listing's `workMap` field under the `WIKI_DIR` env override: the
+ * work-map GET is bound to a registry name (its state and `organizable` are
+ * keyed by it), so a nameless root must not advertise a card that GET refuses.
+ */
+describe("GET /api/wiki/pages — workMap under the WIKI_DIR override", () => {
+  let root: string;
+  let prevWikiDir: string | undefined;
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-workmap-envdir-"));
+    await Bun.write(path.join(root, "notes/a.md"), "---\ntitle: A\n---\n\nBody.");
+    await Bun.write(
+      path.join(root, ".work-map.json"),
+      JSON.stringify({
+        version: 1,
+        wiki: "",
+        runAtMs: 1234,
+        model: "m",
+        coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+        summary: "",
+        needsYou: [],
+        themes: [],
+        efforts: [],
+        loose: [],
+      }),
+    );
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    __resetWikiCacheForTest();
+  });
+
+  afterEach(async () => {
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a bare listing omits workMap: the GET has no wiki name to serve it under", async () => {
+    const app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    const body = (await (await app.request("/api/wiki/pages")).json()) as Record<string, unknown>;
+    expect((body.pages as unknown[]).length).toBeGreaterThan(0);
+    expect("workMap" in body).toBe(false);
+  });
+});
+
+describe("GET /api/wiki/pages — waitsCounted", () => {
+  let root: string;
+  const prev = { extra: process.env.WIKI_EXTRA };
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-waits-counted-"));
+    await Bun.write(path.join(root, "notes/a.md"), "---\ntitle: A\n---\n\nBody.");
+    process.env.WIKI_EXTRA = `waitswiki=${root},otherwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+  });
+
+  afterEach(async () => {
+    __setWikiIndexAnswerConfigForTest(null);
+    if (prev.extra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prev.extra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  type Answers = { wikis: Set<string>; owner: string | null; groups?: Map<string, Set<string>> };
+  // `index` is what the index was built with; it defaults to what the route is given.
+  const counted = async (wiki: string, wikiAnswers: Answers, index: Answers = wikiAnswers) => {
+    __setWikiIndexAnswerConfigForTest(index);
+    __resetWikiCacheForTest();
+    const app = new Hono();
+    registerWikiRoutes(app, { wikiAnswers } as unknown as Parameters<typeof registerWikiRoutes>[1]);
+    const body = (await (await app.request(`/api/wiki/pages?wiki=${wiki}`)).json()) as Record<string, unknown>;
+    return body.waitsCounted;
+  };
+  const wikis = new Set(["waitswiki"]);
+
+  test("true only with an owner on a wiki that takes answers", async () => {
+    expect(await counted("waitswiki", { wikis, owner: "Kari (A1)" })).toBe(true);
+    expect(await counted("otherwiki", { wikis, owner: "Kari (A1)" })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: null })).toBe(false);
+  });
+
+  test("an owner who cannot be asked anything is no owner", async () => {
+    const groups = new Map([["utvikler", new Set(["A1"])]]);
+    expect(await counted("waitswiki", { wikis, owner: '""' })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "utvikler", groups })).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "Kari Testdal", groups })).toBe(true);
+  });
+
+  test("the route and the index must both have an owner, so neither alone paints a 0", async () => {
+    const set = { wikis, owner: "Kari (A1)" };
+    const unset = { wikis, owner: null };
+    expect(await counted("waitswiki", set, unset)).toBe(false);
+    expect(await counted("waitswiki", unset, set)).toBe(false);
+    const groups = new Map([["utvikler", new Set(["A1"])]]);
+    expect(await counted("waitswiki", { wikis, owner: '""' }, set)).toBe(false);
+    expect(await counted("waitswiki", { wikis, owner: "utvikler", groups }, set)).toBe(false);
   });
 });
 
@@ -1540,6 +1725,28 @@ describe("GET /api/wiki/similar", () => {
     expect(ex.description).toBe("Head meta description prose.");
   });
 
+  test("page-list payload carries workMap.runAt only when the wiki has a work map", async () => {
+    const before = (await (await app.request("/api/wiki/pages?wiki=simwiki")).json()) as Record<string, unknown>;
+    expect("workMap" in before).toBe(false);
+    await Bun.write(
+      path.join(root, ".work-map.json"),
+      JSON.stringify({
+        version: 1,
+        wiki: "simwiki",
+        runAtMs: 1234,
+        model: "m",
+        coverage: { sessionsSinceMs: 0, sessionsAsOfMs: 0, touchWindowDays: 28, activePages: 0, threads: 0, logEntries: 0, digestChars: 0, warnings: [] },
+        summary: "",
+        needsYou: [],
+        themes: [],
+        efforts: [],
+        loose: [],
+      }),
+    );
+    const after = (await (await app.request("/api/wiki/pages?wiki=simwiki")).json()) as { workMap?: unknown };
+    expect(after.workMap).toEqual({ runAt: 1234 });
+  });
+
   test("huginn down → 200 with empty similar (section hides, page never errors)", async () => {
     __setSimilarSearchForTest(async () => {
       throw new Error("Knowledge API unreachable");
@@ -2028,6 +2235,116 @@ describe("GET /api/wiki/digest", () => {
     expect(body.digest!.bullets).toBe("- Grew [[knowledge-graph]]");
     // The wikilink resolved to a real page ⇒ rendered as an in-reader anchor.
     expect(body.digest!.html).toContain('data-wiki-page="knowledge-graph"');
+  });
+
+  test("batch digest: each sync's pages render as links by relPath, a root page and same-stem pages included", async () => {
+    await mkdir(path.join(root, "concepts"), { recursive: true });
+    await mkdir(path.join(root, "analyses"), { recursive: true });
+    await Bun.write(path.join(root, "concepts", "Lovvalg.md"), "---\ntitle: Lovvalg\n---\n\nA.");
+    await Bun.write(path.join(root, "analyses", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse]\n---\n\nB.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "### Area\n- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync",
+          pages: [
+            { relPath: "knowledge-graph.md", title: "knowledge-graph" },
+            { relPath: "concepts/Lovvalg.md", title: "Lovvalg" },
+            { relPath: "analyses/Lovvalg.md", title: "Lovvalg [analyse]" },
+          ],
+        },
+        { date: "2026-10-01", title: "Uncommitted", pages: null },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as {
+      digest: { syncs: { date: string; title: string; count: number | null; html: string }[] };
+    };
+    const [sync, none] = body.digest.syncs;
+    expect(sync!.count).toBe(3);
+    expect(sync!.html).toContain('data-relpath="knowledge-graph.md"');
+    expect(sync!.html).toContain('data-relpath="concepts/Lovvalg.md"');
+    expect(sync!.html).toContain('data-relpath="analyses/Lovvalg.md"');
+    expect(sync!.html).not.toContain("wiki-link-missing");
+    expect(none).toEqual({ date: "2026-10-01", title: "Uncommitted", count: null, html: "" });
+  });
+
+  test("batch digest: a sync title's wikilinks read as text", async () => {
+    await mkdir(path.join(root, "c"), { recursive: true });
+    await Bun.write(path.join(root, "c", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse] | utkast\n---\n\nA.");
+    await Bun.write(path.join(root, "c", "a|b.md"), "---\ntitle: Pipe\n---\n\nB.");
+    await Bun.write(path.join(root, "c", "x].md"), "---\ntitle: Bracket\n---\n\nC.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync of [[knowledge-graph]] and [[c/Lovvalg|lovvalg]]\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync of [[knowledge-graph]] and [[c/Lovvalg|lovvalg]]",
+          pages: [
+            { relPath: "c/Lovvalg.md", title: "Lovvalg [analyse] | utkast" },
+            { relPath: "c/a|b.md", title: "Pipe" },
+            { relPath: "c/x].md", title: "Bracket" },
+          ],
+        },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as { digest: { syncs: { title: string; html: string }[] } };
+    const [sync] = body.digest.syncs;
+    expect(sync!.title).toBe("Sync of knowledge-graph and lovvalg");
+  });
+
+  test("batch digest: page titles show as written and odd file names still link", async () => {
+    await mkdir(path.join(root, "c"), { recursive: true });
+    await Bun.write(path.join(root, "c", "Lovvalg.md"), "---\ntitle: Lovvalg [analyse] | utkast\n---\n\nA.");
+    await Bun.write(path.join(root, "c", "a|b.md"), "---\ntitle: Pipe\n---\n\nB.");
+    await Bun.write(path.join(root, "c", "x].md"), "---\ntitle: Bracket\n---\n\nC.");
+    await Bun.write(path.join(root, "log.md"), "# Log\n\n## [2026-11-01] update | Sync\n\nBody.");
+    const mtime = (await readLogMtimeMs(root))!;
+    __seedWikiDigestForTest("digwiki", {
+      bullets: "- x",
+      generatedAt: 1,
+      logMtimeMs: mtime,
+      entryCount: 1,
+      fromDate: "2026-11-01",
+      toDate: "2026-11-01",
+      syncs: [
+        {
+          date: "2026-11-01",
+          title: "Sync",
+          pages: [
+            { relPath: "c/Lovvalg.md", title: "Lovvalg [analyse] | utkast" },
+            { relPath: "c/a|b.md", title: "Pipe" },
+            { relPath: "c/x].md", title: "Bracket" },
+            { relPath: "c/gone.md", title: "<b>Gone</b>" },
+          ],
+        },
+      ],
+    });
+    const res = await app.request("/api/wiki/digest?wiki=digwiki");
+    const body = (await res.json()) as { digest: { syncs: { title: string; html: string }[] } };
+    const [sync] = body.digest.syncs;
+    expect(sync!.html).toContain("<li>&lt;b&gt;Gone&lt;/b&gt;</li>");
+    expect(sync!.html).toContain('href="/wiki?wiki=digwiki&relPath=c%2FLovvalg.md"');
+    expect(sync!.html).not.toContain("wiki-link-missing");
+    expect(sync!.html).toContain('data-relpath="c/Lovvalg.md">Lovvalg [analyse] | utkast</a>');
+    expect(sync!.html).toContain('data-relpath="c/a|b.md">Pipe</a>');
+    expect(sync!.html).toContain('data-relpath="c/x].md">Bracket</a>');
   });
 });
 
@@ -4542,5 +4859,116 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     const first = await (await app.request("/wiki?wiki=aliasfirst")).text();
     expect(first).toContain('window.__WIKI_FIND_SELF__ = "aliasfirst"');
     expect(first).toContain('window.__WIKI_FIND_ROWS__ = "aliasfirst"');
+  });
+
+  // B3 (arch review 2026-11): the page links its script and stylesheet at
+  // content-hashed URLs instead of inlining ~1.8 MB, and the route serves them.
+  test("the served page links both assets, inlines neither, and the route serves those URLs", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    const html = await (await app.request("/wiki?wiki=aliasfirst")).text();
+    expect(html).toContain(`<script src="${js.path}"></script>`);
+    expect(html).toContain(`<link rel="stylesheet" href="${css.path}">`);
+    expect(html).not.toContain(js.body.slice(0, 2000));
+    expect(html).not.toContain(css.body.slice(0, 2000));
+    // The globals still precede the bundle: it reads them at boot.
+    expect(html.indexOf("window.__WIKI_FIND_ROWS__")).toBeLessThan(html.indexOf(js.path));
+    expect(Buffer.byteLength(html)).toBeLessThan(100_000);
+    for (const [asset, type] of [[js, "text/javascript"], [css, "text/css"]] as const) {
+      const res = await app.request(asset.path);
+      expect(res.status, asset.path).toBe(200);
+      expect(res.headers.get("content-type")).toContain(type);
+      expect(res.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
+      expect(res.headers.get("content-encoding")).toBeNull();
+      expect(await res.text()).toBe(asset.body);
+    }
+  });
+
+  test("an asset gzips for a client that accepts it, and inflates to the same bytes", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    const res = await app.request(js.path, { headers: { "Accept-Encoding": "gzip, deflate, br" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    expect(res.headers.get("vary")).toBe("Accept-Encoding");
+    expect(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await res.arrayBuffer())))).toBe(js.body);
+  });
+
+  test("a stale hash of the asset shape gets the current build, never cached; any other name is a no-store 404", async () => {
+    // A page from before a restart (Back replays it) or from the other pod in a
+    // surge rollout names a hash this process never built.
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js, css } = await getWikiAssets();
+    for (const [p, asset] of [["/wiki/assets/wiki.0000000000000000.js", js], ["/wiki/assets/wiki.0000000000000000.css", css]] as const) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+      expect(res.headers.get("content-type"), p).toBe(asset.contentType);
+      expect(await res.text(), p).toBe(asset.body);
+    }
+    const near = ["000000000000000", "00000000000000000", "000000000000000g", "000000000000000A"].map((h) => `/wiki/assets/wiki.${h}.js`);
+    const wrapped = ["wikiX0000000000000000.js", "wiki.0000000000000000Xjs", "xwiki.0000000000000000.js", "wiki.0000000000000000.jsx", "wiki.0000000000000000.js.map", "wiki.0000000000000000.css.js.x"].map((f) => `/wiki/assets/${f}`);
+    for (const p of ["/wiki/assets/x", "/wiki/assets/wiki.zz.js", "/wiki/assets/wiki.0000000000000000.map", "/wiki/assets/other.0000000000000000.js", ...near, ...wrapped]) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(404);
+      expect(res.headers.get("cache-control"), p).toBe("no-store");
+    }
+  });
+
+  test("acceptsGzip: every one- and two-entry header, in both orders, follows gzip > x-gzip > * and never the order", async () => {
+    const { acceptsGzip } = await import("./wiki-routes.ts");
+    const names = ["gzip", "x-gzip", "*", "br"];
+    const qs = [undefined, "0", "0.5", "1", "abc"];
+    const entries = names.flatMap((n) => qs.map((q) => ({ n, q })));
+    const text = (e: { n: string; q?: string }) => (e.q === undefined ? e.n : `${e.n};q=${e.q}`);
+    const weight = (q?: string) => (q === undefined ? 1 : Number.isFinite(Number(q)) ? Number(q) : 0);
+    // The oracle: the most specific name present decides, by its best weight.
+    const oracle = (list: { n: string; q?: string }[]) => {
+      for (const n of ["gzip", "x-gzip", "*"]) {
+        const ws = list.filter((e) => e.n === n).map((e) => weight(e.q));
+        if (ws.length > 0) return Math.max(...ws) > 0;
+      }
+      return false;
+    };
+    let checked = 0;
+    for (const a of entries) {
+      expect(acceptsGzip(text(a)), text(a)).toBe(oracle([a]));
+      for (const b of entries) {
+        const h = `${text(a)}, ${text(b)}`;
+        expect(acceptsGzip(h), h).toBe(oracle([a, b]));
+        checked++;
+      }
+    }
+    expect(checked).toBe(400);
+    expect(acceptsGzip(undefined)).toBe(false);
+    expect(acceptsGzip("")).toBe(false);
+    // Malformed weights read as 0, never as a missing q.
+    for (const h of ["gzip;q=0=1", "gzip;q", "gzip;foo=bar;q=0", "gzip;quality=1;q=0"]) expect(acceptsGzip(h), h).toBe(false);
+    expect(acceptsGzip("gzip;foo=bar")).toBe(true);
+    expect(acceptsGzip("gzip;q=1=0")).toBe(false);
+    // The first q wins; the name must match exactly; any finite Number() above 0 admits.
+    expect(acceptsGzip("gzip;q=1;q=0")).toBe(true);
+    expect(acceptsGzip("gzip;q=0;q=1")).toBe(false);
+    for (const h of ["xgzip", "xgzip, gzip;q=0"]) expect(acceptsGzip(h), h).toBe(false);
+    for (const h of ["gzip;q=0x1", "gzip;q=1e0", "gzip;q=2"]) expect(acceptsGzip(h), h).toBe(true);
+    for (const h of ["gzip;q=Infinity", "gzip;q=1e999"]) expect(acceptsGzip(h), h).toBe(false);
+  });
+
+  test("gzip is not sent to a client that refuses it with q=0", async () => {
+    const { getWikiAssets } = await import("../views/wiki-page.ts");
+    const { js } = await getWikiAssets();
+    for (const ae of ["gzip;q=0, identity", "GZIP; q=0.0", "br", "gzip;q=0, *"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+      expect(await res.text(), ae).toBe(js.body);
+    }
+    for (const ae of ["gzip ; q = 0", "gzip;q= 0", "x-gzip;q=0"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBeNull();
+    }
+    for (const ae of ["GZIP", "deflate, gzip;q=0.5", "*", "x-gzip", "gzip ; q = 0.5"]) {
+      const res = await app.request(js.path, { headers: { "Accept-Encoding": ae } });
+      expect(res.headers.get("content-encoding"), ae).toBe("gzip");
+    }
   });
 });

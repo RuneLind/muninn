@@ -38,8 +38,11 @@ import {
   isFreshMtimeHold,
   isTransientGitLockFailure,
   isUnmergedStatus,
+  SYNC_SUBSUME_MAX_AGE_MS,
+  sweeperSubsumption,
   syncTone,
   type DirtyItem,
+  type SyncCommitStep,
   type SyncLedgerEntry,
   type SyncState,
   type SyncTone,
@@ -191,8 +194,14 @@ export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
       lastSuccessMs: null,
       lastRunMs: null,
       lastLocalSectionMs: null,
+      lastCommitStep: "not-reached",
     }
   );
+}
+
+/** Test-only: seed one repo's ledger entry, as a past tick would have left it. */
+export function __setSyncLedgerEntryForTest(name: string, entry: SyncLedgerEntry): void {
+  ledger.set(name, entry);
 }
 
 /** Test-only: clear the ledger + in-flight set between cases. */
@@ -212,12 +221,18 @@ export function __resetSyncStateForTest(): void {
  * trying", which is what let a repo whose every commit failed renew the sweeper
  * stand-down forever, and not "the whole tick succeeded" either: a push failure
  * stamps, because the sweeper could add nothing the loop did not already commit.
+ *
+ * `commitStep` is the narrower fact beside it: did the tick's `git add` +
+ * `git commit` refuse, whatever failed after them. A rebase conflict withholds
+ * the stamp but its commit landed, and Done must not call that loop one that
+ * "will not commit" (`syncLoopOutlook`, F36 fix round 2).
  */
 function recordLedger(
   name: string,
   result: RepoSyncResult,
   now: number,
   commitPathOk: boolean,
+  commitStep: SyncCommitStep,
 ): SyncLedgerEntry {
   const prev = getSyncLedgerEntry(name);
   const entry: SyncLedgerEntry = {
@@ -228,6 +243,7 @@ function recordLedger(
       result.state === "ok" || result.state === "status-only" ? now : prev.lastSuccessMs,
     lastRunMs: now,
     lastLocalSectionMs: commitPathOk ? now : prev.lastLocalSectionMs,
+    lastCommitStep: commitStep,
     lastError: result.error ?? (result.state === "blocked" ? result.reason : undefined),
   };
   ledger.set(name, entry);
@@ -257,23 +273,65 @@ async function lastFetchMs(top: string): Promise<number | null> {
   }
 }
 
-type Preflight =
+export type Preflight =
   | { kind: "clear" }
-  | { kind: "blocked"; reason: string }
+  | { kind: "blocked"; reason: string; staleLock?: true; conflicts?: string[] }
   | { kind: "transient"; reason: string };
 
 /**
+ * The `.git` entries that say an operation is paused mid-way, each a reason to
+ * leave the tree alone: a rebase (`rebase-merge`; `rebase-apply` is also
+ * `git am`), a merge, a cherry-pick or a revert (`CHERRY_PICK_HEAD`,
+ * `REVERT_HEAD`, `git revert --no-commit` included), a multi-commit cherry-pick
+ * or revert paused after a conflict was resolved and committed (`sequencer`),
+ * and a bisect (`BISECT_LOG`: the work tree is a commit bisect checked out, not
+ * the branch). A commit in any of these concludes or corrupts the operation.
+ * The last three were added for F37 (arch review 2026-11-16); before that a
+ * tick in those states went on to commit, or to `paused` on bisect's detached
+ * HEAD.
+ */
+const IN_PROGRESS_GIT_ENTRIES = [
+  "rebase-merge",
+  "rebase-apply",
+  "MERGE_HEAD",
+  "CHERRY_PICK_HEAD",
+  "REVERT_HEAD",
+  "sequencer",
+  "BISECT_LOG",
+] as const;
+
+/** What clears each entry: the reason names the remedy, so a forgotten bisect
+ *  or an abandoned `.git/sequencer` reads as something to do, not a marker
+ *  name (F37 fix round 1). `sequencer` is a multi-commit cherry-pick or revert;
+ *  `--quit` drops it and keeps the commits already made. */
+const IN_PROGRESS_REMEDY: Record<(typeof IN_PROGRESS_GIT_ENTRIES)[number], string> = {
+  "rebase-merge": "finish it with `git rebase --continue` or drop it with `git rebase --abort`",
+  "rebase-apply": "finish it with `git rebase --continue` (`git am --continue`) or drop it with `git rebase --abort` (`git am --abort`)",
+  MERGE_HEAD: "finish it with `git merge --continue` or drop it with `git merge --abort`",
+  CHERRY_PICK_HEAD: "finish it with `git cherry-pick --continue` or drop it with `git cherry-pick --abort`",
+  REVERT_HEAD: "finish it with `git revert --continue` or drop it with `git revert --abort`",
+  sequencer: "finish it with `git cherry-pick --continue` / `git revert --continue`, or leave it with `git cherry-pick --quit` / `git revert --quit`",
+  BISECT_LOG: "end the bisect with `git bisect reset`",
+};
+
+/**
  * Is a git operation already in progress? An in-progress rebase / merge /
- * cherry-pick means a human is mid-something and the tree must not be touched.
- * An `index.lock` is judged by AGE: a young one is a live concurrent git op
- * (transient, retry next tick), an old one is a crash leftover a human must
- * clear — auto-removing it is exactly how two git processes corrupt an index.
+ * cherry-pick / revert / bisect means a human is mid-something and the tree
+ * must not be touched. An `index.lock` is judged by AGE: a young one is a live
+ * concurrent git op (transient, retry next tick), an old one is a crash
+ * leftover a human must clear — auto-removing it is exactly how two git
+ * processes corrupt an index. A lock dated more than `INDEX_LOCK_STALE_MS` in
+ * the FUTURE is blocked too: its age stays negative, so it read as `transient`
+ * on every tick for as long as the clock stayed behind it.
+ *
+ * Repo-wide, never scoped to a nested wiki's subtree: a commit during any of
+ * these states acts on the whole repo, whatever paths it stages.
  */
 async function preflight(top: string, now: number): Promise<Preflight> {
-  for (const name of ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"]) {
+  for (const name of IN_PROGRESS_GIT_ENTRIES) {
     const p = await gitPath(top, name);
     if (p && (await pathExists(p))) {
-      return { kind: "blocked", reason: `a git operation is in progress (${name})` };
+      return { kind: "blocked", reason: `a git operation is in progress (${name}) — ${IN_PROGRESS_REMEDY[name]}` };
     }
   }
   const lock = await gitPath(top, "index.lock");
@@ -287,12 +345,41 @@ async function preflight(top: string, now: number): Promise<Preflight> {
     if (ageMs > INDEX_LOCK_STALE_MS) {
       return {
         kind: "blocked",
-        reason: `a stale .git/index.lock (${Math.round(ageMs / 60000)} min old) — remove it by hand`,
+        staleLock: true,
+        reason: `a stale .git/index.lock (${Math.round(ageMs / 60000)} min old) — remove it by hand once no git process is running`,
+      };
+    }
+    if (ageMs < -INDEX_LOCK_STALE_MS) {
+      return {
+        kind: "blocked",
+        staleLock: true,
+        reason: `a .git/index.lock dated ${Math.round(-ageMs / 60000)} min in the future — remove it by hand once no git process is running`,
       };
     }
     return { kind: "transient", reason: "another git process holds .git/index.lock" };
   }
   return { kind: "clear" };
+}
+
+/**
+ * The loop's whole "never touch this tree" check, shared with a committer that
+ * runs outside the loop: {@link preflight}, then unmerged paths anywhere in the
+ * repo (a stash-pop conflict leaves those and no `.git` marker). The daily
+ * `wiki-committer` sweeper runs it on every tick, because its only other guard
+ * is the in-memory ledger's `blocked` state, which a restart empties (F37, arch
+ * review 2026-11-16). Takes no lock: it runs before any section, as the loop's
+ * own pre-flight does.
+ */
+export async function treeOperationBlock(top: string, now: number = Date.now()): Promise<Preflight> {
+  const pre = await preflight(top, now);
+  if (pre.kind !== "clear") return pre;
+  const conflicts = await conflictPaths(top);
+  if (conflicts.length > 0) return { kind: "blocked", reason: unmergedReason(conflicts), conflicts };
+  return pre;
+}
+
+function unmergedReason(paths: readonly string[]): string {
+  return `unmerged paths (${paths.slice(0, 5).join(", ")})`;
 }
 
 /** True when a rebase is actually in progress — the ONLY condition under which
@@ -523,6 +610,10 @@ interface LocalSectionOutcome {
    * daily sweeper down.
    */
   sectionSkipped?: true;
+  /** The section stopped at `git add` or `git commit` (`error` or `transient`),
+   *  as opposed to the rebase after a commit that landed: the ledger's
+   *  `lastCommitStep`. */
+  commitFailed?: true;
   /**
    * A SOFT deferral: real work happened (commit / rebase / push all still run),
    * but something was held back, so the tick must not report `ok`. Quiet-held
@@ -533,8 +624,8 @@ interface LocalSectionOutcome {
   actions: string[];
 }
 
-/** Parse the conflicting paths out of a failed rebase (best-effort — the list is
- *  for the card, the blocked state does not depend on it). */
+/** The unmerged paths anywhere in the repo: after a failed rebase (for the
+ *  card), before the local section, and in {@link treeOperationBlock}. */
 async function conflictPaths(top: string): Promise<string[]> {
   const entries = await listDirtyEntries(top);
   return entries.filter((e) => isUnmergedStatus(e.xy)).map((e) => e.path);
@@ -716,6 +807,7 @@ async function localSection(
           out.state = lock ? "transient" : "error";
           out.reason = clampReason(`git add failed: ${staged.error}`);
           out.error = staged.error;
+          out.commitFailed = true;
           return out;
         }
         if (staged.skipped.length > 0) {
@@ -758,11 +850,13 @@ async function localSection(
               out.state = "transient";
               out.reason = clampReason(`git commit failed: ${committed.stderr}`);
               out.error = committed.stderr;
+              out.commitFailed = true;
               return out;
             } else {
               out.state = "error";
               out.reason = clampReason(`git commit failed: ${committed.stderr}`);
               out.error = committed.stderr;
+              out.commitFailed = true;
               return out;
             }
           } else {
@@ -863,9 +957,9 @@ async function localSection(
       return out;
     }
     // No rebase directory ⇒ the rebase never started (a bad ref, a refused
-    // tree). Report git verbatim rather than attempting a confusing abort.
+    // tree). The card gets git's first line, `error` the verbatim text; no abort.
     out.state = "error";
-    out.reason = `rebase failed: ${rebase.stderr || rebase.stdout}`;
+    out.reason = clampReason(`rebase failed: ${rebase.stderr || rebase.stdout}`);
     out.error = rebase.stderr || rebase.stdout;
     return out;
   }
@@ -1038,12 +1132,16 @@ export async function syncRepo(
    * committing loop, which is the same collision two machines already survive,
    * and it is strictly safer than the alternative of claiming a commit pass that
    * a `git rebase` explosion may have rolled back.
+   *
+   * `commitStep` (the ledger's `lastCommitStep`) defaults to `not-reached`
+   * for the same reason.
    */
   const finish = (
     card: RepoCard,
     state: SyncState,
     extra: Partial<RepoSyncResult> = {},
     commitPathOk = false,
+    commitStep: SyncCommitStep = "not-reached",
   ): RepoSyncResult => {
     const now = deps.now();
     const result: RepoSyncResult = {
@@ -1075,7 +1173,7 @@ export async function syncRepo(
     const observeOnly = dryRun || state === "running";
     const led = observeOnly
       ? getSyncLedgerEntry(repo.name)
-      : recordLedger(repo.name, result, now, commitPathOk);
+      : recordLedger(repo.name, result, now, commitPathOk, commitStep);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
     result.lastLocalSectionMs = led.lastLocalSectionMs;
@@ -1095,22 +1193,29 @@ export async function syncRepo(
     const top = await gitToplevel(repo.path);
     if (!top) return finish(blank, "error", { reason: `not a git repo: ${repo.path}` });
 
-    // 1. Pre-flight — never touch a tree mid-operation.
-    const pre = await preflight(top, deps.now());
-    if (pre.kind !== "clear") {
-      const card = await readCard(repo, top);
-      return finish(card, pre.kind === "blocked" ? "blocked" : "transient", {
-        reason: pre.reason,
-        actions: ["pre-flight stopped the tick"],
-      });
-    }
-
-    // 2. Fetch — NO lock held (network I/O never holds a lock).
+    // 1. Fetch — NO lock held (network I/O never holds a lock). It runs BEFORE
+    //    the pre-flight: a fetch writes only remote-tracking refs, FETCH_HEAD and
+    //    objects, never the index, HEAD or the work tree, so it is safe under
+    //    every state the pre-flight blocks on (a rebase, merge, cherry-pick,
+    //    revert or sequence keeps its own onto/HEAD files; a bisect checks out
+    //    nothing; `index.lock` is not one fetch takes). Pre-flight first froze
+    //    ahead/behind and the last fetch on the card for the whole of a bisect
+    //    (F37 fix round 1).
     const fetched = await runGit(top, ["fetch", "--quiet"], {
       timeoutMs: GIT_NETWORK_TIMEOUT_MS,
     });
     const fetchFailed = fetched.code !== 0;
     const card = await readCard(repo, top);
+
+    // 2. Pre-flight — never touch a tree mid-operation. It outranks a failed
+    //    fetch: the block needs a human whatever the network does.
+    const pre = await preflight(top, deps.now());
+    if (pre.kind !== "clear") {
+      return finish(card, pre.kind === "blocked" ? "blocked" : "transient", {
+        reason: pre.reason,
+        actions: [fetchFailed ? "fetch failed; pre-flight stopped the tick" : "fetched; pre-flight stopped the tick"],
+      });
+    }
     if (fetchFailed) {
       // A failed fetch is five lines of stderr; the card's state chip is one
       // line. Clamped for display, verbatim on `lastError`.
@@ -1122,12 +1227,9 @@ export async function syncRepo(
 
     // Unmerged paths anywhere ⇒ a human's half-finished merge. Never auto-commit
     // over one.
-    const unmerged = (await listDirtyEntries(top)).filter((e) => isUnmergedStatus(e.xy));
+    const unmerged = await conflictPaths(top);
     if (unmerged.length > 0) {
-      return finish(card, "blocked", {
-        reason: `unmerged paths (${unmerged.map((e) => e.path).slice(0, 5).join(", ")})`,
-        conflicts: unmerged.map((e) => e.path),
-      });
+      return finish(card, "blocked", { reason: unmergedReason(unmerged), conflicts: unmerged });
     }
 
     // 3. status-only: fetch + report, nothing else. Ever.
@@ -1190,6 +1292,9 @@ export async function syncRepo(
       //     sweeper stand-down off a tick that did strictly less than a tick
       //     which errored at the fetch.
       const commitPathOk = local.state === "deferred" && !local.sectionSkipped;
+      // The commit step is narrower: a rebase conflict or a rebase that never
+      // started fails AFTER the commit step, so the next tick commits too.
+      const commitStep: SyncCommitStep = local.sectionSkipped ? "not-reached" : local.commitFailed ? "failed" : "passed";
       return finish(
         after,
         local.state,
@@ -1200,6 +1305,7 @@ export async function syncRepo(
           ...(local.error ? { error: local.error } : {}),
         },
         commitPathOk,
+        commitStep,
       );
     }
 
@@ -1215,6 +1321,9 @@ export async function syncRepo(
     // key reached through the remote-moved door), so it must not count. A hard
     // `deferred` from the retry stamps, for the same reason the first pass's does.
     let commitPathOk = true;
+    // The first section's commit step passed (it returned no state); only the
+    // retry's refusing at `git add`/`git commit` makes it `failed`.
+    let commitStep: SyncCommitStep = "passed";
     let pushReason: string | undefined;
     let pushError: string | undefined;
     /** HEAD moved in EITHER local section — see the retry merge below. */
@@ -1262,6 +1371,7 @@ export async function syncRepo(
         if (res.local?.state && (res.local.state !== "deferred" || res.local.sectionSkipped)) {
           commitPathOk = false;
         }
+        if (res.local?.commitFailed) commitStep = "failed";
         if (res.local) {
           carry.committed = [...carry.committed, ...res.local.committed];
           carry.rebased = carry.rebased || res.local.rebased;
@@ -1302,6 +1412,7 @@ export async function syncRepo(
         ...(pushError ? { error: pushError } : {}),
       },
       commitPathOk,
+      commitStep,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1399,13 +1510,8 @@ async function pushWithRetry(
   };
 }
 
-/**
- * How recent a sync run must be for the daily `wiki-committer` sweeper to stand
- * down. Sized just over the sweeper's own 24h cadence, so a loop running every 15
- * minutes clears it by two orders of magnitude and a loop that has stopped fails
- * it within one sweeper period.
- */
-export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
+// Defined beside the pure `sweeperSubsumption` in `decide.ts`; re-exported for existing importers.
+export { SYNC_SUBSUME_MAX_AGE_MS };
 
 /**
  * Does the sync loop OWN this repo — i.e. may the daily sweeper stand down?
@@ -1455,12 +1561,13 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  *    path inside the window; sweeping on top of it would fight it.
  *  - `state === "blocked"` — subsumes REGARDLESS of freshness, because the
  *    sweeper is not a safe substitute there at all: `blocked` is the
- *    unmerged-paths / interrupted-operation refusal and the sweeper has no
- *    pre-flight of its own (`listWikiSubtreeDirty` treats a `UU` entry as
- *    ordinary dirt), so it would stage and commit a human's half-finished merge.
- *    A one-tick sample is sound here only because the conditions that produce
- *    `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict markers)
- *    persist across ticks until a human clears them.
+ *    unmerged-paths / interrupted-operation refusal, and a sweep would stage and
+ *    commit a human's half-finished merge. The sweeper also runs this loop's own
+ *    check itself on every tick (`treeOperationBlock`), because this ledger is
+ *    in memory and a restart empties that `blocked` (F37, arch review
+ *    2026-11-16). A one-tick sample is sound here only because the conditions
+ *    that produce `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict
+ *    markers) persist across ticks until a human clears them.
  *
  * Everything else — `error`, `transient`, `paused`, no-upstream, not-a-repo, a
  * cold ledger, and a rebase conflict that never converges — falls through to the
@@ -1475,8 +1582,8 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * `fresh(lastLocalSectionMs)` before the stamp was narrowed to a commit path
  * that WORKED. `state` is a one-tick SAMPLE, not a claim about the window.
  * `paused` falling through is harmless: the sweeper applies the same
- * off-default-branch rule to itself (`onDefaultBranch(top)` guard,
- * `src/watchers/wiki-committer.ts:154`) and no-ops.
+ * off-default-branch rule to itself (the `onDefaultBranch(top)` guard in
+ * `checkWikiCommitter`, `src/watchers/wiki-committer.ts`) and no-ops.
  *
  * `configuredButIdle` is DECOUPLED from `subsumed`: it is simply "no commit pass
  * inside the window", so a repo that subsumes on `blocked` for a week still
@@ -1488,13 +1595,10 @@ export async function syncSubsumesSweeper(
 ): Promise<{ subsumed: boolean; configuredButIdle: boolean; name?: string }> {
   const covering = await findSyncRepoCoveringToplevel(top, opts.repos);
   if (!covering) return { subsumed: false, configuredButIdle: false };
-  const now = opts.now ?? Date.now();
-  const led = getSyncLedgerEntry(covering.name);
-  const fresh = (at: number | null) => at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
-  const committedRecently = fresh(led.lastLocalSectionMs);
-  const subsumed = committedRecently || led.state === "blocked";
-  // Not `!subsumed`: a blocked loop stands the sweeper down AND is idle.
-  return { subsumed, configuredButIdle: !committedRecently, name: covering.name };
+  // The ledger half is pure and shared with Done's message (`syncLoopOutlook`),
+  // so one entry and one `now` give one answer.
+  const { subsumed, configuredButIdle } = sweeperSubsumption(getSyncLedgerEntry(covering.name), opts.now ?? Date.now());
+  return { subsumed, configuredButIdle, name: covering.name };
 }
 
 /** Sync every configured repo, sequentially (they contend on disk and on the

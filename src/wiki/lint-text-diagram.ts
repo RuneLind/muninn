@@ -17,7 +17,7 @@
  * (`readerFences`): backticks only, an unclosed opener is prose, CRLF folded.
  */
 
-import { frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
+import { frontmatterEndLine } from "./core/wiki-integrate.ts";
 import { readerFences } from "../format/markdown-ast.ts";
 import type { LintFinding } from "./lint.ts";
 

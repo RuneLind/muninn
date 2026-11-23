@@ -1,0 +1,274 @@
+/**
+ * The question grid: every question a page's `<DecisionLog>` holds, with its
+ * answer or its age, open questions first. The chain view starts from decisions
+ * and has no row for an open question; this view starts from the questions.
+ *
+ * Pure and server-free, like `decision-views.ts`: `formatWebHtml` calls it with
+ * `views: true` only. A state starts from the card's own rule
+ * (`parseQuestionPage`); a row says decided where the chain closes the question
+ * through «Lukker Sn» or the item names the decision that superseded it, which
+ * the card shows as open or closed. A row reads the log's first sentence.
+ */
+
+import type { Block } from "./markdown-ast.ts";
+import { escapeHtml } from "./markdown-core.ts";
+import { idAnchor, UNSAFE_ANCHOR_ID_RE } from "./query-block.ts";
+import { parseLaneSince } from "./component-spec.ts";
+import { DC_VIEW_CLASS, READER_ONLY_ATTR } from "./reader-lens.ts";
+import type { ChainAnalysis } from "./decision-chain.ts";
+import { dcGoLink } from "./decision-views.ts";
+import { parseDecisionWhen, supersededById } from "./genre-lists.ts";
+import { DECISION_ID_RE, eachComponent, itemReopened, parseQuestionPage, QUESTION_ID_RE } from "./question.ts";
+import type { QuestionLanguage } from "./question-labels.ts";
+import { splitFirstSentence, visibleText } from "./report-top.ts";
+
+/** The grid draws at this many questions, as the chain view does at 3 chains. */
+export const QUESTION_GRID_MIN = 3;
+/** Rows shown before «show more» on a grid with an open row, and that row is
+ *  never behind it. A grid with none open folds whole and opens to every row. */
+export const QUESTION_GRID_CAP = 8;
+/** A row's question or answer, in code points. */
+export const QUESTION_GRID_TEXT_MAX = 220;
+
+export interface QuestionGridRow {
+  id: string;
+  label: string;
+  state: "open" | "decided" | "closed";
+  /** Open: days since it was asked, when the page says. */
+  ageDays: number | null;
+  /** Open: a `<Question>` card holds it. */
+  hasCard: boolean;
+  decision: string | null;
+  answer: string | null;
+  who: string | null;
+  reversed: boolean;
+}
+
+const LABELS: Record<QuestionLanguage, {
+  title: string; open: string; closed: string; reversed: string; today: string; card: string;
+  count: (open: number, all: number) => string; more: (n: number) => string;
+}> = {
+  en: {
+    title: "Questions", open: "open", closed: "closed", reversed: "reversed", today: "today", card: "Answer on the card",
+    count: (open, all) => (open ? `${open} open of ${all}` : `none open · ${all}`),
+    more: (n) => `${n} more`,
+  },
+  no: {
+    title: "Spørsmål", open: "åpen", closed: "lukket", reversed: "snudd", today: "i dag", card: "Svar i kortet",
+    count: (open, all) => (open ? `${open} ${open === 1 ? "åpen" : "åpne"} av ${all}` : `ingen åpne · ${all}`),
+    more: (n) => `${n} til`,
+  },
+};
+
+/** «Asked Kari, 01.11.2026», «Spurt Kari 30.09». A date elsewhere in a question
+ *  («the backups from 12.03») says nothing about when it was asked. */
+const ASKED_RE = /(?<![\p{L}\p{N}_])(?:Asked|Spurt)(?![\p{L}\p{N}_])[^.?!\n]*?(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}(?:\.\d{4})?)(?!\d)/u;
+
+function isoOf(written: string, today: string): string | null {
+  if (/^\d{4}-/.test(written)) return written;
+  const [d, m, y] = written.split(".");
+  const iso = `${y ?? today.slice(0, 4)}-${m!.padStart(2, "0")}-${d!.padStart(2, "0")}`;
+  return Number.isNaN(Date.parse(iso)) ? null : iso;
+}
+
+function daysBetween(from: string, today: string): number | null {
+  const days = Math.round((Date.parse(today) - Date.parse(from)) / 86_400_000);
+  return days >= 0 ? days : null;
+}
+
+/** The `since=` of the waiting lane that names each id. */
+function laneSinceByQuestion(blocks: Block[]): Map<string, string> {
+  const out = new Map<string, string>();
+  eachComponent(blocks, (b) => {
+    if (b.name !== "Lane" || b.attrs.kind !== "waiting") return;
+    const since = parseLaneSince(b.attrs.since);
+    if (!since) return;
+    for (const child of b.children) {
+      if (child.type !== "ul" && child.type !== "ol") continue;
+      for (const item of child.items) {
+        const id = /^\*\*([SO]\d{1,4})\*\*/.exec(item.trim())?.[1];
+        if (id && !out.has(id)) out.set(id, since);
+      }
+    }
+  });
+  return out;
+}
+
+const plainText = (markdown: string): string => visibleText(markdown).replace(/\s+/g, " ").trim();
+
+function clip(s: string): string {
+  const cps = [...s];
+  return cps.length > QUESTION_GRID_TEXT_MAX ? cps.slice(0, QUESTION_GRID_TEXT_MAX - 1).join("").trimEnd() + "…" : s;
+}
+
+const DATE = String.raw`(?:\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}(?:\.\d{4})?)`;
+/** A question item's bookkeeping, always dated: a close, reopen or answer
+ *  stamp and an asked phrase. A word in prose («The Closed state») is none. */
+const BOOKKEEPING_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}_])(?:(?:Closed|Lukket|Reopened|Gjenåpnet|Answered|Besvart)\s+${DATE}(?:\s*\(D\d{1,4}\))?|(?:Asked|Spurt)(?![\p{L}\p{N}_])[^.?!\n]*?${DATE}(?!\d))[.:,]?`,
+  "gu",
+);
+
+/** The item's first sentence as the log shows it, read from the markdown, up to
+ *  any bookkeeping. */
+function firstOf(markdown: string): string {
+  const cut = markdown.search(BOOKKEEPING_RE);
+  const head = (cut > 0 ? markdown.slice(0, cut) : markdown).trimEnd();
+  return splitFirstSentence(head)?.first ?? head;
+}
+
+/** What a closed item says after its first sentence, bookkeeping and a date
+ *  tail left out; null when nothing is left. */
+function ownAnswer(itemText: string, first: string): string | null {
+  const rest = itemText.slice(first.length).replace(BOOKKEEPING_RE, " ").trim();
+  const when = parseDecisionWhen(rest);
+  const text = plainText(firstOf(when ? rest.slice(0, when.start) : rest));
+  return text ? clip(text) : null;
+}
+
+/** A decision item's first sentence, its date tail left out. */
+function decisionAnswer(itemText: string): string | null {
+  const when = parseDecisionWhen(itemText);
+  const text = plainText(firstOf(when ? itemText.slice(0, when.start) : itemText));
+  return text ? clip(text) : null;
+}
+
+/** The grid's rows, open first, each group in id order. `today` is the render
+ *  day; absent, no row has an age. */
+export function questionGridRows(blocks: Block[], analysis: ChainAnalysis, today?: string): QuestionGridRow[] {
+  const page = parseQuestionPage(blocks);
+  const cards = new Set(page.questions.map((q) => q.id).filter((id): id is string => !!id));
+  const byId = new Map(page.entries.map((e) => [e.id, e] as const).reverse());
+  const chainOf = new Map(analysis.chains.flatMap((c) => c.questions.map((q) => [q.id, c] as const)));
+  const since = laneSinceByQuestion(blocks);
+  const rows: QuestionGridRow[] = [];
+  for (const [id, e] of byId) {
+    if (!QUESTION_ID_RE.test(id) && !cards.has(id)) continue;
+    const state = page.states.get(id);
+    // «Lukker Sn» on a decision closes Sn in the chain, unless Sn was reopened since.
+    const chain = chainOf.get(id) ?? null;
+    const decided = state?.kind === "decided" || (state?.kind === "open" && chain !== null && !itemReopened(e.text));
+    // «superseded by Dn» closes a question without a close phrase, so no chain holds it.
+    const supersededBy = !decided && state?.kind === "closed" ? supersededById(e.itemText) : null;
+    const supersededEntry = supersededBy && DECISION_ID_RE.test(supersededBy) ? byId.get(supersededBy) : undefined;
+    const first = firstOf(e.itemText);
+    const asked = ASKED_RE.exec(e.text)?.[1];
+    const from = since.get(id) ?? (asked && today ? isoOf(asked, today) : null);
+    const decisionEntry = decided && chain ? byId.get(chain.decision) : supersededEntry;
+    rows.push({
+      id,
+      label: clip(plainText(first)),
+      state: decided || supersededEntry ? "decided" : state?.kind === "closed" ? "closed" : "open",
+      ageDays: !decided && state?.kind === "open" && from && today ? daysBetween(from, today) : null,
+      hasCard: cards.has(id),
+      decision: decided && chain ? chain.decision : supersededEntry ? supersededBy : null,
+      // A reversed decision's label is its struck sentence.
+      answer: decided && chain?.reversed
+        ? chain.label
+        : decisionEntry
+          ? decisionAnswer(decisionEntry.itemText)
+          : state?.kind === "closed"
+            ? ownAnswer(e.itemText, first)
+            : null,
+      who: decisionEntry ? (parseDecisionWhen(decisionEntry.itemText)?.who ?? null) : null,
+      reversed: decided && chain?.reversed != null,
+    });
+  }
+  const num = (r: QuestionGridRow) => Number(r.id.replace(/\D/g, ""));
+  return rows.sort((a, b) => Number(a.state !== "open") - Number(b.state !== "open") || num(a) - num(b));
+}
+
+/** The anchor a `<Question>` card asks for on the page render, before
+ *  {@link questionCardAnchors} makes it unique. An id that is safe in an
+ *  attribute keeps the anchor deep links already name, `qcard-` + the id
+ *  lower-cased (`Q.1` → `qcard-q.1`); any other is slugged (F26, F57), and ""
+ *  when nothing is left: such a card takes no anchor. */
+export function questionCardAnchor(id: string, linkTexts?: readonly string[]): string {
+  if (!UNSAFE_ANCHOR_ID_RE.test(id)) return `qcard-${id.toLowerCase()}`;
+  const slug = idAnchor(id, linkTexts);
+  return slug ? `qcard-${slug}` : "";
+}
+
+/** Each card's final anchor, by id, for `ids` in page order; an id absent from
+ *  the map takes none. Safe ids and `reserved` (the page's other anchors) are
+ *  taken first, so a slugged id never takes a safe one's anchor: it gets the
+ *  first free `-2`, `-3`. A safe id whose anchor an earlier safe id took
+ *  (`O16`, `o16`) is suffixed the same way. The page's Query cards yield to
+ *  every anchor here (`uniqueAnchors` in `web-format.ts`). */
+export function questionCardAnchors(ids: readonly string[], reserved: Iterable<string>, linkTexts?: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const taken = new Set(reserved);
+  const safe = new Set<string>();
+  const slugged: string[] = [];
+  for (const id of ids) {
+    const anchor = UNSAFE_ANCHOR_ID_RE.test(id) ? "" : questionCardAnchor(id);
+    if (!anchor || safe.has(anchor)) {
+      slugged.push(id);
+      continue;
+    }
+    out.set(id, anchor);
+    safe.add(anchor);
+    taken.add(anchor);
+  }
+  for (const id of slugged) {
+    const base = questionCardAnchor(id, linkTexts);
+    if (!base) continue;
+    let anchor = base;
+    for (let k = 2; taken.has(anchor); k++) anchor = `${base}-${k}`;
+    taken.add(anchor);
+    out.set(id, anchor);
+  }
+  return out;
+}
+
+function rowHtml(r: QuestionGridRow, language: QuestionLanguage, anchorOf: (id: string) => string): string {
+  const L = LABELS[language];
+  const open = r.state === "open";
+  const age = r.ageDays === null ? "" : ` · ${r.ageDays === 0 ? L.today : `${r.ageDays} d`}`;
+  const chip = open
+    ? `<span class="qg-chip qg-chip-open">${escapeHtml(L.open + age)}</span>`
+    : r.decision
+      ? `<span class="qg-chip qg-chip-done${r.reversed ? " qg-chip-reversed" : ""}">${dcGoLink(r.decision, escapeHtml(r.decision))}</span>`
+      : `<span class="qg-chip qg-chip-done">${escapeHtml(L.closed)}</span>`;
+  const anchor = open && r.hasCard ? anchorOf(r.id) : "";
+  const body = open
+    ? anchor
+      ? `<a class="qg-card" href="#${anchor}">${escapeHtml(L.card)}</a>`
+      : ""
+    : `${r.reversed ? `<em class="qg-reversed">${escapeHtml(L.reversed)}</em> ` : ""}${escapeHtml(r.answer ?? "")}${r.who ? ` <span class="qg-who">· ${escapeHtml(r.who)}</span>` : ""}`;
+  return (
+    `<div class="qg-row ${open ? "qg-open" : "qg-done"}" role="listitem">` +
+    `<span class="qg-id">${dcGoLink(r.id, escapeHtml(r.id))}</span>` +
+    `<span class="qg-q">${escapeHtml(r.label)}</span>` +
+    `<span class="qg-a">${chip}${body}</span></div>`
+  );
+}
+
+/** Where the grid goes: right after the first top-level `<StatusRows>`, the
+ *  place a picture takes (plan D15), else with the other views. */
+export function questionGridSlot(blocks: Block[], viewSlotAt: number): number {
+  const i = blocks.findIndex((b) => b.type === "component" && b.name === "StatusRows");
+  return i >= 0 ? i + 1 : viewSlotAt;
+}
+
+/** The grid, or "" under {@link QUESTION_GRID_MIN} rows. It folds when no row is
+ *  open: it counts rows, so an open `<Question>` card does not hold it open.
+ *  `anchorOf`: the anchor a row's card took on the page ("" for none). */
+export function questionGridHtml(rows: QuestionGridRow[], language: QuestionLanguage, anchorOf: (id: string) => string = (id) => questionCardAnchor(id)): string {
+  if (rows.length < QUESTION_GRID_MIN) return "";
+  const L = LABELS[language];
+  const openCount = rows.filter((r) => r.state === "open").length;
+  const titleInner = `${escapeHtml(L.title)} <span class="qg-count">${escapeHtml(L.count(openCount, rows.length))}</span>`;
+  const section = (inner: string) => `<section class="${DC_VIEW_CLASS} qg" ${READER_ONLY_ATTR} aria-label="${escapeHtml(L.title)}">${inner}</section>`;
+  // Nothing to answer: the settled rows wait one click away, so a long list does not push the page's picture down.
+  if (openCount === 0) {
+    return section(`<details class="qg-settled"><summary class="dc-title">${titleInner}</summary><div class="qg-rows" role="list">${rows.map((r) => rowHtml(r, language, anchorOf)).join("")}</div></details>`);
+  }
+  const shown = Math.max(QUESTION_GRID_CAP, openCount);
+  const head = rows.slice(0, shown).map((r) => rowHtml(r, language, anchorOf)).join("");
+  const rest = rows.slice(shown);
+  const more = rest.length
+    ? `<details class="qg-more"><summary>${escapeHtml(L.more(rest.length))}</summary>${rest.map((r) => rowHtml(r, language, anchorOf)).join("")}</details>`
+    : "";
+  return section(`<div class="dc-title">${titleInner}</div><div class="qg-rows" role="list">${head}${more}</div>`);
+}

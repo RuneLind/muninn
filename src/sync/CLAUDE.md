@@ -11,13 +11,13 @@ Three files, one job:
 |---|---|
 | `config.ts` | `SYNC_REPOS` parsing (pure — no git spawn, no env reads). Modes, path resolution, the same-repo dedup, the plain-over-a-wiki warning. |
 | `decide.ts` | The PURE decision layer: what to stage, what to hold, what the card says. No git, no fs, no clock read (`now` is a parameter). |
-| `run.ts` | The per-repo state machine: fetch → (locked) status → commit → rebase → (unlocked) push → refresh the reader cache. Plus the in-memory ledger the card reads. |
+| `run.ts` | The per-repo state machine: fetch → pre-flight → (locked) status → commit → rebase → (unlocked) push → refresh the reader cache. Plus the in-memory ledger the card reads. |
 
 Surface: `POST /api/sync/run` (the ONE code path both triggers use — a 15-minute
 launchd `curl` and the `/models` **Repo sync** card) and `GET /api/sync/status`
 (the card's fetch-free poll). Route contract: the `sync-routes.ts` row in
-`src/dashboard/CLAUDE.md`. Config reference: the `SYNC_REPOS` row in the repo
-`CLAUDE.md`.
+`src/dashboard/reference/notes.md`. Config reference: the `SYNC_REPOS` section
+at the end of this file.
 
 ## The locking contract (stated ONCE, here)
 
@@ -209,9 +209,23 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   **Evidence is the ONLY thing that subsumes, with one exception.** `subsumed =
   fresh(lastLocalSectionMs) || state === "blocked"`. `blocked` subsumes regardless of
   freshness because the sweeper is not a safe substitute there at all: it is the
-  unmerged-paths / interrupted-operation refusal and the sweeper has NO pre-flight of
-  its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so routing a
-  blocked tick to it would stage and commit a human's half-finished merge — and the
+  unmerged-paths / interrupted-operation refusal, and `listWikiSubtreeDirty` treats a
+  `UU` entry as ordinary dirt, so a sweep would stage and commit a human's
+  half-finished merge. The ledger is in memory, so a restart empties that `blocked`:
+  the sweeper therefore runs the loop's own check on the tree itself every tick
+  (`treeOperationBlock`, exported from `run.ts`: the pre-flight plus unmerged paths
+  anywhere in the repo, no lock taken) and stands down with the reason (F37, arch
+  review 2026-11-16). The pre-flight covers a rebase, `git am`, a merge, a
+  cherry-pick, a revert (`REVERT_HEAD`, `--no-commit` included), a sequence paused
+  after a resolved conflict (`sequencer`), a bisect (`BISECT_LOG`) and an
+  `index.lock` young (transient), old or dated in the future (blocked) — the last
+  three entries and the future-dated lock are F37's, and they block `syncRepo`'s
+  own tick too. Each block reason names its remedy (`git bisect reset`,
+  `git cherry-pick --quit` / `git revert --quit`, `--continue`/`--abort`, removing
+  the lock). In `syncRepo` the fetch runs FIRST and the pre-flight after it: a
+  fetch writes only remote-tracking refs, `FETCH_HEAD` and objects, so it is safe
+  in every blocked state, and the card's ahead/behind and last fetch stay live
+  through a bisect; a block outranks a failed fetch in the reported state. The
   conditions that produce `blocked` (a leftover `MERGE_HEAD`, a stale `index.lock`,
   conflict markers) persist across ticks until a human clears them, which is what
   makes a one-tick sample sound there and nowhere else. Every OTHER state — `error`,
@@ -229,6 +243,64 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   silent stand-down over a wiki nothing is committing. Residual, accepted: a healthy
   pass still buys ~26h of grace, so at most ONE daily sweep is skipped after the remote
   goes away; and `blocked` subsumes for as long as it lasts, but never silently.
+- **The evidence stamp is not the answer to "will the next tick commit this page".**
+  A rebase-conflict `blocked` and an in-section `rebase failed` withhold the stamp
+  although their commit landed, and the next tick commits again. So the ledger also
+  records `lastCommitStep` (`passed` / `failed` at `git add`/`git commit`, either
+  section / `not-reached`), and `syncLoopOutlook` (`decide.ts`, read by Done) calls a
+  `blocked`/`error` after a passed step `unpushed`, not `stopped`. Its `sweeper`
+  field is `sweeperOutcome`, the table below (F36).
+
+## Who commits a page the plans board left dirty
+
+The board's writes pass no committer (`src/plans/write.ts`). Done's refusal of such a
+page (`pendingBoardWriteMessage`, `src/plans/board-dirt.ts`) names the loop from
+`syncLoopOutlook` and the daily sweep only when the root is one `sweeperCommits` says
+the sweeper commits AND `sweeperOutcome` answers `commits`. `sweeperOutcome` is
+`sweeperSubsumption` (stands down) first, then `paused` (no-op: the sweeper's
+`onDefaultBranch` guard), then commit step `failed` with state `error` (refused: the
+sweeper's `git add`/`git commit` runs in the same repo with the same config and
+hooks), else `commits`. One row per outcome a recorded tick ends in. *Fresh* is
+`lastLocalSectionMs` inside `SYNC_SUBSUME_MAX_AGE_MS` (~26 h), from this tick or an
+earlier one; a row that stamps is always fresh right after it. Fresh evidence stands
+the sweeper down in every row, so the *stale* column decides the sweep.
+
+| # | The tick ends at | state | step | stamps | Loop commits the page next tick | Sweeper, stale | Done (outlook) | Sweep named, stale |
+|---|---|---|---|---|---|---|---|---|
+| 1 | no tick since boot | `unknown` | not-reached | — | if it runs | commits | never-run | yes |
+| 2 | not a git repo | `error` | not-reached | no | no | finds no repo | unreachable: the page has no `HEAD`, Done keeps its plain refusal | — |
+| 3 | pre-flight: operation in progress, old or future `index.lock` | `blocked` | not-reached | no | no | stands down | stopped | no |
+| 4 | pre-flight: young `index.lock` | `transient` | not-reached | no | yes | commits | healthy | yes |
+| 5 | fetch failed | `error` | not-reached | no | no | commits (push fails) | stopped | yes |
+| 6 | unmerged paths | `blocked` | not-reached | no | no | stands down | stopped | no |
+| 7 | off the default branch | `paused` | not-reached | no | no | no-op | stopped | no |
+| 8 | no upstream and no `origin/main` | `error` | not-reached | no | no | commits (no push) | stopped | yes |
+| 9 | wiki lock held by another process (`sectionSkipped`) | `deferred` | not-reached | no | yes | commits | healthy | yes |
+| 10 | `git add`/`git commit` lost `index.lock` | `transient` | failed | no | yes | commits | healthy | yes |
+| 11 | `git add` refused | `error` | failed | no | no | refused | stopped | no |
+| 12 | `git commit` refused (signing, hook, `user.email`) | `error` | failed | no | no | refused | stopped | no |
+| 13 | hard `deferred` (behind, rebase-blocking dirt) | `deferred` | passed | yes | yes | — | healthy | — |
+| 14 | rebase conflict | `blocked` | passed | no | yes, unpushed | stands down | unpushed | no |
+| 15 | rebase never started | `error` | passed | no | yes, unpushed | commits | unpushed | yes |
+| 16 | `ok`, or a soft hold | `ok`/`deferred` | passed | yes | yes | — | healthy | — |
+| 17 | push failed (either push) | `error` | passed | yes | yes, unpushed | — | unpushed | — |
+| 18 | push rejected, then re-fetch failed or rejected again | `retrying` | passed | yes | yes | — | healthy | — |
+| 19 | no-upstream refusal | `blocked` | passed | yes | yes, unpushed | — | unpushed | — |
+| 20 | retry section: `git add`/`git commit` refused | `error` | failed | no | no | refused | stopped | no |
+| 21 | retry section: lost `index.lock` | `transient` | failed | no | yes | commits | healthy | yes |
+| 22 | retry section: rebase conflict | `blocked` | passed | no | yes, unpushed | stands down | unpushed | no |
+| 23 | retry section: rebase never started | `error` | passed | no | yes, unpushed | commits | unpushed | yes |
+| 24 | retry section: hard `deferred` | `deferred` | passed | yes | yes | — | healthy | — |
+| 25 | retry section: wiki lock held | `deferred` | passed | no | yes | commits | healthy | yes |
+| 26 | a throw | `error` | not-reached | no | unknown | commits | stopped | yes |
+
+A `—` in the stale columns: that row stamps, so its evidence is fresh. A ledger whose
+last tick is older than `SYNC_STALE_SUCCESS_MS` reads `idle` whatever its row (except
+the stopped ones), with the same sweep answer. Without `sweeperCommits` no row names
+the sweep. Pinned row by row in `run.test.ts` («the board-dirt state table»).
+**Residual, accepted:** the ledger keeps only the LAST tick's step, so a refused
+commit followed by ticks that stop earlier (row 12, then row 5 while offline) reads
+row 5 and names a sweep that will be refused.
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The
@@ -239,4 +311,4 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
 
 ## `SYNC_REPOS` — the full entry from the root `CLAUDE.md` env table
 
-Comma-separated `name=path:mode` entries driving the **repo-sync loop** (`src/sync/`, `POST /api/sync/run`) — e.g. `mimir=../mimir:wiki,claude-skills=~/.claude/skills:plain,muninn=.:status-only`. Paths take the same resolution as `WIKI_EXTRA` (`~`, relative-to-repo-root). Modes: `wiki` (auto-commit behind a 5-min quiet period + rebase + push; **must** name a REGISTERED wiki root or the entry is warned about and dropped), `plain` (pull/rebase only, never commits or pushes), `status-only` (fetch + report only). Unset ⇒ no loop and the `/models` Repo sync card is hidden. A `wiki` entry stands the daily `wiki-committer` sweeper down for that repo **only on EVIDENCE the loop got THROUGH its commit path** — neither configuration, nor "a tick ran", nor "a tick reached the commit path and failed there" counts, so `syncSubsumesSweeper` requires a tick that reached the LOCAL (commit) section AND did not fail inside it, inside ~26h (`SYNC_SUBSUME_MAX_AGE_MS`). One exception: a `blocked` tick subsumes regardless of freshness, because the sweeper has no unmerged-paths pre-flight of its own and would commit a human's half-finished merge. The rule exactly as implemented: an `error`, `transient` or `blocked` outcome from BEFORE or INSIDE the local section stamps no evidence — but one from AFTER it (a failed push, the no-upstream `blocked`) DOES stamp, because the local commit path genuinely worked and the sweeper could add nothing the loop did not already commit — except a failure INSIDE the push retry's second local section, which stamps nothing either. No state subsumes on its own — `error`, `transient`, `paused`, no-upstream, a cold ledger all fall through once the evidence is stale — but a state reached after the local section carries a fresh stamp with it. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps subsuming and the daily warn stays silent (the `/models` card is red with a FRESH "last commit pass" — the diagnosis is the push, not the commit); (b) a repeating hard `deferred` with nothing in-subtree dirty stamps evidence without ever invoking `git commit`, so a broken signing key is undetected in that state until in-subtree dirt appears. The WARN is decoupled from the stand-down: no commit pass in ~26h always logs one, including while `blocked` subsumes.
+Comma-separated `name=path:mode` entries driving the **repo-sync loop** (`src/sync/`, `POST /api/sync/run`) — e.g. `mimir=../mimir:wiki,claude-skills=~/.claude/skills:plain,muninn=.:status-only`. Paths take the same resolution as `WIKI_EXTRA` (`~`, relative-to-repo-root). Modes: `wiki` (auto-commit behind a 5-min quiet period + rebase + push; **must** name a REGISTERED wiki root or the entry is warned about and dropped), `plain` (pull/rebase only, never commits or pushes), `status-only` (fetch + report only). Unset ⇒ no loop and the `/models` Repo sync card is hidden. A `wiki` entry stands the daily `wiki-committer` sweeper down for that repo **only on EVIDENCE the loop got THROUGH its commit path** — neither configuration, nor "a tick ran", nor "a tick reached the commit path and failed there" counts, so `syncSubsumesSweeper` requires a tick that reached the LOCAL (commit) section AND did not fail inside it, inside ~26h (`SYNC_SUBSUME_MAX_AGE_MS`). One exception: a `blocked` tick subsumes regardless of freshness, because a sweep there would commit a human's half-finished merge; the sweeper also runs the loop's tree check itself every tick (`treeOperationBlock`), since a restart empties the ledger. The rule exactly as implemented: an `error`, `transient` or `blocked` outcome from BEFORE or INSIDE the local section stamps no evidence — but one from AFTER it (a failed push, the no-upstream `blocked`) DOES stamp, because the local commit path genuinely worked and the sweeper could add nothing the loop did not already commit — except a failure INSIDE the push retry's second local section, which stamps nothing either. No state subsumes on its own — `error`, `transient`, `paused`, no-upstream, a cold ledger all fall through once the evidence is stale — but a state reached after the local section carries a fresh stamp with it. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps subsuming and the daily warn stays silent (the `/models` card is red with a FRESH "last commit pass" — the diagnosis is the push, not the commit); (b) a repeating hard `deferred` with nothing in-subtree dirty stamps evidence without ever invoking `git commit`, so a broken signing key is undetected in that state until in-subtree dirt appears. The WARN is decoupled from the stand-down: no commit pass in ~26h always logs one, including while `blocked` subsumes.

@@ -34,7 +34,7 @@ test("the inline group holds exactly the inline components", () => {
   const lines = componentReference("wiki");
   const start = lines.findIndex((l) => l.startsWith("# Inline"));
   expect(start).toBeGreaterThan(0);
-  expect(namesIn(lines.slice(start))).toEqual(["Verdict", "Pill"]);
+  expect(namesIn(lines.slice(start))).toEqual(["Verdict", "Pill", "Check"]);
 });
 
 test("every enum value and default the reference prints parses with fellBack false", () => {

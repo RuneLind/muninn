@@ -1,0 +1,689 @@
+{
+  "version": 1,
+  "about": "Reference forms on a wiki page and the normalized ids they give. Shared by plan-status-sweep (sweep-lib.test.ts) and muninn's live-chip parser (PR 3b). Synthetic owners, repos, numbers and titles only. Per case: readerConfig is the wiki's .wiki-reader.json (prGrammar, trackers), ownerFlag the sweep's --owner. Per row: page is the whole page, titles the PR titles a lookup returns (a bare #n with no title does not resolve), keys the page's key set (sorted), bodyKeys the distinct key mentions the body pattern finds in text order (code fences included), ids the distinct PR ids the sweep keeps in text order (a bare #n or PR #n only when its title carries a page key as a whole number), marked the ids muninn's reader marks (all of ids with a prGrammar; only pull URLs and owner/repo#n without one). Per case, noProd maps repo ids to whether prGrammar.noProd lists them (the match ignores case).",
+  "cases": [
+    {
+      "name": "a wiki with prGrammar and a tracker project",
+      "readerConfig": {
+        "trackers": [
+          {
+            "id": "jira",
+            "projects": [
+              "DEMO"
+            ],
+            "frontmatterKeys": ["issue","tickets"]
+          }
+        ],
+        "prGrammar": {
+          "owner": "acme",
+          "aliases": {
+            "api": "acme-api",
+            "web": "acme-web",
+            "e2e": "acme-e2e",
+            "docs": "other-org/docs-site",
+            "acme-legacy": "other-org/legacy"
+          },
+          "noProd": [
+            "acme-e2e"
+          ]
+        }
+      },
+      "ownerFlag": null,
+      "rows": [
+        {
+          "name": "pull URL",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nMerged in https://github.com/acme/acme-api/pull/101 today.\n",
+          "titles": {
+            "acme/acme-api#101": "DEMO-11: first part"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#101"
+          ],
+          "marked": [
+            "acme/acme-api#101"
+          ]
+        },
+        {
+          "name": "PR #n as the text of a link to its pull URL is one id",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\nSee [PR #101](https://github.com/acme/acme-api/pull/101) for it.\n",
+          "titles": {
+            "acme/acme-api#101": "DEMO-11: first part"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#101"
+          ],
+          "marked": [
+            "acme/acme-api#101"
+          ]
+        },
+        {
+          "name": "owner/repo#n, with and without a space",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nSee acme/acme-web#205 and other-org/docs-site #12.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-web#205",
+            "other-org/docs-site#12"
+          ],
+          "marked": [
+            "acme/acme-web#205",
+            "other-org/docs-site#12"
+          ]
+        },
+        {
+          "name": "repo #n for a hyphenated name, resolved under the owner",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nacme-web #206 and acme-web PR #207 are open.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-web#206",
+            "acme/acme-web#207"
+          ],
+          "marked": [
+            "acme/acme-web#206",
+            "acme/acme-web#207"
+          ]
+        },
+        {
+          "name": "aliases, including PR #n after one and an alias to another owner; one digit is too short",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\napi #103, web PR #208, e2e #17, e2e #7 and docs #12.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#103",
+            "acme/acme-web#208",
+            "acme/acme-e2e#17",
+            "other-org/docs-site#12"
+          ],
+          "marked": [
+            "acme/acme-api#103",
+            "acme/acme-web#208",
+            "acme/acme-e2e#17",
+            "other-org/docs-site#12"
+          ]
+        },
+        {
+          "name": "an alias wins over the hyphenated-name rule",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nacme-legacy #44 moved; acme-new #45 did not.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "other-org/legacy#44",
+            "acme/acme-new#45"
+          ],
+          "marked": [
+            "other-org/legacy#44",
+            "acme/acme-new#45"
+          ]
+        },
+        {
+          "name": "a word that is not an alias and has no hyphen is no reference",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nsee #12 and item #345.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "bare #n and PR #n resolve through repos: and stay when the title carries a page key",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\n#104 fixes it, PR #106 follows, DEMO-12 is next.\n",
+          "titles": {
+            "acme/acme-api#104": "DEMO-11: fix",
+            "acme/acme-api#106": "Follow-up (DEMO-12)"
+          },
+          "keys": [
+            "DEMO-11",
+            "DEMO-12"
+          ],
+          "bodyKeys": [
+            "DEMO-12"
+          ],
+          "ids": [
+            "acme/acme-api#104",
+            "acme/acme-api#106"
+          ],
+          "marked": [
+            "acme/acme-api#104",
+            "acme/acme-api#106"
+          ]
+        },
+        {
+          "name": "a bare #n whose title carries a longer number is not the page's",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\n#105 is somewhere else.\n",
+          "titles": {
+            "acme/acme-api#105": "DEMO-110: other work"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a key only in a code fence still counts for a bare #n",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\n#107 is the fix.\n\n```\nDEMO-15\n```\n",
+          "titles": {
+            "acme/acme-api#107": "DEMO-15 fix"
+          },
+          "keys": [
+            "DEMO-15"
+          ],
+          "bodyKeys": [
+            "DEMO-15"
+          ],
+          "ids": [
+            "acme/acme-api#107"
+          ],
+          "marked": [
+            "acme/acme-api#107"
+          ]
+        },
+        {
+          "name": "a bare #n on a page with no repos: home is no reference",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\n#104 fixes it.\n",
+          "titles": {
+            "acme/acme-api#104": "DEMO-11: fix"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "Jira keys: frontmatter, title, filename and body, configured project only",
+          "rel": "plans/demo-21-keys.mdx",
+          "page": "---\ntitle: DEMO-22 keys\njira: [DEMO-23]\n---\n\nDEMO-24 and [DEMO-25](https://jira.example/browse/DEMO-25); OTHER-26, Q-16, DEMO-027 and DEMO-28x are not keys.\n",
+          "titles": {},
+          "keys": [
+            "DEMO-21",
+            "DEMO-22",
+            "DEMO-23",
+            "DEMO-24",
+            "DEMO-25"
+          ],
+          "bodyKeys": [
+            "DEMO-24",
+            "DEMO-25"
+          ],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a chained filename stem gives every number in the chain",
+          "rel": "plans/2026-05-04-demo-7588-7969-notes.mdx",
+          "page": "---\ntitle: Forms\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-7588",
+            "DEMO-7969"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a chained stem stops at a far number (a year): the base alone",
+          "rel": "plans/demo-8045-2026-notes.mdx",
+          "page": "---\ntitle: Forms\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-8045"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a key in a directory name is not counted: the filename stem only",
+          "rel": "plans/demo-8045-run/notes.mdx",
+          "page": "---\ntitle: Forms\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "chained titles: KEY-a/b and KEY-a + b, a far number not expanded",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-7588/7969 and DEMO-158 + 169, DEMO-8045/2026\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-158",
+            "DEMO-169",
+            "DEMO-7588",
+            "DEMO-7969",
+            "DEMO-8045"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "frontmatter tickets, issue and owns",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\ntickets: [DEMO-31]\nissue: DEMO-32\nowns: DEMO-33\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-31",
+            "DEMO-32",
+            "DEMO-33"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a scalar jira: value",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: DEMO-34\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-34"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a block-list jira: value gives no key (muninn's parseFrontmatter emits nothing for a block list)",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira:\n  - DEMO-35\n  - DEMO-36\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a block-list tickets: value gives no key",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\ntickets:\n  - DEMO-37\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "jira: prose reads uppercase keys only, as muninn's stampedKeys",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: demo-10 (kilde)\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "jira: an entry that is exactly a key reads in any case",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: [demo-11, DEMO-12 (kilde)]\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-11",
+            "DEMO-12"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "issue: prose reads any case, uppercased, project-bounded",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\nissue: demo-13 (kilde), ora-14\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-13"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a lowercase key in the title is no key (titles are uppercase only)",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: demo-2 bot-plan\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title shorthand of another digit count does not expand",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-1450/999 x\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-1450"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title shorthand with a leading zero does not expand",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-145/045 x\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-145"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title shorthand that does not end cleanly does not expand, and the base stands",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-145/174x\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-145"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title key followed by a letter is no key",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-12x notes\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title key followed by -digit is no key",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-1-2 steps\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title shorthand 700 from its base expands (the gap cap is 1000)",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-1000/1700 x\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-1000",
+            "DEMO-1700"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title chain of three numbers expands to all three",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: DEMO-145/146 + 147 x\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-145",
+            "DEMO-146",
+            "DEMO-147"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a stem chain that hits a number of another digit count loses the key",
+          "rel": "plans/demo-145-2026-x.mdx",
+          "page": "---\ntitle: Forms\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a title written as an inline list is no title (muninn reads a list)",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: [DEMO-16 x]\n---\n\nx\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a jira: value in single quotes is read without them",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: 'demo-15'\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-15"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a lowercase frontmatter key is read and uppercased",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: [demo-103]\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "DEMO-103"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "jira: is muninn's stamped rule, not project-bounded; tickets: and issue: drop a key outside the configured projects",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\njira: [ORA-1]\ntickets: [ORA-2]\nissue: ORA-3\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "ORA-1"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "owns: is read as muninn's lint check 14 reads it, with no project filter",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\nowns: [ORA-7]\n---\n\nx\n",
+          "titles": {},
+          "keys": [
+            "ORA-7"
+          ],
+          "bodyKeys": [],
+          "ids": [],
+          "marked": []
+        },
+        {
+          "name": "a bare #n takes 3 to 5 digits: #12 and a 6-digit number are no reference",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\n#12, #123, #12345 and #123456.\n",
+          "titles": {
+            "acme/acme-api#12": "DEMO-11: fix",
+            "acme/acme-api#123": "DEMO-11: fix",
+            "acme/acme-api#12345": "DEMO-11: fix",
+            "acme/acme-api#123456": "DEMO-11: fix"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#123",
+            "acme/acme-api#12345"
+          ],
+          "marked": [
+            "acme/acme-api#123",
+            "acme/acme-api#12345"
+          ]
+        },
+        {
+          "name": "repo #n and alias #n take 2 to 5 digits",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\napi #1, api #12, api #12345, api #123456, acme-web #3 and acme-web #34.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#12",
+            "acme/acme-api#12345",
+            "acme/acme-web#34"
+          ],
+          "marked": [
+            "acme/acme-api#12",
+            "acme/acme-api#12345",
+            "acme/acme-web#34"
+          ]
+        },
+        {
+          "name": "overlap precedence: url over qualified, repo or alias over bare",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-web]\n---\n\nhttps://github.com/acme/acme-api/pull/101#102, acme/acme-api#103, api #104 and acme-new #105.\n",
+          "titles": {
+            "acme/acme-web#102": "DEMO-11: fix",
+            "acme/acme-web#104": "DEMO-11: fix",
+            "acme/acme-web#105": "DEMO-11: fix"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#101",
+            "acme/acme-api#103",
+            "acme/acme-api#104",
+            "acme/acme-new#105"
+          ],
+          "marked": [
+            "acme/acme-api#101",
+            "acme/acme-api#103",
+            "acme/acme-api#104",
+            "acme/acme-new#105"
+          ]
+        },
+        {
+          "name": "PR #n as link text to another repo's pull URL: the text resolves through repos:, the target is its own id, so two ids",
+          "rel": "plans/demo-11-forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\nSee [PR #101](https://github.com/other-org/other-repo/pull/101).\n",
+          "titles": {
+            "acme/acme-api#101": "DEMO-11: first part",
+            "other-org/other-repo#101": "Unrelated upstream change"
+          },
+          "keys": [
+            "DEMO-11"
+          ],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#101",
+            "other-org/other-repo#101"
+          ],
+          "marked": [
+            "acme/acme-api#101",
+            "other-org/other-repo#101"
+          ]
+        }
+      ],
+      "noProd": {
+        "acme/acme-e2e": true,
+        "ACME/Acme-E2E": true,
+        "acme/acme-api": false
+      }
+    },
+    {
+      "name": "a wiki with neither prGrammar nor trackers",
+      "readerConfig": {},
+      "ownerFlag": "acme",
+      "rows": [
+        {
+          "name": "the sweep uses --owner and the built-in aliases; the reader marks owner-qualified forms only",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\n---\n\nacme/acme-api#301, https://github.com/acme/acme-web/pull/302, api #303 and tool-x #304.\n",
+          "titles": {},
+          "keys": [],
+          "bodyKeys": [],
+          "ids": [
+            "acme/acme-api#301",
+            "acme/acme-web#302",
+            "acme/melosys-api#303",
+            "acme/tool-x#304"
+          ],
+          "marked": [
+            "acme/acme-api#301",
+            "acme/acme-web#302"
+          ]
+        },
+        {
+          "name": "a bare #n is the sweep's only; the reader leaves it unmarked",
+          "rel": "plans/forms.mdx",
+          "page": "---\ntitle: Forms\nrepos: [acme-api]\n---\n\n#305 lands ABC-12.\n",
+          "titles": {
+            "acme/acme-api#305": "ABC-12 change"
+          },
+          "keys": [
+            "ABC-12"
+          ],
+          "bodyKeys": [
+            "ABC-12"
+          ],
+          "ids": [
+            "acme/acme-api#305"
+          ],
+          "marked": []
+        },
+        {
+          "name": "the generic key pattern: any project, two to six digits, MEL- and Q- skipped, filename keys MELOSYS- only",
+          "rel": "plans/melosys-77-abc-31.mdx",
+          "page": "---\ntitle: XYZ-9 keys\n---\n\nABC-12, MEL-13, Q-14, ABC-1 and ABC-1234567 are read as written.\n",
+          "titles": {},
+          "keys": [
+            "ABC-12",
+            "MELOSYS-77",
+            "XYZ-9"
+          ],
+          "bodyKeys": [
+            "ABC-12"
+          ],
+          "ids": [],
+          "marked": []
+        }
+      ],
+      "noProd": {
+        "acme/melosys-e2e-tests": false
+      }
+    }
+  ]
+}

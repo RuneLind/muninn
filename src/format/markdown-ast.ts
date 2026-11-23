@@ -14,6 +14,7 @@
  */
 
 import { lineCodeSpanRanges } from "./code-spans.ts";
+import { nextNeedle } from "./linear-scan.ts";
 import {
   COMPONENT_ATTRS,
   COMPONENT_NAMES,
@@ -647,6 +648,108 @@ export function markdownCodeRegions(body: string, from = 0): ProtectedRegion[] {
   return regions;
 }
 
+/** One piece of a page's markup, as {@link markdownMarkup} reads it. */
+export interface MarkupToken {
+  kind: "frontmatter" | "fence" | "tag" | "sentinel";
+  start: number;
+  /** The token's source: the whole frontmatter block, one fence line, or one tag (a multi-line opener whole). */
+  text: string;
+  /** A tag's component name. */
+  name?: string;
+  /**
+   * Where a tag stands, which decides whether the reader renders it: `lead` is
+   * `line` when only white space is before it on its line (a block tag must
+   * start its line: a list or quote marker or prose there leaves it literal),
+   * `rest` is `line` when only white space follows it (a multi-line opener
+   * owns its line), and `gap` is `inline` when no line break lies between the
+   * previous tag (or the frontmatter) and this one, else `line` (an inline
+   * component's tags must share a line; a blank line before a block tag
+   * changes nothing the reader renders). Frontmatter and fence lines carry
+   * none: the whole line is their text.
+   */
+  lead?: "line" | "text";
+  rest?: "line" | "text";
+  gap?: "inline" | "line";
+}
+
+/** Any known component's tag in the parser's own attribute grammar
+ *  ({@link COMPONENT_OPEN_RE}, `INLINE_COMPONENT_OPEN_RE`): double-quoted values and
+ *  white space between them, line breaks included, so a multi-line opener is
+ *  one token. A failed match stops at the first character the grammar rejects,
+ *  except an open quote, which runs to the next `"`. */
+const MARKUP_TAG_SOURCE = `</?(${COMPONENT_NAMES.join("|")})\\b(?:\\s+[A-Za-z][\\w-]*="[^"]*")*\\s*/?>`;
+
+/**
+ * The page's markup, in source order, read as the reader renders it: the
+ * frontmatter block, every fence line the reader renders ({@link readerFences}:
+ * backticks, at most 3 spaces of indent, an opener with no closer stays prose)
+ * and every known component tag outside frontmatter, those fences and inline
+ * code spans, each with where it stands (`lead`, `rest`, `gap`). Two texts with
+ * the same tokens at the same offsets have the same markup; the Discuss Apply
+ * guard (`src/wiki/discuss-apply.ts`) compares a page before and after an edit
+ * this way. A tag the reader prints as text (a multi-line opener, a tag after a
+ * list marker) is still a token, so an edit that makes it live changes a token.
+ * Linear in the body's length, apart from `readerFences`, whose
+ * `extractFences` keeps a quadratic residual.
+ */
+export function markdownMarkup(body: string): MarkupToken[] {
+  const out: MarkupToken[] = [];
+  const fm = FRONTMATTER_BLOCK_RE.exec(body);
+  const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
+  if (fm && fmEnd > 0) out.push({ kind: "frontmatter", start: 0, text: fm[0] });
+  const lines = body.slice(fmEnd).split("\n");
+  const lineStart: number[] = [];
+  let off = fmEnd;
+  for (const l of lines) {
+    lineStart.push(off);
+    off += l.length + 1;
+  }
+  const code: ProtectedRegion[] = [];
+  const fenced = new Array<boolean>(lines.length).fill(false);
+  for (const f of readerFences(lines.join("\n"))) {
+    for (const k of [f.opener, f.closer]) out.push({ kind: "fence", start: lineStart[k]!, text: lines[k]! });
+    for (let k = f.opener; k <= f.closer; k++) fenced[k] = true;
+    code.push({ start: lineStart[f.opener]!, end: lineStart[f.closer]! + lines[f.closer]!.length });
+  }
+  lines.forEach((l, k) => {
+    if (!fenced[k]) pushInlineCodeSpans(l, lineStart[k]!, code);
+  });
+  code.sort((a, b) => a.start - b.start);
+  let r = 0;
+  let prevEnd = fmEnd;
+  // One forward cursor (tags come in order), so a line of many tags stays linear:
+  // the last line break and the last non-space character before it.
+  let scan = fmEnd;
+  let lastNl = fmEnd - 1;
+  let lastInk = -1;
+  const restRe = /[^\S\n]*(?:\n|$)/y;
+  const re = new RegExp(MARKUP_TAG_SOURCE, "g");
+  re.lastIndex = fmEnd;
+  for (let m = re.exec(body); m !== null; m = re.exec(body)) {
+    const at = m.index;
+    while (r < code.length && code[r]!.end <= at) r++;
+    if (r < code.length && code[r]!.start <= at) continue;
+    for (; scan < at; scan++) {
+      const c = body[scan]!;
+      if (c === "\n") lastNl = scan;
+      else if (!/\s/.test(c)) lastInk = scan;
+    }
+    const end = at + m[0].length;
+    restRe.lastIndex = end;
+    out.push({
+      kind: "tag",
+      start: at,
+      text: m[0],
+      name: m[1]!,
+      lead: lastInk <= lastNl ? "line" : "text",
+      rest: restRe.test(body) ? "line" : "text",
+      gap: lastNl >= prevEnd ? "line" : "inline",
+    });
+    prevEnd = end;
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
 /** Whether this offset falls inside any of the regions {@link markdownCodeRegions} returned. */
 export function inProtectedRegion(pos: number, regions: readonly ProtectedRegion[]): boolean {
   return regions.some((r) => pos >= r.start && pos < r.end);
@@ -678,6 +781,31 @@ export function stripFactWrappers(body: string): string {
   return body.replace(FACT_TAG_SCAN_RE, (match, offset: number) =>
     inProtectedRegion(offset, regions) ? match : "",
   );
+}
+
+/**
+ * {@link stripFactWrappers} with an offset map: `map[i]` is the offset in `body`
+ * of `text[i]`, so a position found in the stripped text maps back to the file.
+ * Removes exactly what the strip removes (the same scan and protected regions);
+ * `text` equals `stripFactWrappers(body)`, which a test pins.
+ */
+export function stripFactWrappersWithMap(body: string): { text: string; map: number[] } {
+  const identity = (): { text: string; map: number[] } => ({ text: body, map: Array.from({ length: body.length }, (_, i) => i) });
+  if (!body || body.indexOf("Fact") === -1) return identity();
+  const regions = factProtectedRegions(body);
+  const parts: string[] = [];
+  const map: number[] = [];
+  let at = 0;
+  for (const m of body.matchAll(FACT_TAG_SCAN_RE)) {
+    const start = m.index!;
+    if (inProtectedRegion(start, regions)) continue;
+    for (let i = at; i < start; i++) map.push(i);
+    parts.push(body.slice(at, start));
+    at = start + m[0].length;
+  }
+  for (let i = at; i < body.length; i++) map.push(i);
+  parts.push(body.slice(at));
+  return { text: parts.join(""), map };
 }
 
 /** How many `<Fact …>` OPENING tags a body carries — i.e. how many inline marks a
@@ -716,7 +844,7 @@ export function factClaimIndex(value: string | undefined): number | null {
  * null when the heading is not a claim heading.
  *
  * Deliberately LOOSER than `CLAIM_HEADING_RE` in
- * `dashboard/views/components/wiki-integrate.ts` (which owns the strict prompt
+ * `src/wiki/core/wiki-integrate.ts` (which owns the strict prompt
  * contract used to derive edits): this one only decides whether to open a
  * `<section id="fc-claim-N">` wrapper, so over-matching costs an unused id and
  * under-matching costs a card the client can't find. A shared strict regex would
@@ -841,7 +969,7 @@ function checklistRows(list: ListBlock, top: boolean): ChecklistRow[] {
  * then the rest of the line (an info string on an opener, nothing on a closer).
  *
  * The 0-3 space bound is CommonMark's, and is the same bound
- * `dashboard/views/components/wiki-integrate.ts` uses in its own
+ * `src/wiki/core/wiki-integrate.ts` uses in its own
  * `FENCE_SHAPE_RE`. The two agree on INDENT and disagree on MARKER: that file
  * accepts `~~~` and this parser does not, so a tilde block is code to the
  * fact-check line mask and markdown here. Narrower than the earlier spelling of
@@ -1787,36 +1915,59 @@ export type InlineSegment =
   | { kind: "component"; name: InlineComponentName; attrs: Record<string, string>; text: string };
 
 // `<Name …>text</Name>` or `<Name …/>` for the inline whitelist only. Attr shape
-// mirrors COMPONENT_OPEN_RE (double-quoted values); the paired form's inner text
-// is captured non-greedily so the FIRST matching close wins. Built from the name
-// list so the whitelist lives in one place. Global — callers reset lastIndex.
-const INLINE_COMPONENT_RE = new RegExp(
-  `<(${INLINE_COMPONENT_NAMES.join("|")})((?:\\s+[A-Za-z][\\w-]*="[^"]*")*)\\s*(?:/>|>([\\s\\S]*?)</\\1>)`,
+// mirrors COMPONENT_OPEN_RE (double-quoted values). The regex matches the OPEN
+// tag only; the paired form's close is found by a memoized `indexOf`, the FIRST
+// matching close winning — the old single regex's lazy `([\s\S]*?)</\1>` rescanned
+// to the end of the text from every unclosed opener (F30: quadratic). Built from
+// the name list so the whitelist lives in one place. Global — callers reset lastIndex.
+const INLINE_COMPONENT_OPEN_RE = new RegExp(
+  `<(${INLINE_COMPONENT_NAMES.join("|")})((?:\\s+[A-Za-z][\\w-]*="[^"]*")*)\\s*(\\/>|>)`,
   "g",
 );
 
 /**
  * Split an inline string into literal-text runs and inline-component tokens.
- * Linear in input length (one global-regex sweep), so a page of thousands of
- * inline components stays single-pass — this runs on every streaming delta the
- * same way the block parser does. A string with no `<` short-circuits to a
- * single text run.
+ * Linear in input length (one global-regex sweep for the open tags, and one
+ * memoized close search per name), so a page of thousands of inline components
+ * — or of unclosed open tags — stays single-pass; this runs on every streaming
+ * delta the same way the block parser does. A string with no `<` short-circuits
+ * to a single text run.
  */
 export function scanInlineComponents(text: string): InlineSegment[] {
   if (text.indexOf("<") === -1) return [{ kind: "text", text }];
 
   const segments: InlineSegment[] = [];
-  INLINE_COMPONENT_RE.lastIndex = 0;
+  const closes = new Map<string, (from: number) => number>();
+  const re = INLINE_COMPONENT_OPEN_RE;
+  re.lastIndex = 0;
   let last = 0;
   let m: RegExpExecArray | null;
-  while ((m = INLINE_COMPONENT_RE.exec(text)) !== null) {
-    if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
+  while ((m = re.exec(text)) !== null) {
     const name = m[1] as InlineComponentName;
+    const openEnd = re.lastIndex;
+    let inner = "";
+    let end = openEnd;
+    if (m[3] === ">") {
+      const close = `</${name}>`;
+      let next = closes.get(name);
+      if (!next) closes.set(name, (next = nextNeedle(text, close)));
+      const at = next(openEnd);
+      if (at < 0) {
+        // Unclosed: literal text, and the scan resumes one character on, as the
+        // single regex did.
+        re.lastIndex = m.index + 1;
+        continue;
+      }
+      inner = text.slice(openEnd, at);
+      end = at + close.length;
+    }
+    if (m.index > last) segments.push({ kind: "text", text: text.slice(last, m.index) });
     if (observingComponentTags()) reportComponentTag({ name, rawAttrs: m[2] ?? "", inline: true });
     const attrs = parseAttrs(m[2] ?? "", name);
-    // Self-closing → group 3 is undefined; treat as empty inner text.
-    segments.push({ kind: "component", name, attrs, text: m[3] ?? "" });
-    last = INLINE_COMPONENT_RE.lastIndex;
+    // Self-closing → empty inner text.
+    segments.push({ kind: "component", name, attrs, text: inner });
+    last = end;
+    re.lastIndex = end;
   }
   if (segments.length === 0) return [{ kind: "text", text }];
   if (last < text.length) segments.push({ kind: "text", text: text.slice(last) });

@@ -7,8 +7,8 @@ import {
 } from "./wiki-mermaid.ts";
 
 /**
- * The client-side mermaid enhancer is DOM-driven and the repo has no browser
- * test env (no happy-dom/jsdom) — client code is otherwise exercised only by
+ * The client-side mermaid enhancer is DOM-driven and these tests do not use
+ * happy-dom — client code is otherwise exercised only by
  * building the bundle (wiki-render.test.ts). So here we test the pure,
  * browser-free parts: the pinned CDN URL, the theme mapping, and the
  * "no fence → no work" gate. The DOM render path is left to the orchestrator's

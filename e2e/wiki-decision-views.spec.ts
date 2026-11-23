@@ -13,7 +13,10 @@
  * instead), and that one row with many questions moves no other row's
  * decision.
  *
- * No model calls, no DB rows: one muninn over a temp wiki holding two
+ * The question grid (`src/format/question-grid.ts`) shares the server: its place
+ * under the status block, the cap, the fold with none open, both links, its tokens and 390 px.
+ *
+ * No model calls, no DB rows: one muninn over a temp wiki holding four
  * synthetic plan pages.
  */
 
@@ -24,6 +27,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { renderDay } from "../src/format/item-dates.ts";
 
 const PORT = e2ePort("wiki-decision-views");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -115,6 +119,92 @@ const MANY = [
   "",
 ].join("\n");
 
+/** The grid counts an age from the render day, so a fixed `since=` passes on one day only. */
+const FOUR_DAYS_AGO = new Date(Date.parse(`${renderDay()}T00:00:00Z`) - 4 * 86_400_000).toISOString().slice(0, 10);
+
+const GRID_REL = "plans/questions.mdx";
+// A long question and answer, one open with a card, one open with none, and 9
+// decided, so the cap folds some.
+const GRID = [
+  "---",
+  "title: Question plan",
+  "plan_status: in-flight",
+  "questions_to: [Rune]",
+  "---",
+  "",
+  "# Question plan",
+  "",
+  "<StatusRows>",
+  "",
+  "- **Status:** in-flight 2026-10-30",
+  "",
+  "</StatusRows>",
+  "",
+  "<NextMoves>",
+  "",
+  `<Lane kind="waiting" since="${FOUR_DAYS_AGO}">`,
+  "",
+  "- **O1**",
+  "",
+  "</Lane>",
+  "",
+  "</NextMoves>",
+  "",
+  '<Question id="O1" choices="A|B">',
+  "",
+  "Which shape do the rows take?",
+  "",
+  "</Question>",
+  "",
+  '<Fold title="Decisions">',
+  "",
+  "## Decisions",
+  "",
+  "<DecisionLog>",
+  "",
+  "- **O1** — Which shape do the rows take?",
+  "- **O2** — Which key groups them, given that a very long question must wrap inside its own column and never push the page wider than a phone?",
+  ...Array.from({ length: 9 }, (_, i) => `- **O${i + 3}** — Which option number ${i + 3} holds? Closed 2026-10-0${(i % 9) + 1} (D1).`),
+  "- **D1** — The reader reads the groups by key, and a very long answer wraps inside its own column on a phone as well. Rune Lind, 04.10.",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
+const SETTLED_REL = "plans/settled-questions.mdx";
+// Twelve questions, all decided: the grid folds to one line.
+const SETTLED = [
+  "---",
+  "title: Settled questions",
+  "type: plan",
+  "plan_status: shipped",
+  "---",
+  "",
+  "# Settled questions",
+  "",
+  "<StatusRows>",
+  "",
+  "- **Status:** shipped 2026-10-30",
+  "",
+  "</StatusRows>",
+  "",
+  "<Fold title=\"Decisions\">",
+  "",
+  "## Decisions",
+  "",
+  "<DecisionLog>",
+  "",
+  ...Array.from({ length: 12 }, (_, i) => `- **O${i + 1}** — Which option number ${i + 1} holds? Closed 2026-10-01 (D1).`),
+  "- **D1** — The reader reads the groups by key. Kari Nordmann, 04.10.",
+  "",
+  "</DecisionLog>",
+  "",
+  "</Fold>",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
@@ -123,6 +213,8 @@ test.beforeAll(async () => {
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
   await writeFile(path.join(root, MANY_REL), MANY, "utf8");
+  await writeFile(path.join(root, GRID_REL), GRID, "utf8");
+  await writeFile(path.join(root, SETTLED_REL), SETTLED, "utf8");
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -377,5 +469,81 @@ test.describe("Wiki reader: decision chain view and PR strip", () => {
     expect(qs).toHaveLength(8);
     for (const q of qs) expect(q.x + q.width).toBeLessThanOrEqual(arrow.x + 0.5);
     expect(new Set(qs.map((q) => Math.round(q.y))).size).toBeGreaterThan(1);
+  });
+});
+
+test.describe("Wiki reader: question grid", () => {
+  const openGrid = async (page: Page, width: number, focus = false) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(GRID_REL)}`);
+    await expect(page.locator(".wiki-article .qg")).toBeVisible();
+    if (focus) {
+      await page.locator("body").press("f");
+      await expect(page.locator("#wikiFocusExit")).toBeVisible();
+    }
+  };
+
+  test("sits between the status block and the follow-up block, open questions first", async ({ page }) => {
+    await openGrid(page, 1440);
+    const y = async (sel: string) => (await page.locator(sel).first().boundingBox())!.y;
+    expect(await y(".wiki-article .qg")).toBeGreaterThan(await y(".wiki-article .status-rows"));
+    expect(await y(".wiki-article .next-moves")).toBeGreaterThan(await y(".wiki-article .qg"));
+    await expect(page.locator(".qg-count")).toHaveText("2 open of 11");
+    await expect(page.locator(".qg-rows > .qg-row .qg-id")).toHaveText(["O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8"]);
+    await expect(page.locator(".qg-rows > .qg-row").first().locator(".qg-chip")).toHaveText(/^open · [45] d$/);  // 5 when the run crosses Oslo midnight
+  });
+
+  test("the cap holds the rest behind one click", async ({ page }) => {
+    await openGrid(page, 1440);
+    await expect(page.locator(".qg-more .qg-row").first()).toBeHidden();
+    await page.locator(".qg-more > summary").click();
+    await expect(page.locator(".qg-more .qg-row .qg-id")).toHaveText(["O9", "O10", "O11"]);
+  });
+
+  test("a card link lands on the card, and an id opens its fold on its item", async ({ page }) => {
+    await openGrid(page, 1440);
+    await page.locator(".qg-card").first().click();
+    await expect(page.locator('.wiki-article .question[data-question-id="O1"]')).toBeInViewport();
+    await openGrid(page, 1440);
+    await page.locator(".qg-rows > .qg-row").nth(2).locator(".qg-id a").click();
+    await expect(page.locator(".wiki-article li.dl-item#o3")).toBeInViewport();
+  });
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: the chips draw in the status tokens`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await openGrid(page, 1440);
+      await expect(page.locator(".qg-chip-open").first()).toHaveCSS("color", await token(page, "color", "--status-warning"));
+      await expect(page.locator(".qg-chip-done").first()).toHaveCSS("color", await token(page, "color", "--status-success"));
+    });
+  }
+
+  for (const scheme of ["dark", "light"] as const) {
+    test(`${scheme}: with none open the grid is one line, and a click opens every row`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(SETTLED_REL)}`);
+      const summary = page.locator(".wiki-article .qg-settled > summary");
+      await expect(summary).toContainText("none open · 12");
+      await expect(page.locator(".qg-rows .qg-row").first()).toBeHidden();
+      expect((await page.locator(".wiki-article .qg").boundingBox())!.height).toBeLessThan(60);
+      await expect(summary).toHaveCSS("color", await token(page, "color", "--text-soft"));
+      await summary.click();
+      await expect(page.locator(".qg-rows > .qg-row")).toHaveCount(12);
+      await expect(page.locator(".qg-rows > .qg-row").last()).toBeVisible();
+    });
+  }
+
+  test("at 390 px nothing runs past the page, and rows keep two columns", async ({ page }) => {
+    await openGrid(page, 390, true);
+    const over = await page.evaluate(() => {
+      const art = document.querySelector(".wiki-article")!.getBoundingClientRect().right;
+      return Array.from(document.querySelectorAll(".wiki-article .qg, .wiki-article .qg *")).filter((e) => e.getBoundingClientRect().right > art + 0.5).map((e) => e.className);
+    });
+    expect(over).toEqual([]);
+    const row = page.locator(".qg-rows > .qg-row").nth(1);
+    const id = (await row.locator(".qg-id").boundingBox())!;
+    const q = (await row.locator(".qg-q").boundingBox())!;
+    expect(q.x).toBeGreaterThan(id.x + id.width - 1);
   });
 });

@@ -24,6 +24,7 @@ import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { tracedOneShot } from "./traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
+import { finishAgentRunTrace } from "../tracing/agent-run-trace.ts";
 import {
   agentStatus,
   getConnectorLabel,
@@ -135,8 +136,10 @@ export interface FencedOneShotOptions {
   /** Called with the error message on failure, so each vertical keeps its own
    *  log line. The error is rethrown regardless. */
   onError?: (message: string) => void;
-  /** Test seams — production callers pass neither. */
+  /** Test seam — production callers omit it. */
   oneShot?: typeof executeOneShot;
+  /** A span to run under instead of a root of its own. A test seam, and the
+   *  consolidation watcher's way of keeping each draft under its `watcher:` span. */
   tracer?: Tracer;
 }
 
@@ -156,12 +159,13 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
   // still finishes the root span and completes the run, instead of leaking both. The
   // shared `tracedOneShot` owns the `claude` span's whole lifecycle (start + ok-end +
   // error-end), so the catch only needs the root finish + `completeRequest`.
+  const run = { kind: opts.kind, name: opts.runName };
+  // A caller's span (the consolidation watcher's) is not this run's root: it holds
+  // many drafts, so it carries no one run's identity. That run stays ring-only.
+  const ownRoot = tracer.name === opts.traceName ? run : null;
   let reqId: string | undefined;
   try {
-    reqId = agentStatus.startRequest(botConfig.name, opts.phase, undefined, {
-      kind: opts.kind,
-      name: opts.runName,
-    });
+    reqId = agentStatus.startRequest(botConfig.name, opts.phase, undefined, run);
     agentStatus.setSourcePage(reqId, opts.sourcePage);
     agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
     if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
@@ -212,8 +216,9 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
       costUsd: result.costUsd,
     };
 
-    tracer.finish("ok", { source: opts.source, ...usage });
+    finishAgentRunTrace(tracer, ownRoot, "ok", { source: opts.source, ...usage });
     agentStatus.completeRequest(reqId, {
+      status: "ok",
       ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
@@ -224,8 +229,13 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { source: opts.source, error: message });
-    if (reqId) agentStatus.completeRequest(reqId, {});
+    finishAgentRunTrace(tracer, ownRoot, "error", { source: opts.source, error: message });
+    if (reqId) {
+      agentStatus.completeRequest(reqId, {
+        status: "error",
+        ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
+      });
+    }
     opts.onError?.(message);
     throw err;
   }

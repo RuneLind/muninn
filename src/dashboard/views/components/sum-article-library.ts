@@ -28,6 +28,7 @@ import {
 import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 import { SIMILAR_CHUNK_CHARS, SIMILAR_DEBOUNCE_MS } from "./sum-reader.ts";
 import { docPanelMenuScript } from "./doc-panel-menu.ts";
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
 
 /**
  * How many times, and how far apart, the doc panel re-reads a document after a
@@ -275,6 +276,9 @@ export function sumArticleLibraryScript(): string {
   return `
     ${docPanelMenuScript()}
 
+    // A summary's \`url\` is stored data of any scheme: a live href only when safe.
+    var sumSafeHref = ${isSafeLinkHref.toString()};
+
     // --- Shared doc helpers (used across all summaries components) ---
 
     function docTitle(docId) {
@@ -362,7 +366,7 @@ export function sumArticleLibraryScript(): string {
 
     // "Open original" anchor. cls picks the row style (recent vs library list).
     function sourceLink(doc, cls) {
-      if (!doc.url) return '';
+      if (!doc.url || !sumSafeHref(doc.url)) return '';
       var s = SOURCES[doc.source];
       var label = s ? s.linkLabel : 'Open ↗';
       return '<a class="' + (cls || 'recent-item-link') + '" href="' + esc(doc.url) +
@@ -419,6 +423,7 @@ export function sumArticleLibraryScript(): string {
       // A fact-check write still running must not reopen the panel it finishes into.
       if (typeof sumFactcheckOnClose === 'function') sumFactcheckOnClose();
       if (typeof sumLinksOnClose === 'function') sumLinksOnClose();
+      if (typeof sumDiscoverOnClose === 'function') sumDiscoverOnClose();
       // A re-run started from this panel keeps running. Its ONE stream moves to
       // the shelf's job card, which is the surface the reader can now see; the
       // menu and its status line go with the panel.
@@ -1356,6 +1361,8 @@ export function sumArticleLibraryScript(): string {
       if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, null);
       // 🔎 Find links: shown only on a document the save path accepts (its options route).
       if (typeof sumLinksOnOpen === 'function') sumLinksOnOpen(docId, _shareDoc ? source : null, null);
+      // ▶ Find on YouTube: shown only on a registered youtube document.
+      if (typeof sumDiscoverOnOpen === 'function') sumDiscoverOnOpen(docId, _shareDoc ? source : null, null);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');
@@ -1384,7 +1391,7 @@ export function sumArticleLibraryScript(): string {
         followEl.href = '/research?q=' + encodeURIComponent(title) +
           (_shareDoc ? '&factcheck=' + encodeURIComponent(source + ':' + docId) : '');
       }
-      linksEl.innerHTML = url && linkLabel
+      linksEl.innerHTML = url && linkLabel && sumSafeHref(url)
         ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>'
         : '';
 
@@ -1461,7 +1468,7 @@ export function sumArticleLibraryScript(): string {
         // A per-document label (x-article: a transcript means an X video)
         // is known now.
         linkLabel = labelFor(splitTranscript(cleaned).transcript !== null);
-        if (videoUrl && linkLabel && (!url || (src && src.docLinkLabels))) {
+        if (videoUrl && linkLabel && (!url || (src && src.docLinkLabels)) && sumSafeHref(url || videoUrl)) {
           linksEl.innerHTML = '<a href="' + esc(url || videoUrl) + '" target="_blank" rel="noopener">' + esc(linkLabel) + '</a>';
         }
         var mainEl = document.getElementById('sumArticleMain');
@@ -1478,6 +1485,7 @@ export function sumArticleLibraryScript(): string {
           }
           if (typeof sumFactcheckOnOpen === 'function') sumFactcheckOnOpen(docId, _shareDoc ? source : null, mainEl);
           if (typeof sumLinksOnOpen === 'function') sumLinksOnOpen(docId, _shareDoc ? source : null, mainEl);
+          if (typeof sumDiscoverOnOpen === 'function') sumDiscoverOnOpen(docId, _shareDoc ? source : null, mainEl);
         }
 
         // Similar searches the summary's opening (readerSimilarQuery), the
@@ -1489,7 +1497,7 @@ export function sumArticleLibraryScript(): string {
         // No body to read: the rail's searches go out on the title.
         scheduleRightRail(title, docId, myRequest, source);
         // Unread, a per-document source falls back to its registry label.
-        if (url && src && !linksEl.querySelector('a')) {
+        if (url && src && !linksEl.querySelector('a') && sumSafeHref(url)) {
           linksEl.innerHTML = '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(src.linkLabel) + '</a>';
         }
         var failEl = document.getElementById('sumArticleMain');

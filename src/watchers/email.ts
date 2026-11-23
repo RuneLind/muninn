@@ -1,6 +1,6 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, HAIKU_TIMEOUT_MS, type HaikuTelemetry } from "../scheduler/executor.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import { gmailServerKeys, loadRawMcpServers } from "../ai/mcp-config-utils.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";

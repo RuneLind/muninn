@@ -608,3 +608,39 @@ describe("subscribe: one reader's unsubscribe is scoped to that reader", () => {
     expect(got).toEqual([]);
   });
 });
+
+describe("the run behind a job", () => {
+  beforeEach(() => agentStatus.clearRequest());
+  const row = (name: string) => agentStatus.getRecentCompleted().find((r) => r.name === name)!;
+
+  test("attachRun answers the run's identity while the run is live, then nothing", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v", title: "A talk", url: "u" });
+    expect(store.attachRun(id, {})).toEqual({ kind: "capture", name: "Test: A talk" });
+    store.completeJob(id, "s", "c");
+    expect(store.attachRun(id, {})).toBeUndefined();
+    expect(store.attachRun("unknown", {})).toBeUndefined();
+  });
+
+  test("a live run says which trace it writes without offering the card a link", () => {
+    const store = makeStore();
+    const id = store.createJob({ videoId: "v", title: "Live", url: "u" });
+    store.attachRun(id, { traceId: "t-live" });
+    const live = agentStatus.getAll().find((r) => r.name === "Test: Live")!;
+    expect(live.liveTraceId).toBe("t-live");
+    expect(live.traceId).toBeUndefined();
+    store.completeJob(id, "s", "c");
+    expect(row("Test: Live").traceId).toBe("t-live");
+  });
+
+  test("a failed job completes its run as error, a finished one as ok", () => {
+    const store = makeStore();
+    const failed = store.createJob({ videoId: "v", title: "Bad", url: "u" });
+    store.failJob(failed, "boom");
+    expect(row("Test: Bad").status).toBe("error");
+
+    const fine = store.createJob({ videoId: "v", title: "Good", url: "u" });
+    store.completeJob(fine, "s", "c");
+    expect(row("Test: Good").status).toBe("ok");
+  });
+});

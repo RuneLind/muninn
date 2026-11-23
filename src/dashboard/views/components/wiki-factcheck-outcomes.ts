@@ -1,7 +1,7 @@
 /**
  * Pure, DOM-free tally + summary helpers for the /wiki reader's fact-check meta
- * line. Split out of `wiki-browser.ts` (which has DOM side effects at module load,
- * so it can't be imported in tests) so these unit-test directly — the same split
+ * line. Split out of `wiki-browser.ts` (which then ran DOM code at module load;
+ * it is importable since `boot()`, but needs a DOM) so these unit-test directly — the same split
  * rationale as `wiki-ask-render.ts` / `wiki-filter.ts`.
  */
 

@@ -86,6 +86,9 @@ interface EditBase {
 interface CardUi {
   section: HTMLElement;
   questionId: string;
+  /** The rendered wording's hash (`data-question-hash`): a save names it, and
+   *  the route refuses it with 409 question_changed once the page moved. */
+  questionHash: string | null;
   server: CardServerState;
   lang: QuestionLanguage;
   L: QuestionLabels;
@@ -190,6 +193,7 @@ export function enhanceAnswerCards(
     const ui: CardUi = {
       section,
       questionId: section.getAttribute("data-question-id") ?? "",
+      questionHash: section.getAttribute("data-question-hash"),
       server: serverStateOf(section.getAttribute("data-question-state")),
       lang,
       L: questionLabels(lang),
@@ -659,6 +663,7 @@ async function save(ctx: CardsCtx, ui: CardUi): Promise<void> {
     choice: ui.choice,
     body: ui.body,
   };
+  if (ui.questionHash) payload.questionHash = ui.questionHash;
   if (base) Object.assign(payload, { answerId: base.answerId, baseVersion: base.version });
   else if (ui.carried) Object.assign(payload, carryFieldsFor(ui.carriedFrom, ctx.carryTokens));
   let status = 0;

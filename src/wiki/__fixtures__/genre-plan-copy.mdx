@@ -1,0 +1,68 @@
+---
+# A trimmed COPY of mimir plans/muninn-mdx-genre-pictures.mdx (2026-10-31), for lint-genre.test.ts
+# (state table rows A33/A34). Kept: the frontmatter keys check 26 reads, the brief and the cost table.
+# plan_status is set to proposed on purpose; the live page is ready.
+title: "One picture per genre: report pages open with the picture their question needs"
+plan_status: proposed
+genre: campaign
+tags: [muninn, wiki, plan]
+---
+
+# One picture per genre: report pages open with the picture their question needs
+
+## Brief
+
+<StatusRows>
+
+- **Status:** ready 2026-10-31 · follow-ups none
+- **PRs:** 4 planned · 0 merged · 0 fix rounds
+
+</StatusRows>
+
+<NextMoves>
+
+<Lane kind="you" who="Du">
+
+1. **Start the campaign on the laptop.** Paste the 2026-10-31 handoff into a fresh session; it runs `/fable-orchestrate` on P1 → P2 → P3 → P4.
+
+</Lane>
+
+</NextMoves>
+
+**What.** A report page's first screen answers its genre's question in a picture: the PR strip for a campaign, outcome bars for a run, the failing hop for a bug, a cost range for a proposed plan. Today 94 of 165 live plan pages have only a mermaid flowchart.
+
+<Chart kind="funnel" caption="Live plan pages, both wikis, 2026-10-31">
+
+| Live pages | Count | Of |
+|---|---|---|
+| Live plan pages | 165 | |
+| Only picture is mermaid | 94 | 165 |
+| Hold a numeric table with no chart | 81 | 165 |
+| No picture and no PR ledger | 54 | 165 |
+
+</Chart>
+
+**How.** P1 adds Chart kinds `bars` and `range` (`chart-block.ts`, `chart-view.ts`). P2 adds page-local lint checks `genre-missing`, `genre-picture` and `chart-candidate`, run by `wiki-check.ts`. P3 puts the Picture column and `genre:` in the skill. P4 gives live pages their genre and slot-6 picture.
+
+**PR ledger.**
+
+| PR | What it gives | State | Review |
+|---|---|---|---|
+| **1 — chart kinds** | `bars` and `range` on the reader | not started | — |
+| **2 — lint** | `genre-missing`, `genre-picture`, `chart-candidate` | not started: after P1 | — |
+| **3 — skill rule** | `genre:` and the slot-6 picture in `/mdx-explainer` | not started: after P2 | — |
+| **4 — sweep** | live pages get genre and picture | not started: after P3, re-priced from P2's count | — |
+
+<Fold title="Cost and time estimate" summary="about $330–670 for the slate; P4 re-priced after P2">
+
+## Cost and time estimate
+
+| Slice | Interval | Basis |
+|---|---|---|
+| P1 — chart kinds | $120–220 | the size of #724, which added four kinds, plus the interval reader |
+| P2 — lint | $100–180 | one muninn PR with a scope predicate and a hand check |
+| P3 — skill rule | $30–70 | a skills commit, the check-13 change and two reviews |
+| P4 — sweep | $80–200 | provisional: genre, wraps and slot-6 moves on about 165 pages; re-priced from P2's count |
+| **Slate** | **$330–670** | |
+
+</Fold>

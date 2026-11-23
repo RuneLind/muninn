@@ -13,6 +13,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Runs the whole workflow plus `unit-timings`, the job that refreshes the unit timing table.
+  workflow_dispatch:
 
 # A new push supersedes the old run on the same ref. `main` is excluded from the
 # cancel so a merge always gets a complete result.
@@ -103,8 +105,17 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun audit --audit-level=high
 
-  test:
+  # The unit chain, split across three runners. `scripts/test-chain.ts run`
+  # runs the links of package.json's `test` that `scripts/unit-shards.json`
+  # puts on this shard, each link writing its own junit file; the `test` job
+  # below checks the merged result.
+  test-shard:
     runs-on: ubuntu-24.04
+    strategy:
+      # Every shard reports, so one red does not hide another.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       # `src/test/test-db-url.ts` hardcodes the default `…@127.0.0.1:5435/muninn_test`
       # and this job sets no `MUNINN_TEST_DATABASE_URL`, so the host port has to
@@ -155,10 +166,122 @@ jobs:
       # Creates `muninn_test`, applies `db/init.sql` and baselines the migrations.
       # The `src/db/` links of the test chain connect to it directly.
       - run: bun run db:setup:test
-      # The full chain, exactly as a developer runs it — including the `&&`-linked
-      # single-file links, which exist because `mock.module` leaks across a whole
-      # `bun test` process (see CLAUDE.md, Testing).
-      - run: bun run test
+      # This shard's links of the full chain, exactly the processes a developer's
+      # `bun run test` runs one after another — including the single-file links,
+      # which exist because `mock.module` leaks across a whole `bun test`
+      # process (see CLAUDE.md, Testing).
+      - run: bun scripts/test-chain.ts run --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-junit-${{ matrix.shard }}
+          path: junit/
+          retention-days: 7
+          overwrite: true
+      # PR only: each test file the PR adds or changes, alone, against a 10 s
+      # bar (`scripts/unit-slow-allowlist.txt` lists the exceptions). On shard 1
+      # because it has the full setup; after the links, so it adds no wait.
+      - name: Time the test files this PR adds or changes
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && matrix.shard == 1 }}
+        # Healthy files take seconds each. 15 min is 900 s: room for two 300 s kills
+        # plus the other files; a third kill uses the whole budget and the step is cut.
+        timeout-minutes: 15
+        run: bun scripts/test-chain.ts changed origin/${{ github.base_ref }}
+
+  # PR only: the import-direction allowlist may not gain entries. `layer-direction.test.ts`
+  # cannot see a PR that adds an upward import AND its list line; this compares the
+  # list's entry count with the base's. Its own status, so a reviewed exception (the PR
+  # body says why) turns only this job red, never `test`. No install: the check path
+  # imports nothing outside the repo.
+  layer-ratchet:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: The layer allowlist does not grow
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # The PR checkout is a merge commit; its first parent is the base the tree was merged onto.
+        run: |
+          if git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
+            base='HEAD^1'
+          else
+            echo "HEAD is not a merge commit: comparing with the PR's base sha $BASE_SHA"
+            base="$BASE_SHA"
+          fi
+          bun scripts/layer-ratchet.ts --check-base "$base"
+
+  # One status named `test` for the unit chain. Three green shards are not
+  # enough: a link on no shard, or on two, leaves every shard green. This
+  # checks the merged junit files: every file the chain runs ran exactly once,
+  # every `mock.module` and own-process file was alone in its process, a link that wrote no
+  # junit is named as a crash, and every shard finished `success`.
+  # `!cancelled()`, not `always()`: a superseded PR run would report every
+  # file missing.
+  test:
+    needs: test-shard
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unit-junit-*
+          path: junit
+          merge-multiple: true
+      - run: bun scripts/test-chain.ts check --junit junit --result ${{ needs.test-shard.result }}
+
+  # Times every file of the chain alone, wall clock, on a runner with the
+  # shards' setup, and uploads `scripts/unit-timings.json` as an artifact:
+  # laptop and CI times differ by file type, so the table is made here. Commit
+  # it, then `bun scripts/test-chain.ts rebalance` in a PR of its own.
+  unit-timings:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: muninn
+          POSTGRES_PASSWORD: muninn
+          POSTGRES_DB: muninn
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U muninn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn_test
+      LOG_DIR: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: bun run db:setup:test
+      - run: bun scripts/test-chain.ts refresh
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-timings
+          path: scripts/unit-timings.json
+          retention-days: 30
 
   # The image's two build ARGs decide what a deployment CAN do, and neither is
   # visible to tsc or to any suite (rationale for the pair: the Dockerfile).
@@ -258,10 +381,12 @@ jobs:
           grep -q "expected true or false" bogus.log \
             || { echo "::error::the build failed, but not on the build-arg check"; cat bogus.log; exit 1; }
 
-  # The Playwright suite, split across four runners. One serial run took 13–15
-  # min and set the wall clock of every push; four shards each run a quarter of
-  # it. Each shard still runs `workers: 1` and `retries: 0`
-  # (`playwright.config.ts` says why): the parallelism comes from separate
+  # The Playwright suite, split across six runners. One serial run took 13–15
+  # min and set the wall clock of every push; six shards each run a sixth of
+  # it. Six, not four, since the unit job moved to its own three shards and the
+  # e2e shards became the critical path; a run peaks at 12 concurrent jobs.
+  # Each shard still runs `workers: 1` and `retries: 0` (`playwright.config.ts`
+  # says why): the parallelism comes from separate
   # runners, so no host is more loaded than one serial run was.
   # `scripts/e2e-shards.ts` packs whole spec files onto shards by the times in
   # `e2e/shard-timings.json`; `--shard=i/n` balances by test count and left one
@@ -272,7 +397,7 @@ jobs:
       # Every shard reports, so one red does not hide another.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -303,7 +428,7 @@ jobs:
       # holding a live token fights the production bot for Telegram.
       CI: "true"
       # One name per shard, so the fan-in's download into one directory does not
-      # overwrite three of the four reports.
+      # overwrite all but one of the reports.
       PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.shard }}.zip
     steps:
       - uses: actions/checkout@v4
@@ -363,7 +488,7 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
 
-  # One status named `e2e` for the whole suite. Four green shards are not
+  # One status named `e2e` for the whole suite. Six green shards are not
   # enough on their own: a file in no shard's list, or in two, still leaves
   # every shard green. This job compares the merged report with
   # `playwright test --list` — every test ran exactly once — and fails on any
@@ -372,6 +497,7 @@ jobs:
   # reason. The merged HTML report and the JSON are uploaded on every run;
   # `bun scripts/e2e-shards.ts refresh e2e-results.json` rewrites the timing
   # table from the JSON.
+  # It also fails once the specs missing from that table took over 60 s.
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}

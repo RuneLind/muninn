@@ -25,7 +25,7 @@ import {
   factWrapperForms,
   isWrapperOnlyEdit,
   type FactcheckClaimAnchor,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 
 const anchor = (index: number, verdict: string): FactcheckClaimAnchor => ({

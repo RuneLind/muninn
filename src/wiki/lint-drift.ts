@@ -40,8 +40,8 @@ import {
   type Block,
   type ListChild,
 } from "../format/markdown-ast.ts";
-import { fenceLineStates, frontmatterEndLine } from "../dashboard/views/components/wiki-integrate.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { fenceLineStates, frontmatterEndLine } from "./core/wiki-integrate.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { parseFrontmatter, type WikiPageMeta } from "./store.ts";
 import { splitFrontmatter } from "./page-text.ts";
 import type { LintFinding } from "./lint.ts";
@@ -166,6 +166,21 @@ export function isLiveReportPage(relPath: string, fm: Record<string, unknown>, p
   if (!isReportPage(relPath, fm)) return false;
   if (planStatus !== undefined && LIVE_PLAN_STATUSES.includes(planStatus)) return true;
   return fm.plan_status === undefined && planStatus === undefined && relPath.startsWith("plans/");
+}
+
+/**
+ * The picture scope of lint check 26's `genre-missing`
+ * (`lint-genre.ts`), and P4's sweep list: a live report page
+ * ({@link isLiveReportPage}), or a `plan_status: shipped` page with
+ * `followups: open` (the store's validated value, so `Open` is not open).
+ */
+export function isPictureScopePage(
+  relPath: string,
+  fm: Record<string, unknown>,
+  planStatus: string | undefined,
+  followups: string | undefined,
+): boolean {
+  return isLiveReportPage(relPath, fm, planStatus) || (planStatus === "shipped" && followups === "open");
 }
 
 /** Lines as `wc -l` counts them, plus a last line with no newline: a trailing

@@ -168,7 +168,10 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     attrs: {
       kind: { doc: "Which chart the table is read as", onFallback: "is not a chart kind; it renders as its table" },
       caption: { doc: "A line over the chart" },
-      value: { doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of)", printType: '"<column>"' },
+      value: {
+        doc: "gap: the column of values; funnel: the count column (default: the first after the label that is not Of); bars: the column drawn as one bar per row (a trailing run of bold label rows after at least one ordinary row is the total, printed below a rule with no bar; a log scale when every value is above 0 and the largest is over 100 times the smallest); range: the column of intervals (`$40–80`, `~$40 – $80`, `40–80 USD`; one number is a point; every row in one unit; a trailing run of bold label rows after at least one ordinary row is the total, drawn below a rule)",
+        printType: '"<column>"',
+      },
       target: { doc: "gap: the column of targets", printType: '"<column>"' },
       gap: { doc: "gap: the column of written gaps", printType: '"<column>"' },
       mark: { doc: "gap: a column drawn as a tick", printType: '"<column>"' },
@@ -213,6 +216,18 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
       caption: { doc: "A line naming the map, also its accessible name" },
       external: { doc: "Names with no repos/ page; each links its integrations/ page when one exists", printType: '"<name>;<name>"' },
       groups: { doc: "A node's column (default: repos, or external for an external name)", printType: '"<name>=<group>;…"' },
+    },
+  },
+  Check: {
+    doc: "The facts a `you` step names: one tag, the last thing on the step's first line, after its sentence (`1. **Add the key.** <Check env=\"KEY\" on=\"laptop\" />`). Give at least one probe attribute, each attribute once. `restart` always reads unknown for now. The wiki reader keeps an empty slot for it; every other surface prints nothing.",
+    teach: WIKI,
+    attrs: {
+      env: { doc: "An env key the instance must hold", printType: '"<ENV_KEY>"' },
+      migration: { doc: "A schema_migrations version that must be applied, zero-padded as its file prefix", printType: '"<NNN>"' },
+      checkout: { doc: "A repo that must be checked out on the machine", printType: '"<repo>"' },
+      pushed: { doc: "A repo whose commits must be pushed", printType: '"<repo>"' },
+      restart: { doc: "The muninn port that must have restarted", printType: '"<port>"' },
+      on: { doc: "The machines that must hold it (default: the reader's own)", printType: '"<machine>,<machine>"' },
     },
   },
 };

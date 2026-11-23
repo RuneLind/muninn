@@ -10,7 +10,7 @@ import {
 } from "./wiki-start-cards.ts";
 
 /**
- * The repo has no browser test env (no jsdom/happy-dom), so — like the sibling
+ * These tests do not use happy-dom, so — like the sibling
  * `wiki-factcheck-reader.test.ts` / `code-tabs.test.ts` — the DOM here is a
  * minimal hand-rolled shim and the real render path is left to the reader's
  * headless smoke.

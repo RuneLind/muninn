@@ -161,8 +161,9 @@ export const USER_ZONE_PATHS: readonly string[] = [
 /**
  * The wiki READ slice — the `wiki-read` route group: the reader page, the
  * listing, one page, its provenance block, another page's Related work (the
- * reader's second hop), explainer HTML, graph mode and a page's decision
- * chain as lineage lines.
+ * reader's second hop), explainer HTML, graph mode, a page's decision
+ * chain as lineage lines and another page's cross-page id targets
+ * (`/api/wiki/ref`, the hover and link of `D9 i [[page]]`).
  *
  * In the user zone ONLY when the caller says the read slice is the served wiki
  * surface (`ZoneDecisionInput.wikiReadSlice`, from `servesWikiReadSliceOnly` —
@@ -170,14 +171,19 @@ export const USER_ZONE_PATHS: readonly string[] = [
  * reader over every registered wiki, and role `user` gets 403 there, as before
  * the slice existed. Exact paths and GET/HEAD only: a later POST on one of
  * these paths stays admin by default-deny rather than arriving user-reachable.
+ * One entry is a pattern ({@link matchPathPattern}, `:file` = one non-empty
+ * segment): the page's own content-hashed script and stylesheet, which the
+ * reader cannot boot without. Never a prefix: `/wiki/assets/a/b` stays admin.
  */
 export const WIKI_READ_SLICE_PATHS: readonly string[] = [
   "/wiki",
+  "/wiki/assets/:file",
   "/api/wiki/pages",
   "/api/wiki/page",
   "/api/wiki/page/provenance",
   "/api/wiki/related",
   "/api/wiki/decision-chain",
+  "/api/wiki/ref",
   "/api/wiki/html",
   "/api/wiki/graph",
 ];
@@ -293,7 +299,7 @@ export function decideZone(input: ZoneDecisionInput): ZoneDecision {
   if (denied) return { allowed: false, zone: "admin", reason: `deny list: ${denied.pattern}` };
   if (inPathList(OPEN_ZONE_PATHS, input.path)) return { allowed: true, zone: "open", reason: "open zone" };
   if (inPathList(USER_ZONE_PATHS, input.path)) return { allowed: true, zone: "user", reason: "user zone" };
-  if (input.wikiReadSlice === true && effective === "GET" && WIKI_READ_SLICE_PATHS.includes(input.path)) {
+  if (input.wikiReadSlice === true && effective === "GET" && WIKI_READ_SLICE_PATHS.some((p) => matchPathPattern(p, input.path))) {
     return { allowed: true, zone: "user", reason: "wiki read slice" };
   }
   if (

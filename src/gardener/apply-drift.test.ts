@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { applyWikiProposal, applyWikiProposalGroup, listingDrift, type ApplyDeps } from "./apply.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";

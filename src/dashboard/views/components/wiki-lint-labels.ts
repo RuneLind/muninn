@@ -22,7 +22,13 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "question-block": "Question blocks the DecisionLog cannot close",
   "role-key": "Lane roles and question targets outside roleKeys",
   "case-board-labels": "<CaseBoard labels=> entries that name no case status",
+  "effort-unknown": "effort: values that name no effort in the work map",
+  "log-kind": "log.md entries whose kind is outside logKinds",
+  "plan-not-folded": "Shipped plans that name no durable page (folded_into)",
+  "cross-page-id-unlinked": "Ids another page defines, named with no link to it",
+  "step-query-missing-case": "Next-move steps whose query card lacks a case they name",
   "ledger-row-state": "PR ledger rows the strip cannot read a state from",
+  "plan-no-ledger": "Plans with two or more PRs and no PR ledger on the page",
   "chain-close-conflict": "Decisions whose «Lukker» the question's own close contradicts",
   "chart-table": "<Chart> tables the chart cannot draw, or draws with a note",
   "rule-tree": "<RuleTree> lists the tree cannot read: untoned outcomes, cases on two leaves",
@@ -50,7 +56,10 @@ export const LINT_LABELS: Record<LintCheck, string> = {
   "state-owns-unread": "owns: entries that name no key",
   "component-value": "Component values the renderer falls back on",
   "component-attr": "Component attributes the renderer drops",
+  "check-placement": "<Check> tags that are malformed or not the last thing on a you step's first line",
   "status-line": "Status words beside a plan link that disagree with its plan_status",
+  "genre-missing": "Live report pages with no genre: key",
+  "genre-picture": "Report pages whose first screen lacks their genre's picture, or whose genre: is not a slug",
 };
 
 /** A group's heading: its label, plus `(info)` when every finding in it carries

@@ -461,7 +461,7 @@ describe("Slack handler", () => {
     });
   });
 
-  describe("system prompt includes SLACK_POST_CAPABILITY when postToChannel provided", () => {
+  describe("system prompt includes slackPostCapability() when postToChannel provided", () => {
     test("appends posting capability to system prompt", async () => {
       const postToChannelMock = mock(() => Promise.resolve());
       const handler = createSlackMessageHandler(config, botConfig);

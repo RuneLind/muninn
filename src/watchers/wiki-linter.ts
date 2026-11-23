@@ -16,7 +16,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { lintWiki, LINT_CHECKS, type LintCheck } from "../wiki/lint.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import {
   seedLintProposals,
@@ -43,7 +43,13 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "question-block": { one: "question block problem", many: "question block problems" },
   "role-key": { one: "unknown role key", many: "unknown role keys" },
   "case-board-labels": { one: "unusable CaseBoard label", many: "unusable CaseBoard labels" },
+  "effort-unknown": { one: "unknown declared effort", many: "unknown declared efforts" },
+  "log-kind": { one: "log entry with an unlisted kind", many: "log entries with an unlisted kind" },
+  "plan-not-folded": { one: "shipped plan that names no durable page", many: "shipped plans that name no durable page" },
+  "cross-page-id-unlinked": { one: "id from another page with no link to it", many: "ids from another page with no link to them" },
+  "step-query-missing-case": { one: "step whose query lacks a case it names", many: "steps whose query lacks a case they name" },
   "ledger-row-state": { one: "PR ledger row with no readable state", many: "PR ledger rows with no readable state" },
+  "plan-no-ledger": { one: "plan with two or more PRs and no PR ledger", many: "plans with two or more PRs and no PR ledger" },
   "chain-close-conflict": { one: "contradicted «Lukker» close", many: "contradicted «Lukker» closes" },
   "chart-table": { one: "chart table problem", many: "chart table problems" },
   "rule-tree": { one: "rule tree problem", many: "rule tree problems" },
@@ -71,7 +77,10 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "state-owns-unread": { one: "owns: entry that names no key", many: "owns: entries that name no key" },
   "component-value": { one: "component value that falls back", many: "component values that fall back" },
   "component-attr": { one: "dropped component attribute", many: "dropped component attributes" },
+  "check-placement": { one: "misplaced or malformed check", many: "misplaced or malformed checks" },
   "status-line": { one: "stale status line", many: "stale status lines" },
+  "genre-missing": { one: "report page with no genre", many: "report pages with no genre" },
+  "genre-picture": { one: "genre picture missing from the first screen", many: "genre pictures missing from the first screen" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
@@ -127,7 +136,7 @@ export async function checkWikiLinter(
   //
   // **It runs even when this pass has NOTHING to propose, and before the
   // clean-wiki return.** The seeder's first rule is the SELF-HEAL, which retires
-  // every live `draft` group whose key no current finding mints — so a wiki
+  // every live group whose key no current finding mints — so a wiki
   // whose fixable findings have all been fixed is EXACTLY the state where every
   // live group is superseded. The first cut skipped the call on
   // `fixable.length === 0` and claimed the opposite ("nothing that could have
@@ -145,6 +154,7 @@ export async function checkWikiLinter(
         ...DEFAULT_LINT_PROPOSAL_DEPS,
         wikiDir: botConfig.wikiDir,
         wikiName: name,
+        push: botConfig.wikiAutoCommit?.push ?? true,
       });
       if (seeded.proposed > 0 || seeded.staled > 0) {
         log.info(

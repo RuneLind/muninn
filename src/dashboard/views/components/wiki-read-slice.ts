@@ -12,9 +12,11 @@
  *     {@link wikiReadSliceStyles}. CSS survives the re-renders that replace the
  *     breadcrumb, the answer pane and the rail.
  *  2. **Client guards** — {@link wikiToolsFlag} reads the same class; the
- *     reader (`wiki-browser.ts`) uses it to skip the fetches whose panels are
- *     hidden (index coverage, the start cards, Similar), to leave the Atlas tab
- *     out and to keep the rail on Connections ({@link readSliceStartTab}).
+ *     reader uses it to skip the fetches whose panels are hidden (index
+ *     coverage in `wiki-rail-controller.ts`, the start cards in `wiki-browser.ts`,
+ *     Similar in `wiki-article-controller.ts`), to leave the Atlas tab out and to
+ *     keep the rail on Connections (`switchConnTab`, article controller;
+ *     {@link readSliceStartTab}).
  *  3. **Server omissions** — `renderWikiPage({ tools: false })`
  *     (`views/wiki-page.ts`) renders no agent-presence chip, withholds the host
  *     path from `window.__WIKI_ROOT__`, and the `/wiki` route resolves no ask
@@ -26,6 +28,7 @@
  * flag, not on this class.
  */
 import {
+  STALE_COUNT_SURFACES,
   WIKI_READONLY_BLOCKED_SELECTOR,
   WIKI_READONLY_EGRESS_SELECTOR,
 } from "./wiki-readonly-client.ts";
@@ -51,15 +54,31 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   // tool-half routes (stale check PR 2a).
   '[data-conntab="stale"]',
   "#staleBody",
+  // The Stale check's counts outside the tab (PR 2b): the article pill, the
+  // rail badge, the home line and the home's Stale tab.
+  ...STALE_COUNT_SURFACES,
   // The issue board (`/wiki/issues`) and the gardener (`/wiki/gardener`).
   "#wikiBoardLink",
   ".wiki-gardener-icon",
+  // Discuss P1's «Ask Claude Code» (both controls) and its panel:
+  // `POST /api/wiki/discuss/handoff` is in the dropped `wiki` group.
+  "#wikiDiscussHandoffBtn",
+  "#wikiDiscussHandoffPageBtn",
+  "#wikiDiscussHandoffPanel",
+  // Discuss P3's tab and its body: `POST /api/wiki/discuss` and
+  // `/api/wiki/discuss/continue` are in the dropped `wiki` group.
+  '[data-conntab="discuss"]',
+  "#discussBody",
+  // P4's Apply and «Change the wording»: `POST /api/wiki/discuss/apply` is in the same group.
+  "[data-discuss-apply]",
+  "[data-discuss-reword]",
   // Stamp on a provenance ghost row: `POST /api/wiki/provenance/stamp`.
   "[data-prov-stamp]",
-  // The start view's What's new (digest) and Index (index-coverage, reindex)
+  // The start view's Your work, What's new (digest) and Index (index-coverage, reindex)
   // cards, the rail's coverage footer and Similar: the client does not fetch
   // them under the read slice, and these stop an empty box from showing.
   "#wikiWhatsNew",
+  "#wikiWorkCard",
   "#wikiIndexCard",
   "#wikiCoverageFoot",
   "#wikiSimilar",
@@ -84,7 +103,10 @@ export function wikiToolsFlag(doc: unknown = (globalThis as { document?: unknown
 }
 
 /** The overview tab to show: Atlas fetches `/api/wiki/atlas`, which the read
- *  slice does not register, so a stored or linked `view=atlas` lands on Hubs. */
-export function readSliceStartTab<T extends string>(tab: T, tools: boolean): T | "hubs" {
-  return !tools && tab === "atlas" ? "hubs" : tab;
+ *  slice does not register, so a stored or linked `view=atlas` lands on Hubs.
+ *  So does `view=stale` where the Stale tab is absent (`stale` false: the read
+ *  slice, or a read-only instance, D25). */
+export function readSliceStartTab<T extends string>(tab: T, tools: boolean, stale = tools): T | "hubs" {
+  if (!tools && tab === "atlas") return "hubs";
+  return !(tools && stale) && tab === "stale" ? "hubs" : tab;
 }

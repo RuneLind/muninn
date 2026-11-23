@@ -20,40 +20,47 @@
  */
 export function lineCodeSpanRanges(line: string): { start: number; end: number; runLen: number }[] {
   const ranges: { start: number; end: number; runLen: number }[] = [];
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
-      i++;
+  // Every maximal backtick run, and the runs of each length in order: a closer
+  // is the next run of the opener's length, found by a cursor per length, so an
+  // unmatched opener costs O(1) instead of a scan to the end of the line (fix
+  // round 2 of A4: `` \``a `` × 16k, every opener escaped to one backtick with
+  // no single-backtick closer, took 597 ms).
+  const runStart: number[] = [];
+  const runEnd: number[] = [];
+  const byLen = new Map<number, number[]>();
+  for (let k = 0; k < line.length; ) {
+    if (line[k] !== "`") {
+      k++;
       continue;
     }
-    let openEnd = i;
-    while (openEnd < line.length && line[openEnd] === "`") openEnd++;
+    let e = k;
+    while (e < line.length && line[e] === "`") e++;
+    const list = byLen.get(e - k);
+    if (list) list.push(runStart.length);
+    else byLen.set(e - k, [runStart.length]);
+    runStart.push(k);
+    runEnd.push(e);
+    k = e;
+  }
+  const cursor = new Map<number, number>();
+  let i = 0;
+  for (let r = 0; r < runStart.length; r++) {
+    if (runStart[r]! < i) continue; // inside a span already paired
+    let open = runStart[r]!;
+    const openEnd = runEnd[r]!;
     let slashes = 0;
-    while (i - slashes > 0 && line[i - slashes - 1] === "\\") slashes++;
-    if (slashes % 2 === 1) i++; // the escaped backtick is literal
-    const runLen = openEnd - i;
+    while (open - slashes > 0 && line[open - slashes - 1] === "\\") slashes++;
+    if (slashes % 2 === 1) open++; // the escaped backtick is literal
+    const runLen = openEnd - open;
     if (runLen === 0) continue;
-    let closeAt = -1;
-    let k = openEnd;
-    while (k < line.length) {
-      if (line[k] !== "`") {
-        k++;
-        continue;
-      }
-      let runEnd = k;
-      while (runEnd < line.length && line[runEnd] === "`") runEnd++;
-      if (runEnd - k === runLen) {
-        closeAt = k;
-        break;
-      }
-      k = runEnd;
-    }
-    if (closeAt === -1) {
-      i = openEnd; // unmatched run — literal backticks, no span
-    } else {
-      ranges.push({ start: i, end: closeAt + runLen, runLen });
-      i = closeAt + runLen;
-    }
+    const list = byLen.get(runLen);
+    let c = cursor.get(runLen) ?? 0;
+    while (list && c < list.length && runStart[list[c]!]! < openEnd) c++;
+    cursor.set(runLen, c);
+    if (!list || c >= list.length) continue; // unmatched run: literal backticks, no span
+    const close = list[c]!;
+    ranges.push({ start: open, end: runEnd[close]!, runLen });
+    i = runEnd[close]!;
   }
   return ranges;
 }

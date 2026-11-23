@@ -37,15 +37,18 @@ const LEDGER = "one time- and byte-bounded read of the claude-usage ledger, poll
 const REFRESH = "the plain read; its `?refresh=1` rebuild is on REFRESH_SIDE_EFFECTING_GETS";
 
 const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
+  // Living facts PR 4: the cross-page id hover renders ONE page off disk (its
+  // own sibling files) and reads the asked ids off it.
+  ["/api/wiki/ref", "renders one page from disk and reads its id targets: no outbound call, spawn, search or model spend"],
   ...[
     "/", "/docs", "/traces", "/memsearch", "/logs", "/search", "/search/document/:collection/*",
-    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/youtube",
+    "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/summaries/discover", "/youtube",
     "/x-articles", "/tiktok", "/vimeo", "/graph", "/wiki", "/wiki/issues", "/wiki/gardener",
     "/benchmark", "/benchmark/retrieval", "/benchmark/run-live/:traceId", "/benchmark/runs/:id",
     "/models", "/indexing", "/agents", "/plans", "/jira", "/chat",
   ].map((p) => [p, PAGE] as const),
   ...[
-    "/api/live", "/api/ready", "/favicon.svg", "/favicon.ico", "/theme-lab.js", "/api/dashboard-build-hash",
+    "/api/live", "/api/ready", "/favicon.svg", "/favicon.ico", "/theme-lab.js", "/wiki/assets/:file", "/api/dashboard-build-hash",
     "/api/attention", "/api/openapi.json", "/api/bots", "/api/bots/config", "/api/stats",
     "/api/memories", "/api/memories/by-user", "/api/memories/user/:userId", "/api/goals",
     "/api/goals/:userId", "/api/tasks", "/api/scheduled-tasks/:userId", "/api/threads",
@@ -63,7 +66,8 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/x-articles/video-options", "/api/tiktok/jobs", "/api/tiktok/options", "/api/vimeo/jobs",
     "/api/wiki/related", "/api/wiki/decision-chain", "/api/wiki/html",
     "/api/wiki/share/presets", "/api/wiki/chat-target", "/api/wiki/answers",
-    "/api/wiki/answers/export", "/api/wiki/proposals", "/api/wiki/linter-findings", "/api/wiki/stale",
+    "/api/wiki/answers/export", "/api/wiki/proposals", "/api/wiki/linter-findings", "/api/wiki/stale", "/api/wiki/claim-check",
+    "/api/wiki/work-map", "/api/wiki/step-done", "/api/wiki/decision-triage/status", "/api/wiki/decision-triage/overview",
     "/api/benchmark/preview", "/api/benchmark/cells/live/:traceId", "/api/benchmark/runs",
     "/api/benchmark/runs/:id", "/api/benchmark/runs/:id/rejudge-children",
     "/api/models/overview", "/api/agents/overview", "/api/sync/status", "/api/jira/archive",
@@ -74,6 +78,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/chat/conversations/:id/messages", "/chat/context-usage/:userId/:botName",
     "/chat/tool-usage/:userId/:botName", "/chat/reports/:botName/:userId/:issueKey",
     "/chat/specs/:botName/:userId/:issueKey", "/chat/dev-run/by-thread/:threadId",
+    "/api/summaries/discover/shelves",
   ].map((p) => [p, LOCAL] as const),
   ...[
     "/api/search/health", "/api/search/collections", "/api/search/collection/:name/documents",
@@ -83,6 +88,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/articles/document/*", "/api/youtube/document/*", "/api/x-articles/document/*",
     "/api/tiktok/document/*", "/api/vimeo/document/*", "/api/graph/collections",
     "/api/wiki/gardener/backlog-doc-delete-status", "/api/indexing/overview",
+    "/api/summaries/discover/seeds",
   ].map((p) => [p, HUGINN_READ] as const),
   ...[
     "/api/summaries/documents", "/api/wiki/reindex-status",

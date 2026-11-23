@@ -1,7 +1,7 @@
 /**
  * `<Fold>` through the CHAT page's own sanitizer.
  *
- * The repo has no browser test env (no jsdom, no happy-dom) and `sanitizeHtml`
+ * This check needs the real chat bundle, not happy-dom, and `sanitizeHtml`
  * is not exported — it is defined inside `web-format-browser.ts`, a `Bun.build`
  * entrypoint whose last line publishes it on `globalThis`. So the one place its
  * attribute allowlist can be driven is the real chat page with the real bundle,

@@ -285,12 +285,12 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
 
   test("an unclosed [[, markup inside a wikilink and a <Fact> that renders as text are findings", async () => {
     const { findings } = await wikiCheck(path.join(tmp, "page-checks/plans/s.mdx"));
-    expect(new Set(findings.map((f) => f.check))).toEqual(new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark", "missing-tldr"]));
+    expect(new Set(findings.map((f) => f.check))).toEqual(new Set(["index-truncation", "nested-annotation", "unrendered-fact-mark", "genre-missing", "missing-tldr"]));
   });
 
   test("a live plan with no <Tldr> first is a missing-tldr finding, and one whose box holds no <More> a tldr-no-more", async () => {
     expect((await wikiCheck(path.join(tmp, "page-checks/plans/k.mdx"))).findings.map((f) => f.check)).toContain("missing-tldr");
-    expect((await wikiCheck(path.join(tmp, "page-checks/plans/m.mdx"))).findings.map((f) => f.check)).toEqual(["tldr-no-more"]);
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/m.mdx"))).findings.map((f) => f.check)).toEqual(["genre-missing", "tldr-no-more"]);
     expect((await wikiCheck(path.join(tmp, "page-checks/concepts/ref.mdx"))).findings.map((f) => f.check)).toEqual(["missing-tldr"]);
   });
 
@@ -300,13 +300,13 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
   });
 
   test("a live plan_status with a trailing comment is read as the index reads it", async () => {
-    expect((await wikiCheck(path.join(tmp, "page-checks/archive/cs.mdx"))).findings.map((f) => f.check)).toEqual(["missing-tldr"]);
+    expect((await wikiCheck(path.join(tmp, "page-checks/archive/cs.mdx"))).findings.map((f) => f.check)).toEqual(["genre-missing", "missing-tldr"]);
     const found = (await runWikiCheck([path.join(tmp, "page-checks")])).out.map((l) => JSON.parse(l) as { check: string; relPath: string });
     expect(found).toContainEqual(expect.objectContaining({ check: "missing-tldr", relPath: "archive/cs.mdx" }));
   });
 
-  test("a single culled page is checked as given, the Tldr checks included", async () => {
-    expect((await wikiCheck(path.join(tmp, "page-checks/plans/rs.mdx"))).findings.map((f) => f.check)).toContain("missing-tldr");
+  test("a single culled page skips the Tldr checks, as in a directory (state table D13)", async () => {
+    expect((await wikiCheck(path.join(tmp, "page-checks/plans/rs.mdx"))).findings.map((f) => f.check)).not.toContain("missing-tldr");
   });
 
   test("with no .wiki-reader.json text-diagram is skipped too: the plans/ skip reads the folder (fix round 1)", async () => {
@@ -337,7 +337,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
   test("lintWiki reports a page's page-text findings in checkPageText's order", async () => {
     const root = path.join(tmp, "page-checks");
     const lint = (await lintWiki(await buildWikiIndex(root))).findings.filter((f) => f.relPath === "plans/o.mdx" && PAGE_TEXT.has(f.check));
-    expect(lint.map((f) => f.check)).toEqual(["index-truncation", "question-block", "missing-tldr"]);
+    expect(lint.map((f) => f.check)).toEqual(["index-truncation", "question-block", "genre-missing", "missing-tldr"]);
   });
 
   test("a culled page in a directory still gets the page-text checks lintWiki runs on it", async () => {
@@ -370,6 +370,7 @@ describe("wiki-check runs the checks lintWiki runs on a page's own text", () => 
         "rule-tree",
         "glossary",
         "text-diagram",
+        "genre-missing",
       ]),
     );
     expect((await runWikiCheck([root])).out.map((l) => JSON.parse(l))).toEqual(lint.map((f) => JSON.parse(JSON.stringify(f))));
@@ -404,6 +405,7 @@ describe("wiki-check", () => {
     expect(found.err).toBe("");
     expect(found.out.trimEnd().split("\n").map((l) => JSON.parse(l))).toEqual([
       expect.objectContaining({ check: "component-value", relPath: "plans/deep/a.mdx", line: 4 }),
+      expect.objectContaining({ check: "genre-missing", relPath: "plans/deep/a.mdx" }),
       expect.objectContaining({ check: "missing-tldr", relPath: "plans/deep/a.mdx" }),
     ]);
     expect(spawn(path.join(tmp, "clean"))).toEqual({ code: 0, out: "", err: `${noRootNote(path.join(tmp, "clean"))}\n` });

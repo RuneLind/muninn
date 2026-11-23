@@ -85,7 +85,7 @@ import {
   FACTCHECK_SENTINEL_END,
   findLiveSentinelBlocks,
 } from "./factcheck-context.ts";
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import {
   factWrapperForms,
   fenceLineStates,
@@ -97,7 +97,7 @@ import {
   WIKILINK_SPAN_SOURCE,
   type ClaimQuote,
   type FactcheckClaimAnchor,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 
 /** Re-exported so the write path has ONE import for the whole strip → resolve →
  *  splice shape. The strip itself lives in `markdown-ast.ts` beside the tag-shape
@@ -116,7 +116,7 @@ export { stripFactWrappers, countFactWrappers };
  * browser would drag `explain-context.ts` → `research/answer.ts` (the whole server
  * graph) into the bundle. One constant, two consumers, no drift.
  */
-export { INTEGRATE_BODY_MAX } from "../dashboard/views/components/wiki-integrate.ts";
+export { INTEGRATE_BODY_MAX } from "./core/wiki-integrate.ts";
 /** Max edits accepted in one propose/apply call. */
 export const INTEGRATE_MAX_EDITS = 12;
 /** Max chars for one edit's `old` or `new`. */

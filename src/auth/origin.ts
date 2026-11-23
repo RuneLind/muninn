@@ -124,6 +124,25 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // calls back into this instance and into claude-usage), so an `<img>` on any
   // page must not be able to start one. The reader's same-origin fetch passes.
   "/api/wiki/plan-card",
+  // The work map's GitHub check SPAWNS `gh` per uncached request, a query per 50
+  // PRs on the machine's login. The card's same-origin fetch passes.
+  "/api/wiki/work-map/checks",
+  // The decision inbox SPAWNS one `git log` per open card (the commit that added
+  // it), a fan-out the wiki sizes. The card's same-origin fetch passes.
+  "/api/wiki/decision-inbox",
+  // The owner-step checks SPAWN git per uncached probe, one of them a network
+  // `ls-remote` to each named repo's origin. The reader's same-origin fetch passes.
+  "/api/wiki/step-checks",
+  // The peer half of the same checks: the other machine's muninn asks this one
+  // to run probes for itself, the same git spawns. A server-side fetch sends
+  // neither Origin nor Sec-Fetch-Site, so it passes.
+  "/api/checks/answer",
+  // The peer half of the boot line below: the other machine's muninn asks this
+  // one for its own line, the same git spawns. Server-side fetch: passes.
+  "/api/checks/boot-line",
+  // The Your work card's boot line SPAWNS git in muninn's own checkout on every
+  // read, and a network `ls-remote` once per 30 s. The card's same-origin fetch passes.
+  "/api/wiki/boot-line",
   // The felles status SPAWNS Bun and a gcloud bucket listing per uncached
   // request. The route also requires its own header, which a cross-origin page
   // cannot send without a preflight; this entry is the instance-wide rule.
@@ -169,8 +188,8 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 /**
  * GET paths whose plain read is the reader's own and stays open, but whose
  * `?refresh=1` forces a rebuild: a full wiki index build with its git reads
- * (`pages`, `index-coverage`), or an uncached recompute over every summary
- * collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
+ * (`pages`, `index-coverage`, `stale`), or an uncached recompute over every
+ * summary collection (`ingest-backlog`, `stats`). Exact paths. Each route reads
  * `c.req.query("refresh") === "1"`, which is Hono's FIRST value of a repeated
  * parameter; {@link refreshRequested} matches ANY `refresh` value equal to
  * `"1"`, a superset of whichever one the route reads.
@@ -184,6 +203,7 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
 export const REFRESH_SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/pages",
   "/api/wiki/index-coverage",
+  "/api/wiki/stale",
   "/api/wiki/ingest-backlog",
   "/api/summaries/stats",
 ];

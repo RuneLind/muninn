@@ -325,6 +325,9 @@ export async function renderWikiGardenerPage(opts?: {
     .badge-entity { background: var(--tint-cyan); color: var(--status-cyan); }
     .badge-source { background: var(--tint-warning); color: var(--status-warning); }
     .badge-lint { background: var(--tint-cyan); color: var(--status-cyan); }
+    /* Outlined, in the accent: the warning fill is the stale status chip's, and a kind tag is not a status. */
+    .badge-stale-check { background: transparent; color: var(--accent-light); box-shadow: inset 0 0 0 1px var(--accent); }
+    .gard-filter-sep { width: 1px; align-self: stretch; background: var(--border-secondary); margin: 2px 6px; }
     .badge-group { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-create { background: var(--tint-success); color: var(--status-success); }
     .badge-update { background: var(--tint-info); color: var(--status-info); }
@@ -399,6 +402,15 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-preview a { color: var(--status-info); }
     .gard-preview .wiki-link { color: var(--accent-light); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
     .gard-preview .wiki-link-missing { color: var(--text-muted); border-bottom: 1px dashed var(--text-disabled); }
+
+    /* Batch section headers (wiki-gardener-batch.ts) */
+    .gard-batch-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 22px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-primary); }
+    .gard-batch-head:first-child { margin-top: 0; }
+    .gard-batch-label { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+    .gard-batch-count { font-size: 12.5px; color: var(--text-soft); }
+    .gard-batch-actions { display: flex; gap: 8px; margin-left: auto; }
+    .gard-batch-note { flex-basis: 100%; font-size: 12.5px; color: var(--text-soft); }
+    .gard-batch-stop { background: transparent; border-color: var(--border-secondary); color: var(--text-secondary); }
 
     /* Actions */
     .gard-actions { display: flex; gap: 10px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border-primary); }
@@ -481,6 +493,21 @@ ${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wik
       <button class="gard-filter" data-status="applied">Applied</button>
       <button class="gard-filter" data-status="rejected">Rejected</button>
       <button class="gard-filter" data-status="stale">Stale</button>
+      <span class="gard-filter-sep" aria-hidden="true"></span>
+      <!-- The KIND filter (PR 3 of muninn-wiki-drift-check, D28): «Stale check»
+           is the kind, not the stale status chip beside it. -->
+      <button class="gard-filter active" data-kind="">All kinds</button>
+      <button class="gard-filter" data-kind="stale-check">Stale check</button>
+      <button class="gard-filter" data-kind="lint">Lint</button>
+      <button class="gard-filter" data-kind="pages">Drafted pages</button>
+      <span class="gard-filter-sep" aria-hidden="true" data-section-group></span>
+      <!-- The SECTION filter (wiki-gardener-batch.ts): one batch section's
+           drafts and its Approve all. The client adds each chip's count and
+           hides the group on a wiki with no life domain. -->
+      <button class="gard-filter active" data-section="" data-section-group>All sections</button>
+      <button class="gard-filter" data-section="ai" data-section-group>AI</button>
+      <button class="gard-filter" data-section="life" data-section-group>Life</button>
+      <button class="gard-filter" data-section="entertainment" data-section-group>Entertainment</button>
     </div>
     <div id="gardList">${gardListInit}</div>
 

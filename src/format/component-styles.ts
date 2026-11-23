@@ -91,6 +91,66 @@ export function componentBlockCss(scope: string): string {
       vertical-align: top;
     }
     ${scope} .tablewrap th { background: var(--bg-inset); color: var(--text-primary); }
+    /* Reader shapes (reader-shapes.ts, wiki render only): number columns,
+       verdict cells, the bold-label grid. */
+    /* The header and a cell's note wrap (nowrap on both widened the widest
+       table on 54 of 234 pages at 390 px); only the number stays whole. */
+    ${scope} th.num, ${scope} td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    ${scope} td.num .num-nw { white-space: nowrap; }
+    ${scope} td.v-good { background: color-mix(in srgb, var(--status-success) 11%, transparent); }
+    ${scope} td.v-warn { background: color-mix(in srgb, var(--status-warning) 13%, transparent); }
+    ${scope} td.v-bad { background: color-mix(in srgb, var(--status-error) 11%, transparent); }
+    /* The tint cost a coloured child its margin: a link measured 4.19:1 in a
+       light v-good cell. Inside one, the tokens links, refs and chips draw with
+       move 30% toward --text-primary. The table holds each token's value, so
+       the cell's own definition is no cycle. */
+    ${scope} table {
+      --vc-info: var(--status-info); --vc-accent: var(--accent); --vc-accent-light: var(--accent-light);
+      --vc-muted: var(--text-muted); --vc-soft: var(--text-soft);
+    }
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad) {
+      --status-info: color-mix(in oklab, var(--vc-info) 70%, var(--text-primary));
+      --accent: color-mix(in oklab, var(--vc-accent) 70%, var(--text-primary));
+      --accent-light: color-mix(in oklab, var(--vc-accent-light) 70%, var(--text-primary));
+      --text-muted: color-mix(in oklab, var(--vc-muted) 70%, var(--text-primary));
+      --text-soft: color-mix(in oklab, var(--vc-soft) 70%, var(--text-primary));
+    }
+    /* A traffic light (\`v-light\`: a priority, a status) keeps its own glyph
+       and draws no pass/fail icon. */
+    ${scope} :is(td.v-good, td.v-warn, td.v-bad):not(.v-light)::before {
+      display: inline-grid; place-items: center; width: 1.3em; height: 1.3em; border-radius: 50%;
+      margin-right: 0.2em; vertical-align: -0.25em; font: 700 0.8em/1 system-ui, sans-serif; color: var(--bg-panel);
+    }
+    ${scope} td.v-good:not(.v-light)::before { content: "✓"; content: "✓" / ""; background: var(--tone-good); }
+    ${scope} td.v-warn:not(.v-light)::before { content: "!"; content: "!" / ""; background: var(--tone-warn); }
+    ${scope} td.v-bad:not(.v-light)::before { content: "✕"; content: "✕" / ""; background: var(--tone-err); }
+    /* Hidden but in flow: an out-of-flow span made a selection drop the
+       spaces around it (\`✅Targeted\`), which Explain then cannot locate. */
+    ${scope} .v-glyph, ${scope} .lg-c { font-size: 0; }
+    ${scope} ul.label-grid { list-style: none; padding-left: 0; margin: 0.7rem 0 1.1rem; border-top: 1px solid var(--border-subtle); }
+    ${scope} ul.label-grid > li {
+      display: grid; grid-template-columns: minmax(8.5rem, 26%) minmax(0, 1fr); column-gap: 1.1rem;
+      margin: 0; padding: 0.5rem 0; border-bottom: 1px solid var(--border-subtle);
+    }
+    ${scope} .lg-k { font-weight: 650; color: var(--text-primary); }
+    ${scope} .lg-k strong { font-weight: inherit; }
+    ${scope} .lg-v { display: block; min-width: 0; }
+    ${scope} .lg-v > :first-child { margin-top: 0; }
+    ${scope} .lg-v > p, ${scope} .lg-v > pre { margin: 0.3rem 0 0; }
+    @media (max-width: 720px) { ${scope} ul.label-grid > li { grid-template-columns: minmax(0, 1fr); } }
+    /* Before → after chips: no good/bad colour, the reader cannot know which
+       way is better. Pure styling spans, no hidden text. Soft and light accent,
+       not muted and accent: those fell under 4.5:1 in some light, dark and paper-light
+       cells (e2e chip contrast). */
+    ${scope} .ba-chip {
+      white-space: nowrap; font-variant-numeric: tabular-nums; padding: 0 0.3em; border-radius: 4px;
+      background: color-mix(in srgb, var(--accent) 10%, transparent);
+    }
+    ${scope} .ba-chip-p { padding-right: 0; }
+    ${scope} .ba-chip-o { padding-left: 0; }
+    ${scope} .ba-old { color: var(--text-soft); }
+    ${scope} .ba-arr { color: var(--accent-light); padding: 0 0.15em; }
+    ${scope} .ba-new { font-weight: 650; }
     ${scope} .fileref { color: var(--accent-light); font-family: var(--mono, ui-monospace, monospace); }
     ${scope} .fileref code { background: transparent; box-shadow: none; padding: 0; color: inherit; }
     ${scope} .figure { margin: 1.4rem 0; }
@@ -585,6 +645,38 @@ export function componentBlockCss(scope: string): string {
     }
     ${scope} .diagram-body { overflow-x: auto; }
     ${scope} .diagram svg { max-width: 100%; height: auto; }
+    /* The mermaid enhancer's ⤢ button and full-window view (wiki-mermaid.ts). */
+    ${scope} .diagram[data-mermaid-src] { position: relative; }
+    ${scope} .diagram-expand {
+      position: absolute; top: 6px; right: 6px; z-index: 2; cursor: pointer;
+      width: 28px; height: 28px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel);
+      color: var(--text-soft); font-size: 15px; line-height: 1;
+    }
+    ${scope} .diagram-expand:hover, ${scope} .diagram-expand:focus-visible { color: var(--accent); border-color: var(--accent); }
+    dialog.diagram-dialog {
+      /* margin: auto centres a modal dialog; the page's * reset zeroes it. */
+      margin: auto; padding: 0; border: 1px solid var(--border-primary); border-radius: 10px;
+      max-width: 96vw; max-height: 94vh; overflow: auto;
+      background: var(--bg-panel); color: var(--text-primary);
+    }
+    dialog.diagram-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+    dialog.diagram-dialog .diagram-dialog-inner { position: relative; padding: 24px; text-align: center; }
+    dialog.diagram-dialog .diagram-dialog-close {
+      position: sticky; top: 0; float: right; margin: -16px -16px 0 8px; z-index: 2; cursor: pointer;
+      width: 28px; height: 28px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-soft); font-size: 14px;
+    }
+    dialog.diagram-dialog .diagram-dialog-close:hover, dialog.diagram-dialog .diagram-dialog-close:focus-visible { color: var(--accent); border-color: var(--accent); }
+    /* Block, so no line box adds a descender gap under it; sized in wiki-mermaid.ts by mermaid-theme.ts dialogBox. */
+    dialog.diagram-dialog svg { display: block; margin: 0 auto; height: auto; }
+    /* Paper does not scroll: a widened diagram (an inline width and max-width:none
+       from wiki-mermaid.ts layout) scales back to the page width, as <Diagram> does. */
+    @media print {
+      ${scope} .diagram-body { overflow: visible; }
+      ${scope} .diagram svg[data-widened] { max-width: 100% !important; height: auto; }
+      ${scope} .diagram-expand, dialog.diagram-dialog { display: none !important; }
+    }
     ${scope} .caption { color: var(--text-muted); font-size: 0.85em; text-align: center; margin-top: 0.5rem; }
     ${scope} .meter { display: flex; align-items: center; gap: 0.6rem; margin: 1rem 0; }
     ${scope} .meter-label { font-weight: 600; color: var(--text-primary); }
@@ -1124,6 +1216,29 @@ export function decisionViewsCss(scope: string): string {
       container: dc-view / inline-size;
     }
     ${scope} .dc-title { font-size: 0.8em; font-weight: 600; color: var(--text-soft); margin-bottom: 0.4rem; }
+    ${scope} .qg-count { font-weight: 500; color: var(--text-muted); margin-left: 0.35em; }
+    ${scope} .qg-row { display: grid; grid-template-columns: 2.6em minmax(0, 1fr); gap: 0.1rem 0.5rem; padding: 0.35rem 0.1rem; border-top: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent); }
+    ${scope} .qg-rows > .qg-row:first-child { border-top: 0; }
+    ${scope} .qg-id { font-weight: 700; font-size: 0.85em; padding-top: 0.08em; }
+    ${scope} .qg-id a { color: inherit; text-decoration: none; }
+    ${scope} .qg-id a:hover { text-decoration: underline; }
+    ${scope} .qg-open .qg-id { color: var(--status-warning); }
+    ${scope} .qg-done .qg-id { color: var(--status-success); }
+    ${scope} .qg-q { line-height: 1.35; overflow-wrap: anywhere; }
+    ${scope} .qg-a { grid-column: 2; color: var(--text-soft); line-height: 1.35; font-size: 0.94em; overflow-wrap: anywhere; }
+    ${scope} .qg-chip { display: inline-block; font-size: 0.82em; font-weight: 700; padding: 0 0.4em; border-radius: 4px; margin-right: 0.35em; white-space: nowrap; }
+    ${scope} .qg-chip a { color: inherit; text-decoration: none; }
+    ${scope} .qg-chip a:hover { text-decoration: underline; }
+    ${scope} .qg-chip-done { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 14%, transparent); }
+    ${scope} .qg-chip-open { color: var(--status-warning); background: color-mix(in srgb, var(--status-warning) 15%, transparent); }
+    ${scope} .qg-chip-reversed { text-decoration: line-through; color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 14%, transparent); }
+    ${scope} .qg-reversed { font-style: normal; font-weight: 600; color: var(--text-muted); }
+    ${scope} .qg-who { color: var(--text-muted); }
+    ${scope} .qg-card { color: var(--accent-light); }
+    ${scope} .qg-more { border-top: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent); }
+    ${scope} .qg-settled > summary { cursor: pointer; margin-bottom: 0; }
+    ${scope} .qg-settled[open] > summary { margin-bottom: 0.4rem; }
+    ${scope} .qg-more > summary { cursor: pointer; padding: 0.35rem 0.1rem; color: var(--text-soft); font-size: 0.9em; }
     /* One grid over every row (rows are subgrids) with each cell on a fixed
        column, so all decisions start at one x whether or not a row has
        questions or outputs. The questions and decision columns are capped and
@@ -1243,6 +1358,10 @@ export function chartViewCss(scope: string): string {
     ${scope} .vc-target { stroke: var(--text-primary); stroke-width: 2px; }
     ${scope} .vc-mark { stroke: var(--status-magenta); stroke-width: 2px; stroke-dasharray: 2 1; }
     ${scope} .vc-zero { stroke: var(--text-secondary); stroke-width: 1px; }
+    ${scope} .vc-point { stroke: var(--accent); stroke-width: 3px; }
+    ${scope} .vc-span { stroke: var(--accent); stroke-width: 8px; }
+    ${scope} .vc-rule { grid-column: 1 / -1; border-top: 1px solid var(--text-muted); }
+    ${scope} .vc-total { font-weight: 600; }
     ${scope} .vc-gap { color: var(--tone-warn); }
     ${scope} .vc-verdict { display: block; font-weight: 600; }
     ${scope} .vc-ok { color: var(--tone-good); }
@@ -1308,6 +1427,8 @@ export function chartViewCss(scope: string): string {
       /* \`.vc .vc-line\` matches the \`.vc-sN .vc-line\` series rules' specificity and comes later. */
       ${scope} .vc-track, ${scope} .vc-hold { stroke: CanvasText; }
       ${scope} .vc-value { fill: Highlight; }
+      ${scope} .vc-point, ${scope} .vc-span { stroke: Highlight; }
+      ${scope} .vc-rule { border-top-color: CanvasText; }
       ${scope} .vc-band { fill: CanvasText; }
       ${scope} .vc-target, ${scope} .vc-mark, ${scope} .vc-ref, ${scope} .vc-zero, ${scope} .vc .vc-line { stroke: CanvasText; }
       ${scope} .vc-sw { forced-color-adjust: none; background: CanvasText; }

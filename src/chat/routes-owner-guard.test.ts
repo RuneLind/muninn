@@ -89,6 +89,14 @@ describe("resource guards on the conversation routes", () => {
     return app;
   }
 
+  test("the chat page is rendered with the session's provider, and null with auth off", async () => {
+    const seeded = async (identity: Identity | null) =>
+      (await (await (await appAs(identity, null)).request("/")).text()).match(/var authProvider = [^;]+;/)?.[0];
+    expect(await seeded(null)).toBe("var authProvider = null;");
+    expect(await seeded(A)).toBe('var authProvider = "local";');
+    expect(await seeded({ ...A, provider: "entra" })).toBe('var authProvider = "entra";');
+  });
+
   /** A uuid that the injected lookup reports as owned by someone else. */
   const FOREIGN_THREAD_ID = "11111111-2222-4333-8444-555555555555";
 

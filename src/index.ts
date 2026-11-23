@@ -1,5 +1,5 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { answerGroupsBootLines, ConfigError, loadConfig, resolveServingProfile } from "./config.ts";
+import { answerGroupsBootLines, ConfigError, loadConfig, machineBootWarning, parsePeers, resolveServingProfile } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
@@ -15,6 +15,7 @@ import {
 import { activityLog } from "./observability/activity-log.ts";
 import { warmupEmbeddings } from "./ai/embeddings.ts";
 import { startScheduler, stopScheduler, waitForPendingTicks } from "./scheduler/runner.ts";
+import { startSnapshotSweeper } from "./ai/snapshots.ts";
 import { waitForPendingExtractions } from "./ai/extraction-tracker.ts";
 import { logResolvedHaikuBackends } from "./ai/haiku-direct.ts";
 import { disconnectAll as disconnectAllMcp } from "./ai/mcp-tool-caller.ts";
@@ -22,9 +23,11 @@ import { serenaManager } from "./serena/manager.ts";
 import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
+import { startDiscussTurnSweep, stopDiscussTurnSweep } from "./dashboard/routes/wiki-discuss.ts";
 import { answerRetentionBootLines, startAnswerRetentionSweep, stopAnswerRetentionSweep } from "./wiki/answer-retention.ts";
 import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup } from "./scheduler/retention-cleanup.ts";
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
+import { startWorkMapLoop, stopWorkMapLoop } from "./wiki/work-map/loop.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
@@ -37,6 +40,15 @@ import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 import { killLiveProcessGroups } from "./utils/run-proc.ts";
+import { startBootRecord } from "./wiki/step-checks/boot-record.ts";
+
+// The commit this process starts from (the Your work card's boot line). The
+// first statement: the static imports above are already evaluated, so the
+// record covers only code loaded after this point (dynamic imports, files read
+// on first use): a pull landing while they load puts a newer commit on the
+// record than the code they loaded. Never
+// awaited: a slow git gives an unknown record, not a slow start.
+void startBootRecord();
 
 // `loadConfig()` throws on every fail-closed config condition — a missing
 // DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has
@@ -136,6 +148,10 @@ initDb(config);
 // Pre-load embedding model (fire-and-forget)
 warmupEmbeddings();
 
+// Sweep the read-and-search snapshots now and every 15 minutes: one unused for
+// an hour, or a build a crash left half-done, is removed (`src/ai/snapshots.ts`).
+startSnapshotSweeper();
+
 // Warm the WORKED-on ledger memo for every registered wiki (fire-and-forget,
 // beside the embeddings warm-up and for the same reason). The index folds in
 // whatever is warm and never waits, and it is itself TTL-cached at 5 minutes —
@@ -169,6 +185,13 @@ if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+}
+
+// Discuss turns whose process died (no heartbeat) are closed as `abandoned`,
+// now and every minute; the route lives in the `wiki` group, so only where it
+// is served (`src/dashboard/routes/wiki-discuss.ts`).
+if (wikiToolsRegistered(config.profile ?? resolveServingProfile())) {
+  startDiscussTurnSweep();
 }
 
 // GCS bucket mirrors feeding read-only wiki roots (fire-and-forget; every
@@ -284,6 +307,12 @@ if (answerGroupLines.info) log.info("{line}", { line: answerGroupLines.info });
 // `WIKI_DEFAULT_LENS`: entries the parse dropped, by position.
 for (const line of config.wikiDefaultLens.warnings) log.warn("{line}", { line });
 
+// `MUNINN_MACHINE` set to something that is not a machine name: the parse logs nothing.
+const machineLine = machineBootWarning();
+if (machineLine) log.warn("{line}", { line: machineLine });
+// `MUNINN_PEERS`: entries the parse dropped, by position, and the one line saying the list goes unused until MUNINN_MACHINE is set.
+for (const line of parsePeers().warnings) log.warn("{line}", { line });
+
 // Trace, prompt-snapshot and thread-citation retention: hourly, process-wide, on
 // every profile — not inside the per-bot scheduler, which needs a Telegram bot.
 if (startRetentionCleanup(config)) {
@@ -297,6 +326,16 @@ if (startRetentionCleanup(config)) {
 const staleConfirmWikis = startStaleConfirmLoop(config);
 if (staleConfirmWikis.length) {
   log.info("Stale confirm loop on (every 5 min after a run ends): {wikis}", { wikis: staleConfirmWikis.join(", ") });
+}
+
+// The work map's nightly organize (`src/wiki/work-map/`): beside the stale
+// loop, on the write owner only, for the wikis WORK_MAP_WIKIS names.
+const workMapWikis = startWorkMapLoop(config);
+if (workMapWikis.length) {
+  log.info("Work map loop on (daily from {hour}:00 Europe/Oslo): {wikis}", {
+    hour: config.workMapHour,
+    wikis: workMapWikis.join(", "),
+  });
 }
 
 // Start research_knowledge MCP server. Bots opt in by adding the server to their
@@ -563,9 +602,11 @@ async function shutdown() {
   killLiveProcessGroups();
   stopScheduler();
   stopStaleHandoffSweep();
+  stopDiscussTurnSweep();
   const answerRetentionStopped = stopAnswerRetentionSweep();
   const retentionCleanupStopped = stopRetentionCleanup();
   const staleConfirmStopped = stopStaleConfirmLoop();
+  const workMapStopped = stopWorkMapLoop();
   await wikiBucketMirrors?.stop();
   await waitForPendingTicks(10_000);
   // Let in-flight memory/goal/schedule extractions finish their DB writes
@@ -575,6 +616,7 @@ async function shutdown() {
   await answerRetentionStopped;
   await retentionCleanupStopped;
   await staleConfirmStopped;
+  await workMapStopped;
 
   for (const bot of telegramBotMap.values()) {
     bot.stop();

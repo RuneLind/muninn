@@ -12,11 +12,19 @@
  */
 
 import type { QuestionLanguage } from "./question-labels.ts";
+// The lens names and the config parsers live with `src/config.ts`'s other
+// parsers, a layer down (architecture review 2026-11, B2).
+import {
+  LENSES,
+  parseDefaultLens,
+  parseLens,
+  parseWikiDefaultLens,
+  type Lens,
+  type StoredLens,
+  type WikiDefaultLens,
+} from "../utils/config-parsers.ts";
 
-export const LENSES = ["overview", "all", "agent"] as const;
-export type Lens = (typeof LENSES)[number];
-/** A lens a viewer may store, and an instance or wiki may name as default. */
-export type StoredLens = Exclude<Lens, "agent">;
+export { LENSES, parseDefaultLens, parseLens, parseWikiDefaultLens, type Lens, type StoredLens, type WikiDefaultLens };
 
 /** The attribute on text the reader adds to a page (an id's noun, a fold's
  *  size line): on screen, but not in the page's source, so a selection sent
@@ -31,24 +39,6 @@ export const DL_EXPANDED_CLASS = "dl-expanded";
 
 /** localStorage key for the viewer's choice (D1), beside «line refs». */
 export const LENS_KEY = "muninn.wiki.lens.v1";
-
-const LENS_ALIASES: Readonly<Record<string, Lens>> = {
-  overview: "overview",
-  oversikt: "overview",
-  all: "all",
-  alt: "all",
-  agent: "agent",
-};
-
-/** A lens value as a URL, a store or a config spells it: canonical names and
- *  the Norwegian aliases, any case, trimmed. Null for anything else. */
-export function parseLens(raw: unknown): Lens | null {
-  if (typeof raw !== "string") return null;
-  const key = raw.trim().toLowerCase();
-  // Own keys only: `constructor` or `__proto__` from a URL, a store or a
-  // config must not resolve to an inherited member.
-  return Object.hasOwn(LENS_ALIASES, key) ? LENS_ALIASES[key]! : null;
-}
 
 /** A lens that may be stored or be a default: Overview or All. */
 export function parseStoredLens(raw: unknown): StoredLens | null {
@@ -208,45 +198,7 @@ export const COMPACT_WORDS: Record<
 };
 
 // ── WIKI_DEFAULT_LENS (D24) ──────────────────────────────────────────────────
-
-/** A default lens as `WIKI_DEFAULT_LENS` or `.wiki-reader.json` `defaultLens`
- *  spells it: Overview or All. Anything else is null with the one warning
- *  text both sources log. */
-export function parseDefaultLens(raw: unknown): { lens: StoredLens | null; warning?: string } {
-  const lens = parseLens(raw);
-  if (lens === "agent") return { lens: null, warning: "agent cannot be a default lens" };
-  if (lens) return { lens };
-  const shown = typeof raw === "string" ? `"${raw.trim()}"` : JSON.stringify(raw);
-  return { lens: null, warning: `${shown} is not overview, all, oversikt or alt` };
-}
-
-export interface WikiDefaultLens {
-  /** Wiki name, lower-cased → its default. */
-  byWiki: ReadonlyMap<string, StoredLens>;
-  /** Entries dropped, by position — carried, logged at boot. */
-  warnings: string[];
-}
-
-/** `WIKI_DEFAULT_LENS`: `wiki=lens` pairs, comma-separated, names matched
- *  without case. A malformed entry, an unknown lens or `agent` is dropped with
- *  a warning naming its position. */
-export function parseWikiDefaultLens(raw: string | undefined): WikiDefaultLens {
-  const byWiki = new Map<string, StoredLens>();
-  const warnings: string[] = [];
-  (raw ?? "").split(",").forEach((segment, i) => {
-    const entry = segment.trim();
-    if (!entry) return;
-    const at = `WIKI_DEFAULT_LENS entry ${i + 1}`;
-    const eq = entry.indexOf("=");
-    const name = eq === -1 ? "" : entry.slice(0, eq).trim().toLowerCase();
-    if (!name) return void warnings.push(`${at} dropped: expected wiki=lens`);
-    const { lens, warning } = parseDefaultLens(entry.slice(eq + 1));
-    if (!lens) return void warnings.push(`${at} dropped: ${warning}`);
-    if (byWiki.has(name)) warnings.push(`${at}: "${name}" is named again — this entry wins`);
-    byWiki.set(name, lens);
-  });
-  return { byWiki, warnings };
-}
+// `parseDefaultLens` and `parseWikiDefaultLens`: `src/utils/config-parsers.ts`.
 
 /** One page's default: the instance's for this wiki, else the wiki file's. */
 export function pageDefaultLens(

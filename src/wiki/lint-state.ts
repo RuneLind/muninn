@@ -45,8 +45,8 @@ import { COMPONENT_OPEN_RE, listItemLines, paragraphLines, parseBlocks, readerFe
 import type { StatePhrasesConfig } from "../format/state-phrases.ts";
 import { isLedgerLabel } from "../format/pr-ledger.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
-import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
-import { JIRA_KEY_SOURCE } from "../jira/retrieval.ts";
+import { JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
+import { JIRA_KEY_SOURCE } from "../utils/jira-key-source.ts";
 import { normalizeJiraKey } from "./provenance.ts";
 import { stampedKeys } from "./trackers/jira.ts";
 import { isLiveReportPage } from "./lint-drift.ts";
@@ -361,14 +361,15 @@ export function stateExemptLines(content: string): { lines: string[]; body: numb
  * a `**Status**` paragraph or list item and a PR-ledger table are homes; every other line
  * is linted.
  */
-export function stateLineRoles(content: string): LineRoles {
+export function stateLineRoles(content: string, opts?: { frontmatter?: boolean }): LineRoles {
   // Folded once, so `lines`, the frontmatter boundary and `readerFencedLines`
   // (which folds its own input too) all count the same lines.
   const folded = content.replace(/\r\n/g, "\n");
   const lines = folded.split("\n");
   // The store's boundary: a column-0 `---` ends the frontmatter, so an indented
-  // one inside a block scalar is still frontmatter.
-  const body = frontmatterBodyLine(folded);
+  // one inside a block scalar is still frontmatter. `frontmatter: false` reads
+  // a body the reader already stripped, where a leading `---` is a rule.
+  const body = opts?.frontmatter === false ? 0 : frontmatterBodyLine(folded);
   // The reader's fence rule over the body it renders: backticks only, and an
   // opener with no closer stays prose. Frontmatter lines are never fenced.
   const fenced = [...new Array<boolean>(body).fill(false), ...readerFencedLines(lines.slice(body).join("\n"))];

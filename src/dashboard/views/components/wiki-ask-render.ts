@@ -1,8 +1,8 @@
 /**
  * Pure, side-effect-free progressive renderer for the /wiki reader's **Ask**
- * answer body. Split out from `wiki-browser.ts` (which has DOM side effects at
- * module load, so it can't be imported in tests) so these can be unit-tested
- * directly — the same split rationale as `wiki-filter.ts`.
+ * answer body. Split out from `wiki-browser.ts` (which then ran DOM code at module
+ * load; it is importable since `boot()`, but needs a DOM) so these can be
+ * unit-tested directly — the same split rationale as `wiki-filter.ts`.
  *
  * `formatWebHtml` is imported directly from its canonical module (the exact
  * pattern `web-format-browser.ts` uses) so the reader renders streaming markdown
@@ -14,6 +14,8 @@
  */
 
 import { formatWebHtml } from "../../../web/web-format.ts";
+import { inRenderedCode, renderedCodeRegions } from "../../../format/rendered-code.ts";
+import { withoutSentinelDelimiters } from "../../../format/markdown-core.ts";
 
 /**
  * Matches a standalone `Confidence: NN/100` line in **formatWebHtml output**.
@@ -37,7 +39,10 @@ const CONFIDENCE_HTML_RE = /(^|\n|>)([ \t]*)Confidence:[ \t]*(\d{1,3})\/100(?=$|
  * answer body.
  */
 export function enhanceConfidenceHtml(html: string): string {
-  return html.replace(CONFIDENCE_HTML_RE, (_m, pre: string, ws: string, digits: string) => {
+  // A line inside a fence or a code span is code, and stays as written (F71).
+  const code = renderedCodeRegions(html);
+  return html.replace(CONFIDENCE_HTML_RE, (m, pre: string, ws: string, digits: string, offset: number) => {
+    if (inRenderedCode(code, offset + pre.length + ws.length)) return m;
     const n = Math.max(0, Math.min(100, parseInt(digits, 10)));
     const band = n >= 80 ? "hi" : n >= 50 ? "mid" : "lo";
     return (
@@ -54,9 +59,10 @@ export function enhanceConfidenceHtml(html: string): string {
  *  into the same `.wiki-article`-styled body as the final answer, so headings,
  *  lists and code grow formatted during the stream instead of as plain text. The
  *  confidence-chip enhancement is baked in here so EVERY streaming/done render of a
- *  fact-check buffer carries the chip (no per-call-site opt-in to forget). */
+ *  fact-check buffer carries the chip (no per-call-site opt-in to forget). The
+ *  raw text drops NUL and U+0001 first, as the server's answer does (F29). */
 export function renderStreamingBody(text: string): string {
-  return enhanceConfidenceHtml(formatWebHtml(text));
+  return enhanceConfidenceHtml(formatWebHtml(withoutSentinelDelimiters(text)));
 }
 
 /** Body HTML for one Ask turn: the server-rendered final article once it has

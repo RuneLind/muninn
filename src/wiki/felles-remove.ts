@@ -5,7 +5,9 @@
  *
  * Target set: exactly the data files `publiser-felles-wiki.ts` uploads for the
  * page as it stands. The refs come from the reader's own rule
- * (`pageFileRefKinds`), resolved from the page's folder; then each spelling
+ * (`pageFileRefKinds`), resolved from the page's folder, each diagram file
+ * followed by its HTML sibling (`removeCases` in `page-file-refs.cases.json`
+ * pin that list for both repos); then each spelling
  * gets publish's per-file checks ({@link publishDataFileCheck}: `relUnder`,
  * `lstat`, `sjekkSti`, the `O_NOFOLLOW` open, `isFile`, the 1 MiB cap) and
  * publish's in-run collision rule (small letters + NFC). Two spellings of one
@@ -18,25 +20,38 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync } f
 import path from "node:path";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { resolveEmbedRelPath } from "../format/embed.ts";
-import { checkPageFileRef, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
+import { checkPageFileRef, diagramSiblingRelPath, PAGE_FILE_COMPONENTS, pageFileRefKinds } from "../format/query-block.ts";
+import { DIAGRAM_HTML_MAX_BYTES } from "./page-files.ts";
 import { splitFrontmatter } from "./page-text.ts";
+import { extractEmbedTargets } from "./store.ts";
 
 /** The data-file refs a page's markdown reads, resolved to wiki-relative
- *  paths in the page's own spelling, in source order, each spelling once. */
-function pageDataFileSpellings(pageRelPath: string, markdown: string): string[] {
-  if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return [];
-  const out: string[] = [];
+ *  paths in the page's own spelling, in source order, each spelling once.
+ *  Each diagram file is followed by its HTML sibling (`diagramSiblingRelPath`,
+ *  the reader's own path), which publish uploads beside it (muninn-nais #24);
+ *  `html` holds the spellings that are siblings. */
+function pageDataFileSpellings(pageRelPath: string, markdown: string): { rels: string[]; html: Set<string> } {
+  const rels: string[] = [];
+  const html = new Set<string>();
+  if (!PAGE_FILE_COMPONENTS.some((c) => markdown.includes(`<${c}`))) return { rels, html };
   for (const [ref, kinds] of pageFileRefKinds(parseBlocks(splitFrontmatter(markdown).body))) {
     if (checkPageFileRef(ref, kinds) !== "ok") continue;
     const rel = resolveEmbedRelPath(pageRelPath.replace(/\\/g, "/"), ref);
-    if (rel !== null && !out.includes(rel)) out.push(rel);
+    if (rel !== null && !rels.includes(rel)) rels.push(rel);
+    const sibling = kinds.has("diagram") ? diagramSiblingRelPath(pageRelPath, ref) : null;
+    if (sibling !== null && !rels.includes(sibling)) {
+      rels.push(sibling);
+      html.add(sibling);
+    }
   }
-  return out;
+  return { rels, html };
 }
 
-/** The wiki-relative data files a page's markdown reads, NFC, in source order. */
+/** The wiki-relative files publish uploads beside a page — the data files it
+ *  reads and each diagram file's HTML sibling — NFC, in source order. Pinned
+ *  by `removeCases` in `page-file-refs.cases.json`. */
 export function pageDataFileRelPaths(pageRelPath: string, markdown: string): string[] {
-  return [...new Set(pageDataFileSpellings(pageRelPath, markdown).map((r) => r.normalize("NFC")))];
+  return [...new Set(pageDataFileSpellings(pageRelPath, markdown).rels.map((r) => r.normalize("NFC")))];
 }
 
 /** The script's `MAKS_SEGMENT_BYTES`: the longest object-name segment it sends. */
@@ -109,7 +124,12 @@ export const realFsProbe: FsProbe = {
  *   still takes part in the collision rule;
  * - `uploads`: publish uploads it unless the scanner or a collision refuses it.
  */
-export function publishDataFileCheck(root: string, rel: string, probe: FsProbe = realFsProbe): "missing" | "refused" | "uploads" {
+export function publishDataFileCheck(
+  root: string,
+  rel: string,
+  probe: FsProbe = realFsProbe,
+  maxBytes: number = FELLES_DATA_MAX_BYTES,
+): "missing" | "refused" | "uploads" {
   const segments = rel.split("/");
   let dir = root;
   for (const segment of segments.slice(0, -1)) {
@@ -123,7 +143,7 @@ export function publishDataFileCheck(root: string, rel: string, probe: FsProbe =
   const nfc = rel.normalize("NFC");
   if (fellesObjectPathRefusal(rel) !== null || nfc.split("/").some((d) => d.startsWith("."))) return "refused";
   const opened = probe.open(abs);
-  if ("error" in opened || !opened.isFile || opened.size > FELLES_DATA_MAX_BYTES) return "refused";
+  if ("error" in opened || !opened.isFile || opened.size > maxBytes) return "refused";
   return "uploads";
 }
 
@@ -138,17 +158,25 @@ const readText = async (abs: string): Promise<string | null> => {
   }
 };
 
+/** One page of the local index, as `fellesRemoveDataFiles` reads it:
+ *  `parent` is the page it folds under (`pairAttachments`), if any. */
+export interface IndexedPage {
+  relPath: string;
+  parent?: string;
+}
+
 /**
  * The data files to delete with `pageRelPath` (NFC object names): the ones
- * publish uploads for the page as it stands, minus the ones another page in
- * `pageRelPaths` (the local index) also reads (`shared`). `refused` lists the
- * names the script's `sjekkStiform` refuses — never uploaded, and one such
- * name in a `--fjern` argv makes it delete nothing.
+ * publish uploads for the page as it stands, minus the ones another page of
+ * `pages` (the local index) uses (`shared`): it reads them, `<Embed>`s them, or
+ * is one of them as a page of its own, i.e. not folded under `pageRelPath`.
+ * `refused` lists the names the script's `sjekkStiform` refuses — never
+ * uploaded, and one such name in a `--fjern` argv makes it delete nothing.
  */
 export async function fellesRemoveDataFiles(
   root: string,
   pageRelPath: string,
-  pageRelPaths: readonly string[],
+  pages: readonly IndexedPage[],
   read: (abs: string) => Promise<string | null> = readText,
   probe: FsProbe = realFsProbe,
 ): Promise<{ dataFiles: string[]; shared: string[]; refused: string[] }> {
@@ -157,8 +185,13 @@ export async function fellesRemoveDataFiles(
   const page = pageRelPath.normalize("NFC");
   const named: { object: string; verdict: "refused" | "uploads" }[] = [];
   const refused: string[] = [];
-  for (const spelling of pageDataFileSpellings(pageRelPath, markdown)) {
-    const verdict = publishDataFileCheck(root, spelling, probe);
+  const spellings = pageDataFileSpellings(pageRelPath, markdown);
+  for (const spelling of spellings.rels) {
+    // A sibling gets the reader's 2 MiB sibling cap: a cap above publish's only
+    // targets an object never uploaded («not in the bucket» = success); one
+    // below it would leave the uploaded sibling behind.
+    const cap = spellings.html.has(spelling) ? DIAGRAM_HTML_MAX_BYTES : FELLES_DATA_MAX_BYTES;
+    const verdict = publishDataFileCheck(root, spelling, probe, cap);
     if (verdict === "missing") continue;
     const object = spelling.normalize("NFC");
     named.push({ object, verdict });
@@ -179,15 +212,26 @@ export async function fellesRemoveDataFiles(
   if (candidates.length === 0) return { dataFiles: [], shared: [], refused };
 
   const others = new Set<string>();
-  for (const other of pageRelPaths) {
-    if (other.normalize("NFC") === page || !/\.mdx?$/i.test(other)) continue;
+  // Keyed by `collisionKey`: another page's `<Embed>` target, which
+  // `extractEmbedTargets` reads lowercased, and an indexed page that is not
+  // this page's own attachment. The index lists every `.html`, this page's
+  // diagram sibling too, folded under this page (`pairAttachments` rule 3):
+  // that one goes with the page (F48 fix round 2). A sibling folded under
+  // another page, or under none, is a page of its own and stays.
+  const otherKeys = new Set<string>();
+  for (const { relPath: other, parent } of pages) {
+    if (other.normalize("NFC") === page) continue;
+    if (parent?.normalize("NFC") !== page) otherKeys.add(collisionKey(other));
+    if (!/\.mdx?$/i.test(other)) continue;
     const text = await read(path.join(root, other));
     if (text === null) continue;
     for (const rel of pageDataFileRelPaths(other, text)) others.add(rel);
+    for (const rel of extractEmbedTargets(text, other)) otherKeys.add(collisionKey(rel));
   }
+  const isShared = (rel: string) => others.has(rel) || otherKeys.has(collisionKey(rel));
   return {
-    dataFiles: candidates.filter((rel) => !others.has(rel)),
-    shared: candidates.filter((rel) => others.has(rel)),
+    dataFiles: candidates.filter((rel) => !isShared(rel)),
+    shared: candidates.filter(isShared),
     refused,
   };
 }

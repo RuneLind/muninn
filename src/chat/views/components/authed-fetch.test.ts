@@ -183,7 +183,15 @@ interface Stub {
 
 /** Evaluate the real emitted script against a stubbed browser. */
 function evalScript(
-  opts: { status?: number; body?: unknown; raw?: string; storageThrows?: boolean } = {},
+  opts: {
+    status?: number;
+    body?: unknown;
+    raw?: string;
+    storageThrows?: boolean;
+    provider?: "local" | "entra";
+    /** Answers each fetch itself, so a test decides the order responses land in. */
+    answer?: () => Promise<Response>;
+  } = {},
 ): Stub {
   const state = { reloads: 0, now: 1_700_000_000_000, fetches: 0, bannerAppends: 0 };
   const store: Record<string, string> = {};
@@ -233,6 +241,7 @@ function evalScript(
     },
     fetch: async () => {
       state.fetches++;
+      if (opts.answer) return opts.answer();
       if (opts.raw !== undefined) return new Response(opts.raw, { status: opts.status ?? 401 });
       const body = opts.body ?? { error: "unauthenticated", mode: "entra", loginUrl: LOGIN_URL_HINT };
       return new Response(JSON.stringify(body), { status: opts.status ?? 401 });
@@ -243,7 +252,7 @@ function evalScript(
     "ctx",
     "var window = ctx.window; var document = ctx.document; var sessionStorage = ctx.sessionStorage;" +
     "var fetch = ctx.fetch; var Date = ctx.Date;" +
-    authedFetchScript(),
+    authedFetchScript(opts.provider ?? null),
   );
   fn(sandbox);
 
@@ -291,8 +300,7 @@ describe("acceptance 19 — expiry, per channel", () => {
   });
 
   test("with auth OFF a ws/sse failure is IGNORED — there is no session to expire", () => {
-    // The regression this closes: `authProvider === null` is BOTH "auth is off"
-    // and "before /chat/me answered", and the first cut banner'd for both. On
+    // The regression this closes: the first cut banner'd on a null provider. On
     // an auth-off instance — today's default — any permanent SSE failure (a
     // 500, a 403, a dev-server restart) then reads "Your session expired" to a
     // reader who has no session at all. Silent reconnect is what those
@@ -305,6 +313,37 @@ describe("acceptance 19 — expiry, per channel", () => {
       expect(s.banner()).toBe(false);
       expect(s.reloads).toBe(0);
     }
+  });
+
+  // A session refused from the first request: /chat/me itself answers a proxy's
+  // HTML 401, so it never publishes a provider. Only the page render can.
+  test("entra, /chat/me refused without JSON: the provider the page was rendered with still banners", async () => {
+    const s = evalScript({ status: 401, raw: "<html>401</html>", provider: "entra" });
+    await s.authedFetch("/chat/me");
+    await settle();
+    expect(s.banner()).toBe(true);
+    expect(s.reloads).toBe(0);
+  });
+
+  test("entra, /chat/me never answered: a refused socket spends the one reload, then banners", () => {
+    const s = evalScript({ provider: "entra" });
+    expect(s.refusal("ws")).toBe("reload");
+    expect(s.refusal("ws")).toBe("banner");
+    expect(s.reloads).toBe(1);
+  });
+
+  test("local, /chat/me never answered: a refused stream banners and an HTML 401 stays its call site's", async () => {
+    const s = evalScript({ status: 401, raw: "<html>401</html>", provider: "local" });
+    await s.authedFetch("/api/x");
+    await settle();
+    expect(s.banner()).toBe(false);
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.reloads).toBe(0);
+  });
+
+  test("the page script carries the provider it was rendered with, and null with auth off", async () => {
+    expect(await renderChatPage({ authProvider: "entra" })).toContain('var authProvider = "entra";');
+    expect(await renderChatPage()).toContain("var authProvider = null;");
   });
 
   test("an entra 401 whose body is UNREADABLE banners rather than saying nothing", () => {
@@ -551,6 +590,105 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
     await settle();
     expect(s.latched("http")).toBe(false);
     expect(s.banner()).toBe(false);
+  });
+
+  describe("a 2xx only counts as recovery when its request started after the refusal", () => {
+    const REFUSED = () => new Response("<html>401</html>", { status: 401 });
+    const OK = () => new Response("{}", { status: 200 });
+
+    /** Every fetch waits here until the test answers it, in any order. */
+    function heldFetches() {
+      const held: Array<(res: Response) => void> = [];
+      const s = evalScript({
+        answer: () => new Promise<Response>((resolve) => { held.push(resolve); }),
+      });
+      s.setProvider("entra");
+      const answer = async (index: number, res: Response) => {
+        held[index]!(res);
+        await settle();
+      };
+      return { s, answer };
+    }
+
+    test("a request started BEFORE the refused one, answered after it, leaves the banner up", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/older");
+      void s.authedFetch("/refused");
+      await answer(1, REFUSED());
+      expect(s.banner()).toBe(true);
+      await answer(0, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("so does one started after the refused request but before its 401 landed", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      void s.authedFetch("/between");
+      await answer(0, REFUSED());
+      await answer(1, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("a request started after the 401 landed takes the banner down", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      await answer(0, REFUSED());
+      expect(s.banner()).toBe(true);
+      void s.authedFetch("/after");
+      await answer(1, OK());
+      expect(s.banner()).toBe(false);
+      expect(s.latched("http")).toBe(false);
+    });
+
+    test("a second refusal moves the mark: a request older than IT no longer counts", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/first-refused");
+      await answer(0, REFUSED());
+      void s.authedFetch("/older-than-second");
+      void s.authedFetch("/second-refused");
+      await answer(2, REFUSED());
+      await answer(1, OK());
+      expect(s.banner()).toBe(true);
+      expect(s.latched("http")).toBe(true);
+    });
+
+    test("another channel latching does not move http's mark", async () => {
+      const { s, answer } = heldFetches();
+      void s.authedFetch("/refused");
+      await answer(0, REFUSED());
+      void s.authedFetch("/after");
+      s.refusal("ws");
+      await answer(1, OK());
+      expect(s.latched("http")).toBe(false);
+      expect(s.latched("ws")).toBe(true);
+    });
+
+    test("a latch from an armed reload is marked too", async () => {
+      const s = evalScript({
+        answer: () => new Promise<Response>((resolve) => { release = resolve; }),
+      });
+      let release: (res: Response) => void = () => {};
+      s.setProvider("entra");
+      void s.authedFetch("/older");
+      expect(s.refusal("http", LOGIN_URL_HINT)).toBe("reload");
+      release(OK());
+      await settle();
+      expect(s.latched("http")).toBe(true);
+    });
+  });
+
+  test("a 2xx leaves a banner whose channels have all been released", async () => {
+    // An explicit reconnect releases the latch and deliberately leaves the banner:
+    // with nothing latched, only the 'http' guard stands between a 2xx and removing it.
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("local");
+    s.refusal("sse");
+    s.releaseLatch("sse");
+    await s.authedFetch("/chat/bots");
+    await settle();
+    expect(s.banner()).toBe(true);
   });
 
   test("a 2xx on a page where http was never latched removes NOTHING", async () => {

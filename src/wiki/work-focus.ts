@@ -38,7 +38,7 @@
  * classification.
  */
 
-import { isMetaStem } from "../dashboard/views/components/wiki-filter.ts";
+import { isMetaStem } from "./core/wiki-filter.ts";
 import { normalizeWorkedPath } from "./rel-path.ts";
 import { mapLedgerProvider } from "./provenance.ts";
 

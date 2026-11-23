@@ -32,7 +32,7 @@
  */
 
 import type { WikiPageMeta } from "./store.ts";
-import { facetJiraKeys } from "../dashboard/views/components/wiki-filter.ts";
+import { facetJiraKeys } from "./core/wiki-filter.ts";
 import { relationsCount, type IssueRow } from "./trackers/types.ts";
 
 /** The four frontmatter keys, exactly as they are spelled in a page. */
@@ -51,7 +51,7 @@ export const PROVENANCE_FRONTMATTER_KEYS = [
  * accepts a ONE-character project prefix, and requiring two here made `X-1` a
  * 400 on the muninn side of a key the stamper had happily written.
  *
- * Deliberately NOT `src/jira/key-scan.ts`'s `KEY_RE`, which is a SCANNER over
+ * Deliberately NOT `src/utils/jira-key-scan.ts`'s `KEY_RE`, which is a SCANNER over
  * prose (word-boundary anchored, denylisted for `UTF-8`): this one validates a
  * whole query parameter, where an anchored match is the question and a denylist
  * would refuse a project that happens to be called `SED`.

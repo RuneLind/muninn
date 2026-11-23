@@ -11,16 +11,18 @@
  * empty state instead of taking the dashboard down.
  */
 
+import { parsePrGrammar, type PrGrammar } from "./pr-grammar.ts";
 import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
-import { resolveServingProfile } from "../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig } from "../config.ts";
+import type { AnswerGroups } from "../format/question.ts";
 import { wikiToolsRegistered } from "../dashboard/route-groups.ts";
 import {
   isMetaStem,
   pageStemOf,
   sanitizeColorToken,
-} from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-filter.ts";
 import {
   parseActivityWeights,
   type ActivityWeights,
@@ -30,6 +32,8 @@ import { parseQuestionLanguage, type QuestionLanguage } from "../format/question
 import { parseDefaultLens, parseIdLabels, type IdLabels, type StoredLens } from "../format/reader-lens.ts";
 import { parseRoleKeys } from "../format/lane-roles.ts";
 import { parseStatePhrases, type StatePhrasesConfig } from "../format/state-phrases.ts";
+import { parseLogKinds, type LogKindsConfig } from "./lint-log-kind.ts";
+import { parseFoldCheck, type FoldCheckConfig } from "./lint-fold.ts";
 import {
   ATTR_RE,
   COMPONENT_TAG_SOURCE,
@@ -39,7 +43,7 @@ import {
 } from "../format/markdown-ast.ts";
 import { diagramSiblingRelPath, pageFileRefKinds } from "../format/query-block.ts";
 import { parseEmbedAttrs, resolveEmbedRelPath } from "../format/embed.ts";
-import { buildWikiGitDates, type TouchRecord } from "./git-dates.ts";
+import { buildWikiGitDates, type MetadataFilterOutcome, type TouchRecord } from "./git-dates.ts";
 import { isLivingPage, resolveStatusLineHits, statusLineCandidates, type StatusLineCandidate, type StatusLineHit } from "./stale.ts";
 import { isMarkdownWikiPath, splitFrontmatter } from "./page-text.ts";
 import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
@@ -48,7 +52,7 @@ import { normalizeRelPath } from "./rel-path.ts";
 import { aliasTopDirs, aliasWorkedPaths } from "./alias-ref.ts";
 import { extractWikilinks } from "./wikilinks.ts";
 import { readFrontmatterLists, resolveRelatedEntries, type RelatedEntry } from "./frontmatter-lists.ts";
-import { extractNextMoves } from "./next-moves.ts";
+import { extractNextMoves, waitOwnerFrom, waitsOnOwner } from "./next-moves.ts";
 import {
   inferIssues,
   parseTrackersConfig,
@@ -65,6 +69,8 @@ import {
 import { kickWorkSessionsRefresh, workSessionsFor, workSessionsIdentityFor } from "./work-sessions.ts";
 import { computeWorkFocus, type IndexWork, type PageWork, type WorkPageInput } from "./work-focus.ts";
 import { buildWorkEvidence } from "./work-evidence.ts";
+import { parseWorkMapReaderConfig, type WorkMapKind } from "./work-map/kind.ts";
+import { parseWhatsNewReaderConfig, type WhatsNewMode } from "./whats-new-config.ts";
 
 const log = getLog("wiki", "store");
 
@@ -236,6 +242,12 @@ export interface WikiReaderConfig {
    * `readWikiReaderConfig` always sets it.
    */
   statePhrases?: StatePhrasesConfig | null;
+  /** The kinds a `log.md` entry may carry (`logKinds`, lint check 27). Null or
+   *  absent ⇒ the check does not run. */
+  logKinds?: LogKindsConfig | null;
+  /** The day from which a shipped plan must name its durable page
+   *  (`foldCheck`, lint check 28). Null or absent: not checked. */
+  foldCheck?: FoldCheckConfig | null;
   /**
    * The heading names whose sections the `system-map-drift` lint reads for
    * links between `repos/` pages (`systemMapLinkHeadings`). Undefined ⇒ the
@@ -244,6 +256,67 @@ export interface WikiReaderConfig {
    * left empty warns and is ignored.
    */
   systemMapLinkHeadings?: string[];
+  /**
+   * The work map's kind for this wiki (`workMap: {"kind": "themes"}`,
+   * `work-map/kind.ts`). Absent ⇒ `work`. A bad block or kind warns and reads
+   * as `work`. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  workMap?: { kind: WorkMapKind };
+  /**
+   * Which digest the What's new card builds (`whatsNew: {"mode": "batch"}`,
+   * `whats-new-config.ts`). Absent ⇒ `default`. A bad block or mode warns and
+   * reads as `default`. Optional so hand-built configs stay valid;
+   * `readWikiReaderConfig` always sets it.
+   */
+  whatsNew?: { mode: WhatsNewMode };
+  /**
+   * How the wiki's short PR forms resolve (`prGrammar`, living facts PR 3b,
+   * `pr-grammar.ts`): the owner, the aliases and the `noProd` repos. Null or
+   * absent ⇒ the live chips mark only owner-qualified forms (a pull URL,
+   * `owner/repo#n`). A bad field warns and is dropped.
+   */
+  prGrammar?: PrGrammar | null;
+  /**
+   * Discuss (mimir plan muninn-wiki-discuss): `"discuss": {"handoff": true}`
+   * offers «Ask Claude Code» in the reader, which copies a prompt naming the
+   * page's path and the passage's lines. Absent ⇒ off. A bad block or value
+   * warns and reads as off. Cosmetic, so it may live here: losing the file
+   * hides two controls that call no model.
+   *
+   * `"repos": [...]` lists the repos the wiki agent (P2b) may read a snapshot
+   * of, by name (`DECISION_TRIAGE_REPO_ROOTS` finds the checkout). It fails
+   * closed: absent, malformed or a file that does not parse puts no repo in
+   * reach.
+   */
+  discuss?: { handoff: boolean; repos?: string[] };
+}
+
+/** `.wiki-reader.json`'s `discuss` block: `{handoff: boolean, repos?: string[]}`,
+ *  else off with a warning. `repos` keeps only safe repo names; a bad list
+ *  warns and is dropped (no repo in reach). */
+export function parseDiscussReaderConfig(raw: unknown): { handoff: boolean; repos?: string[]; warning?: string } {
+  if (raw === undefined) return { handoff: false };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { handoff: false, warning: "is not an object — ignoring it" };
+  const o = raw as Record<string, unknown>;
+  const warnings: string[] = [];
+  let repos: string[] | undefined;
+  if (o.repos !== undefined) {
+    if (!Array.isArray(o.repos)) warnings.push("repos is not a list of repo names — no repo is in reach");
+    else {
+      repos = [];
+      for (const r of o.repos) {
+        if (typeof r === "string" && /^[\w.-]+$/.test(r.trim()) && r.trim() !== "." && r.trim() !== "..") {
+          if (!repos.includes(r.trim())) repos.push(r.trim());
+        } else warnings.push(`repos entry ${JSON.stringify(r)} is not a repo name — dropped`);
+      }
+    }
+  }
+  const h = o.handoff;
+  let handoff = false;
+  if (h !== undefined && typeof h !== "boolean") warnings.push("handoff is not true or false — ignoring it");
+  else handoff = h === true;
+  return { handoff, ...(repos ? { repos } : {}), ...(warnings.length ? { warning: warnings.join("; ") } : {}) };
 }
 
 /** A heading's text with one trailing parenthetical dropped, trimmed:
@@ -347,6 +420,15 @@ export function readPlanStatus(fm: Record<string, string | string[]>): PlanStatu
 export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
 export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
 
+/** The validated `followups:` value, read as {@link parsePlanFields} reads it:
+ *  exact-case `open`/`none`, a trailing comment stripped; anything else is
+ *  undefined. Exported for `scripts/wiki-check.ts`, which has no index. */
+export function readFollowups(fm: Record<string, string | string[]>): PlanFollowups | undefined {
+  const v = fm.followups;
+  const raw = typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+  return (PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw) ? (raw as PlanFollowups) : undefined;
+}
+
 /** `status_date` SHAPE gate — an ISO calendar day, nothing looser. Shape only:
  *  it admits `2026-99-99` / `2026-02-31`, which `isCalendarDay` then rejects. */
 const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -402,6 +484,22 @@ const YAML_BLOCK_SCALAR_INDICATORS = new Set([">", "|", ">-", "|-", ">+", "|+"])
 function stripTrailingComment(raw: string): string {
   const i = raw.search(/\s#/);
   return i === -1 ? raw : raw.slice(0, i).trim();
+}
+
+/** A scalar AS WRITTEN on its line (before `parseFrontmatter` unquotes it), read
+ *  as YAML reads it: a quoted value is what its quotes hold, `#` kept, with only
+ *  a comment after the closing quote dropped; an unquoted value drops a trailing
+ *  `# comment`, and a value that is only a comment (`genre: # later`) is empty.
+ *  Unquoted at most once. For lint check 26's `genre:` and `tags:`. */
+export function readCommentedScalar(raw: string): string {
+  const t = raw.trim();
+  const q = t[0];
+  if (q === '"' || q === "'") {
+    const end = t.indexOf(q, 1);
+    const rest = end < 0 ? "" : t.slice(end + 1);
+    return end > 0 && (rest === "" || /^\s+#/.test(rest)) ? t.slice(1, end).trim() : t;
+  }
+  return t.startsWith("#") ? "" : stripTrailingComment(t);
 }
 
 /** A frontmatter `status_date` as the index reads it — comment-stripped,
@@ -545,10 +643,6 @@ function parsePlanFields(
     drops.pages++;
     if (drops.samples.length < PLAN_DROP_SAMPLE_CAP) drops.samples.push(relPath);
   };
-  /** The validated fields' shared read: string-or-nothing, comment-stripped, trimmed. */
-  const scalar = (v: string | string[] | undefined) =>
-    typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
-
   const plan_status = readPlanStatus(fm);
   if (fm.plan_status !== undefined && plan_status === undefined) drop("planStatus");
 
@@ -560,17 +654,19 @@ function parsePlanFields(
 
   let followups: PlanFollowups | undefined;
   if (fm.followups !== undefined) {
-    const raw = scalar(fm.followups);
-    if ((PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw)) {
-      followups = raw as PlanFollowups;
-    } else drop("followups");
+    followups = readFollowups(fm);
+    if (followups === undefined) drop("followups");
   }
 
-  // NOT comment-stripped (see `stripTrailingComment`) — a note may say "#399".
-  const rawNote = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
-  const note = YAML_BLOCK_SCALAR_INDICATORS.has(rawNote) ? "" : rawNote;
+  return { plan_status, status_date, followups, status_note: readStatusNote(fm) };
+}
 
-  return { plan_status, status_date, followups, status_note: note || undefined };
+/** A page's `status_note:` as the index keeps it: trimmed, NOT comment-stripped
+ *  (see `stripTrailingComment`: a note may say "#399"), a bare block-scalar
+ *  indicator read as absent. */
+export function readStatusNote(fm: Record<string, string | string[]>): string | undefined {
+  const rawNote = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
+  return YAML_BLOCK_SCALAR_INDICATORS.has(rawNote) ? undefined : rawNote || undefined;
 }
 
 /**
@@ -840,6 +936,18 @@ export interface WikiPageMeta {
    */
   movesYou?: number;
   /**
+   * DECISIONS WAITING — the open `<Question>` ids that ask `WIKI_ANSWER_OWNER` and
+   * that a `waiting` lane of the owner's names: a `role` the owner is in, a `who`
+   * naming the owner, or neither (`waitsOnOwner`, `next-moves.ts`). Derived at index
+   * time and absent, not 0, on a page with none or with no owner configured; the
+   * listing's `waitsCounted` says whether it applies to this wiki. Only
+   * `/api/wiki/pages` serves it, and not on the read slice (`toListing`).
+   */
+  movesWaiting?: number;
+  /** The oldest parsed `since=` (`YYYY-MM-DD`) among the lanes holding a counted
+   *  id. Absent when none of them carries a date. */
+  waitingSince?: string;
+  /**
    * SERIES — the piece of work this page belongs to, from the frontmatter key
    * `series:`. One authored slug per member, spread over folders and stems: the
    * signal the rail's name heuristics (families, months) cannot see, and the one
@@ -868,6 +976,14 @@ export interface WikiPageMeta {
    * second fetch per series to find the one page carrying it.
    */
   seriesLabel?: string;
+  /**
+   * DECLARED EFFORT — the work-map effort this page names in frontmatter
+   * `effort:` (plan `muninn-wiki-work-map`, P6). Read with `series:`'
+   * tolerance (a list reads as its first entry); kept as written, so the work
+   * map's run and lint judge it against `EFFORT_ID_RE` themselves. Rides the
+   * listing, so the reader's `joinWorkMap` places a page declared after the run.
+   */
+  effort?: string;
   /**
    * ATTACHMENTS — the pages that fold under this one in the reader's rail, as
    * wiki-relative paths in the order the pairing pass found them. Absent (never
@@ -944,6 +1060,9 @@ export interface WikiTrail {
 
 export interface WikiIndex {
   pages: WikiPageMeta[];
+  /** This build had an owner to count `movesWaiting` for (`waitOwnerFrom`), so an
+   *  absent count means 0 rather than «not counted». */
+  waitOwnerSet?: boolean;
   /**
    * Outgoing link targets per page, keyed by normalized lowercased relPath
    * (`normalizeRelPath`); values are target relPaths in the same form.
@@ -1043,6 +1162,12 @@ export interface WikiIndex {
    * rules' `asOf` steps back through. Absent without git.
    */
   gitTouches?: Map<string, TouchRecord[]>;
+  /**
+   * Whether the metadata-only filter behind each page's `gitTouchedMs` ran to
+   * completion on this build (`WikiGitDates.metadataFilter`). Absent without
+   * git. The work map records a degraded walk in its coverage.
+   */
+  gitMetadataFilter?: MetadataFilterOutcome;
 }
 
 /** A page the same-stem precedence rule dropped, and the page that displaced it. */
@@ -2142,12 +2267,36 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of statePhrases.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "statePhrases", reason });
   }
+  const logKinds = parseLogKinds(obj.logKinds);
+  for (const reason of logKinds.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "logKinds", reason });
+  }
+  const foldCheck = parseFoldCheck(obj.foldCheck);
+  for (const reason of foldCheck.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "foldCheck", reason });
+  }
   const systemMapLinkHeadings = parseSystemMapLinkHeadings(obj.systemMapLinkHeadings);
   for (const reason of systemMapLinkHeadings.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "systemMapLinkHeadings", reason });
   }
   for (const { key, reason } of cull.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason });
+  }
+  const workMap = parseWorkMapReaderConfig(obj.workMap);
+  if (workMap.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "workMap", reason: workMap.warning });
+  }
+  const prGrammar = parsePrGrammar(obj.prGrammar);
+  for (const reason of prGrammar.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "prGrammar", reason });
+  }
+  const whatsNew = parseWhatsNewReaderConfig(obj.whatsNew);
+  if (whatsNew.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
+  }
+  const discuss = parseDiscussReaderConfig(obj.discuss);
+  if (discuss.warning) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "discuss", reason: discuss.warning });
   }
   // Same shape once more, one level down: `parseActivityWeights` drops a knob
   // whose value is not a finite number of the right magnitude and keeps the rest
@@ -2175,7 +2324,13 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     defaultLens: defaultLens.lens,
     roleKeys: roleKeys.keys,
     statePhrases: statePhrases.config,
+    logKinds: logKinds.config,
+    foldCheck: foldCheck.config,
     ...(systemMapLinkHeadings.headings ? { systemMapLinkHeadings: systemMapLinkHeadings.headings } : {}),
+    workMap: { kind: workMap.kind },
+    whatsNew: { mode: whatsNew.mode },
+    discuss: { handoff: discuss.handoff, ...(discuss.repos ? { repos: discuss.repos } : {}) },
+    prGrammar: prGrammar.grammar,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),
@@ -2778,6 +2933,15 @@ function asOptionalScalar(v: unknown): string | undefined {
   return raw.trim() || undefined;
 }
 
+/** A page's declared work-map effort (`effort:`, P6): `series:`' tolerance (a
+ *  list reads as its first entry), a trailing `# comment` and wrapping quotes
+ *  dropped as `readCull` drops them. Kept otherwise as written: the run, the
+ *  reader and lint judge it against `EFFORT_ID_RE` themselves. */
+export function readEffort(v: unknown): string | undefined {
+  const value = asOptionalScalar(v);
+  return value ? unquote(stripTrailingComment(value)).trim() || undefined : undefined;
+}
+
 /**
  * The cull bit off one page's signal pair — frontmatter `signal` +
  * `signal-reason`, or an explainer's two head metas. Only `none` culls (case
@@ -3375,6 +3539,10 @@ export async function buildWikiIndex(
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
   // the move is safe because the read depends on nothing but `root`.
   const readerConfig = await readWikiReaderConfig(root);
+  // Read once per build, so a change to the owner or the groups takes a restart
+  // and a re-index. Which wiki it applies to is the listing's `waitsCounted`: the
+  // index has no wiki name.
+  const waitOwner = waitOwnerFrom(answerConfigForIndex());
   const includePatterns = readerConfig?.include ?? [];
   // The one place the STORE needs to know a root is read-only: `include` is
   // cosmetic and degrades to absent, so on a root whose whole point is that it
@@ -3593,6 +3761,7 @@ export async function buildWikiIndex(
         // else can join.
         series: asOptionalScalar(fm.series),
         seriesLabel: asOptionalScalar(fm.series_label),
+        effort: readEffort(fm.effort),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.
@@ -3607,8 +3776,14 @@ export async function buildWikiIndex(
       if (lists.owns.keys.length) meta.owns = lists.owns.keys;
       if (lists.related.entries.length) rawRelated.set(relPath, lists.related.entries);
       // Waiting on you, from the body's `<NextMoves>` you lanes.
-      const movesYou = extractNextMoves(content)?.counts.you ?? 0;
+      const moves = extractNextMoves(content);
+      const movesYou = moves?.counts.you ?? 0;
       if (movesYou > 0) meta.movesYou = movesYou;
+      if (moves && waitOwner) {
+        const waits = waitsOnOwner(moves, fm.questions_to, waitOwner);
+        if (waits.ids.length) meta.movesWaiting = waits.ids.length;
+        if (waits.oldestSince) meta.waitingSince = waits.oldestSince;
+      }
       // Issue refs, where the body is already in hand (the `pagePrRefs`
       // precedent). The TITLE rule reads the authored `title:` line only, never
       // the stem fallback `titleFromFrontmatter` answers with.
@@ -4213,6 +4388,7 @@ export async function buildWikiIndex(
 
   return {
     pages,
+    waitOwnerSet: waitOwner !== null,
     outgoing,
     backlinks,
     resolve,
@@ -4228,7 +4404,7 @@ export async function buildWikiIndex(
     ...(work ? { work } : {}),
     issueKeys: buildIssueKeyIndex(pages, trackers),
     statusLineHits,
-    ...(gitDates ? { gitTouches: gitDates.touchCommits } : {}),
+    ...(gitDates ? { gitTouches: gitDates.touchCommits, gitMetadataFilter: gitDates.metadataFilter } : {}),
   };
 }
 
@@ -4341,6 +4517,13 @@ async function buildAndCache(root: string): Promise<WikiIndex | null> {
   return index;
 }
 
+let answerConfigForIndex: () => { owner: string | null; groups?: AnswerGroups } = resolveWikiAnswerConfig;
+
+/** Test seam: the answer config `buildWikiIndex` reads; null restores the env's. */
+export function __setWikiIndexAnswerConfigForTest(cfg: { owner: string | null; groups?: AnswerGroups } | null): void {
+  answerConfigForIndex = cfg ? () => cfg : resolveWikiAnswerConfig;
+}
+
 /** Test-only: swap the index builder (null restores the real one) and zero the
  *  build counter. */
 export function __setWikiIndexBuilderForTest(fn: ((root: string) => Promise<WikiIndex>) | null): void {
@@ -4353,10 +4536,16 @@ export function __wikiIndexBuildsStartedForTest(): number {
   return buildsStarted;
 }
 
+/** The one decoding of a page file: UTF-8 with a leading BOM dropped
+ *  (`Bun.file().text()`). Rejects when the file cannot be read. */
+export function readWikiText(absPath: string): Promise<string> {
+  return Bun.file(absPath).text();
+}
+
 /** Raw markdown of one page (by resolved meta). Null when the file vanished. */
 export async function readWikiPage(index: WikiIndex, meta: WikiPageMeta): Promise<string | null> {
   try {
-    return await Bun.file(path.join(index.root, meta.relPath)).text();
+    return await readWikiText(path.join(index.root, meta.relPath));
   } catch {
     return null;
   }

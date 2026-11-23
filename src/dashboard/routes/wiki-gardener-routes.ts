@@ -19,8 +19,9 @@ import { findWikiByRoot, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
 import { lineDiff, trimDiffContext, type DiffLine } from "../../gardener/diff.ts";
-import { applyWikiProposal, draftTitle, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
-import { commitWikiChange } from "../../wiki/commit.ts";
+import { proposalCategory, type ProposalCategory } from "../../gardener/category.ts";
+import { applyWikiProposal, draftTitle, isMechanicalKind, listingDrift, type ApplyDeps } from "../../gardener/apply.ts";
+import { commitWikiChange, committedPageWithHash, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -40,9 +41,23 @@ import {
   listWikiProposalsByGroup,
   approveWikiProposalGroup,
   rejectWikiProposalGroup,
+  settleWikiProposalApplied,
+  claimWikiProposalGroupLease,
+  renewWikiProposalGroupLease,
+  releaseWikiProposalGroupLease,
+  wikiProposalGroupLeaseHeld,
+  GROUP_LEASE_RENEW_MS,
   type DeletedSourceProposal,
+  type GroupLeaseRef,
 } from "../../db/wiki-proposals.ts";
-import { applyWikiProposalGroup, type GroupApplyResult } from "../../gardener/apply.ts";
+import {
+  applyWikiProposalGroup,
+  settleWrittenGroupRows,
+  GroupLeaseLostError,
+  GroupLogWriteError,
+  type GroupApplyResult,
+  type GroupRowOutcome,
+} from "../../gardener/apply.ts";
 import {
   seedLintProposals,
   DEFAULT_LINT_PROPOSAL_DEPS,
@@ -50,6 +65,7 @@ import {
 } from "../../gardener/lint-proposals.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { lintFindingPathOf } from "../../gardener/lint-markers.ts";
+import { carryPassageVerdicts, keptAsWritten, snapshotPassageKeys, writeFixedVerdicts, type PassageKeySnapshot } from "../../wiki/stale-fix-verdicts.ts";
 import { invalidateSummariesStatsCache } from "./summaries-routes.ts";
 import { notifySummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
@@ -81,6 +97,7 @@ import {
   WIKI_GARDENER_RUN_KEY,
   WIKI_GARDENER_LAST_RUN_KEY,
   WIKI_GARDENER_WEEKLY_RUN_KEY,
+  BACKLOG_DRAIN_RUN,
   type AssembledBacklog,
   type BacklogProgress,
   type DraftedScanProposal,
@@ -112,7 +129,10 @@ import {
   type SourceDraftTrigger,
 } from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
+import type { WatcherAlert } from "../../types.ts";
+import { markAgentRunFailed } from "../../db/traces.ts";
 import { Tracer } from "../../tracing/index.ts";
+import { finishAgentRunTrace } from "../../tracing/agent-run-trace.ts";
 import { getLog } from "../../logging.ts";
 import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -275,6 +295,14 @@ interface ProposalView {
    *  containment now changes the draft. The diff is against the page as it is
    *  now, not the page the draft was written on. */
   drifted: string | null;
+  /** Ungrouped drafts only: the review section the gate files the card under
+   *  (`proposalCategory`), null for everything else. */
+  category: ProposalCategory | null;
+  /** `stale-check` rows only (PR 3): the changed page the card is about. */
+  staleChanged?: string | null;
+  /** A superseded `stale-check` group's row (D20, D28): the group that
+   *  replaced it, for the «replaced by group n+1» note. */
+  replacedByGroup?: string | null;
 }
 
 /** The two fact-check reads the gate makes; a module seam so a route test can
@@ -385,6 +413,7 @@ function applyDepsFor(
     },
     reindex: triggerReindex,
     commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push }),
+    hasUncommittedChanges: (relPath) => pageHasUncommittedChanges(wikiDir, relPath),
   };
 }
 
@@ -460,7 +489,7 @@ export interface BacklogRouteDeps extends CoverageDeps {
    * write queue. Its whole observable is "the row is reviewable again", which a
    * test that cannot see the CAS can only assume.
    */
-  revertProposal: (id: string) => Promise<WikiProposal | null>;
+  revertProposal: (id: string, lease?: GroupLeaseRef) => Promise<WikiProposal | null>;
   /**
    * The proposal half of a doc delete (`backlog-doc-delete`): drop the `source`
    * proposals drafted from the doc, report the applied ones kept. Injectable so the
@@ -479,13 +508,42 @@ export interface BacklogRouteDeps extends CoverageDeps {
    * assert the endpoint exists.
    */
   listProposalsByGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
-  approveProposalGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
-  rejectProposalGroup: (wikiName: string, groupKey: string) => Promise<WikiProposal[]>;
+  /** A group verb passes its `lease` to every row CAS, which then moves
+   *  nothing unless that lease is still live (checked in the same statement). */
+  approveProposalGroup: (wikiName: string, groupKey: string, lease?: GroupLeaseRef) => Promise<WikiProposal[]>;
+  rejectProposalGroup: (
+    wikiName: string,
+    groupKey: string,
+    exceptIds?: readonly string[],
+    lease?: GroupLeaseRef,
+  ) => Promise<WikiProposal[]>;
+  /** Group Dismiss's CAS for a live row whose page already carries its draft:
+   *  `draft`/`approved` → `applied` (`settleWikiProposalApplied`). */
+  settleProposalApplied: (id: string, lease?: GroupLeaseRef) => Promise<WikiProposal | null>;
+  /** The group's cross-process lease (F35, migration 093): claim answers a
+   *  token, or null when another Accept or Dismiss — in this process or
+   *  another one on the same DB — holds a live lease; renew answers false when
+   *  the token lost it. */
+  claimGroupLease: (wikiName: string, groupKey: string, verb: "accept" | "dismiss") => Promise<string | null>;
+  renewGroupLease: (wikiName: string, groupKey: string, token: string) => Promise<boolean>;
+  releaseGroupLease: (wikiName: string, groupKey: string, token: string) => Promise<void>;
+  /** Does the token still hold a live lease? Asked before every write that is
+   *  not a row CAS: the page writes, `log.md`, the Stale check verdicts. */
+  groupLeaseHeld: (wikiName: string, groupKey: string, token: string) => Promise<boolean>;
+  /** How often a held lease is renewed; tests shorten it. Default
+   *  `GROUP_LEASE_RENEW_MS`. */
+  groupLeaseRenewMs?: number;
+  /** Group Dismiss's settle of the already-written rows; absent ⇒
+   *  `settleWrittenGroupRows`. Injectable so a test can make it throw. */
+  settleWrittenRows?: typeof settleWrittenGroupRows;
+  /** The group apply itself; absent ⇒ `applyWikiProposalGroup`. Injectable so
+   *  a test can make it throw part-way through a real apply on a real wiki. */
+  applyProposalGroup?: typeof applyWikiProposalGroup;
   /** The group route's terminal CAS, as ONE seam over the three verbs the
    *  single-row route calls as module functions. A group's apply can end on a
    *  different verb per row, so a test that cannot drive them cannot tell a
    *  stopped group from a failed one. */
-  markProposal: (id: string, status: "applied" | "stale" | "error") => Promise<boolean>;
+  markProposal: (id: string, status: "applied" | "stale" | "error", lease?: GroupLeaseRef) => Promise<boolean>;
   /** Turn check-8 findings into proposal rows. Injectable so the manual
    *  `lint-proposals` route is testable without a database. */
   seedLintProposals: typeof seedLintProposals;
@@ -511,22 +569,28 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   listProposals: (botName) => listAllWikiProposals(botName),
   getProposalById: (id) => getWikiProposalById(id),
   approveProposal: (id) => approveWikiProposal(id),
-  revertProposal: (id) => revertWikiProposalToDraft(id),
+  revertProposal: (id, lease) => revertWikiProposalToDraft(id, lease),
   deleteSourceProposalsForDoc: (botName, collection, docId) =>
     deleteSourceProposalsForDoc(botName, collection, docId),
   listProposalsByGroup: (wikiName, groupKey) => listWikiProposalsByGroup(wikiName, groupKey),
-  markProposal: (id, status) =>
+  markProposal: (id, status, lease) =>
     finishProposal(
       id,
-      status === "applied"
-        ? markWikiProposalApplied
-        : status === "stale"
-          ? markWikiProposalStale
-          : markWikiProposalError,
+      (rowId) =>
+        (status === "applied"
+          ? markWikiProposalApplied
+          : status === "stale"
+            ? markWikiProposalStale
+            : markWikiProposalError)(rowId, lease),
       status,
     ),
-  approveProposalGroup: (wikiName, groupKey) => approveWikiProposalGroup(wikiName, groupKey),
-  rejectProposalGroup: (wikiName, groupKey) => rejectWikiProposalGroup(wikiName, groupKey),
+  approveProposalGroup: (wikiName, groupKey, lease) => approveWikiProposalGroup(wikiName, groupKey, lease),
+  rejectProposalGroup: (wikiName, groupKey, exceptIds, lease) => rejectWikiProposalGroup(wikiName, groupKey, exceptIds, lease),
+  settleProposalApplied: (id, lease) => settleWikiProposalApplied(id, lease),
+  claimGroupLease: (wikiName, groupKey, verb) => claimWikiProposalGroupLease(wikiName, groupKey, verb),
+  renewGroupLease: (wikiName, groupKey, token) => renewWikiProposalGroupLease(wikiName, groupKey, token),
+  releaseGroupLease: (wikiName, groupKey, token) => releaseWikiProposalGroupLease(wikiName, groupKey, token),
+  groupLeaseHeld: (wikiName, groupKey, token) => wikiProposalGroupLeaseHeld(wikiName, groupKey, token),
   seedLintProposals,
 };
 
@@ -561,6 +625,24 @@ async function readRunJournal(deps: BacklogRouteDeps, watcherId: string): Promis
  * can render the "run finished — nothing clustered" / "drafted N" line.
  */
 const lastBacklogRuns = new Map<string, LastBacklogRun>();
+
+/**
+ * Group verbs (Accept, Dismiss) in flight in THIS process, keyed
+ * `<wiki lowercased>\0<group key>`: the synchronous first check, set with no
+ * `await` after the check, so two clicks here cannot both pass. What holds
+ * across processes is the DB lease each verb then claims (`claimGroupLease`,
+ * migration 093): `bun run dev:chat` registers the same routes on the same DB
+ * and wikis with its own set, and only the lease tells it an Accept here is
+ * still running. An `approved` row with no live lease is stranded (a throw or
+ * a restart), and both verbs take it (F35, arch review 2026-11-16).
+ */
+const groupVerbsInFlight = new Set<string>();
+
+/** Test seam: mark a group verb as in flight (or clear it) without running one. */
+export function __setGroupVerbInFlightForTest(wikiName: string, groupKey: string, on: boolean): void {
+  if (on) groupVerbsInFlight.add(groupFlightKey(wikiName, groupKey));
+  else groupVerbsInFlight.delete(groupFlightKey(wikiName, groupKey));
+}
 function setLastBacklogRun(botName: string, r: LastBacklogRun): void {
   lastBacklogRuns.set(botName, r);
 }
@@ -1233,6 +1315,44 @@ function buildBacklogGardenerDeps(
   };
 }
 
+/** A manual drain's gardener call, under the trace root that `runGardener` does not finish. */
+export function drainGardenerRun(
+  ctx: { bot: BotConfig; config: ReturnType<typeof loadConfig>; apiUrl: string; root: string },
+  gardener: typeof runGardener = runGardener,
+): (assembled: AssembledBacklog, hooks: GardenerRunHooks) => Promise<WatcherAlert[]> {
+  return (assembled, hooks) => {
+    const tracer = new Tracer("wiki-gardener-backlog", { botName: ctx.bot.name });
+    return runDrainUnderTrace(tracer, ctx.config.tracingEnabled, hooks, assembled.batchKeys.length, () =>
+      gardener(buildBacklogGardenerDeps(assembled, { ...ctx, tracer }, hooks)),
+    );
+  };
+}
+
+/**
+ * Run a manual drain's gardener under its trace root: name the trace to the drain's
+ * `/agents` run, so that row is not listed a second time from the root, and finish
+ * the root with the run's identity on both exits.
+ */
+export async function runDrainUnderTrace(
+  tracer: Pick<Tracer, "traceId" | "finish">,
+  tracingEnabled: boolean,
+  hooks: Pick<GardenerRunHooks, "onTraceId">,
+  offered: number,
+  run: () => Promise<WatcherAlert[]>,
+): Promise<WatcherAlert[]> {
+  if (tracingEnabled) hooks.onTraceId?.(tracer.traceId);
+  try {
+    const alerts = await run();
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "ok", { offered, drafted: draftedCount(alerts) });
+    return alerts;
+  } catch (err) {
+    finishAgentRunTrace(tracer, BACKLOG_DRAIN_RUN, "error", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
 /**
  * Shared resolve/guard prologue for the two backlog POSTs: resolve the wiki
  * request against the full registry, reject unknown / non-bot wikis, and find
@@ -1382,6 +1502,9 @@ export function registerWikiGardenerRoutes(
     const resolve = index ? index.resolve : () => undefined;
     const { marks: factcheckMarks, unavailable: factcheckUnavailable } = await loadFactcheckMarks();
     const replacements = redraftReplacements(rows);
+    // D20: group n+1 names the group it replaced, so group n's rows can say so.
+    const replacedByGroup = new Map<string, string>();
+    for (const r of rows) if (r.kind === "stale-check" && r.staleMeta?.supersedes && r.groupKey) replacedByGroup.set(r.staleMeta.supersedes, r.groupKey);
 
     const proposals: ProposalView[] = await Promise.all(
       rows.map(async (p) => {
@@ -1393,7 +1516,8 @@ export function registerWikiGardenerRoutes(
         // expensive read-time passes below are skipped for it. Measured on a
         // mimir clone: 183 lint rows rendered a 10.3 MB payload, almost all of
         // it `previewHtml` for a page the reviewer can open in the reader.
-        const mechanical = p.kind === "lint";
+        // A Stale check row is mechanical the same way (PR 3).
+        const mechanical = isMechanicalKind(p.kind);
         let diff: DiffLine[] | null = null;
         let drifted: string | null = null;
         if (reviewable && p.mode === "update" && root) {
@@ -1487,6 +1611,10 @@ export function registerWikiGardenerRoutes(
           ),
           replacedBy: replacements.get(p.id) ?? null,
           drifted,
+          category: p.status === "draft" && !p.groupKey ? proposalCategory(p.draft, p.targetPath) : null,
+          ...(p.kind === "stale-check"
+            ? { staleChanged: p.staleMeta?.changed ?? null, replacedByGroup: (p.groupKey && replacedByGroup.get(p.groupKey)) || null }
+            : {}),
           ...(factcheckUnavailable && factcheckLockApplies(p) ? { factcheckUnknown: true as const } : {}),
         };
       }),
@@ -1761,25 +1889,11 @@ export function registerWikiGardenerRoutes(
       clearRunJournal: () => backlogDeps.setSnapshot(watcher!.id, WIKI_GARDENER_RUN_KEY, null),
       draftedKeysSince: async (startedAt, batchKeys) =>
         draftedKeysSince(await backlogDeps.listProposals(bot.name), startedAt, batchKeys),
-      // The tracer root span must be finished HERE — runGardener only creates
-      // sub-spans (the weekly checker finishes its own tracer the same way);
-      // without this every drain leaves a malformed open trace in the waterfall.
-      runGardener: async (assembled, hooks) => {
-        const tracer = new Tracer("wiki-gardener-backlog", { botName: bot.name });
-        try {
-          const alerts = await runGardener(
-            buildBacklogGardenerDeps(assembled, { bot, config, apiUrl: KNOWLEDGE_API_URL, root, tracer }, hooks),
-          );
-          tracer.finish("ok", {
-            offered: assembled.batchKeys.length,
-            drafted: draftedCount(alerts),
-          });
-          return alerts;
-        } catch (err) {
-          tracer.error(err instanceof Error ? err : String(err));
-          throw err;
-        }
-      },
+      // `runGardener` only creates sub-spans, so the root is finished in
+      // `runDrainUnderTrace` (the weekly checker finishes its own tracer the same
+      // way); without that every drain leaves a malformed open trace in the waterfall.
+      runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root }),
+      markRunFailed: markAgentRunFailed,
       // Low-volume vertical fallback (R4): when the gardener drafts ZERO cluster
       // proposals, draft the batch docs individually as source pages instead. Bound to
       // the real `draftOneBacklogDoc` (which fetches each doc's body internally — the
@@ -2594,6 +2708,8 @@ export function registerWikiGardenerRoutes(
     const id = c.req.param("id");
     const existing = await backlogDeps.getProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
+    const grouped = groupMemberRefusal(c, existing);
+    if (grouped) return grouped;
 
     // …and the same refusal for the PER-WIKI guard, for the same reason and in
     // the same place. `applyWikiProposal` re-checks the root, but it is reached
@@ -2859,8 +2975,10 @@ export function registerWikiGardenerRoutes(
     const notJson = requireJsonRequest(c);
     if (notJson) return notJson;
     const id = c.req.param("id");
-    const existing = await getWikiProposalById(id);
+    const existing = await backlogDeps.getProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
+    const grouped = groupMemberRefusal(c, existing);
+    if (grouped) return grouped;
 
     const rejected = await rejectWikiProposal(id);
     if (!rejected) {
@@ -2956,6 +3074,8 @@ export function registerWikiGardenerRoutes(
         wikiDir: entry.root,
         wikiName: entry.name,
         seededBy: "lint-proposals",
+        // The self-heal's settle commit follows the owning bot's push policy, as the group verbs do.
+        push: getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)?.wikiAutoCommit?.push ?? true,
       });
       log.info(
         "Lint proposals for {wiki}: {proposed} group(s), {rows} row(s), {skipped} skipped, {claimed} page-claimed, {staled} retired",
@@ -2977,18 +3097,27 @@ export function registerWikiGardenerRoutes(
   });
 
   /**
-   * Approve a whole lint GROUP: CAS every `draft` row to `approved`, then apply
+   * Approve a whole lint GROUP: claim its live rows as `approved`, then apply
    * them in ONE write section (`applyWikiProposalGroup`).
    *
-   * **The gate refuses a group somebody else is mid-decision on, and SKIPS the
-   * rows that are already settled.** A row in `approved` means another apply is
-   * in flight over these same pages, and a `rejected` one is a dismissal the
-   * reviewer made — either refuses the whole request, 409
-   * `{outcome: "mixed", statuses}`. `applied` and `stale` rows are skipped and
-   * reported (`skipped`), and the `draft` rows are approved and applied. A group
-   * with no `draft` row left answers 409 `{outcome: "nothing-to-apply"}`, which
-   * is a different fact and a different remedy — and that check runs FIRST, so a
-   * fully-dismissed group is reported as settled rather than as blocked.
+   * **The gate refuses a decision somebody else is making, and SKIPS the rows
+   * that are already settled.** Another Accept or Dismiss of the group in
+   * flight (`groupVerbsInFlight` in this process, the group's DB lease in any
+   * process), or a `rejected` row (a dismissal the reviewer made), refuses the
+   * whole request, 409 `{outcome: "mixed", statuses}`. `applied` and `stale`
+   * rows are skipped and reported (`skipped`). The `draft` rows are claimed and
+   * applied, and so is every `approved` row: with the lease held it is one a
+   * throw or a restart stranded (F35, arch review 2026-11-16), and the re-run is safe
+   * (`applyWikiProposalGroup`). A group with no `draft` or `approved` row left
+   * answers 409 `{outcome: "nothing-to-apply"}`, which is a different fact and a
+   * different remedy — and that check runs FIRST, so a fully-dismissed group is
+   * reported as settled rather than as blocked.
+   *
+   * **No claimed row outlives the request in `approved`.** Every row the claim
+   * can touch is protected before the claim runs. On a throw anywhere, a row
+   * the apply reported written is marked `applied`; every other claimed row
+   * goes back to `draft`. A row is never put back to `draft` over a page it
+   * wrote, so a later Dismiss cannot record a landed edit as dismissed.
    *
    * It used to refuse on ANY non-draft row, which made the stop path below a
    * dead end: after a stop the group is `applied` + `stale` + `draft`, so the
@@ -2999,8 +3128,7 @@ export function registerWikiGardenerRoutes(
    * that is not `applied`; that row is CASed to its own terminal status, and
    * every row left in `approved` — the ones the apply never reached, plus a
    * `forbidden` one, which it reached and refused — is put back to `draft`
-   * (`revertWikiProposalToDraft`), since `approved` renders no verb in the gate
-   * at all. The decision itself is {@link groupApplyActions}.
+   * (`revertWikiProposalToDraft`). The decision itself is {@link groupApplyActions}.
    */
   app.post("/api/wiki/proposals/group/:groupKey/approve", async (c) => {
     const refused = readonlyRefusal(c);
@@ -3020,13 +3148,13 @@ export function registerWikiGardenerRoutes(
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
 
     // NOTHING TO APPLY outranks MIXED, and the order is the whole difference for
-    // an all-`rejected` group: there is no draft for an `approved`/`rejected` row
-    // to block, so "somebody else is mid-decision, try again" is false — the
+    // an all-`rejected` group: there is no live row for a `rejected` one to
+    // block, so "somebody else is mid-decision, try again" is false — the
     // dismissal IS the decision, and the honest answer is that this click has
     // nothing to do. Judged the other way round, a dismissed group answered
-    // `mixed`, whose remedy ("wait for the other apply") never arrives.
-    const skipped = statusCounts(existing.filter((r) => r.status !== "draft"));
-    if (existing.every((r) => r.status !== "draft")) {
+    // `mixed`, whose remedy never arrives.
+    const skipped = statusCounts(existing.filter((r) => !isLiveGroupRow(r)));
+    if (!existing.some(isLiveGroupRow)) {
       return c.json(
         {
           outcome: "nothing-to-apply",
@@ -3036,77 +3164,217 @@ export function registerWikiGardenerRoutes(
         409,
       );
     }
-    // MIXED: with a draft still live, only a row somebody else is deciding on
-    // blocks the request — an `approved` one (another apply is mid-flight over
-    // these pages) or a `rejected` one (a dismissal this click must not
-    // overrule). The message names what blocks: `applied` and `stale` rows are
-    // not draft either and are skipped rather than refused, so "the group is not
-    // all draft" described a condition this branch does not test.
-    const blocking = existing.filter((r) => r.status === "approved" || r.status === "rejected");
-    if (blocking.length > 0) {
-      return c.json(
-        {
-          outcome: "mixed",
-          error: "an approved or rejected row blocks the group",
-          statuses: statusCounts(existing),
-        },
-        409,
-      );
+    const flightKey = groupFlightKey(wikiName, groupKey);
+    const blockedBy = groupVerbsInFlight.has(flightKey)
+      ? IN_FLIGHT
+      : existing.some((r) => r.status === "rejected")
+        ? "a rejected row blocks the group"
+        : null;
+    if (blockedBy) {
+      return c.json({ outcome: "mixed", error: blockedBy, statuses: statusCounts(existing) }, 409);
+    }
+    groupVerbsInFlight.add(flightKey);
+    let lease: GroupLease | null;
+    try {
+      lease = await holdGroupLease(backlogDeps, wikiName, groupKey, "accept");
+    } catch (err) {
+      groupVerbsInFlight.delete(flightKey);
+      throw err;
+    }
+    if (!lease) {
+      groupVerbsInFlight.delete(flightKey);
+      return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
     }
 
-    await backlogDeps.approveProposalGroup(wikiName, groupKey);
-    // Re-read rather than trusting the CAS's own RETURNING set: a concurrent
-    // click may have taken half of them.
-    const rows = (await backlogDeps.listProposalsByGroup(wikiName, groupKey)).filter(
-      (r) => r.status === "approved",
-    );
-    if (rows.length === 0) {
-      return c.json({ error: "group is not reviewable", statuses: statusCounts(existing) }, 409);
-    }
+    // Every row this request may hold in `approved`, protected BEFORE the claim:
+    // the live rows it read. A row still `draft` when the `finally` runs is
+    // untouched by the revert (it CASes on `approved`).
+    const unsettled = new Set(existing.filter(isLiveGroupRow).map((r) => r.id));
+    // Each row's outcome as the apply reports it, so a throw after a page write
+    // still knows that page landed; and the rows whose page the group's
+    // `log.md` entry named (F35 R3: only those may be marked `applied`).
+    const outcomes = new Map<string, GroupRowOutcome>();
+    const logged = new Set<string>();
+    let rows: WikiProposal[] = [];
+    let snapshots: PassageKeySnapshot[] = [];
+    /** The pages this request wrote (or recovered) whose log entry it did not write. */
+    const unlogged = () => rows.filter((r) => needsGroupLog(outcomes.get(r.id)) && !logged.has(r.id)).map((r) => r.targetPath);
+    const landed = () => rows.filter((r) => outcomes.get(r.id)?.outcome.outcome === "applied").map((r) => r.targetPath);
+    try {
+      await backlogDeps.approveProposalGroup(wikiName, groupKey, lease.ref);
+      // Re-read rather than trusting the CAS's own RETURNING set: it does not
+      // carry the stranded `approved` rows this request claims too.
+      const reread = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
+      // A Dismiss in another process that finished between the first read and
+      // the lease rejected rows this request read as live: the group is
+      // decided, so nothing is applied over it (the claimed rows go back to
+      // `draft` in the `finally`).
+      if (reread.some((r) => r.status === "rejected" && unsettled.has(r.id))) {
+        return c.json({ outcome: "mixed", error: "a rejected row blocks the group", statuses: statusCounts(reread) }, 409);
+      }
+      rows = reread.filter((r) => r.status === "approved" && unsettled.has(r.id));
+      // The fenced claim moved nothing this request may apply: its lease was
+      // already gone, or another verb moved the rows between the first read and
+      // the claim. Either way the rows are someone else's (R2).
+      if (rows.length === 0) {
+        return c.json(
+          { outcome: "conflict", error: "this Accept claimed no row: its lease was gone or another verb moved the group first", applied: [], statuses: statusCounts(reread) },
+          409,
+        );
+      }
 
-    const deps = applyDepsForWiki(wikiEntry, bot);
-    const result = await applyWikiProposalGroup(rows, deps);
-
-    const { actions, applied, noop } = groupApplyActions(rows, result);
-    for (const action of actions) {
-      if (action.status === "draft") await backlogDeps.revertProposal(action.id);
-      else await backlogDeps.markProposal(action.id, action.status);
-    }
-
-    const stopped = result.stoppedAt;
-    if (stopped) {
-      const outcome = stopped.outcome;
-      const reason = "reason" in outcome ? outcome.reason : "";
-      log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
-        group: groupKey,
-        path: stopped.targetPath,
-        outcome: outcome.outcome,
-        reason,
+      const deps = applyDepsForWiki(wikiEntry, bot);
+      // A Stale check group: the written pages' linking passage keys before the
+      // write, so their verdicts follow the new content hashes after it.
+      snapshots = await staleCheckSnapshots(wikiEntry, rows);
+      // The apply asks for the lease inside its write section, before each page
+      // write and right before the log entry, and throws GroupLeaseLostError
+      // with nothing further written, logged or committed when it is gone.
+      const result = await (backlogDeps.applyProposalGroup ?? applyWikiProposalGroup)(rows, deps, {
+        onRowOutcome: (o) => outcomes.set(o.id, o),
+        onLogged: (ids) => ids.forEach((id) => logged.add(id)),
+        leaseHeld: lease.held,
       });
-      return c.json(
-        {
-          outcome: "stopped",
-          // The preflight refuses a stale member before any write; a later
-          // failure leaves earlier pages written, so the answer names both.
-          applied,
-          noop,
-          skipped,
-          stoppedAt: stopped.targetPath,
-          stoppedOutcome: outcome.outcome,
-          error: reason,
-          ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
-        },
-        outcome.outcome === "forbidden" ? 403 : 409,
-      );
+
+      const { actions, applied, noop, recovered } = groupApplyActions(rows, result);
+      // D29: a Stale check Accept writes a `fixed` verdict on each written
+      // linking page's new passage, on the index the apply refreshed. Before the
+      // status marks, so a mark that throws does not lose them. A no-op row's
+      // page already carries its edit (a dead pass wrote it and something
+      // committed it): it gets them too, as Dismiss's `alreadyWritten` does.
+      // Only while the lease holds (R4): a lease gone here is a lost lease like
+      // any other, and the answer is 409.
+      let fixed: number | null = null;
+      if (rows.some((r) => r.kind === "stale-check")) {
+        if (!(await lease.held())) throw new GroupLeaseLostError(groupKey);
+        fixed = await staleCheckFixedVerdicts(wikiEntry, rows, [...applied, ...recovered, ...noop], snapshots);
+      }
+      // A terminal CAS this request loses means another verb moved the row, or
+      // the lease lapsed, while this one applied it: every CAS is fenced on the
+      // lease, and the answer reports the loss rather than "applied".
+      const lost: string[] = [];
+      for (const action of actions) {
+        const won =
+          action.status === "draft"
+            ? (await backlogDeps.revertProposal(action.id, lease.ref)) !== null
+            : await backlogDeps.markProposal(action.id, action.status, lease.ref);
+        if (!won) lost.push(rows.find((r) => r.id === action.id)?.targetPath ?? action.id);
+        unsettled.delete(action.id);
+      }
+      if (lost.length > 0) {
+        const after = await backlogDeps.listProposalsByGroup(wikiName, groupKey);
+        log.error("Lint group {group}: another verb settled {lost} while this Accept applied them", {
+          group: groupKey,
+          lost: lost.join(", "),
+        });
+        return c.json(
+          {
+            outcome: "conflict",
+            error: "another Accept or Dismiss settled rows of this group while this one applied them",
+            lost,
+            applied,
+            noop,
+            recovered,
+            statuses: statusCounts(after),
+            ...(fixed !== null ? { fixed } : {}),
+          },
+          409,
+        );
+      }
+
+      const stopped = result.stoppedAt;
+      if (stopped) {
+        const outcome = stopped.outcome;
+        const reason = "reason" in outcome ? outcome.reason : "";
+        log.warn("Lint group {group} stopped at {path}: {outcome} — {reason}", {
+          group: groupKey,
+          path: stopped.targetPath,
+          outcome: outcome.outcome,
+          reason,
+        });
+        // A Stale check card: `fixed` for the rows written before the stop, and
+        // the edits that did not land, each with the status its row now has.
+        const notLanded = staleCheckNotLanded(rows, actions);
+        return c.json(
+          {
+            outcome: "stopped",
+            // The preflight refuses a stale member before any write; a later
+            // failure leaves earlier pages written, so the answer names both.
+            applied,
+            noop,
+            recovered,
+            skipped,
+            stoppedAt: stopped.targetPath,
+            stoppedOutcome: outcome.outcome,
+            error: reason,
+            ...(outcome.outcome === "forbidden" ? { readonly: true } : {}),
+            ...(fixed !== null ? { fixed, notLanded } : {}),
+          },
+          outcome.outcome === "forbidden" ? 403 : 409,
+        );
+      }
+      log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
+      return c.json({ outcome: "applied", applied, noop, recovered, skipped, ...(fixed !== null ? { fixed } : {}) });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (err instanceof GroupLeaseLostError) {
+        // The lease lapsed (and another verb may hold the group): nothing was
+        // written after the check, nothing this request had not logged is
+        // logged or committed, and its fenced row CASes move nothing. `unlogged`
+        // names the pages it wrote that the next verb logs and commits once
+        // (through its `recovered` / `alreadyWritten` path).
+        log.error("Lint group {group}: the Accept lost its lease", { group: groupKey });
+        return c.json(
+          {
+            outcome: "conflict",
+            error: "this Accept lost the group's lease; another Accept or Dismiss may hold the group",
+            applied: landed(),
+            unlogged: unlogged(),
+            statuses: statusCounts(await backlogDeps.listProposalsByGroup(wikiName, groupKey)),
+          },
+          409,
+        );
+      }
+      if (err instanceof GroupLogWriteError) {
+        // R3: the written pages are not logged, so no row is marked `applied`
+        // over them and nothing was committed; the `finally` puts the rows back
+        // to `draft`, and the next verb logs and commits the pages once.
+        log.error("Lint group {group} Accept: {error}", { group: groupKey, error: reason });
+        return c.json({ error: `group apply failed: ${reason}`, logFailed: true, unlogged: unlogged() }, 500);
+      }
+      log.error("Lint group {group} Accept failed: {error}", { group: groupKey, error: reason });
+      // The pages that landed (and were logged) before the throw still get
+      // their `fixed` verdicts, while the lease holds; this answer is a 500.
+      const done = rows.filter((r) => logged.has(r.id)).map((r) => r.targetPath);
+      if (done.length > 0 && (await lease.held())) await staleCheckFixedVerdicts(wikiEntry, rows, done, snapshots);
+      return c.json({ error: `group apply failed: ${reason}` }, 500);
+    } finally {
+      await settleUnsettledGroupRows(unsettled, (id) => markableApplied(outcomes.get(id), logged.has(id)), groupKey, lease.ref);
+      await lease.release();
+      groupVerbsInFlight.delete(flightKey);
     }
-    log.info("Lint group {group} applied {count} page(s)", { group: groupKey, count: applied.length });
-    return c.json({ outcome: "applied", applied, noop, skipped });
   });
 
   /**
    * Dismiss a whole lint group. The `rejected` rows are LEFT IN PLACE on
    * purpose — the seeder's skip list reads them, so they are what stops the
    * finding being proposed again on the next lint pass.
+   *
+   * It holds the group's lease (`claimGroupLease`, across processes) and
+   * takes every live row: `draft`, and `approved` (with the lease held, a
+   * stranded row, F35), so a half-stranded group settles whole rather than as
+   * `approved` + `rejected`. A live row whose page already IS its draft (an
+   * earlier Accept wrote it) is settled `applied`, not `rejected`, and named in
+   * `alreadyWritten`: rejecting it would record a dismissal of an edit that is
+   * on the page, and a Stale check card would write «kept as written» verdicts
+   * for it. The read, the compare, the `log.md` entry (for a page still
+   * uncommitted) and the settle run inside one write section and the commit
+   * after it (`settleWrittenGroupRows`), all before the rest are rejected; a
+   * Stale check row then gets its `fixed` verdict.
+   *
+   * It answers 200 `rejected` only when every live row it read reached
+   * `applied` or `rejected` in this call (F35 R2); a lease lost anywhere after
+   * the claim answers 409 `conflict` naming what it settled and rejected.
    *
    * It carries BOTH read-only refusals, unlike its single-row sibling
    * (`proposals/:id/reject`, a DB status flip that mutates no wiki). A dismissal
@@ -3128,12 +3396,128 @@ export function registerWikiGardenerRoutes(
 
     const existing = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
     if (existing.length === 0) return c.json({ error: "group not found" }, 404);
-    const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey);
-    if (rejected.length === 0) {
-      return c.json({ error: "group is no longer a draft", statuses: statusCounts(existing) }, 409);
+    const flightKey = groupFlightKey(scope.wikiName, groupKey);
+    if (groupVerbsInFlight.has(flightKey)) {
+      return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
     }
-    return c.json({ outcome: "rejected", rejected: rejected.length });
+    groupVerbsInFlight.add(flightKey);
+    let lease: GroupLease | null = null;
+    const conflict = async (error: string, extra: Record<string, unknown>) =>
+      c.json(
+        { outcome: "conflict", error, ...extra, statuses: statusCounts(await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey)) },
+        409,
+      );
+    try {
+      lease = await holdGroupLease(backlogDeps, scope.wikiName, groupKey, "dismiss");
+      if (!lease) return c.json({ outcome: "mixed", error: IN_FLIGHT, statuses: statusCounts(existing) }, 409);
+      // Re-read under the lease: an Accept elsewhere may have settled rows
+      // between the first read and the claim.
+      const current = await backlogDeps.listProposalsByGroup(scope.wikiName, groupKey);
+      const live = current.filter(isLiveGroupRow);
+      if (live.length === 0) return c.json({ error: "group is no longer a draft", statuses: statusCounts(current) }, 409);
+      // A Stale check row an earlier Accept wrote: its page's linking passage
+      // keys from before that write, so its verdicts follow it below.
+      const snapshots = await staleCheckSnapshots(scope.wikiEntry, live);
+      // Rows an earlier Accept already wrote: read, compared, logged and
+      // settled `applied` inside ONE write section, committed after it, so a
+      // row is `applied` only over a page that carried its draft when settled
+      // and was logged first. A throw leaves the rest live for a later verb.
+      // Every write is fenced on the lease: the section asks for it right
+      // before its log entry, and each settle and the reject check it in their
+      // own CAS.
+      const held = lease.held;
+      const ref = lease.ref;
+      const written = await (backlogDeps.settleWrittenRows ?? settleWrittenGroupRows)(
+        live,
+        applyDepsForWiki(scope.wikiEntry, scope.bot),
+        async (r) => (await backlogDeps.settleProposalApplied(r.id, ref)) !== null,
+        { leaseHeld: held },
+      );
+      const rejected = await backlogDeps.rejectProposalGroup(scope.wikiName, groupKey, written.map((r) => r.id), ref);
+      const alreadyWritten = written.length > 0 ? { alreadyWritten: written.map((r) => r.targetPath) } : {};
+      // R2: 200 only when every live row it read is now terminal. The reject
+      // is fenced, so a lease lost after the settle rejects nothing.
+      const done = new Set([...written, ...rejected].map((r) => r.id));
+      if (live.some((r) => !done.has(r.id))) {
+        log.error("Lint group {group}: the Dismiss lost its lease before every row was settled", { group: groupKey });
+        return await conflict("this Dismiss lost the group's lease before every row was settled; another Accept or Dismiss may hold the group", {
+          rejected: rejected.length,
+          ...alreadyWritten,
+        });
+      }
+      // R4: the verdict writes are not row CASes, so a Stale check card asks
+      // for the lease first; a lease gone here is a 409 like any other loss.
+      if (live.some((r) => r.kind === "stale-check") && !(await held())) {
+        log.error("Lint group {group}: the Dismiss lost its lease before its verdicts", { group: groupKey });
+        return await conflict("this Dismiss settled every row but lost the group's lease before writing its verdicts", {
+          rejected: rejected.length,
+          ...alreadyWritten,
+          verdictsWritten: false,
+        });
+      }
+      // A Stale check row an earlier Accept wrote gets its `fixed` verdict and
+      // the carry of its linking verdicts (best effort, logged inside).
+      if (written.length > 0) {
+        await staleCheckFixedVerdicts(scope.wikiEntry, written, written.map((r) => r.targetPath), snapshots);
+      }
+      // D20: a rejected Stale check card's edits are «kept as written»: reader
+      // «still true» rows where the stored verdict still carries the edit.
+      const kept = rejected.length > 0 ? await staleCheckKeptVerdicts(scope.wikiEntry, rejected) : null;
+      return c.json({
+        outcome: "rejected",
+        rejected: rejected.length,
+        ...alreadyWritten,
+        ...(kept ?? {}),
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (err instanceof GroupLeaseLostError) {
+        // Found gone right before the log entry: nothing logged, committed,
+        // settled or rejected.
+        log.error("Lint group {group}: the Dismiss lost its lease", { group: groupKey });
+        return await conflict("this Dismiss lost the group's lease; another Accept or Dismiss may hold the group", { rejected: 0 });
+      }
+      log.error("Lint group {group} Dismiss failed: {error}", { group: groupKey, error: reason });
+      return c.json({ error: `group dismiss failed: ${reason}`, ...(err instanceof GroupLogWriteError ? { logFailed: true } : {}) }, 500);
+    } finally {
+      await lease?.release();
+      groupVerbsInFlight.delete(flightKey);
+    }
   });
+
+  /**
+   * The group Accept's `finally`: every claimed row the request did not move to
+   * a status of its own. A row `markable` answers true for (its page landed and
+   * was logged, or a no-op over a committed page) is marked `applied`, never
+   * put back to `draft` over a logged page; every other row goes back to
+   * `draft` (a CAS on `approved`, so a row still `draft` is untouched),
+   * including a written row whose log entry was not written (R3: the next
+   * verb logs it once, through its `recovered` path). Both CASes are fenced
+   * on the lease, so after it lapsed they move nothing. A mark that throws is
+   * logged and leaves the row `approved`, which the next Accept or Dismiss
+   * takes as stranded.
+   */
+  async function settleUnsettledGroupRows(
+    unsettled: ReadonlySet<string>,
+    markable: (id: string) => boolean,
+    groupKey: string,
+    lease: GroupLeaseRef,
+  ): Promise<void> {
+    for (const id of unsettled) {
+      const landed = markable(id);
+      try {
+        if (landed) await backlogDeps.markProposal(id, "applied", lease);
+        else await backlogDeps.revertProposal(id, lease);
+      } catch (err) {
+        log.error("Lint group {group}: settling {id} as {status} failed, the next Accept or Dismiss takes it: {error}", {
+          group: groupKey,
+          id,
+          status: landed ? "applied" : "draft",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
 
   /**
    * Which WIKI a group request is about. THREE cases, and there is no fourth:
@@ -3175,6 +3559,104 @@ export function registerWikiGardenerRoutes(
       (b) => b.name.toLowerCase() === wikiEntry.name.toLowerCase() && !!b.wikiDir,
     );
     return { wikiEntry, wikiName: wikiEntry.name, bot };
+  }
+}
+
+/** The passage keys a Stale check group's pages carry before the write
+ *  (`snapshotPassageKeys`); empty for another kind. Best effort.
+ *
+ *  A page that already IS its row's draft was written by a pass that died
+ *  (F35): its bytes on disk are the after-content, whose keys would carry
+ *  nothing. Its before-content is the committed copy whose sha256 is the
+ *  row's `base_hash` (`committedPageWithHash`: HEAD while the write is
+ *  uncommitted, an older commit once something committed it). With no such
+ *  copy (outside git, history past the depth) the page is left out. The keys'
+ *  context (the page's title and plan facts) is read off the current index. */
+async function staleCheckSnapshots(entry: WikiRegistryEntry, rows: readonly WikiProposal[]): Promise<PassageKeySnapshot[]> {
+  const stale = rows.filter((r) => r.kind === "stale-check");
+  if (!stale.length) return [];
+  try {
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return [];
+    const pages: { relPath: string; content: string }[] = [];
+    for (const r of stale) {
+      const onDisk = await readFileOrNull(path.join(entry.root, r.targetPath));
+      if (onDisk === null) continue;
+      if (onDisk !== r.draft) {
+        pages.push({ relPath: r.targetPath, content: onDisk });
+        continue;
+      }
+      const before = r.baseHash ? await committedPageWithHash(entry.root, r.targetPath, r.baseHash) : null;
+      if (before !== null) pages.push({ relPath: r.targetPath, content: before });
+      else log.warn("Stale check: {page} already carries its draft and no committed copy matches its base, so its verdicts are not carried", { page: r.targetPath });
+    }
+    return await snapshotPassageKeys(index, pages);
+  } catch (err) {
+    log.warn("Stale check accept: passage keys not read for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return [];
+  }
+}
+
+/** D29: the `fixed` verdicts a Stale check Accept writes, or null for
+ *  another kind, then the carry of the written pages' linking verdicts. Written
+ *  whether or not the group's commit landed: the keys hash the page content, as
+ *  on the single-row Apply. Best effort: a failed write is logged, never a
+ *  failed Accept. */
+async function staleCheckFixedVerdicts(
+  entry: WikiRegistryEntry,
+  rows: readonly WikiProposal[],
+  applied: readonly string[],
+  snapshots: readonly PassageKeySnapshot[],
+): Promise<number | null> {
+  const written = rows.filter((r) => r.kind === "stale-check" && applied.includes(r.targetPath));
+  if (!rows.some((r) => r.kind === "stale-check")) return null;
+  if (!written.length) return 0;
+  try {
+    // Rebuilt AFTER the commit tail: the apply's own refresh ran while the
+    // pages were still uncommitted, which reads them as changed by mtime.
+    const index = await getWikiIndex({ root: entry.root, refresh: true });
+    if (!index) return 0;
+    const n = await writeFixedVerdicts({ wiki: entry.name, index, edits: written.flatMap((r) => r.staleMeta?.edits ?? []) });
+    const writtenPaths = new Set(written.map((r) => r.targetPath));
+    await carryPassageVerdicts({ wiki: entry.name, index, snapshots: snapshots.filter((s) => writtenPaths.has(s.page)) });
+    return n;
+  } catch (err) {
+    log.warn("Stale check accept: fixed verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return 0;
+  }
+}
+
+/** A stopped Stale check Accept's rows that wrote nothing: each page, the
+ *  status its row ends in (`groupApplyActions`) and its edits. */
+function staleCheckNotLanded(
+  rows: readonly WikiProposal[],
+  actions: readonly GroupRowAction[],
+): { page: string; status: string; edits: { old: string; text: string }[] }[] {
+  const status = new Map(actions.map((a) => [a.id, a.status]));
+  return rows
+    .filter((r) => r.kind === "stale-check" && status.get(r.id) !== "applied")
+    .map((r) => ({
+      page: r.targetPath,
+      status: status.get(r.id) ?? r.status,
+      edits: (r.staleMeta?.edits ?? []).map((e) => ({ old: e.old, text: e.text })),
+    }));
+}
+
+/** D20: the «kept as written» verdicts a rejected Stale check card writes
+ *  (`kept`) and the edits it wrote none for (`keptSkipped`), or null for
+ *  another kind. Best effort, like the fixed verdicts. */
+async function staleCheckKeptVerdicts(entry: WikiRegistryEntry, rejected: readonly WikiProposal[]): Promise<{ kept: number; keptSkipped: number } | null> {
+  const stale = rejected.filter((r) => r.kind === "stale-check");
+  if (!stale.length) return null;
+  const edits = stale.flatMap((r) => r.staleMeta?.edits ?? []);
+  try {
+    const index = await getWikiIndex({ root: entry.root });
+    if (!index) return { kept: 0, keptSkipped: edits.length };
+    const { kept, skipped } = await keptAsWritten({ wiki: entry.name, index, edits });
+    return { kept, keptSkipped: skipped };
+  } catch (err) {
+    log.warn("Stale check reject: kept verdicts not written for {wiki}: {error}", { wiki: entry.name, error: err instanceof Error ? err.message : String(err) });
+    return { kept: 0, keptSkipped: edits.length };
   }
 }
 
@@ -3244,15 +3726,17 @@ export interface GroupRowAction {
 export function groupApplyActions(
   rows: readonly WikiProposal[],
   result: GroupApplyResult,
-): { actions: GroupRowAction[]; applied: string[]; noop: string[] } {
+): { actions: GroupRowAction[]; applied: string[]; noop: string[]; recovered: string[] } {
   const actions: GroupRowAction[] = [];
   const applied: string[] = [];
   const noop: string[] = [];
+  const recovered: string[] = [];
   // Rows whose outcome left them in a status of their own. Everything else —
   // a row the apply never reached, and a `forbidden` one, which it reached and
   // refused — is still `approved`, which the gate renders with NO buttons at
   // all, so on a stop it goes back to `draft`.
   const settled = new Set<string>();
+  const staleCheckIds = new Set(rows.filter((r) => r.kind === "stale-check").map((r) => r.id));
   for (const row of result.results) {
     if (row.outcome.outcome === "applied") {
       actions.push({ id: row.id, status: "applied" });
@@ -3261,7 +3745,9 @@ export function groupApplyActions(
       // draft) wrote nothing. It is `applied` in the DB — it is done — but the
       // answer keeps the two apart, or a card reports N pages written on a
       // re-click that touched none.
-      (row.outcome.noop ? noop : applied).push(row.targetPath);
+      // A no-op whose page an earlier pass of the group wrote and never
+      // committed is `recovered`: this pass logged and committed it.
+      (row.recovered ? recovered : row.outcome.noop ? noop : applied).push(row.targetPath);
       continue;
     }
     if (row.outcome.outcome === "stale") {
@@ -3271,7 +3757,12 @@ export function groupApplyActions(
       actions.push({ id: row.id, status: "draft" });
       settled.add(row.id);
     } else if (row.outcome.outcome === "error") {
-      actions.push({ id: row.id, status: "error" });
+      // A Stale check row whose write failed goes back to `draft`: `error`
+      // renders no diff and no verb, and a later Send carries only live rows,
+      // so its edits would be lost. A pre-write refusal (a deleted or moved
+      // page) keeps `error`, or every later Accept stops at it again. A lint
+      // row keeps `error`.
+      actions.push({ id: row.id, status: staleCheckIds.has(row.id) && row.writeFailed ? "draft" : "error" });
       settled.add(row.id);
     }
   }
@@ -3282,7 +3773,108 @@ export function groupApplyActions(
       actions.push({ id: row.id, status: "draft" });
     }
   }
-  return { actions, applied, noop };
+  return { actions, applied, noop, recovered };
+}
+
+/** A group row a verb can still act on: `draft`, or `approved` (in flight, or
+ *  stranded by a throw or a restart — the group's lease tells which). */
+function isLiveGroupRow(r: WikiProposal): boolean {
+  return r.status === "draft" || r.status === "approved";
+}
+
+/**
+ * The single-row approve/reject routes refuse a row that belongs to a group
+ * (F35, arch review 2026-11-16): 409 `{group: true, groupKey}`. A group is
+ * accepted or dismissed whole — one write section, one `log.md` entry, one
+ * commit — and a single-row verb neither honours the group's in-flight set nor
+ * settles the rest of it: it could re-run a row a group Accept is applying, or
+ * reject one member and wedge the group as `rejected` + live. The gate never
+ * offers a single-row verb on a group card, so this refuses only a direct POST.
+ */
+function groupMemberRefusal(c: Context, row: WikiProposal): Response | null {
+  if (!row.groupKey) return null;
+  return c.json(
+    {
+      error: "this proposal is one page of a group — Accept or Dismiss the whole group on its card",
+      group: true,
+      groupKey: row.groupKey,
+      status: row.status,
+    },
+    409,
+  );
+}
+
+const IN_FLIGHT = "another Accept or Dismiss of this group is in flight";
+
+/** Did this row write (or recover) a page the group's `log.md` entry must
+ *  name? A no-op over a page already committed needs none. */
+function needsGroupLog(o: GroupRowOutcome | undefined): boolean {
+  return o?.outcome.outcome === "applied" && (!o.outcome.noop || !!o.recovered);
+}
+
+/** May the Accept's `finally` mark this row `applied` (F35 R3)? Only when its
+ *  page landed and, if the page needed a log entry, that entry was written. */
+function markableApplied(o: GroupRowOutcome | undefined, logged: boolean): boolean {
+  return o?.outcome.outcome === "applied" && (logged || !needsGroupLog(o));
+}
+
+interface GroupLease {
+  /** What the fenced row CASes take. */
+  ref: GroupLeaseRef;
+  /** Is the lease still live? A DB check (token and `expires_at`), asked
+   *  before every write that is not a row CAS. A lease found gone stays gone:
+   *  an expired lease is never renewed (`renewWikiProposalGroupLease`). */
+  held: () => Promise<boolean>;
+  release: () => Promise<void>;
+}
+
+/**
+ * Claim the group's cross-process lease for one verb and keep it renewed
+ * until `release`; null when another verb holds a live one. Every write the
+ * verb makes is fenced on it (F35): the row CASes check the token and
+ * `expires_at` in their own statement (`ref`), and the page, `log.md` and
+ * verdict writes ask `held()` first. A renewal that answers false (the lease
+ * expired, or another verb took it) is logged and stops the renewals; `held()`
+ * answers false from then on because the DB says so, so no flag is kept here.
+ */
+async function holdGroupLease(
+  deps: Pick<BacklogRouteDeps, "claimGroupLease" | "renewGroupLease" | "releaseGroupLease" | "groupLeaseHeld" | "groupLeaseRenewMs">,
+  wikiName: string,
+  groupKey: string,
+  verb: "accept" | "dismiss",
+): Promise<GroupLease | null> {
+  const token = await deps.claimGroupLease(wikiName, groupKey, verb);
+  if (!token) return null;
+  const timer = setInterval(() => {
+    deps.renewGroupLease(wikiName, groupKey, token).then(
+      (held) => {
+        if (held) return;
+        clearInterval(timer);
+        log.error("Lint group {group}: the {verb} lost its lease while running", { group: groupKey, verb });
+      },
+      (err) => log.warn("Lint group {group}: lease renewal failed: {error}", { group: groupKey, error: err instanceof Error ? err.message : String(err) }),
+    );
+  }, deps.groupLeaseRenewMs ?? GROUP_LEASE_RENEW_MS);
+  timer.unref?.();
+  return {
+    ref: { scope: wikiName, groupKey, token },
+    held: () => deps.groupLeaseHeld(wikiName, groupKey, token),
+    release: async () => {
+      clearInterval(timer);
+      try {
+        await deps.releaseGroupLease(wikiName, groupKey, token);
+      } catch (err) {
+        log.warn("Lint group {group}: lease release failed, it expires on its own: {error}", {
+          group: groupKey,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  };
+}
+
+function groupFlightKey(wikiName: string, groupKey: string): string {
+  return `${wikiName.toLowerCase()}\0${groupKey}`;
 }
 
 /** `{draft: 2, applied: 1}` — what a 409 tells the reviewer about a group it

@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Forty check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
+ * Forty-seven check keys, each finding `{ check, relPath, message, detail?, line?, severity?, fix? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -50,6 +50,8 @@
  *                      refuses it), an id two DecisionLog items carry (the
  *                      first decides), an item carrying a near-miss close
  *                      (D6 — `Closed 2026-10-08: B (D15)`, `Besvart 06.10`),
+ *                      an open card its page seems to rule on (`unclosedCards`,
+ *                      `src/format/question-unclosed.ts`),
  *                      or a `questions_to:` written as a block list, which
  *                      `parseFrontmatter` does not read. Rules:
  *                      `src/format/question.ts`.
@@ -82,18 +84,23 @@
  *                      a key another page `owns:` (D10), and an `owns:` entry
  *                      that names no key. Off unless `.wiki-reader.json`
  *                      declares `statePhrases`. Rules: `lint-state.ts`.
- * 15. component-value / component-attr — on `.mdx` pages, a component
- *                      attribute the renderer falls back on (a value its spec
- *                      `parse` rejects, or a missing `required` one) or drops
- *                      (an attribute `COMPONENT_ATTRS` does not list, or an
- *                      earlier spelling of a repeated one). Not culled. Rules:
+ * 15. component-value / component-attr / check-placement — on `.mdx` pages, a
+ *                      component attribute the renderer falls back on (a value
+ *                      its spec `parse` rejects, or a missing `required` one) or
+ *                      drops (an attribute `COMPONENT_ATTRS` does not list, or an
+ *                      earlier spelling of a repeated one); a `<Check>` that is
+ *                      not a you step's trailing tag, or a `<Check` outside code
+ *                      that reads as no tag. Not culled. Rules:
  *                      `lint-components.ts`. `scripts/wiki-check.ts` runs it with checks
  *                      5, 6, 6b, 10, 11, 12, 13, 16, 17 and 18 (`checkPageText`).
- * 16. ledger-row-state / chain-close-conflict — what the decision views
+ * 16. ledger-row-state / chain-close-conflict / plan-no-ledger — what the decision views
  *                      cannot draw: a PR ledger row whose state no rule reads
  *                      (the strip shows `unknown`), and a decision's «Lukker
  *                      Sn» that the question's own close contradicts. Info,
  *                      report-only. Rules: `lint-decision-chain.ts`.
+ *                      `plan-no-ledger`, in the same file: an in-flight,
+ *                      blocked or shipped plan with two or more `prs:` and no
+ *                      PR ledger table directly on the page.
  * 17. chart-table — on `.mdx` pages that are not culled, what a `<Chart>`
  *                      cannot draw from its table (a warning: the reader shows
  *                      the table instead) or draws with a note (info: a gap
@@ -140,6 +147,19 @@
  *                      no verdicts here, so a not-a-status hit never alerts).
  *                      Reads the target's status, so `lintWiki` only. Rules:
  *                      `stale.ts`.
+ * 25. effort-unknown — a page whose `effort:` (work-map P6) fails
+ *                      `EFFORT_ID_RE`, or names an id in neither `efforts` nor
+ *                      `retired` of the wiki's `.work-map.json` (warning). Silent
+ *                      on a wiki without a map; culled pages are not subjects.
+ * 27. log-kind       — a `log.md` entry whose kind is outside
+ *                      `.wiki-reader.json` `logKinds` (warning). Silent on a
+ *                      wiki that declares none. Rules: `lint-log-kind.ts`.
+ * 28. plan-not-folded — a `plans/` page with `plan_status: shipped`, a
+ *                      `status_date` on or after `.wiki-reader.json`
+ *                      `foldCheck.since`, and no `folded_into:` entry
+ *                      (warning). Silent on a wiki that declares no cutoff.
+ *                      Reads `status_date`, so `lintWiki` only. Rules:
+ *                      `lint-fold.ts`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -160,13 +180,13 @@ import {
 import {
   FUTURE_DATE_SKEW_MS,
   isImplausibleFutureDate,
-} from "../dashboard/views/components/wiki-filter.ts";
+} from "./core/wiki-filter.ts";
 import {
   fencedLineMask,
   frontmatterEndLine,
   NESTED_MARKUP_RE,
   stripLineCodeSpans,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 import { maskLineCodeSpans } from "../format/code-spans.ts";
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { checkSeries, SERIES_LINT_CHECKS, type LintFix } from "./lint-series.ts";
@@ -178,6 +198,7 @@ import { checkStatusLines, STALE_LINT_CHECKS } from "./stale.ts";
 import { loadPageFiles } from "./page-files.ts";
 import { checkDecisionChain, DECISION_CHAIN_LINT_CHECKS } from "./lint-decision-chain.ts";
 import { CHART_LINT_CHECKS, checkCharts } from "./lint-chart.ts";
+import { checkGenre, GENRE_LINT_CHECKS } from "./lint-genre.ts";
 import { checkRuleTrees, RULE_TREE_LINT_CHECKS } from "./lint-rule-tree.ts";
 import { checkGlossaries, GLOSSARY_LINT_CHECKS } from "./lint-glossary.ts";
 import { checkTextDiagrams, TEXT_DIAGRAM_LINT_CHECKS } from "./lint-text-diagram.ts";
@@ -185,6 +206,11 @@ import { checkDiagrams, DIAGRAM_LINT_CHECKS } from "./lint-diagram.ts";
 import { checkSteps, STEPS_LINT_CHECKS } from "./lint-steps.ts";
 import { checkSystemMapDrift, checkSystemMaps, SYSTEM_MAP_DRIFT_LINT_CHECKS, SYSTEM_MAP_LINT_CHECKS, type SystemMapPage } from "./lint-system-map.ts";
 import { isReservedBasename } from "./frontmatter-lists.ts";
+import { EFFORT_ID_RE } from "./work-map/ids.ts";
+import { checkLogKinds, LOG_KIND_LINT_CHECKS } from "./lint-log-kind.ts";
+import { checkCrossRefs, CROSS_REF_LINT_CHECKS, queryCardText, scanXrefPage, type XrefPageScan } from "./lint-cross-ref.ts";
+import { checkPlanFold, FOLD_LINT_CHECKS } from "./lint-fold.ts";
+import { parseWorkMap } from "./work-map/schema.ts";
 import { COMPONENT_OPEN_RE, countFactWrappers, parseBlocks } from "../format/markdown-ast.ts";
 import {
   closeNearMisses,
@@ -194,6 +220,7 @@ import {
   parseQuestionsTo,
   type QuestionState,
 } from "../format/question.ts";
+import { unclosedCards, type UnclosedCard } from "../format/question-unclosed.ts";
 import { normalizeRoleKey } from "../format/lane-roles.ts";
 import { CASE_STATUSES, parseCaseLabels } from "../format/case-board.ts";
 import type { Block } from "../format/markdown-ast.ts";
@@ -211,6 +238,7 @@ export const LINT_CHECKS = [
   "question-block",
   "role-key",
   "case-board-labels",
+  "effort-unknown",
   ...SERIES_LINT_CHECKS,
   ...DRIFT_LINT_CHECKS,
   ...REPORT_TOP_LINT_CHECKS,
@@ -226,11 +254,15 @@ export const LINT_CHECKS = [
   ...SYSTEM_MAP_LINT_CHECKS,
   ...SYSTEM_MAP_DRIFT_LINT_CHECKS,
   ...STALE_LINT_CHECKS,
+  ...GENRE_LINT_CHECKS,
+  ...LOG_KIND_LINT_CHECKS,
+  ...FOLD_LINT_CHECKS,
+  ...CROSS_REF_LINT_CHECKS,
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 /** The checks that read a page's own text, its relPath and the reader
- *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18, 19 and 20),
+ *  config's `roleKeys` (checks 5, 6, 6b, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20 and 26),
  *  and for check 15 the data files the page names ({@link pageTextFiles}). Check
  *  11's Tldr half reads `plan_status`, which the index parses from the page's
  *  own frontmatter ({@link readPlanStatus}). `lintWiki` runs them per page
@@ -262,14 +294,15 @@ export const PAGE_TEXT_LINT_CHECKS = [
   ...DIAGRAM_LINT_CHECKS,
   ...STEPS_LINT_CHECKS,
   ...SYSTEM_MAP_LINT_CHECKS,
+  ...GENRE_LINT_CHECKS,
 ] as const satisfies readonly LintCheck[];
 
 /** What the page-text checks read of a page. */
 type PageRef = Pick<WikiPageMeta, "relPath">;
 
 /** What {@link checkPageText} reads of a page: its relPath, whether it is
- *  culled, and its validated `plan_status`. */
-export type PageTextRef = PageRef & Pick<WikiPageMeta, "plan_status"> & { culled?: boolean };
+ *  culled, and its validated `plan_status` and `followups` (check 26's scope). */
+export type PageTextRef = PageRef & Pick<WikiPageMeta, "plan_status" | "followups"> & { culled?: boolean };
 
 export interface LintFinding {
   check: LintCheck;
@@ -655,6 +688,17 @@ function nearMissConsequence(id: string, quoted: string, state: QuestionState | 
   return `DecisionLog item ${id} says ${quoted} but no canonical close (Closed <date> (Dn).), so its card stays open`;
 }
 
+/** What to write for a card whose page seems to hold its ruling; a reading of
+ *  prose, so the message says what to do if it is wrong. */
+function unclosedCardMessage(card: UnclosedCard): string {
+  if (card.decision === null) {
+    return `DecisionLog item ${card.id} says "${card.word}" but its card stays open and no decision's first sentence names ${card.id} as ruled. If this is a ruling, write Closed <date> (Dn). in item ${card.id}, naming the decision that records it or one you add; if it is not, leave the card open`;
+  }
+  const decision =
+    card.namedBy === card.decision ? `Decision ${card.decision}` : `Decision ${card.namedBy}, superseded by ${card.decision},`;
+  return `${decision} reads as ruling on ${card.id} but its card stays open. If it does, write Closed <date> (${card.decision}). in item ${card.id}; if that reading is wrong, leave the card open`;
+}
+
 /**
  * Check 10 — a `<Question>` whose answer card cannot follow its DecisionLog
  * item. Reads the page through the one parse the renderer runs
@@ -685,6 +729,7 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
 
   const blockLines = questionLines(questions, questionTagLines(lines));
   const lineOf = (k: number) => blockLines[k];
+  const unclosed = new Map(unclosedCards(parsed).map((c) => [c.id, c]));
   const seen = new Set<string>();
   questions.forEach((q, k) => {
     const line = lineOf(k);
@@ -715,6 +760,8 @@ function checkQuestions(page: PageRef, rawContent: string): LintFinding[] {
       const quoted = [...new Set(words)].map((w) => `"${w}"`).join(", ");
       push(nearMissConsequence(q.id, quoted, states.get(q.id), item.text), line);
     }
+    const card = unclosed.get(q.id);
+    if (card && !words.some((w) => w === "Answered" || w === "Besvart")) push(unclosedCardMessage(card), line);
   });
   return findings;
 }
@@ -826,6 +873,28 @@ function checkMissingSources(page: WikiPageMeta, content: string): LintFinding |
     relPath: page.relPath,
     message: "Concept page cites no sources (no ## Sources section or sources: frontmatter)",
   };
+}
+
+/**
+ * Check 25: a page's `effort:` must be a valid effort id the map holds in
+ * `efforts` or `retired`. The run ignores any other value, so a typo would
+ * otherwise leave the page silently unplaced.
+ */
+export function checkDeclaredEfforts(
+  pages: readonly Pick<WikiPageMeta, "relPath" | "effort" | "culled">[],
+  map: { efforts: readonly { id: string }[]; retired?: readonly { id: string }[] },
+): LintFinding[] {
+  const known = new Set([...map.efforts.map((e) => e.id), ...(map.retired ?? []).map((r) => r.id)]);
+  const out: LintFinding[] = [];
+  for (const p of pages) {
+    if (p.effort === undefined || p.culled) continue;
+    if (!EFFORT_ID_RE.test(p.effort)) {
+      out.push({ check: "effort-unknown", relPath: p.relPath, message: `effort: "${p.effort}" is not a valid effort id (a–z, 0–9 and "-", first character not "-", at most 64 characters)`, detail: p.effort });
+    } else if (!known.has(p.effort)) {
+      out.push({ check: "effort-unknown", relPath: p.relPath, message: `effort: "${p.effort}" names no effort in the work map; the organize run ignores it`, detail: p.effort });
+    }
+  }
+  return out;
 }
 
 /** Pages with no inbound links, discounting reserved-file linkers + subjects. */
@@ -1043,8 +1112,9 @@ function checkCaseBoardLabels(page: PageRef, rawContent: string): LintFinding[] 
  * question target, 13 on a page with a labelled CaseBoard, 11's first half on a
  * page with a DecisionLog or StatusRows, 15 on an `.mdx` page that is not
  * culled, 11's Tldr half on an `.mdx` page that is a live report page or a
- * reference page and is not reserved or culled, and 20 on a page outside
- * `archive/` and `plans/` that is not reserved or culled.
+ * reference page and is not reserved or culled, 20 on a page outside
+ * `archive/` and `plans/` that is not reserved or culled, and 26 on an `.mdx`
+ * page under `archive/` or `plans/` that is not reserved or culled.
  */
 export function checkPageText(
   page: PageTextRef,
@@ -1062,7 +1132,7 @@ export function checkPageText(
     ...checkReportTop(page, content),
     ...checkDecisionChain(page, content),
   ];
-  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files));
+  if (judgesComponents(page)) findings.push(...checkComponents(page.relPath, content, undefined, files), ...checkCharts(page, content), ...checkRuleTrees(page, content), ...checkGlossaries(page, content), ...checkDiagrams(page, content, files), ...checkSteps(page, content, files), ...checkGenre(page, content, files));
   // The reader draws a `<SystemMap>` on `.md` pages too, so its checks skip only culled pages.
   if (!page.culled) findings.push(...checkSystemMaps(page, content));
   if (!reservedBasename(page.relPath) && !page.culled) findings.push(...checkTldr(page, content), ...checkTextDiagrams(page, content));
@@ -1081,6 +1151,37 @@ export const judgesComponents = (page: Pick<PageTextRef, "relPath" | "culled">):
  *  skips. */
 export async function pageTextFiles(root: string, page: Pick<PageTextRef, "relPath" | "culled">, content: string): Promise<LoadedPageFiles> {
   return judgesComponents(page) ? loadPageFiles(root, page.relPath, content) : new Map();
+}
+
+/** Checks 29 and 30 over the scanned pages: a page's neighbours are the pages
+ *  it links to and the pages of its `series:`. */
+async function checkXrefs(
+  index: WikiIndex,
+  scans: ReadonlyMap<string, XrefPageScan>,
+  trackerProjects: readonly string[],
+  readFile: (absPath: string) => Promise<string | null>,
+): Promise<LintFinding[]> {
+  const byKey = new Map(index.pages.map((p) => [normalizeRelPath(p.relPath), p]));
+  const bySeries = new Map<string, string[]>();
+  for (const p of index.pages) {
+    const series = p.series?.trim();
+    if (series) bySeries.set(series, [...(bySeries.get(series) ?? []), p.relPath]);
+  }
+  const series = (relPath: string) => bySeries.get(byKey.get(normalizeRelPath(relPath))?.series?.trim() ?? "") ?? [];
+  return checkCrossRefs(scans, {
+    neighbours: (relPath) => {
+      const linked = (index.outgoing.get(normalizeRelPath(relPath)) ?? []).map((k) => byKey.get(k)?.relPath).filter((p): p is string => !!p);
+      return [...new Set([...linked, ...series(relPath)])].filter((p) => p !== relPath);
+    },
+    resolve: (target) => index.resolve(target)?.relPath,
+    cardText: async (relPath, id) => {
+      const page = byKey.get(normalizeRelPath(relPath));
+      const content = page ? await readFile(path.join(index.root, page.relPath)) : null;
+      return page && content !== null ? queryCardText(content, await pageTextFiles(index.root, page, content), id) : null;
+    },
+    connector: index.readerConfig?.language === "no" ? "på" : "on",
+    trackerProjects,
+  });
 }
 
 /**
@@ -1105,6 +1206,10 @@ export async function lintWiki(
   // `system-map-drift` reads the repos pages a map names, so it runs after
   // the loop over the hub pages the loop collected.
   const systemMapPages: SystemMapPage[] = [];
+  const foldCheck = index.readerConfig?.foldCheck ?? null;
+  // Checks 29 and 30 read what every page defines before they can judge one.
+  const trackerProjects = (index.readerConfig?.trackers ?? []).flatMap((t) => t.projects);
+  const xrefScans = new Map<string, XrefPageScan>();
 
   for (const page of index.pages) {
     // Check 24 — a status word after a link to a plan that says otherwise
@@ -1117,7 +1222,10 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
-    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], await pageTextFiles(index.root, page, content)));
+    const files = await pageTextFiles(index.root, page, content);
+    findings.push(...checkPageText(page, content, index.readerConfig?.roleKeys ?? [], files));
+    // A reserved or culled page defines ids and is linted for none.
+    xrefScans.set(page.relPath, scanXrefPage(content, trackerProjects, !reservedBasename(page.relPath) && !page.culled));
 
     // A culled page is never a subject of the two frontmatter-hygiene checks: it
     // is filed away, and a finding asks someone to edit it.
@@ -1129,6 +1237,9 @@ export async function lintWiki(
       if (sources) findings.push(sources);
       // Check 9 — live report pages only (`isLiveReportPage`).
       findings.push(...checkDrift(page, content, drift));
+      // Check 28 — a shipped plan with no `folded_into:` entry, from the wiki's cutoff.
+      const unfolded = foldCheck ? checkPlanFold(page, content, foldCheck) : null;
+      if (unfolded) findings.push({ check: "plan-not-folded", relPath: page.relPath, message: unfolded });
     }
     if (!page.culled && content.includes("<SystemMap")) systemMapPages.push({ page, content });
     // Reserved and culled pages own nothing and are linted for nothing.
@@ -1149,6 +1260,8 @@ export async function lintWiki(
     findings.push(...(await checkSystemMapDrift(index, systemMapPages, (relPath) => readFile(path.join(index.root, relPath)))));
   }
 
+  findings.push(...(await checkXrefs(index, xrefScans, trackerProjects, readFile)));
+
   findings.push(...checkOrphans(index));
   // Index-level, not per-page: the subject of this finding is a page the loop
   // above never sees — the store dropped it from `index.pages`.
@@ -1156,6 +1269,17 @@ export async function lintWiki(
   // Check 8 — index-level for the same reason, and the only checks whose
   // findings carry a `fix`. Its rules and cuts: `lint-series.ts`.
   findings.push(...checkSeries(index));
+  // Check 25 — declared efforts against the wiki's work map.
+  // `WORK_MAP_FILE` (work-map/write.ts), spelled here so lint does not import the write seam.
+  const mapText = await readFile(path.join(index.root, ".work-map.json"));
+  const map = mapText === null ? null : parseWorkMap(mapText);
+  if (map) findings.push(...checkDeclaredEfforts(index.pages, map));
+  // Check 27 — log.md entry kinds against the wiki's own list.
+  const logKinds = index.readerConfig?.logKinds;
+  const logText = logKinds ? await readFile(path.join(index.root, "log.md")) : null;
+  if (logKinds && logText !== null) {
+    for (const f of checkLogKinds(logText, logKinds)) findings.push({ check: "log-kind", relPath: "log.md", message: f.message, detail: f.kind, line: f.line });
+  }
 
   // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
   // — the cast is what let a partially-seeded map type-check as complete.

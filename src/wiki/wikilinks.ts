@@ -1,8 +1,10 @@
 /**
- * The `[[wikilink]]` scanner, in a module with no IO and no imports, so the
+ * The `[[wikilink]]` scanner, in a module with no IO and one platform import, so the
  * index (`store.ts`) and the frontmatter list readers (`frontmatter-lists.ts`)
  * share one scanner without importing each other.
  */
+
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
 
 /**
  * A `[[wikilink]]`, target and alias both NEWLINE-FREE. Obsidian has no
@@ -15,13 +17,14 @@
  * consumer: `render.ts`, `digest.ts`, `graph-routes.ts`, `draft.ts`'s
  * `CONTAIN_BODY_RE`, and the two flatteners in `store.ts` (which share one). The sixth was
  * the fact-check annotate pass, and it is now the exported SOURCE
- * `WIKILINK_SPAN_SOURCE` (`dashboard/views/components/wiki-integrate.ts`) — the
+ * `WIKILINK_SPAN_SOURCE` (`src/wiki/core/wiki-integrate.ts`) — the
  * side of the split that has to answer "is this a link?" rather than "which pages
  * does this page name", so it also rejects a candidate spanning a dangling `[[`
  * (`store.ts`'s `firstDanglingWikilinkOpen` rule) and scans a code-span-masked line.
- * This copy stays a copy: the index must not import a dashboard module.
+ * This copy stays a copy: the index must not import a dashboard module. The
+ * copies of this exact pattern share one linear matcher (`wikilink-scan.ts`).
  */
-export const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
+export const WIKILINK_RE = wikilinkRegExp("plain");
 
 /**
  * Extract deduped [[wikilink]] targets from raw file content (frontmatter

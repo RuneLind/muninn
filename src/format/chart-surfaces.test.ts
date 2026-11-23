@@ -41,4 +41,21 @@ describe("a <Chart> off the reader", () => {
       expect(out.replace(/\s+/g, " ")).toBe(fmt(bare).replace(/\s+/g, " "));
     });
   }
+
+  // The bars and range tables, with a bold total row, print as written too.
+  const kindTables: [string, string[]][] = [
+    ['<Chart kind="bars" value="Cost">', ["| Run | Cost |", "|---|---|", "| a | $30 |", "| b | $4500 |"]],
+    ['<Chart kind="range" value="Interval">', ["| Slice | Interval |", "|---|---|", "| P1 | $120–220 |", "| **Slate** | **$330–670** |"]],
+  ];
+  for (const [open, rows] of kindTables) {
+    for (const [name, fmt] of surfaces) {
+      test(`${name} prints ${open} as its table`, () => {
+        const plain = [...rows, ""].join("\n");
+        const out = fmt([open, "", ...rows, "", "</Chart>", ""].join("\n"));
+        expect(out).not.toContain("<svg");
+        expect(out).not.toContain("vc-");
+        expect(out.replace(/\s+/g, " ")).toBe(fmt(plain).replace(/\s+/g, " "));
+      });
+    }
+  }
 });

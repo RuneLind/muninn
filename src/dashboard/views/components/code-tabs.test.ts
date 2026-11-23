@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 
 /**
- * The repo has no browser test env (no jsdom/happy-dom), so — like the mermaid
+ * These tests do not use happy-dom, so — like the mermaid
  * enhancer — the DOM render path is left to the orchestrator's headless smoke.
  * Here we drive `enhanceCodeTabs` against a minimal hand-rolled DOM to lock the
  * behavior that matters: a tab click moves `.is-active` onto that tab + its

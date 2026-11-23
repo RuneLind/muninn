@@ -1,18 +1,21 @@
 import { test, expect, describe } from "bun:test";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import {
   MOCK_ALIAS_IMPORT,
   MOCK_MODULE_CALL,
   MOCK_MODULE_SUBSTRING,
   SINGLE_PROCESS_SCRIPTS,
-  TEST_FILE_DIRS,
-  TEST_FILE_GLOB,
   bunTestLinks,
+  discoverTestFiles,
   expandLink,
+  isPlaywrightSpec,
+  ownProcessFiles,
   sharedLinkOffenders,
   unrunMockFiles,
 } from "./mock-isolation.ts";
+import { recordedTestTempDirs, testTempDirSync } from "./temp-dir.ts";
 
 /**
  * Every test file that calls `mock.module()` runs in a `bun test` process of its
@@ -40,13 +43,7 @@ import {
 const ROOT = join(import.meta.dir, "..", "..");
 
 function allTestFiles(): string[] {
-  const out: string[] = [];
-  for (const dir of TEST_FILE_DIRS) {
-    for (const rel of new Bun.Glob(TEST_FILE_GLOB).scanSync({ cwd: join(ROOT, dir) })) {
-      out.push(`${dir}/${rel}`);
-    }
-  }
-  return out.sort();
+  return discoverTestFiles(ROOT);
 }
 
 function mockFiles(files: readonly string[]): string[] {
@@ -119,6 +116,68 @@ describe("the rule, on fixtures", () => {
     expect(sharedLinkOffenders({ links: l, mockFiles: ["src/b/solo.test.ts"], allTestFiles: all })).toHaveLength(1);
   });
 
+  test("the own-process predicate selects by directory prefix, or by a GlobalWindow import from happy-dom", () => {
+    const src: Record<string, string> = {
+      "src/dashboard/views/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/a.test.ts": 'import { Window } from "happy-dom";',
+      "src/x/wiki-boot/a.test.ts": "",
+      "src/dashboard/views/components/g.test.ts": 'import { test } from "bun:test";\nimport { GlobalWindow } from "happy-dom";',
+      "src/y/g.test.ts": "import {\n  Window,\n  GlobalWindow,\n} from 'happy-dom';",
+      "src/z/other.test.ts": 'import { GlobalWindow } from "./my-dom";',
+      "src/q/quoted.test.ts": `const s = 'import { GlobalWindow } from "happy-dom"';`,
+      "src/d/default-named.test.ts": 'import HappyDom, { GlobalWindow } from "happy-dom";',
+      "src/d/aliased.test.ts": 'import { GlobalWindow as GW } from "happy-dom";',
+      "src/n/namespace.test.ts": 'import * as hd from "happy-dom";\nconst w = new hd.GlobalWindow();',
+    };
+    expect(ownProcessFiles(Object.keys(src), (f) => src[f]!)).toEqual([
+      "src/dashboard/views/wiki-boot/a.test.ts",
+      "src/dashboard/views/components/g.test.ts",
+      "src/y/g.test.ts",
+      "src/d/default-named.test.ts",
+      "src/d/aliased.test.ts",
+    ]);
+  });
+
+  test("a path argument is a substring of the file's path, as bun reads it; a leading `./` makes it a path", () => {
+    const files = ["src/plans/a.test.ts", "src/plans/a.test.tsx", "src/plansx/f.test.ts", "sub/src/plans/a.test.ts", "xsrc/plans/e.test.ts"];
+    expect(expandLink(["src/plans/"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx", "sub/src/plans/a.test.ts", "xsrc/plans/e.test.ts"]);
+    expect(expandLink(["src/plans/a.test.ts"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx", "sub/src/plans/a.test.ts"]);
+    expect(expandLink(["./src/plans/"], files)).toEqual(["src/plans/a.test.ts", "src/plans/a.test.tsx"]);
+    expect(expandLink(["./src/plans/a.test.ts"], files)).toEqual(["src/plans/a.test.ts"]);
+    expect(expandLink(["src/gone.test.ts"], files)).toEqual(["src/gone.test.ts"]);
+  });
+
+  test("matching is case-sensitive, and a directory argument that matches nothing is dropped, not returned", () => {
+    const files = ["src/plans/a.test.ts", "src/plans/G.TEST.TS"];
+    expect(expandLink(["TEST.TS"], files)).toEqual(["src/plans/G.TEST.TS"]);
+    expect(expandLink(["SRC/PLANS/"], files)).toEqual([]);
+    expect(expandLink(["src/nothing/"], files)).toEqual([]);
+  });
+
+  test("Playwright's specs are anchored at the root's e2e/, not any e2e/ segment", () => {
+    expect(isPlaywrightSpec("e2e/a/o.spec.ts")).toBe(true);
+    expect(isPlaywrightSpec("src/e2e/o.spec.ts")).toBe(false);
+    expect(isPlaywrightSpec("xe2e/o.spec.ts")).toBe(false);
+  });
+
+  // Documented divergences from bun 1.3.10 (measured on macOS; no chain uses these shapes):
+  // bun skips `Node_Modules/`, runs a `./` path into a hidden directory, and reads an
+  // absolute argument as a path. The model keeps its simpler rules; this pins them.
+  test("the documented divergences from bun keep the model's behavior", () => {
+    expect(discoverTestFilesIn({ "src/Node_Modules/a.test.ts": "", "src/.hidden/b.test.ts": "" })).toEqual(["src/Node_Modules/a.test.ts"]);
+    const files = ["src/plans/a.test.ts"];
+    expect(expandLink(["./src/.hidden/"], files)).toEqual([]);
+    expect(expandLink(["./src/.hidden/b.test.ts"], files)).toEqual(["./src/.hidden/b.test.ts"]);
+    expect(expandLink(["/abs/src/plans/a.test.ts"], files)).toEqual(["/abs/src/plans/a.test.ts"]);
+    expect(expandLink(["/abs/src/plans/"], files)).toEqual([]);
+  });
+
+  test("a mock file whose path contains a group's directory shares that group's process", () => {
+    const files = ["e2e/fixtures/src/wiki/m.test.ts", "src/wiki/a.test.ts"];
+    const l = bunTestLinks({ test: "bun test src/wiki/" });
+    expect(sharedLinkOffenders({ links: l, mockFiles: ["e2e/fixtures/src/wiki/m.test.ts"], allTestFiles: files })).toHaveLength(1);
+  });
+
   test("a mock file no chain runs is reported, not silently skipped", () => {
     expect(unrunMockFiles({ links, mockFiles: ["src/zz/lost.test.ts", "src/b/solo.test.ts"], allTestFiles: all })).toEqual([
       "src/zz/lost.test.ts",
@@ -137,6 +196,77 @@ describe("the rule, on fixtures", () => {
     expect(MOCK_ALIAS_IMPORT.test('import { mock, test } from "bun:test";')).toBe(false);
     expect(MOCK_ALIAS_IMPORT.test("// treat the mock as a stand-in for the DB")).toBe(false);
     expect(MOCK_MODULE_CALL.test(" * a file that mock.module()s a db module\nconst r = /mock\\.module\\(/;")).toBe(false);
+  });
+});
+
+/** The files a real `bun test <args>` loads in `dir`, read off its junit report. */
+function bunReport(dir: string, args: string[]): { files: string[]; out: string } {
+  // The report sits in a recorded temp dir so the run's cleanup removes it; inside `dir` it would be in the tree bun scans.
+  const out = join(testTempDirSync(join(tmpdir(), "bun-junit-")), `${basename(dir)}.xml`);
+  const r = Bun.spawnSync(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  const log = `${r.stdout.toString()}${r.stderr.toString()}`;
+  // bun 1.3.10 on filters that match nothing: exit 1, no junit file, this line.
+  if (!existsSync(out) && r.exitCode === 1 && log.includes("did not match any test files")) return { files: [], out };
+  if (r.exitCode !== 0 || !existsSync(out)) throw new Error(`bun test ${args.join(" ")} exited ${r.exitCode}${existsSync(out) ? "" : " without a junit file"}:\n${log}`);
+  return { files: [...new Set([...readFileSync(out, "utf8").matchAll(/ file="([^"]+)"/g)].map((m) => m[1]!))].sort(), out };
+}
+
+function bunRuns(dir: string, args: string[]): string[] {
+  return bunReport(dir, args).files;
+}
+
+/** `discoverTestFiles` over a fresh temp tree holding `files`. */
+function discoverTestFilesIn(files: Record<string, string>): string[] {
+  const dir = testTempDirSync(join(tmpdir(), "discover-"));
+  for (const [f, body] of Object.entries(files)) {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), body);
+  }
+  return discoverTestFiles(dir);
+}
+
+describe("the model agrees with bun itself (spawns bun on a fixture tree)", () => {
+  const dir = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+  for (const f of [
+    "src/plans/a.test.ts", "src/plans/b.test.tsx", "src/plans/c.spec.ts", "src/plans/d_test.ts", "src/plans/e_spec.js",
+    "src/plans/f.test.mts", "src/plans/G.TEST.TS", "src/plans/.h.test.ts", "src/plans/i.tests.ts", "src/plans/j-test.ts",
+    "src/plans/k.test.d.ts", "src/plans/.hidden/l.test.ts", "src/plans/node_modules/m.test.ts", "src/plansx/n.test.ts",
+    "sub/src/plans/a.test.ts", "e2e/o.spec.ts",
+  ]) {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+  }
+
+  test("discovery: every file bun runs with no argument, and no other", () => {
+    expect(discoverTestFiles(dir)).toEqual(bunRuns(dir, []));
+  }, 20_000);
+
+  test("matching: expandLink gives the files bun runs for each argument shape", () => {
+    const all = discoverTestFiles(dir);
+    for (const args of [["src/plans/"], ["src/plans/a.test.ts"], ["./src/plans/"], ["./src/plans/a.test.ts"], ["rc/pla"], ["src/plansx/", "./sub/"], ["TEST.TS"], ["SRC/PLANS/"], ["src/nothing/"]]) {
+      expect(expandLink(args, all).sort(), args.join(" ")).toEqual(bunRuns(dir, args));
+    }
+  }, 30_000);
+
+  test("a bun run that fails for any reason but an unmatched filter is an error, not an empty list", () => {
+    const fresh = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+    writeFileSync(join(fresh, "a.test.ts"), 'import { test, expect } from "bun:test";\ntest("t", () => { expect(1).toBe(2); });\n');
+    expect(() => bunRuns(fresh, [])).toThrow(/exited 1:/);
+  }, 20_000);
+
+  test("the junit report lands inside a recorded temp dir, never next to the fixture", () => {
+    const fresh = testTempDirSync(join(tmpdir(), "bun-discovery-"));
+    writeFileSync(join(fresh, "a.test.ts"), 'import { test } from "bun:test";\ntest("t", () => {});\n');
+    const { files, out } = bunReport(fresh, []);
+    expect(files).toEqual(["a.test.ts"]);
+    // Only the path this call wrote: other files' recorded dirs may already be gone.
+    expect(recordedTestTempDirs().some((d) => dirname(out) === d)).toBe(true);
+    expect(readdirSync(tmpdir()).filter((n) => n.startsWith(basename(fresh)) && n !== basename(fresh))).toEqual([]);
+  }, 20_000);
+
+  test("Playwright's specs are e2e/**/*.spec.ts (playwright.config.ts testDir + testMatch)", () => {
+    expect(discoverTestFiles(dir).filter(isPlaywrightSpec)).toEqual(["e2e/o.spec.ts"]);
+    expect(readFileSync(join(ROOT, "playwright.config.ts"), "utf8")).toMatch(/testDir: "\.\/e2e",[\s\S]*testMatch: "\*\*\/\*\.spec\.ts"/);
   });
 });
 
@@ -226,6 +356,14 @@ describe("the live chains", () => {
 
   test("every file that calls mock.module is run by at least one chain", () => {
     expect(unrunMockFiles(liveInput())).toEqual([]);
+  });
+
+  test("every own-process file (directory or GlobalWindow import) is ALONE in each bun test process that runs it, and run by a chain", () => {
+    const input = liveInput();
+    const own = ownProcessFiles(input.allTestFiles, (f) => readFileSync(join(ROOT, f), "utf8"));
+    expect(own).toContain("src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts");
+    expect(sharedLinkOffenders({ ...input, mockFiles: own })).toEqual([]);
+    expect(unrunMockFiles({ ...input, mockFiles: own })).toEqual([]);
   });
 
   /**

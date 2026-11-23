@@ -2,8 +2,8 @@
  * Pure, DOM-free helpers for the /wiki reader's **claim retry** (↻) affordance —
  * the client half of `GET /api/wiki/factcheck/claim`.
  *
- * Split out of `wiki-browser.ts` (which runs DOM code at module load and so can't
- * be imported in tests) for the same reason `wiki-integrate.ts` / `wiki-explain.ts`
+ * Split out of `wiki-browser.ts` (which then ran DOM code at module load; it is
+ * importable since `boot()`, but needs a DOM) for the same reason `wiki-integrate.ts` / `wiki-explain.ts`
  * / `wiki-ask-session.ts` were: the answer surgery here is where a bug is durable.
  * A fact-check answer is committed into the wiki page by ➕/integrate, so a splice
  * that damages a sibling block, or a lede amendment written where no lede exists,

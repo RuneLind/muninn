@@ -14,7 +14,7 @@
  * sentinel-strip + prompt shapes unit-test in isolation — this is the test seam.
  */
 
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 import {
   COMPONENT_TAG_SOURCE_SINGLE_LINE,
   normalizeFactVerdict,
@@ -24,7 +24,7 @@ import {
   fenceLineStates,
   fenceOpener,
   parseFactcheckClaims,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 import { splitFrontmatter } from "./page-text.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */

@@ -93,6 +93,14 @@ export const GIT_DATES_TIMEOUT_MS = 5_000;
  */
 export const SWEEP_THRESHOLD = 10;
 
+/**
+ * The subject prefix of a Stale check fix commit (Apply: `[stale-check] apply:
+ * <page>`; Accept: `[stale-check] fix: …`). Such a commit is not a page change
+ * (plan muninn-wiki-drift-check, D29): it contributes no update date and no
+ * touch, as a sweep does, so a fix never makes its page a changed page.
+ */
+export const STALE_CHECK_COMMIT_PREFIX = "[stale-check] ";
+
 /** The three durable per-page date signals a wiki's git history can supply. All
  *  maps/sets are keyed by WIKI-relative posix path, exactly as `WikiPageMeta.relPath`
  *  spells it. */
@@ -135,7 +143,23 @@ export interface WikiGitDates {
    * on a hash-less log.
    */
   touchCommits: Map<string, TouchRecord[]>;
+  /**
+   * Whether the metadata-only filter behind `touched` ran to completion. The
+   * filter gives up past {@link GIT_DATES_CLASSIFY_TIMEOUT_MS} (or on a failed
+   * read) and answers `touched` unfiltered, and a page whose newest
+   * {@link METADATA_TOUCH_MAX_STEPS} touches are all metadata-only keeps the
+   * one it reached, unverified. Either way a lint-accept burst can read as
+   * edits; the work map records this in its coverage.
+   */
+  metadataFilter: MetadataFilterOutcome;
 }
+
+/** How {@link resolveMetadataOnlyTouches} ended. `steps` counts the pages still
+ *  unresolved after the last step; `budget` covers a failed read too. */
+export type MetadataFilterOutcome =
+  | { degraded: false }
+  | { degraded: true; reason: "budget" }
+  | { degraded: true; reason: "steps"; pages: number };
 
 /** A file entry from `--name-status`: a status letter, optional similarity score,
  *  then a TAB. Commit lines (`--format=%H %at`, hex and digits) can never match it,
@@ -175,9 +199,14 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   }
 }
 
-/** A commit line: `%H %at`. The bare-integer form (`%at` alone) is still read, so
- *  a hash-less log parses as before — it just records no {@link TouchRecord}s. */
-const COMMIT_LINE_RE = /^(?:([0-9a-f]{7,64}) )?(\d+)$/;
+/** The same helper for `digest-changed-pages.ts`, which reads one entry's commit and its file list. */
+export { git as runWikiGit };
+
+/** A commit line: `%H %at`, then a TAB and the subject (`%x09%s`). The
+ *  bare-integer form (`%at` alone) and a subject-less line are still read, so a
+ *  hash-less log parses as before — it just records no {@link TouchRecord}s.
+ *  The TAB cannot open a file entry: those start with a capital status letter. */
+const COMMIT_LINE_RE = /^(?:([0-9a-f]{7,64}) )?(\d+)(?:\t(.*))?$/;
 
 /** One parsed `--name-status` file entry. `from` is set only for renames/copies. */
 interface FileEntry {
@@ -206,7 +235,7 @@ export interface TouchRecord {
  * spawn, no fs) so the rename/sweep semantics are unit-testable against literal git
  * output.
  *
- * Expects `--reverse --name-status -M --format=%H %at` — oldest commit first, which is
+ * Expects `--reverse --name-status -M --format=%H %at%x09%s` — oldest commit first, which is
  * what makes both maps single-pass: a rename's source is always already recorded
  * when the rename is read, and "last write wins" on `touched` lands on the newest
  * qualifying commit without a second sort.
@@ -250,10 +279,11 @@ export function parseGitLog(
   };
 
   /** Apply one commit's entries. Sweep-ness is a property of the whole commit, so
-   *  entries are buffered until the commit is complete before any is applied. */
-  const flush = (ts: number, commit: string, entries: FileEntry[]) => {
+   *  entries are buffered until the commit is complete before any is applied. A
+   *  Stale check fix commit is skipped like a sweep ({@link STALE_CHECK_COMMIT_PREFIX}). */
+  const flush = (ts: number, commit: string, entries: FileEntry[], subject: string) => {
     if (!ts || entries.length === 0) return;
-    const isSweep = entries.length >= sweepThreshold;
+    const isSweep = entries.length >= sweepThreshold || subject.startsWith(STALE_CHECK_COMMIT_PREFIX);
     for (const e of entries) {
       if (e.status === "R" && e.from !== undefined) {
         // A RENAME moves a page: the destination IS the source, so it inherits both
@@ -299,6 +329,7 @@ export function parseGitLog(
 
   let ts = 0;
   let commit = "";
+  let subject = "";
   let entries: FileEntry[] = [];
   for (const line of stdout.split("\n")) {
     if (!line) continue;
@@ -310,10 +341,11 @@ export function parseGitLog(
       // a commit.
       const c = COMMIT_LINE_RE.exec(line);
       if (!c) continue;
-      flush(ts, commit, entries);
+      flush(ts, commit, entries, subject);
       entries = [];
       commit = c[1] ?? "";
       ts = Number(c[2]) * 1000;
+      subject = c[3] ?? "";
       continue;
     }
     if (!ts) continue; // file entry before any stamp — malformed, ignore
@@ -331,7 +363,7 @@ export function parseGitLog(
     }
     entries.push({ status, path: rest });
   }
-  flush(ts, commit, entries); // the last commit has no following stamp to trigger its flush
+  flush(ts, commit, entries, subject); // the last commit has no following stamp to trigger its flush
 
   return { created, touched, touches };
 }
@@ -396,7 +428,7 @@ export function parseGitLog(
  * page: the four provenance keys claude-usage's stamper writes, plus the five
  * muninn's own mechanical writers do — the series editor (`series`/`series_label`,
  * one call per member of a join) and the `/plans` board (`priority`, and
- * `plan_status` + `status_date` together) — plus the three keys of a cull and the `code_at` commit pin.
+ * `plan_status` + `status_date` together) — plus the three keys of a cull, the `code_at` commit pin and the declared `effort`.
  *
  * The rule is derived from the KEY SET, not from a claim about its writers: the
  * gardener's lint-proposals path writes `series:` WITH a `log.md` entry, so "every
@@ -424,6 +456,8 @@ export const METADATA_ONLY_FRONTMATTER_KEYS = [
   // The line-ref chips' commit pin (`src/wiki/code-refs.ts`): re-pinning moves
   // where the links point, not what the page says.
   "code_at",
+  // The work-map effort a page declares (P6): where the page sits, not what it says.
+  "effort",
 ] as const;
 
 /** A frontmatter line whose KEY is one a mechanical writer owns. Column 0 and a
@@ -449,14 +483,23 @@ export type PageChangeVerdict = "identical" | "metadata-only" | "edit";
  * differ at all: there is no block a mechanical writer could have written into, so
  * every difference is body. (Equal texts answer `identical` before the split runs,
  * so a frontmatter-less page that did not change is still dropped.)
+ *
+ * `keys` narrows the metadata set for a caller asking a narrower question: Done
+ * asks whether a plan page's dirt is only the `/plans` board's pending write
+ * (`src/plans/board-dirt.ts`). The default is the whole set.
  */
-export function classifyPageChange(headText: string, workText: string): PageChangeVerdict {
+export function classifyPageChange(
+  headText: string,
+  workText: string,
+  keys: readonly string[] = METADATA_ONLY_FRONTMATTER_KEYS,
+): PageChangeVerdict {
   if (headText === workText) return "identical";
   const head = splitFrontmatter(headText);
   const work = splitFrontmatter(workText);
   if (head.frontmatter === null || work.frontmatter === null) return "edit";
   if (head.body !== work.body) return "edit";
-  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter)
+  const lineRe = keys === METADATA_ONLY_FRONTMATTER_KEYS ? METADATA_FRONTMATTER_LINE_RE : new RegExp(`^(?:${keys.join("|")}):`);
+  return frontmatterDiffIsMetadataOnly(head.frontmatter, work.frontmatter, lineRe)
     ? "metadata-only"
     : "edit";
 }
@@ -478,11 +521,11 @@ export function classifyPageChange(headText: string, workText: string): PageChan
  * A trailing `\r` needs no trimming: the key regex is anchored at column 0 and
  * open at the end, so a CRLF page's metadata lines match with it in place.
  */
-function frontmatterDiffIsMetadataOnly(head: string, work: string): boolean {
+function frontmatterDiffIsMetadataOnly(head: string, work: string, lineRe: RegExp): boolean {
   const remainder = (block: string) =>
     block
       .split("\n")
-      .filter((line) => !METADATA_FRONTMATTER_LINE_RE.test(line))
+      .filter((line) => !lineRe.test(line))
       .join("\n");
   return remainder(head) === remainder(work);
 }
@@ -720,9 +763,10 @@ async function resolveMetadataOnlyTouches(
   prefix: string,
   touched: Map<string, number>,
   touches: Map<string, TouchRecord[]>,
-): Promise<Map<string, number>> {
+): Promise<{ touched: Map<string, number>; outcome: MetadataFilterOutcome }> {
   // Set when the budget race is lost, so the loser spawns no further rounds.
   let aborted = false;
+  let unresolved = 0;
   const run = async (): Promise<Map<string, number>> => {
     const out = new Map(touched);
     let pending: { key: string; list: TouchRecord[]; i: number }[] = [];
@@ -763,6 +807,7 @@ async function resolveMetadataOnlyTouches(
       });
       pending = next;
     }
+    unresolved = pending.length;
     if (moved > 0) {
       log.debug("wiki {root}: {n} metadata-only commit touch(es) set aside", { root, n: moved });
     }
@@ -783,9 +828,12 @@ async function resolveMetadataOnlyTouches(
       "wiki {root}: metadata-only commit classification failed or exceeded its budget — touch dates unfiltered",
       { root },
     );
-    return touched;
+    return { touched, outcome: { degraded: true, reason: "budget" } };
   }
-  return resolved;
+  return {
+    touched: resolved,
+    outcome: unresolved > 0 ? { degraded: true, reason: "steps", pages: unresolved } : { degraded: false },
+  };
 }
 
 /**
@@ -813,7 +861,7 @@ export async function newestEditAtOrBefore(
   if (cut.size === 0) return touched;
   const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
   if (!top) return touched;
-  return resolveMetadataOnlyTouches(root, top, "", touched, cut);
+  return (await resolveMetadataOnlyTouches(root, top, "", touched, cut)).touched;
 }
 
 /**
@@ -874,7 +922,8 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     // `-M90%` would therefore mis-date 6 real pages to prevent 1 hypothetical.
     "-M",
     "--diff-merges=first-parent",
-    "--format=%H %at",
+    // The subject after a TAB: a Stale check fix commit is skipped by it.
+    "--format=%H %at%x09%s",
   ];
   if (rel) args.push("--", rel);
 
@@ -916,7 +965,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
 
   const parsed = parseGitLog(stdout);
   const created = parsed.created;
-  const touched = await resolveMetadataOnlyTouches(
+  const { touched, outcome: metadataFilter } = await resolveMetadataOnlyTouches(
     root,
     toplevel,
     prefix,
@@ -932,7 +981,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     touchTimes.set(p.slice(prefix.length), list.map((r) => r.ts));
     touchCommits.set(p.slice(prefix.length), list);
   }
-  if (!rel) return { created, touched, dirty, touchTimes, touchCommits };
+  if (!rel) return { created, touched, dirty, touchTimes, touchCommits, metadataFilter };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree
   // (the pathspec makes that rare, but a rename's SOURCE can legitimately sit
@@ -942,7 +991,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
     for (const [p, ms] of m) if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
     return out;
   };
-  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits };
+  const out = { created: strip(created), touched: strip(touched), dirty, touchTimes, touchCommits, metadataFilter };
   // The strip is the one step that can throw away EVERYTHING while git reported
   // success — a wrong prefix, or paths in a spelling the prefix can't match (the
   // `core.quotePath` class of bug). Distinguished here from the innocent

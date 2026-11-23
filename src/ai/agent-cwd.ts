@@ -255,3 +255,40 @@ export function resolveFencedAgentCwd(): string {
   }
   return dir;
 }
+
+/**
+ * Bucket for a copilot-sdk `{ mcpTools }` session's working directory: an
+ * empty dir in the agent home, so the runtime finds no `CLAUDE.md`,
+ * `AGENTS.md` or `.github/` there the way it would in the bot folder. Like
+ * {@link FENCED_AGENT_CWD_BUCKET}, a name {@link bucket} never returns.
+ */
+export const MCP_TOOLS_AGENT_CWD_BUCKET = ".mcp-tools";
+
+/**
+ * The working directory of a `{ mcpTools }` session. Never degrades to the
+ * shared temp dir, for the reason {@link resolveFencedAgentCwd} does not.
+ */
+export function resolveMcpToolsAgentCwd(): string {
+  const dir = join(agentCwdRoot(), MCP_TOOLS_AGENT_CWD_BUCKET);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new Error(
+      `{ mcpTools } tool surface: cannot create its agent home ${dir} (${err instanceof Error ? err.message : String(err)}) — ` +
+        "refusing to run in the shared temp dir.",
+    );
+  }
+  return dir;
+}
+
+/**
+ * Bucket holding the read-and-search snapshots (`src/ai/snapshots.ts`): a
+ * sibling of {@link FENCED_AGENT_CWD_BUCKET}, so no fenced run's working
+ * directory contains it and a snapshot is readable only when a run names it.
+ */
+export const SNAPSHOT_BUCKET = ".snapshots";
+
+/** The snapshot directory's path; created by the snapshot module, not here. */
+export function snapshotRootDir(): string {
+  return join(agentCwdRoot(), SNAPSHOT_BUCKET);
+}

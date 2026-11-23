@@ -11,7 +11,7 @@ import { OWN_CHROME_FIXTURES } from "../../../test/own-chrome-fixtures.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 
 /**
- * The repo has no browser test env (no jsdom/happy-dom), so — like the
+ * These tests do not use happy-dom, so — like the
  * `code-tabs` and mermaid enhancers — the DOM wiring, the clipboard write and
  * the hover reveal are left to `e2e/wiki-code-highlight.spec.ts`, which drives a
  * real browser against a real page.

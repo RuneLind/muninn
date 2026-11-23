@@ -42,16 +42,17 @@ describe("theme lab derivation", () => {
     });
   }
 
-  test("Reading mode at page lightness 5, saturation 12 moves the whole ladder and keeps its order", () => {
+  test("Reading mode at page lightness 11, saturation 12 moves the whole ladder and keeps its order", () => {
     const ref = themeRef("reading");
-    const st = { ...labInitialState(ref), bgL: 5, bgS: 12 };
+    const st = { ...labInitialState(ref), bgL: 11, bgS: 12 };
     const out = labDerive(ref, st);
     const page = labHsl(out["--bg-page"]!)!;
-    expect(page[2]).toBeCloseTo(5, 0);
+    expect(page[2]).toBeCloseTo(11, 0);
     expect(page[1]).toBeGreaterThan(10);
-    // Every field and surface moves down by the page's own delta (11 → 5).
+    // Every field and surface moves by the page's own delta.
+    const delta = 11 - labHsl(ref["--bg-page"]!)![2];
     for (const name of ["--bg-panel", "--bg-card", "--bg-inset", "--border-primary"]) {
-      expect(labHsl(out[name]!)![2], name).toBeCloseTo(labHsl(ref[name]!)![2] - 6, 0);
+      expect(labHsl(out[name]!)![2], name).toBeCloseTo(labHsl(ref[name]!)![2] + delta, 0);
     }
     expect(labLadderIssues(ref, { ...ref, ...out })).toEqual([]);
     // Text and accent are untouched by the background sliders.

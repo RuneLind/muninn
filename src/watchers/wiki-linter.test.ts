@@ -30,7 +30,7 @@ function seedSpy() {
     calls,
     seed: async (findings: readonly unknown[]) => {
       calls.push({ findings: findings.length });
-      return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] };
+      return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] };
     },
   };
 }

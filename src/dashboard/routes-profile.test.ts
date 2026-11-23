@@ -100,6 +100,20 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     }
   });
 
+  test("the work map's GitHub check is off the pod: it would spawn `gh` on the pod's login", async () => {
+    const path = "/api/wiki/work-map/checks";
+    expect(await status(build("nais"), `${path}?wiki=w`)).toBe(404);
+    expect(registeredPaths(build("nais")).has(path)).toBe(false);
+    expect(registeredPaths(build("default")).has(path)).toBe(true);
+  });
+
+  test("the status date check goes with the wiki tool group: it reads what that check cached", async () => {
+    const path = "/api/wiki/claim-check";
+    expect(await status(build("nais"), `${path}?wiki=w&relPath=plans/a.mdx`)).toBe(404);
+    expect(registeredPaths(build("nais")).has(path)).toBe(false);
+    expect(registeredPaths(build("default")).has(path)).toBe(true);
+  });
+
   test("the same paths are REGISTERED on the default profile", () => {
     // The other half of the pin: a 404 above has to mean "dropped", not "that
     // path never existed" — a typo'd path would make the whole suite vacuous.
@@ -365,6 +379,7 @@ describe("the wiki read slice under nais", () => {
     expect(read.length).toBeGreaterThanOrEqual(7);
     expect(read.some((r) => r.path === "/api/wiki/related")).toBe(true);
     expect(read.some((r) => r.path === "/api/wiki/decision-chain")).toBe(true);
+    expect(read.some((r) => r.path === "/api/wiki/ref")).toBe(true);
     const paths = registeredPaths(build("nais"));
     for (const { path } of read) {
       expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
@@ -376,11 +391,11 @@ describe("the wiki read slice under nais", () => {
     // answer is the route's own and does not depend on this machine's wikis.
     const app = build("nais");
     const answers: Record<string, number> = {};
-    for (const path of ["/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/related", "/api/wiki/decision-chain", "/api/wiki/html", "/api/wiki/pages?wiki=__no_such_wiki__"]) {
+    for (const path of ["/api/wiki/page", "/api/wiki/page/provenance", "/api/wiki/related", "/api/wiki/decision-chain", "/api/wiki/ref", "/api/wiki/html", "/api/wiki/pages?wiki=__no_such_wiki__"]) {
       answers[path] = (await app.request(path)).status;
     }
     expect(answers).toEqual({
-      "/api/wiki/page": 400, "/api/wiki/page/provenance": 400, "/api/wiki/related": 400, "/api/wiki/decision-chain": 400, "/api/wiki/html": 400,
+      "/api/wiki/page": 400, "/api/wiki/page/provenance": 400, "/api/wiki/related": 400, "/api/wiki/decision-chain": 400, "/api/wiki/ref": 400, "/api/wiki/html": 400,
       "/api/wiki/pages?wiki=__no_such_wiki__": 200,
     });
   });

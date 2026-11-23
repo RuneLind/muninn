@@ -32,6 +32,9 @@
  */
 export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-action="approve"]',
+  // The gate's section Approve all: N single approves. Its Reject all stays
+  // open, like the single reject it repeats.
+  '[data-batch-action="approve"]',
   // Redraft persists a replacement proposal; the route refuses it like the
   // drafting verbs.
   '[data-action="redraft"]',
@@ -45,7 +48,7 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   "#lintPropose",
   // The SERIES editor's two openers (the rail/related `⋯` and the reader
   // header's `edit series`). Both are already ABSENT on a read-only instance and
-  // on a read-only root — `wiki-browser.ts` renders neither, which is the "no
+  // on a read-only root — the reader (the rail `⋯` in `wiki-rail-controller.ts`, the related `⋯` in `wiki-article-controller.ts`, the header in `wiki-browser.ts`) renders neither, which is the "no
   // dead controls" rule and what the acceptance asserts — so these entries are
   // the BACKSTOP for anything painted before the flags are read. They are in
   // this list and NOT in the egress one below although they must also be dead on
@@ -89,6 +92,19 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   // refuse on a read-only instance and root. On the instance the whole tab is
   // hidden (WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR); this is the backstop.
   "[data-stale-verdict]",
+  // PR 3's Apply (a page write) and Send to Gardener (a proposal row): both
+  // routes refuse on a read-only instance and root.
+  "[data-stale-apply]",
+  "[data-stale-send]",
+  // Done on a `you`-lane step and its preview's Remove: a page write the route
+  // refuses on a read-only instance and root. Not the preview's Cancel.
+  "[data-step-done]",
+  "[data-step-done-confirm]",
+  // «Remove N checked» on a lane and its preview's Remove: the same route's list form.
+  "[data-step-done-all]",
+  "[data-step-done-all-confirm]",
+  // Discuss P4's Apply: a page write the route refuses on a read-only instance and root.
+  "[data-discuss-apply]",
   "#wikiFcIntAccept",
   ".wiki-atlas-cdraft",
 ].join(",");
@@ -128,6 +144,16 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // The STALE tab's Check: model calls over the wiki's pages.
   "[data-stale-check]",
   "#wikiClaimRetryAll",
+  // Discuss's tab (P3): its Ask / Follow up, P1's panel's «Ask here» and
+  // «Continue in Claude Code» — the route refuses a read-only wiki, and the
+  // tab is never shown on one; these are the backstop.
+  "#wikiDiscussAskBtn",
+  '[data-handoff="ask-here"]',
+  "[data-discuss-continue]",
+  // P4's «Change the wording»: it fills the box for a turn the route refuses here.
+  "[data-discuss-reword]",
+  // P4's «Preview again» / «Check again»: a preview request to the apply route.
+  "[data-discuss-repreview]",
   // «Walk me through» on a section heading. The reader renders none on a
   // read-only wiki or under the read slice; this is the backstop.
   "[data-walkthrough-btn]",
@@ -138,7 +164,13 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // half that survives all of them.
   "#wikiAskInput",
   "#wikiFollowupInput",
+  "#wikiDiscussInput",
 ].join(",");
+
+/** The Stale check's counts outside the STALE tab (PR 2b): the article pill,
+ *  the rail badge, the home line and the home's Stale tab. The client renders
+ *  none of them where the tab is absent; these hide any that a render left. */
+export const STALE_COUNT_SURFACES: readonly string[] = ["#wikiStalePill", ".wiki-stale-rail", "#wikiStaleHome", '.wiki-tab[data-tab="stale"]'];
 
 /**
  * Surfaces HIDDEN, not dimmed, on a read-only INSTANCE (D25 of plan
@@ -149,7 +181,7 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
  * read-only ROOT on a writable instance keeps the tab (its buckets are free;
  * Check and the verdict buttons are dimmed and blocked by the lists above).
  */
-export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]', "#staleBody"].join(",");
+export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]', "#staleBody", ...STALE_COUNT_SURFACES].join(",");
 
 /** The body class for {@link WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR}. */
 export const WIKI_READONLY_INSTANCE_CLASS = "wiki-readonly-instance";
@@ -221,7 +253,7 @@ export function wikiReadonlyKeyActivates(key: string): boolean {
  * bar, both of which set the same attributes at paint time — can be checked
  * against one list.
  */
-export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput"];
+export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput", "#wikiDiscussInput"];
 
 /**
  * The controls reachable from the **keyboard with no pointer event at all**: the
@@ -262,6 +294,21 @@ export function wikiReadonlyFlag(win: unknown = globalThis): boolean {
  *  of the instance flag — either, both, or neither can be true. */
 export function wikiReadonlyWikiFlag(win: unknown = globalThis): boolean {
   return (win as { __WIKI_READONLY_WIKI__?: unknown })?.__WIKI_READONLY_WIKI__ === true;
+}
+
+/**
+ * May this reader edit a page's series?
+ *
+ * Both read-only mechanisms refuse the write server-side (`writeWikiPage`'s two
+ * guards, plus the route's own `readonlyRefusal`), and this is what keeps the
+ * control OFF THE PAGE rather than dimmed: the acceptance for a read-only
+ * instance is that the menu is ABSENT, and #557's F2 decision is that a visible
+ * control which cannot act is worse than none. The selectors are in both
+ * lists in this file as well, as the backstop for anything painted
+ * before the flags are read.
+ */
+export function seriesEditable(): boolean {
+  return !wikiReadonlyFlag() && !wikiReadonlyWikiFlag();
 }
 
 /**

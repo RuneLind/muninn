@@ -117,6 +117,7 @@ export const E2E_PORTS = {
   // Claude one is offered `deep`). The server is restarted mid-file, because a
   // per-bot `captureSummary.<id>.md` is read at bot DISCOVERY.
   "summaries-prompts": 3054,
+  "agents-recent-durable": 3107,
   // Not bound by anything — the opposite, the `plans-write/dead-ledger` idiom.
   // The spec points KNOWLEDGE_API_URL here so a page that reached for huginn
   // would fail loudly instead of quietly answering off the developer's own
@@ -140,6 +141,11 @@ export const E2E_PORTS = {
   // fetches canned in-process), against a fake huginn.
   "summaries-find-links": 3170,
   "summaries-find-links/huginn": 3171,
+  // ▶ Find on YouTube: the real discover route on a muninn booted through
+  // `e2e/youtube-discover-boot.ts` (model calls and yt-dlp search canned
+  // in-process), against a fake huginn that also records the Summarize POST.
+  "summaries-youtube-discover": 3246,
+  "summaries-youtube-discover/huginn": 3247,
   // Reading themes: the palette picker, the no-flash init and mermaid under a
   // palette, on a muninn with a temp `WIKI_EXTRA` wiki.
   "theme-palettes": 3172,
@@ -149,6 +155,18 @@ export const E2E_PORTS = {
   "wiki-stale-tab": 3173,
   "wiki-stale-tab/readonly": 3174,
   "wiki-stale-tab/fake": 3175,
+  // The Stale check's counts everywhere (PR 2b): the rail badge, the article
+  // pill, the marks and the home on a temp git wiki, and a read-only instance
+  // on which none of them shows (D25).
+  "wiki-stale-counts": 3176,
+  "wiki-stale-counts/readonly": 3177,
+  // The Stale check's fix paths (PR 3): Apply, Send to Gardener, the Stale
+  // check card's Accept and Dismiss, the ⧗ states, on a temp git wiki; a
+  // read-only instance on which Apply and Send are absent (D25), and a dead
+  // knowledge API so the post-write reindex is best effort.
+  "wiki-stale-fix": 3178,
+  "wiki-stale-fix/readonly": 3179,
+  "wiki-stale-fix/dead-huginn": 3180,
   // The reader's provenance strip and the chain it opens, end to end. ONE fake
   // `node:http` server plays claude-usage's `GET /api/sessions-by-id` and
   // `GET /api/merges` — pricing one of the fixture's two sessions and OMITTING
@@ -224,6 +242,15 @@ export const E2E_PORTS = {
   "wiki-system-map": 3164,
   // «Walk me through»: ONE muninn over two synthetic wikis, one of them read-only.
   "wiki-walkthrough": 3165,
+  // The Your work card (plan `muninn-wiki-work-map`, P2), split in three files
+  // by topic: each boots ONE muninn over the synthetic wikis
+  // `wiki-work-card-fixture.ts` seeds.
+  "wiki-work-card-slot": 3190,
+  "wiki-work-card-board": 3197,
+  "wiki-work-card-strip": 3198,
+  // The effort page (work map P3): ONE muninn over a seeded-map wiki and a
+  // no-map wiki.
+  "wiki-effort-page": 3191,
   // Tracker links: two temp wikis in ONE process — one declaring a `trackers`
   // block (pills, the widened Jira facet) and one that does not, which must
   // render today's stamped-only facet and no pills.
@@ -364,6 +391,46 @@ export const E2E_PORTS = {
   "wiki-agent-lens/real": 3148,
   "wiki-agent-lens/nais-user": 3149,
   "wiki-agent-lens/nais-admin": 3150,
+  // Work map P4: the rail's effort folds, over a seeded map, with a fake
+  // claude-usage so Work threads and Pick up are on screen too.
+  "wiki-rail-efforts": 3192,
+  "wiki-rail-efforts/ledger": 3193,
+  // Theme map P2: the What you're following card and the rail's theme folds,
+  // over a seeded themes map.
+  "wiki-theme-card": 3194,
+  // Theme map P3: the theme page (`?effort=<id>` on a themes map).
+  "wiki-theme-page": 3195,
+  // Decision inbox P3a: the Decisions section on the Your work card.
+  "wiki-decision-inbox": 3196,
+  // Decision triage visibility PR 3: Run now on a server whose pass is on, model off.
+  "wiki-decision-run-now": 3199,
+  // Mermaid in the reader's palette, readable size and the ⤢ full-window view.
+  "wiki-mermaid-readable": 3417,
+  // Wiki render richer PR 2: selection text and ref nouns over the reader shapes.
+  "wiki-reader-shapes": 3200,
+  // Wiki render richer PR 3: before → after chips and the section bar.
+  "wiki-section-bar": 3240,
+  // Issue #623: the reader at phone and tablet widths.
+  "wiki-phone-width": 3241,
+  // Done on a `you`-lane step: preview, remove, the next Done, the stale refusal.
+  "wiki-step-done": 3242,
+  // The owner-step check chips beside Done: env and migration probes on a spawned muninn.
+  "wiki-step-checks": 3244,
+  "wiki-step-checks/readonly": 3245,
+  // Living facts PR 4: cross-page ids (`D9 i [[page]]`) over a two-page wiki.
+  "wiki-cross-refs": 3250,
+  // Living facts PR 3b: live chips over three synthetic wikis.
+  "wiki-live-facts": 3251,
+  // Discuss P1: «Ask Claude Code» copies a prompt; a read-only wiki and an opted-out one beside it.
+  "wiki-discuss-handoff": 3252,
+  // Discuss P3: the Discuss tab against a claude-sdk bot on the fake Messages API; a read-only wiki beside it.
+  "wiki-discuss-tab": 3253,
+  // Discuss P4: the proposed edit's diff card and Apply, on a git wiki with no remote.
+  "wiki-discuss-apply": 3254,
+  // F26: a hostile <Question id> in the reader, with a glossary term after it.
+  "wiki-reader-html-gate": 3255,
+  // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.
+  "wiki-ask-pane-view": 3277,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
@@ -373,6 +440,9 @@ export const E2E_PORTS = {
   // spec binding it, which would quietly turn those assertions into a live-ledger
   // run.
   "plans-write/dead-ledger": 8799,
+  "gardener-batch": 3243,
+  // Not bound: approve's reindex points here so it fails fast on a refused connect.
+  "gardener-batch/dead-huginn": 8800,
 } as const;
 
 export type E2ePortName = keyof typeof E2E_PORTS;

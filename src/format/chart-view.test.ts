@@ -347,6 +347,99 @@ describe("steps x labels", () => {
   });
 });
 
+describe("bars", () => {
+  const bars = (rows: string[]) => reader(chart('<Chart kind="bars" caption="Runs" value="N">', ["| Run | N |", "|---|---|", ...rows]));
+
+  test("one bar per row in the order written, linear from 0 by default", () => {
+    const html = bars(["| b | 10 |", "| a | 40 |"]);
+    expect(html).toContain('class="vc vc-kind-bars"');
+    expect(texts(html, "vc-lab")).toEqual(["b", "a"]);
+    expect(html).not.toContain(CHART_WORDS.en.logScale);
+    // Linear: the 40 bar is four times the 10 bar's width.
+    const widths = [...html.matchAll(/class="vc-value" x="[\d.]+" y="2" width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(widths[1]! / widths[0]!).toBeCloseTo(4, 1);
+  });
+
+  test("a log scale says so in its notes; a 0 keeps it linear", () => {
+    expect(bars(["| a | 1 |", "| b | 500 |"])).toContain(`<li>${CHART_WORDS.en.logScale}</li>`);
+    expect(bars(["| a | 0 |", "| b | 500 |"])).not.toContain(CHART_WORDS.en.logScale);
+  });
+
+  test("a trailing bold total draws below a rule with its number and no bar; the parts keep their scale", () => {
+    const html = bars(["| b | 10 |", "| a | 40 |", "| **Total** | 50 |"]);
+    const plot = html.split('class="vc-table')[0]!;
+    const widths = [...plot.matchAll(/class="vc-value" x="[\d.]+" y="2" width="([\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(widths).toHaveLength(2);
+    expect(widths[1]).toBeCloseTo(96.15, 1); // 40 on a 0–41.6 axis: the 50 total sets no max
+    const rule = plot.indexOf("vc-rule");
+    expect(rule).toBeGreaterThan(plot.indexOf("a: 40"));
+    expect(plot.indexOf('<span class="vc-total">Total</span>')).toBeGreaterThan(rule);
+    expect(plot.slice(rule)).toContain(">50<");
+  });
+
+  test("a ± n prints beside the bar", () => {
+    expect(bars(["| a | 5 ± 1 |", "| b | 8 |"])).toContain('<span class="vc-num">5 ± 1</span>');
+  });
+});
+
+describe("range", () => {
+  const range = (rows: string[]) => reader(chart('<Chart kind="range" value="Interval">', ["| Slice | Interval |", "|---|---|", ...rows]));
+
+  test("one interval per row; a bold row draws below a rule as the total; a point is a tick", () => {
+    const html = range(["| P1 | $120–220 |", "| P2 | $40 |", "| **Slate** | **$160–260** |"]);
+    const plot = html.split('class="vc-table')[0]!;
+    expect(plot).toMatch(/P2: \$40<\/title>.*vc-point/);
+    const rule = plot.indexOf("vc-rule");
+    expect(rule).toBeGreaterThan(plot.indexOf("P2"));
+    expect(plot.indexOf('<span class="vc-total">Slate</span>')).toBeGreaterThan(rule);
+    expect(plot).toContain("$160–260");
+  });
+
+  test("rows keep the written order; the rule draws only before a trailing bold run", () => {
+    const titles = (html: string) => [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):/g)].map((m) => m[1]);
+    const mid = range(["| a | $1–2 |", "| **Slate** | $3–5 |", "| c | $1 |"]);
+    expect(titles(mid)).toEqual(["a", "Slate", "c"]);
+    expect(mid).not.toContain("vc-rule");
+    const all = range(["| **A** | $1–2 |", "| **B** | $3–5 |"]);
+    expect(all).not.toContain("vc-rule");
+    const tail = range(["| a | $1–2 |", "| **Sub** | $2 |", "| b | $3 |", "| **All** | $3–5 |"]);
+    const plot = tail.split('class="vc-table')[0]!;
+    expect(titles(tail)).toEqual(["a", "Sub", "b", "All"]);
+    expect(plot.indexOf("vc-rule")).toBeGreaterThan(plot.indexOf("b: $3"));
+    expect(plot.indexOf("vc-rule")).toBeLessThan(plot.indexOf("All: "));
+    expect(plot.match(/vc-rule/g)).toHaveLength(1);
+  });
+
+  test("an interval draws its true extent and a fixed-width band at its midpoint; only a true point is a tick", () => {
+    // Per row: the rect's x and width, and the band's x1/x2, in track percent.
+    const shapes = (html: string) =>
+      Object.fromEntries(
+        [...html.split('class="vc-table')[0]!.matchAll(/<title>([^:<]*):[^<]*<\/title>(.*?)<\/svg>/g)].map((m) => {
+          if (m[2]!.includes("vc-point")) return [m[1], "point"];
+          const r = /class="vc-value" x="([\d.]+)" y="2" width="([\d.]+)"/.exec(m[2]!)!;
+          const band = /<line class="vc-span" x1="([\d.]+)" x2="([\d.]+)" y1="2" y2="10" vector-effect="non-scaling-stroke"\/>/.exec(m[2]!);
+          return [m[1], { x: Number(r[1]), w: Number(r[2]), band: band && [Number(band[1]), Number(band[2])] }];
+        }),
+      );
+    // 0–10000 on a 0–10400 axis (4 % pad): 1 % of the axis is 104.
+    const s = shapes(range(["| all | 0–10000 |", "| low | 100–152 |", "| top | 9896–10000 |", "| mid | 5000–5110 |", "| one | 5000 |"]));
+    expect(s.all).toEqual({ x: 0, w: 96.15, band: [48.08, 48.08] });
+    expect(s.low).toEqual({ x: 0.96, w: 0.5, band: [1.21, 1.21] });
+    expect(s.top).toEqual({ x: 95.15, w: 1, band: [95.65, 95.65] });
+    expect(s.mid).toEqual({ x: 48.08, w: 1.05, band: [48.61, 48.61] });
+    expect(s.one).toBe("point");
+    const tiny = shapes(range(["| all | 0–1000 |", "| mid | 500–500.01 |", "| same | 500–500 |"]));
+    expect(tiny.mid).toEqual({ x: 48.08, w: 0, band: [48.08, 48.08] });
+    expect(tiny.same).toBe("point");
+  });
+
+  test("a mixed sign is a note under the drawn chart; a flipped interval falls back to the table", () => {
+    expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("vc-kind-range");
+    expect(range(["| a | $1–2 |", "| b | €3–4 |"])).toContain("<li>row &quot;b&quot;: € differs from $ in row &quot;a&quot;</li>");
+    expect(range(["| a | $9–2 |"])).toContain("vc-fallback");
+  });
+});
+
 describe("funnel", () => {
   test("bars are each row's share of its parent, indented by depth", () => {
     const md = chart('<Chart kind="funnel">', ["| Step | Count | Of |", "|---|---|---|", "| all | 40 | |", "| kept | 10 | 40 |", "| fine | 5 | 10 |", "| zero | 0 | 5 |", "| under | 0 | 0 |"]);
@@ -539,6 +632,11 @@ describe("render and lint agree", () => {
     ["code cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | `3` | 2 |"], true],
     ["struck cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | ~~9~~ 3 | 2 |"], true],
     ["text cell", ["| Slice | Bar | Pass | Hold |", "|---|---|---|---|", "| a | 2 | soon | 2 |"], false],
+    ["bars, currency", ["| Run | N |", "|---|---|", "| a | $2 |", "| b | **$3** |"], true, '<Chart kind="bars" value="N">'],
+    ["bars, text", ["| Run | N |", "|---|---|", "| a | many |"], false, '<Chart kind="bars" value="N">'],
+    ["range, bold total", ["| Slice | I |", "|---|---|", "| a | $2–3 |", "| **All** | **$2–3** |"], true, '<Chart kind="range" value="I">'],
+    ["range, mixed signs", ["| Slice | I |", "|---|---|", "| a | $2–3 |", "| b | €2–3 |"], true, '<Chart kind="range" value="I">'],
+    ["range, year span", ["| Slice | I |", "|---|---|", "| a | 2024–2025 |"], false, '<Chart kind="range" value="I">'],
   ];
   for (const [name, rows, draws, open] of cases) {
     test(name, () => {

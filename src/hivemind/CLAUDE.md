@@ -85,10 +85,9 @@ Phases 1, 2, 3, and 4 of the integration plan, archived in mimir at `archive/mun
   turns per peer thread (`maxAutoTurnsPerHour`, default 20). When the cap is
   hit the router persists `auto_respond_paused=true` + `pause_reason` on the
   thread row (migration 036) and skips further autorespond until manually
-  unpaused. We deliberately did **not** add a token budget — per-turn cost is
-  already bounded by the connector's `contextWindow` and `thinkingMaxTokens`,
-  and the hourly cap caps cumulative cost to a known ceiling. Add a token
-  budget later if real-world traffic needs one.
+  unpaused. We deliberately did **not** add a token budget — the hourly cap
+  bounds cumulative turns per peer thread. Add a token budget
+  later if real-world traffic needs one.
 - **Trace emission.** Each autorespond cycle creates a new `Tracer` rooted at
   `hivemind_autorespond` with point-in-time `peer_inbound` and `peer_outbound`
   events, so the waterfall view shows the full agent-to-agent chain. The
@@ -187,9 +186,10 @@ forget after persist/broadcast) so a parse error can never block inbound deliver
   past the threshold on non-terminal runs — a peer that accepted then died parks the
   run forever (the 7-day TTL is on correlation tokens, not handoffs). The detection
   primitive lands here; the periodic sweep + manual re-send affordance are Phase 5 UI.
-- **Tests run under `bun run test:hivemind`** (`handoff-interpreter.test.ts`,
-  `ci-conclusion.test.ts`, router wiring in `router.test.ts`); the dev-runs DB helpers
-  are in the main `bun run test` (`src/db/dev-runs.test.ts`). `gh` and file I/O are
+- **Tests:** `handoff-interpreter.test.ts`, `ci-conclusion.test.ts` and the router
+  wiring in `router.test.ts`, run by `bun run test` (its `src/hivemind/` link) or
+  alone by `bun run test:hivemind`; the dev-runs DB helpers are in
+  `src/db/dev-runs.test.ts`. `gh` and file I/O are
   injectable, so no live CLI / real spec files in tests.
 
 ## Spec-driven dev loop — auto-advance (Phase 6, v2)

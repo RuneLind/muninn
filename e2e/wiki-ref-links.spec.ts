@@ -4,8 +4,9 @@
  * links, as do server-rendered `](#slug)` links to a heading; hovering or
  * focusing one shows a peek card with the target; clicking jumps there with
  * the fold opened and the target flashed, and Back returns to the scroll
- * position the jump left. Also a fresh load on `#q2-oppskrift`, and 4.5:1 on
- * the link and the peek in both colour schemes.
+ * position the jump left. Also a fresh load on a fold's hash and on the hash of
+ * a heading inside a closed fold, and 4.5:1 on the link and the peek in both
+ * colour schemes.
  *
  * No model calls, no DB rows. ENV / SPAWN ENV: no `.env` is required — the
  * spawn inherits `DATABASE_URL` and `e2eEnv()` blanks the platform tokens and
@@ -42,6 +43,7 @@ const PAGE = [
   '<Lane kind="you" who="Du">',
   "",
   "1. **Test fiksen i q2** med oppskriften i «Q2-oppskrift».",
+  "2. **Bestem** [sidene uten bilde](#sider-uten-bilde-12).",
   "",
   "</Lane>",
   "",
@@ -130,6 +132,25 @@ const PAGE = [
   "Fag svarte på runde 3.",
   "",
   ...filler(40, "Tredje"),
+  '<Fold title="Oppfølging videre" summary="to lister">',
+  "",
+  "## Oppfølging videre",
+  "",
+  "### Sider uten bilde #12",
+  "",
+  "Lista over sidene.",
+  "",
+  "</Fold>",
+  "",
+  ...filler(40, "Fjerde"),
+  '<Fold title="Eldre oppfølging">',
+  "",
+  "### Sider uten bilde #12",
+  "",
+  "Den eldre lista.",
+  "",
+  "</Fold>",
+  "",
 ].join("\n");
 
 let server: ChildProcess | undefined;
@@ -218,6 +239,7 @@ test.describe("Wiki reader: in-page references", () => {
       .evaluateAll((as) => as.map((a) => `${a.textContent}→${(a as HTMLElement).dataset.ref}`));
     expect(refs).toEqual([
       "«Q2-oppskrift»→q2-oppskrift",
+      "sidene uten bilde→sider-uten-bilde-12",
       "D4→d4",
       "Q-2→q-2",
       "Runde 3→runde-3--2026-08-18-kveld",
@@ -243,6 +265,26 @@ test.describe("Wiki reader: in-page references", () => {
     // Folds and headings got ids; the heading inside its fold did not take the fold's.
     await expect(page.locator("details.fold#q2-oppskrift")).toHaveCount(1);
     await expect(page.locator("h2#runde-3--2026-08-18-kveld, h3#runde-3--2026-08-18-kveld")).toHaveCount(1);
+    expectClean(seen);
+  });
+
+  test("a scroll retires the shown card but not the next link's pending one", async ({ page }) => {
+    const seen = await openPage(page);
+    const peek = page.locator(".wiki-ref-peek");
+    // Synthetic events: the scroll is the event alone, nothing moves under a pointer.
+    const over = (text: string, scroll: boolean) =>
+      page.locator(".wiki-article a.wiki-ref", { hasText: text }).first().evaluate((a, s) => {
+        a.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        if (s) document.getElementById("articleWrap")!.dispatchEvent(new Event("scroll"));
+      }, scroll);
+    await over("D4", false);
+    await expect(peek.locator(".wiki-ref-peek-label")).toHaveText("D4");
+    // S1's card is pending when the scroll (as a hover that scrolls the pane
+    // makes) retires D4's: one evaluate, so it lands inside the 200 ms delay.
+    await over("S1", true);
+    await expect(peek.locator(".wiki-ref-peek-label")).toHaveText("S1");
+    await page.locator("#articleWrap").evaluate((el) => el.dispatchEvent(new Event("scroll")));
+    await expect(peek).toHaveCount(0);
     expectClean(seen);
   });
 
@@ -317,6 +359,38 @@ test.describe("Wiki reader: in-page references", () => {
       el.dispatchEvent(new AnimationEvent("animationend", { bubbles: true, animationName: "x" })),
     );
     await expect(fold).toHaveClass(/wiki-hash-flash/);
+    expectClean(seen);
+  });
+
+  test("a fresh load on a heading's hash opens the closed fold around it", async ({ page }) => {
+    const seen = await openPage(page, "#sider-uten-bilde-12");
+    const fold = page.locator("details.fold#oppfølging-videre");
+    await expect(fold).toHaveAttribute("open", "");
+    const heading = fold.locator("h4#sider-uten-bilde-12");
+    await expect(heading).toBeInViewport();
+    await expect(heading).toHaveClass(/wiki-hash-flash/);
+    // The hidden copy of the fold's title holds no id: the fold has that slug.
+    await expect(fold.locator(".fold-heading-dup")).not.toHaveAttribute("id");
+    // Only the fold around the target opens.
+    await expect(page.locator("details.fold#eldre-oppfølging")).not.toHaveAttribute("open", "");
+    expectClean(seen);
+  });
+
+  test("a repeated heading's numbered hash opens its own fold", async ({ page }) => {
+    const seen = await openPage(page, "#sider-uten-bilde-12-1");
+    const fold = page.locator("details.fold#eldre-oppfølging");
+    await expect(fold).toHaveAttribute("open", "");
+    await expect(fold.locator("h4#sider-uten-bilde-12-1")).toBeInViewport();
+    await expect(page.locator("details.fold#oppfølging-videre")).not.toHaveAttribute("open", "");
+    expectClean(seen);
+  });
+
+  test("a lane step's fragment link opens the closed fold around its heading", async ({ page }) => {
+    const seen = await openPage(page);
+    await openLane(page);
+    await page.locator('.nm-lane a.wiki-ref[href="#sider-uten-bilde-12"]').click();
+    await expect(page.locator("details.fold#oppfølging-videre")).toHaveAttribute("open", "");
+    await expect(page.locator("h4#sider-uten-bilde-12")).toBeInViewport();
     expectClean(seen);
   });
 

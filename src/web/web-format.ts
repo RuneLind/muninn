@@ -25,13 +25,17 @@ import {
   taskListRows,
   componentBlocks,
 } from "../format/markdown-ast.ts";
-import type { Block, ChecklistList, ChecklistRow, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
+import type { Block, ChecklistList, ChecklistRow, ComponentName, FactVerdict, ListChild, NextMovesLane } from "../format/markdown-ast.ts";
 import { withoutComponentTags } from "../format/component-observer.ts";
-import { ordinals, renderBlocks, type BlockRenderer, type RenderedChild } from "../format/block-renderer.ts";
+import { ordinals, renderBlocks, type BlockRenderer, type ListNest, type RenderedChild } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { beforeAfterChipsHtml, htmlText, labelGridItems, numberCellHtml, numberColumns, verdictCell, type LabelItem } from "../format/reader-shapes.ts";
 import { highlightCode } from "../format/highlight.ts";
+import { renderedCodeRegions } from "../format/rendered-code.ts";
 import { chainViewHtml, DC_GO_RE, pageDecisionData, prStripHtml, viewSlot } from "../format/decision-views.ts";
+import { questionCardAnchors, questionGridHtml, questionGridRows, questionGridSlot } from "../format/question-grid.ts";
 import { codeSpanContent, lineCodeSpanRanges } from "../format/code-spans.ts";
+import { replaceAngleLinks, replaceAnglePipeLinks, replaceMarkdownLinks } from "../format/linear-scan.ts";
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { parseCsv } from "../format/csv.ts";
 import {
@@ -40,6 +44,8 @@ import {
   STEPS_NO_SRC,
   QUERY_CSV_MAX_ROWS,
   anchorSlug,
+  idAnchor,
+  UNSAFE_ANCHOR_ID_RE,
   formatCount,
   lookupPageFile,
   pageFileFailureText,
@@ -63,9 +69,12 @@ import {
 import {
   decisionLogEntries,
   DECISION_ID_RE,
+  eachComponent,
   isOpenQuestion,
+  namedQuestionIds,
   parseQuestionAttrs,
   parseQuestionPage,
+  questionIdRe,
   resolveQuestionTargets,
   type QuestionRenderOptions,
   type QuestionState,
@@ -258,6 +267,12 @@ export function formatWebHtml(
      *  classes and DecisionLog items their state. Absent (chat) ⇒ neither,
      *  since the chat sanitizer drops a class it does not allow. */
     reader?: boolean;
+    /** With `reader`: the render lands in the reader's article
+     *  (`.wiki-article`), so a plain table and list take the reader shapes
+     *  (`reader-shapes.ts`). `componentBlockCss` also styles them under
+     *  `.web-content` and `.answer-body`, which never receive the classes.
+     *  `renderWikiHtml` passes it for `GET /api/wiki/page` alone. */
+    readerShapes?: boolean;
     /** The wiki's `.wiki-reader.json` `language`: the `<More>` label and the
      *  `<StatusRows>` state phrases. Absent ⇒ the question option's, else `en`. */
     language?: QuestionLanguage;
@@ -313,6 +328,10 @@ export function formatWebHtml(
     /** With `views` and `itemDates`: the timeline lanes after the decision
      *  views (`renderWikiHtml` passes `timelineLanesHtml`). Absent ⇒ none. */
     timelineLanes?: TimelineLanesRenderer;
+    /** A step's trailing `<Check>` (its raw attribute run) as the reader's
+     *  empty slot: `renderWikiHtml` passes `checkSlotHtml` (`check-tag.ts`), so
+     *  the bundle carries no slot. Absent ⇒ the tag prints nothing. */
+    checkSlot?: (attrs: string) => string;
   },
 ): string {
   // `files` is read by the `Query`, `CaseBoard` and `DeltaTable` cases, deep
@@ -321,12 +340,15 @@ export function formatWebHtml(
   const prev = currentPageFiles;
   const prevQuestion = currentQuestionPage;
   const prevReader = currentReader;
+  const prevComponents = currentComponents;
+  const prevShapes = currentShapes;
   const prevLanguage = currentLanguage;
   const prevLaneCards = currentLaneCards;
   const prevLinkTexts = currentLinkTexts;
   const prevLinkSources = currentLinkSources;
   const prevItemDates = currentItemDates;
   const prevViews = currentViews;
+  const prevCheckSlot = currentCheckSlot;
   const prevChartView = currentChartView;
   const prevLedgerRows = currentLedgerRows;
   const prevLogIds = currentLogIds;
@@ -341,6 +363,7 @@ export function formatWebHtml(
   const prevCaseDotsPending = currentCaseDotsPending;
   currentCaseDotsPending = [];
   currentViews = opts?.views === true;
+  currentCheckSlot = opts?.checkSlot;
   currentCaseDotsView = currentViews && text.includes("<CaseBoard") ? (opts?.caseDotsView ?? null) : null;
   currentRuleTreeView = currentViews && text.includes("<RuleTree") ? (opts?.ruleTreeView ?? null) : null;
   currentDiagramView = currentViews && text.includes("<Diagram") ? (opts?.diagramView ?? null) : null;
@@ -361,6 +384,8 @@ export function formatWebHtml(
   currentLinkTexts = opts?.wikiLinkTexts;
   currentLinkSources = opts?.wikiLinkSources;
   currentReader = opts?.reader === true;
+  currentComponents = [];
+  currentShapes = currentReader && opts?.readerShapes === true;
   currentItemDates = currentReader ? opts?.itemDates : undefined;
   currentLanguage = opts?.language ?? opts?.question?.language ?? "en";
   try {
@@ -369,16 +394,28 @@ export function formatWebHtml(
     // sees one block at a time, so every card's state is read off the whole
     // page first. A substring test keeps the walk off every chat delta.
     currentQuestionPage = text.includes("<Question") ? questionPage(blocks, opts?.question) : undefined;
+    if (currentViews && currentQuestionPage?.options) {
+      const qp = currentQuestionPage;
+      // A slugged card id yields to every safe one and to the Query cards' slugs.
+      const queries: string[] = [];
+      eachComponent(blocks, (b) => {
+        if (b.name === "Query") queries.push(idAnchor(parseQueryAttrs(b.attrs).id, currentLinkTexts));
+      });
+      const ids = [...qp.questionIds].filter((id) => !qp.duplicates.has(id));
+      qp.cardAnchors = questionCardAnchors(ids, queries.filter(Boolean), currentLinkTexts);
+    }
     // On the reader, a waiting lane that names a `<Question>` holds its card
     // (D13); decided over the whole page first, as the card may sit above or
     // below the block.
+    // A spliced-in block must not give a page the views' slot it did not have.
+    const hasViewSlot = viewSlot(blocks) >= 0;
     currentLaneCards =
-      currentReader && currentQuestionPage?.options && text.includes("<NextMoves")
+      currentReader && currentQuestionPage?.options
         ? laneCardsFor(blocks, currentQuestionPage)
         : undefined;
     // The views' whole-page pre-pass runs only on the reader's page render;
     // without it the walk is the one `renderBlocks` call, byte for byte.
-    const slot = opts?.views ? viewSlot(blocks) : -1;
+    const slot = opts?.views && hasViewSlot ? viewSlot(blocks) : -1;
     // A tree's case ids join the page's CaseBoard rows, whichever comes first.
     if (currentRuleTreeView && text.includes("<CaseBoard")) currentCaseKorts = pageCaseKorts(blocks);
     if (charted) {
@@ -401,19 +438,46 @@ export function formatWebHtml(
       // inside a label (`[[plans/x|PR 7]]`) counts as the route counts it.
       const linkTexts = opts?.wikiLinkTexts;
       const analysed = opts?.decisionText ?? text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
-      const data = pageDecisionData(analysed === text ? blocks : parseBlocks(analysed), { proposed: opts?.proposedPlan === true });
+      const analysedBlocks = analysed === text ? blocks : parseBlocks(analysed);
+      const data = pageDecisionData(analysedBlocks, { proposed: opts?.proposedPlan === true });
       const lanes = currentItemDates && opts?.timelineLanes ? opts.timelineLanes(blocks, currentItemDates, currentLanguage, shownLinkText) : "";
       const view = chainViewHtml(data.analysis, currentLanguage) + prStripHtml(data.ledgers, currentLanguage, data.analysis) + lanes;
-      rendered = view
-        ? [renderBlocks(blocks.slice(0, slot), webRenderer), view, renderBlocks(blocks.slice(slot), webRenderer)]
-            .filter((part) => part !== "")
-            .join("\n")
-        : renderBlocks(blocks, webRenderer);
+      // The rows read link labels, the cards their sentinels: key the anchors by label.
+      const cardAnchors = currentQuestionPage?.cardAnchors;
+      const byLabel = new Map<string, string>();
+      for (const [id, a] of cardAnchors ?? []) {
+        const label = id.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => linkTexts?.[Number(i)] ?? "");
+        if (!byLabel.has(label)) byLabel.set(label, a);
+      }
+      const grid = questionGridHtml(
+        questionGridRows(analysedBlocks, data.analysis, currentItemDates?.today),
+        currentLanguage,
+        cardAnchors ? (id) => byLabel.get(id) ?? "" : undefined,
+      );
+      // Grid first when both land in one slot; the sort is stable.
+      const inserts = [
+        { at: grid ? questionGridSlot(blocks, slot) : -1, html: grid },
+        { at: view ? slot : -1, html: view },
+      ]
+        .filter((x) => x.html !== "")
+        .sort((a, b) => a.at - b.at);
+      if (inserts.length) {
+        const parts: string[] = [];
+        let from = 0;
+        for (const x of inserts) {
+          parts.push(renderBlocks(blocks.slice(from, x.at), webRenderer), x.html);
+          from = x.at;
+        }
+        parts.push(renderBlocks(blocks.slice(from), webRenderer));
+        rendered = parts.filter((part) => part !== "").join("\n");
+      } else {
+        rendered = renderBlocks(blocks, webRenderer);
+      }
     }
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Cases first: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
-    const anchored = uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())));
+    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim()))));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
@@ -426,12 +490,15 @@ export function formatWebHtml(
     currentPageFiles = prev;
     currentQuestionPage = prevQuestion;
     currentReader = prevReader;
+    currentComponents = prevComponents;
+    currentShapes = prevShapes;
     currentLanguage = prevLanguage;
     currentLaneCards = prevLaneCards;
     currentLinkTexts = prevLinkTexts;
     currentLinkSources = prevLinkSources;
     currentItemDates = prevItemDates;
     currentViews = prevViews;
+    currentCheckSlot = prevCheckSlot;
     currentChartView = prevChartView;
     currentLedgerRows = prevLedgerRows;
     currentLogIds = prevLogIds;
@@ -468,9 +535,13 @@ export interface ItemDateDays {
 /** `opts.itemDates` for the call in progress (reader only). */
 let currentItemDates: ItemDateDays | undefined;
 
-/** `text` with each wikilink sentinel read as the text its link shows. */
+/** `text` with each wikilink sentinel read as the text its link shows. A live
+ *  chip's sentinel has empty link text and reads as nothing, unpadded. */
 function shownLinkText(text: string): string {
-  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => ` ${currentLinkTexts?.[Number(i)] ?? ""} `);
+  return text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => {
+    const shown = currentLinkTexts?.[Number(i)] ?? "";
+    return shown ? ` ${shown} ` : "";
+  });
 }
 
 /** ` data-item-date="YYYY-MM-DD"` for the latest date in `text` not after the
@@ -489,8 +560,29 @@ let currentPageFiles: PageFiles | undefined;
 /** `opts.reader` for the call in progress. */
 let currentReader = false;
 
+/** The components the block in progress sits in, outermost first (the
+ *  walker's `inComponent` hook keeps it). */
+let currentComponents: ComponentName[] = [];
+
+/** `opts.reader && opts.readerShapes` for the call in progress. */
+let currentShapes = false;
+
+/** Components that only wrap a section of the page: a table or list in one is
+ *  still the page's own, so the reader shapes reach it. Every other component
+ *  draws its own table or list, or is a card whose body stays as written. */
+const SHAPE_TRANSPARENT: ReadonlySet<ComponentName> = new Set<ComponentName>(["Fold", "More", "Historic", "ComparisonTable", "Figure"]);
+
+/** True when a table or list rendered now takes the reader shapes (number
+ *  columns, verdict cells, the label grid): the reader's article render, outside any
+ *  component but a section wrapper. Chat never does, byte for byte. */
+function readerShapesOn(): boolean {
+  return currentShapes && currentComponents.every((n) => SHAPE_TRANSPARENT.has(n));
+}
+
 /** `opts.views` for the call in progress: `<StatusRows view="tiles">` draws tiles. */
 let currentViews = false;
+/** `formatWebHtml`'s `checkSlot`, for this call. */
+let currentCheckSlot: ((attrs: string) => string) | undefined;
 
 /** `opts.chartView` for the call in progress; null ⇒ a `<Chart>` is its table. */
 let currentChartView: ChartViewRenderer | null = null;
@@ -562,6 +654,9 @@ interface QuestionPage {
   /** Each DecisionLog id's own text after the id, from the first item that
    *  carries it: what a settled card's row quotes from its decision. */
   logText: Map<string, string>;
+  /** On the page render (`views`): each card's final `qcard-…` anchor by id
+   *  ({@link questionCardAnchors}); an id absent takes none. */
+  cardAnchors?: Map<string, string>;
   options?: QuestionRenderOptions;
 }
 let currentQuestionPage: QuestionPage | undefined;
@@ -600,8 +695,9 @@ function retargetQuestionLinks(html: string): string {
 
 /**
  * A `<Question>` as an answer card. With the wiki's options it carries the id
- * (linking the DecisionLog item, whose anchor it never takes: the card has NO
- * `id` attribute, or `uniqueLogAnchors` would rename the item `o3-2`), the
+ * (linking the DecisionLog item, whose anchor it never takes: the card's only
+ * `id` is the page render's distinct `qcard-…`, for the question grid, since the
+ * bare id would make `uniqueLogAnchors` rename the item `o3-2`), the
  * state from the pre-pass (D6), the body and who it is for, plus the data
  * attributes the reader's client hydrates (PR 3). Without them — chat, a
  * gardener preview — it is a plain bordered question with no state.
@@ -641,6 +737,10 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
   const isDuplicate = id !== "" && page.duplicates.has(id);
   const duplicate = isDuplicate ? `<p class="q-note q-duplicate">${escapeHtml(L.duplicate)}</p>` : "";
   const choices = parsed.choices;
+  // The hashes are keyed by the raw parse's id; a wikilink in this id is a
+  // sentinel here, so it is read back as its `[[…]]` source — the spelling
+  // `data-question-id` carries once the attributes are restored.
+  const hash = id ? opts.questionHashes?.get(id.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_m, i: string) => currentLinkSources?.[Number(i)] ?? "")) : undefined;
   const data =
     (id ? ` data-question-id="${escapeHtml(id)}"` : "") +
     ` data-question-state="${state ? state.kind : "none"}"` +
@@ -648,13 +748,18 @@ function questionCardHtml(attrs: Record<string, string>, body: string): string {
     // A duplicated id is read-only: the answer route refuses it (409).
     ` data-wiki-answerable="${opts.answerable && !isDuplicate ? "true" : "false"}"` +
     ` data-question-lang="${opts.language}"` +
+    // The wording this render shows, sent back with a save (F49).
+    (hash ? ` data-question-hash="${escapeHtml(hash)}"` : "") +
     (choices.length ? ` data-question-choices="${escapeHtml(choices.join("|"))}"` : "") +
     ` data-question-to-source="${toSource}"` +
     // Names only: no client reads an ident, and the reader's page should not
     // carry one (the answer route computes `asked` on the server).
     (to.length ? ` data-question-to="${escapeHtml(to.map((t) => t.name).join("|"))}"` : "");
   const cls = `question q-${state ? state.kind : "noid"}`;
-  return `<section class="${cls}"${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
+  // The question grid's link lands here; only the page render draws that grid.
+  const cardAnchor = currentViews && id !== "" && !isDuplicate ? (page.cardAnchors?.get(id) ?? "") : "";
+  const anchor = cardAnchor ? ` id="${cardAnchor}"` : "";
+  return `<section class="${cls}"${anchor}${data}><div class="q-head">${lead}${idHtml}${stateHtml}</div>${duplicate}${bodyHtml}${forHtml}</section>`;
 }
 
 const STAMP_LOG_RE = /<li class="(dl-item[^"]*)"((?: value="\d+")?) id="([^"]+)">(<a class="dl-id" href="#\3">([^<]*)<\/a>)/g;
@@ -702,27 +807,57 @@ function stampIdChips(html: string, page: QuestionPage | undefined, labels: IdLa
 
 const ANCHOR_RE = /<section class="query" id="([^"]+)">([\s\S]*?)<a class="query-id" href="#\1">/g;
 
+/** A Query id's parked wikilink as its link text inside the id's own anchor:
+ *  restored as a link it would nest an `<a>` in an `<a>`, which the browser
+ *  closes early. After `uniqueAnchors`, which reads the sentinel to rank the
+ *  card's anchor last. */
+function unlinkQueryIds(html: string): string {
+  if (!html.includes('<a class="query-id"')) return html;
+  return html.replace(/(<a class="query-id" href="#[^"]*">)([^<]*)(<\/a>)/g, (m, open: string, text: string, close: string) =>
+    text.includes("\x00") ? open + text.replace(/\x00WIKIPAGELINK(\d+)\x00/g, (_s, i: string) => escapeHtml(currentLinkTexts?.[Number(i)] ?? "")) + close : m,
+  );
+}
+
 /** Each `Query` card's anchor made unique in the finished HTML, across the
- *  cards and the `CaseBoard` rows (made unique first, {@link
- *  uniqueCaseAnchors}): a repeat, or a card whose slug a case holds
- *  (`<Query id="Case-A">` beside case `A`), gets the first free `-2`, `-3`,
- *  and its id link follows. A pass over the OUTPUT, because some components
- *  render a body twice and keep one copy (`foldBodyHtml`). */
+ *  cards and every other element's id but a DecisionLog item's (which yields
+ *  later, {@link uniqueLogAnchors}): the `CaseBoard` rows (made unique first,
+ *  {@link uniqueCaseAnchors}), the `<Question>` cards' `qcard-…` anchors and
+ *  the lanes' `nm-q-…` ones. A repeat, or a card whose slug another element
+ *  holds (`<Query id="Case-A">` beside case `A`), gets the first free `-2`,
+ *  `-3`, and its id link follows. A pass over the OUTPUT, because some
+ *  components render a body twice and keep one copy (`foldBodyHtml`). */
 function uniqueAnchors(html: string): string {
   if (!html.includes('<section class="query" id="')) return html;
-  const cases = [...html.matchAll(CASE_ROW_RE)].map((m) => m[1]!);
+  const others = [...html.replace(ANCHOR_RE, "$2").replace(LOG_ITEM_RE, "").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!);
   // Every card's own slug is reserved first, so a repeat's suffix never takes
   // an id an author wrote (`Q-8`, `Q-8`, `Q-8-2` → `q-8`, `q-8-3`, `q-8-2`).
-  const reserved = new Set([...[...html.matchAll(ANCHOR_RE)].map((m) => m[1]!), ...cases]);
-  const used = new Set<string>(cases);
-  return html.replace(ANCHOR_RE, (_m, slug: string, between: string) => {
-    let anchor = slug;
-    if (used.has(anchor)) {
-      let k = 2;
-      while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
-      anchor = `${slug}-${k}`;
-    }
-    used.add(anchor);
+  const reserved = new Set([...html.matchAll(ANCHOR_RE)].map((m) => m[1]!));
+  const used = new Set<string>(others);
+  // A card whose id holds a parked wikilink (its id text still carries the
+  // sentinel here) slugs its link text, so it yields to every other card.
+  const matches = [...html.matchAll(ANCHOR_RE)];
+  const parked = matches.map((m) => {
+    const end = m.index! + m[0].length;
+    return html.slice(end, html.indexOf("<", end)).includes("\x00");
+  });
+  const final: string[] = [];
+  for (const pass of [false, true]) {
+    matches.forEach((m, i) => {
+      if (parked[i] !== pass) return;
+      const slug = m[1]!;
+      let anchor = slug;
+      if (used.has(anchor)) {
+        let k = 2;
+        while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
+        anchor = `${slug}-${k}`;
+      }
+      used.add(anchor);
+      final[i] = anchor;
+    });
+  }
+  let n = 0;
+  return html.replace(ANCHOR_RE, (_m, _slug: string, between: string) => {
+    const anchor = final[n++]!;
     return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
   });
 }
@@ -1048,9 +1183,12 @@ function deltaBlockHtml(attrs: Record<string, string>, rawChildren: Block[]): st
     const csv = readCsvFile(d.src, "Table");
     table = !csv.ok
       ? blockNote("dt-unavailable", csv.note)
-      : (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
+      : // `dt-file`: the table is the CSV's, not the page's (DISCUSS_TEXT_SKIP).
+        `<div class="dt-file">` +
+        (csv.warning ? blockNote("dt-warning", csv.warning) : "") +
         deltaTableHtml(deltaGrid(csv.header, csv.shown, csv.headerWidth), d, queryCellHtml, (s) => s) +
-        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "");
+        (csv.truncated ? blockNote("dt-truncated", csv.truncated) : "") +
+        `</div>`;
   } else if (k !== -1) {
     const t = rawChildren[k] as Extract<Block, { type: "table" }>;
     table = deltaTableHtml(deltaGrid(t.headers, t.rows), d, renderInline, stripEmphasis);
@@ -1198,7 +1336,7 @@ function foldBodyHtml(title: string, children: string, rawChildren: Block[]): st
   const first = rawChildren[i];
   if (!first || first.type !== "heading" || first.content.trim() !== title) return children;
   const tag = `h${Math.min(first.level + 1, 6)}`;
-  const head = `<${tag} class="fold-heading-dup">${renderInline(first.content)}</${tag}>`;
+  const head = `<${tag} class="fold-heading-dup">${renderInlineWith(first.content, false)}</${tag}>`;
   const rest = rawChildren.slice(i + 1);
   return [
     ...(i > 0 ? [renderBlocks(rawChildren.slice(0, i), webRenderer)] : []),
@@ -1215,6 +1353,13 @@ function isBlankTextBlock(block: Block): boolean {
  *  `pre-wrap` shows as a line break and the wiki reader as a space. */
 function itemHtml(text: string): string {
   return text.split("\n").map(renderInline).join("\n");
+}
+
+/** Item `k`'s trailing `<Check>` (`renderList` took it off) as the reader's
+ *  slot, after the item's text; nothing without `checkSlot`. */
+function checkSlot(nest: ListNest, k: number): string {
+  const raw = nest.checks?.[k];
+  return raw === undefined ? "" : currentCheckSlot?.(raw) ?? "";
 }
 
 /** ` value="n"` on an ordered item that keeps its own source number. */
@@ -1355,35 +1500,6 @@ let currentLinkTexts: readonly string[] | undefined;
 /** `opts.wikiLinkSources` for the call in progress. */
 let currentLinkSources: readonly string[] | undefined;
 
-/** Characters an id may not touch on either side to count as named. */
-const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
-
-/** Where each `<Question>` id an item names sits, in text order. An id counts
- *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
- *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
- *  the id — while a sentence-final `S1.` is named. */
-function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
-  const hits: { id: string; at: number }[] = [];
-  for (const id of ids) {
-    const m = questionIdRe(id).exec(text);
-    if (m) hits.push({ id, at: m.index });
-  }
-  return hits.sort((a, b) => a.at - b.at);
-}
-
-/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
-function questionIdRe(id: string, flags = ""): RegExp {
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
-}
-
-/** The `<Question>` ids an item names, in the order they appear. On the
- *  reader a wikilink is a sentinel here, so an id in its target or text names
- *  nothing. The peek, the counts and the card moves all read this, so they agree. */
-function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
-  return namedQuestionHits(item, ids).map((h) => h.id);
-}
-
 /**
  * The pre-pass behind D13: the first waiting lane (in document order) whose
  * open items name a `<Question>` on the page takes that card. A duplicated id
@@ -1395,7 +1511,9 @@ function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
  * A decided or closed card goes to no waiting lane: the page's first live
  * `<NextMoves>` with a lane takes it into its render-only «Avklart» lane
  * (settled questions plan, D1, D10) — unless it sits in a settled section or
- * inside a lane, where it stays.
+ * inside a lane, where it stays. A page with no such block gets an empty one,
+ * spliced into `blocks`, so deleting a page's last lane does not unfold its
+ * decided cards and they leave the same pointer lines.
  */
 function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   const questions = new Map<string, { block: ComponentBlock; lanes: Block[][]; settledSection: boolean }>();
@@ -1430,13 +1548,8 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   /** Question id → the `<NextMoves>` block whose lane took its card, and that lane. */
   const takenBy = new Map<string, ComponentBlock>();
   const takenLane = new Map<string, Block[]>();
-  const anchors = new Set<string>();
   const take = (id: string, block: ComponentBlock, lane: Block[], list: ComponentBlock[]) => {
-    const base = `nm-q-${anchorSlug(id)}`;
-    let anchor = base;
-    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
-    anchors.add(anchor);
-    out.moved.set(id, anchor);
+    out.moved.set(id, ""); // the anchor is given below, once every card is taken
     takenBy.set(id, block);
     takenLane.set(id, lane);
     list.push(questions.get(id)!.block);
@@ -1453,16 +1566,57 @@ function laneCardsFor(blocks: Block[], page: QuestionPage): LaneCards {
   }
   // A block with no lane renders as plain markdown, so it has no lane list to
   // add the «Avklart» lane to.
-  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0);
+  const settledIds = [...questions].filter(([id, q]) => isSettled(id) && !q.settledSection && q.lanes.length === 0).map(([id]) => id);
+  const firstSettled = settledIds[0];
+  const host = nextMoves.find((b) => nextMovesLanes(b.children).length > 0)
+    ?? (firstSettled === undefined ? undefined : insertSettledHost(blocks, questions.get(firstSettled)!.block));
   if (host) {
     const list: ComponentBlock[] = [];
-    for (const [id, q] of questions) {
-      if (isSettled(id) && !q.settledSection && q.lanes.length === 0) take(id, host, SETTLED_LANE, list);
-    }
+    for (const id of settledIds) take(id, host, SETTLED_LANE, list);
     if (list.length) out.settled.set(host.children, list);
+  }
+  // `nm-q-` + the slug, a repeat suffixed `-2`, `-3` in take order; an id
+  // unsafe in an attribute (or holding a sentinel) comes after every safe one,
+  // so it never takes a safe id's anchor, and one that slugs to nothing takes
+  // `nm-q-card` (its moved-card line needs a target).
+  const anchors = new Set<string>();
+  const ids = [...out.moved.keys()];
+  for (const id of [...ids.filter((i) => !UNSAFE_ANCHOR_ID_RE.test(i)), ...ids.filter((i) => UNSAFE_ANCHOR_ID_RE.test(i))]) {
+    const slug = idAnchor(id, currentLinkTexts);
+    const base = `nm-q-${slug || (UNSAFE_ANCHOR_ID_RE.test(id) ? "card" : "")}`;
+    let anchor = base;
+    for (let k = 2; anchors.has(anchor); k++) anchor = `${base}-${k}`;
+    anchors.add(anchor);
+    out.moved.set(id, anchor);
   }
   planMovedStubs(blocks, out, takenBy, takenLane);
   return out;
+}
+
+/** A block a page's author may write as its picture, right after the status. */
+const isPictureBlock = (b: Block): boolean =>
+  b.type === "table" ||
+  (b.type === "code_block" && b.lang === "mermaid") ||
+  (b.type === "component" && PICTURE_COMPONENTS.has(b.name));
+const PICTURE_COMPONENTS: ReadonlySet<string> = new Set(["Chart", "ComparisonTable", "DeltaTable", "Diagram", "Figure", "RuleTree", "CaseBoard", "Steps", "SystemMap"]);
+
+/** Splices an empty `<NextMoves>` into a page that has none to hold its decided
+ *  cards: at the top level, so no fold can hide it. It goes where a written one
+ *  goes, after the status and any picture that follows it, else before the block
+ *  holding the first card. Returns it. */
+function insertSettledHost(blocks: Block[], firstCard: ComponentBlock): ComponentBlock {
+  const holds = (b: Block): boolean => b === firstCard || (b.type === "component" && b.children.some(holds));
+  const status = blocks.findIndex((b) => b.type === "component" && b.name === "StatusRows");
+  let at = status >= 0 ? status + 1 : blocks.findIndex(holds);
+  if (status >= 0) {
+    for (let i = at; i < blocks.length; i++) {
+      if (isPictureBlock(blocks[i]!)) at = i + 1;
+      else if (!isBlankOrCommentBlock(blocks[i]!)) break;
+    }
+  }
+  const host: ComponentBlock = { type: "component", name: "NextMoves", attrs: {}, children: [] };
+  blocks.splice(at, 0, host);
+  return host;
 }
 
 /** The «Avklart» lane's key where a lane's `children` would be: it has no
@@ -2110,6 +2264,50 @@ function runListHtml(list: ChecklistList): string {
     .join("");
 }
 
+/** A pipe table on the reader: number columns (`num`, on the header too) and
+ *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
+ *  a traffic light adds `v-light` and keeps its glyph on screen). */
+function readerTableHtml(headers: string[], rows: string[][]): string {
+  const head = headers.map((h) => renderInlineWith(h, false));
+  const body = rows.map((row) => row.map(renderInline));
+  const nums = numberColumns(head.map(htmlText), body.map((r) => r.map(htmlText)));
+  const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
+  const tbody = "<tbody>" + body.map((row) =>
+    "<tr>" + row.map((cell, c) => {
+      if (nums.has(c)) return `<td class="num">${numberCellHtml(cell)}</td>`;
+      const v = verdictCell(cell);
+      return v ? `<td class="v-${v.tone}${v.light ? " v-light" : ""}">${v.html}</td>` : `<td>${cell}</td>`;
+    }).join("") + "</tr>"
+  ).join("") + "</tbody>";
+  return `<table>${thead}${tbody}</table>`;
+}
+
+/** A top-level list whose every item opens with a bold label (D3), on the
+ *  reader: the label in one column, the text and anything under the item in
+ *  the other. The label's `:`/`.` and the `:`/`—`/`–` after the bold stay in the
+ *  text, hidden in flow with `font-size: 0` (`lg-c`), which keeps a
+ *  selection reading `Label — text` as the source does; the spaces around
+ *  them sit outside it only so the visible gap stays. `lg-v` is a span
+ *  (a grid item, so a block box) because the ref links read the noun before
+ *  an id back through inline elements only (`precedingText`). */
+function labelGridHtml(items: LabelItem[], nest: ListNest): string {
+  const lis = items.map((it, k) => {
+    const punct = it.punct ? `<span class="lg-c">${escapeHtml(it.punct)}</span>` : "";
+    const sep = hiddenSep(it.sep);
+    const key = `<span class="lg-k"><strong>${renderInline(it.label)}${punct}</strong>${sep}</span>`;
+    return `<li>${key}<span class="lg-v">${itemHtml(it.rest)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</span></li>`;
+  });
+  return `<ul class="label-grid">${lis.join("")}</ul>`;
+}
+
+/** A separator after the bold (`: `, ` — `): its mark hidden, its spaces not
+ *  (one space for any run). Only spaces, as after `**Label:**`: one space. */
+function hiddenSep(sep: string): string {
+  const m = /^(\s*)(\S+)(\s*)$/u.exec(sep);
+  if (!m) return sep ? " " : "";
+  return `${m[1] ? " " : ""}<span class="lg-c">${escapeHtml(m[2]!)}</span>${m[3] ? " " : ""}`;
+}
+
 /** One labelled row. A command that is one code span renders as a one-line
  *  code block, so the reader's copy button reaches it; anything under the
  *  entry follows as written. (A fence cannot sit this deep; one directly under
@@ -2139,21 +2337,42 @@ const webRenderer: BlockRenderer = {
   hr: () => "<hr>",
   heading(block) {
     const tag = `h${Math.min(block.level + 1, 6)}`;
-    return `<${tag}>${renderInline(block.content)}</${tag}>`;
+    // No before → after chip in a heading: its weight already bolds the new
+    // value, and the reader's section bar and walkthrough read its text.
+    return `<${tag}>${renderInlineWith(block.content, false)}</${tag}>`;
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
-  ul: (items, nest) =>
-    `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`,
+  ul: (items, nest) => {
+    const grid = nest.depth === 0 && readerShapesOn()
+      ? labelGridItems(
+          items,
+          (k) => (nest.children[k] ?? []).some((c) => c.kind === "list"),
+          // A wikilink counts as its own text, unpadded: the cap reads what the label shows.
+          (label) => peekText(htmlText(renderInline(label))).replace(/\s+/g, " "),
+        )
+      : null;
+    if (grid) return labelGridHtml(grid, nest);
+    return `<ul>${items.map((i, k) => `<li>${itemHtml(i)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</li>`).join("")}</ul>`;
+  },
   ol: (items, start, nest) =>
     `<ol${start !== 1 ? ` start="${start}"` : ""}>` +
-    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${childrenHtml(nest.children[k])}</li>`).join("") +
+    items.map((i, k) => `<li${liValue(nest.values, k)}>${itemHtml(i)}${checkSlot(nest, k)}${childrenHtml(nest.children[k])}</li>`).join("") +
     `</ol>`,
   table(headers, rows) {
+    if (readerShapesOn()) return readerTableHtml(headers, rows);
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
       "<tr>" + row.map((cell) => `<td>${renderInline(cell)}</td>`).join("") + "</tr>"
     ).join("") + "</tbody>";
     return `<table>${thead}${tbody}</table>`;
+  },
+  inComponent(name, render) {
+    currentComponents.push(name);
+    try {
+      return render();
+    } finally {
+      currentComponents.pop();
+    }
   },
   component(name, attrs, children, rawChildren) {
     switch (name) {
@@ -2165,7 +2384,7 @@ const webRenderer: BlockRenderer = {
           // original body kept behind the fold so the history stays readable.
           // The author's tone is dropped — the row reports the outcome.
           const t = attrs.title?.trim();
-          const titleHtml = t ? ` · <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
+          const titleHtml = t ? ` <span class="callout-resolved-sep">·</span> <span class="callout-resolved-title">${escapeHtml(t)}</span>` : "";
           return (
             `<details class="callout callout-good callout-resolved">` +
             `<summary class="callout-resolved-row"><span class="callout-resolved-mark">✓</span> ` +
@@ -2181,8 +2400,12 @@ const webRenderer: BlockRenderer = {
       }
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = children.trim() || (value === "yes" ? "Yes" : "No");
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        // A body-less Verdict shows a fallback label the file does not hold:
+        // `verdict-default` marks it for Discuss's context (DISCUSS_TEXT_SKIP).
+        const label = children.trim();
+        return label
+          ? `<span class="verdict verdict-${value}">${label}</span>`
+          : `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);
@@ -2285,7 +2508,7 @@ const webRenderer: BlockRenderer = {
       case "Fact": {
         // BLOCK form — a `<Fact>` owning its whole line, which the block parser
         // claims before `renderInline` ever sees it. `children` is already rendered
-        // block HTML (a <p>), so the mark is a block-level wrapper here; the
+        // by the block parser, bare text or blocks, so the mark is a block-level wrapper here; the
         // common inline form is handled in `renderInline`.
         const { chip } = factMarkParts(attrs);
         const v = normalizeFactVerdict(attrs.v);
@@ -2318,9 +2541,12 @@ const webRenderer: BlockRenderer = {
         // closed; the duplicate-heading test below still compares the title alone.
         const teaser = (attrs.summary ?? "").trim();
         const teaserHtml = teaser ? `<span class="fold-summary">${escapeHtml(teaser)}</span>` : "";
+        // An untitled fold's «Details» is the reader's word, not the file's:
+        // its own class keeps it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
+        const label = title ? escapeHtml(title) : `<span class="fold-label-default">Details</span>`;
         return (
           `<details class="${foldClass(title, attrs.for)}"${openAttr}>` +
-          `<summary>${title ? escapeHtml(title) : "Details"}${teaserHtml}</summary>` +
+          `<summary>${label}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
         );
@@ -2344,7 +2570,8 @@ const webRenderer: BlockRenderer = {
         // four-lane block from leaving one card alone on a row.
         // No lane ⇒ the body renders as plain markdown, with no grid.
         const lanes = nextMovesLanes(rawChildren, currentReader ? currentLanguage : undefined);
-        if (lanes.length === 0) return children;
+        // A block `laneCardsFor` spliced in has no lanes, only its «Avklart» row.
+        if (lanes.length === 0) return currentLaneCards?.settled.has(rawChildren) ? compactNextMovesHtml(lanes, rawChildren) : children;
         // The wiki reader's compact «Oppfølging» block (D13, D14); chat keeps the grid.
         if (currentReader) return compactNextMovesHtml(lanes, rawChildren);
         // Anything in the block that is not a lane (an intro line) sits above the grid.
@@ -2373,14 +2600,17 @@ const webRenderer: BlockRenderer = {
           : lane.since && lane.since !== attrs.since?.trim()
             ? `<span ${READER_ONLY_ATTR}> — since ${escapeHtml(since)}</span>`
             : ` — since ${escapeHtml(since)}`;
-        return `<p><strong>${label}${sinceHtml}</strong></p>${children}`;
+        // `lane-plain-head`: who= and since= are attributes, not text the
+        // page holds (DISCUSS_TEXT_SKIP).
+        return `<p class="lane-plain-head"><strong>${label}${sinceHtml}</strong></p>${children}`;
       }
       case "Query": {
         // One card per query: header (id, question, answer, run date, uses),
         // the reading, the result table, the SQL behind a closed disclosure.
         const q = parseQueryAttrs(attrs);
-        // Made unique across the page by `uniqueAnchors`, after rendering.
-        const anchor = q.anchor;
+        // Made unique across the page by `uniqueAnchors`, after rendering. Read
+        // with a parked wikilink as its text, never the sentinel (F57).
+        const anchor = idAnchor(q.id, currentLinkTexts);
         const { sql, body } = splitQuerySql(rawChildren, q.sql !== "");
         const idHtml = !q.id
           ? ""
@@ -2488,6 +2718,10 @@ const webRenderer: BlockRenderer = {
         }
         return questionCardHtml(attrs, children);
       }
+      case "Check":
+        // Off its step's line it names no step (lint `check-placement`): a
+        // self-closing tag prints nothing, a paired one its body alone.
+        return children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2498,8 +2732,8 @@ const webRenderer: BlockRenderer = {
     switch (name) {
       case "Verdict": {
         const value = normalizeVerdictValue(attrs.value);
-        const label = text.trim() ? escapeHtml(text.trim()) : value === "yes" ? "Yes" : "No";
-        return `<span class="verdict verdict-${value}">${label}</span>`;
+        if (!text.trim()) return `<span class="verdict verdict-${value} verdict-default">${value === "yes" ? "Yes" : "No"}</span>`;
+        return `<span class="verdict verdict-${value}">${escapeHtml(text.trim())}</span>`;
       }
       case "Pill": {
         const tone = normalizePillTone(attrs.tone);
@@ -2514,6 +2748,11 @@ const webRenderer: BlockRenderer = {
         // `**1.32 kg**` as literal asterisks. Chip-only is the safe answer here.
         return factMarkParts(attrs).chip;
       }
+      case "Check":
+        // Reachable only via a direct call: `renderInline` leaves a paired
+        // tag's body in the stream, as prose. A step's trailing tag never gets
+        // here: `renderList` takes it off and `itemHtml` draws it.
+        return escapeHtml(text);
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -2524,6 +2763,16 @@ const webRenderer: BlockRenderer = {
 };
 
 function renderInline(text: string): string {
+  return renderInlineWith(text, true);
+}
+
+/** A parked placeholder (code span, inline component) inside a link's URL. */
+const PARKED_IN_URL_RE = /\x00[A-Z]+\d+\x01/;
+
+/** `renderInline`; `chips` false keeps the before → after chips out (a
+ *  heading, a fold's duplicate heading, a table header). They are drawn
+ *  only where the reader shapes apply. */
+function renderInlineWith(text: string, chips: boolean): string {
   const ph = new Placeholders();
 
   // Inline code FIRST — protect its content from further markdown processing.
@@ -2553,6 +2802,9 @@ function renderInline(text: string): string {
       // label: only its generated tags are parked, and the body is left in the
       // stream so the bold/link/escape passes below still apply to it. Every other
       // inline component escapes its own label inside `inlineComponent`.
+      // A `<Check>` off its step's line names no step: a paired one's body
+      // stays in the stream as prose, a self-closing one prints nothing.
+      if (seg.name === "Check") return seg.text;
       if (seg.name === "Fact") {
         const { open, close, chip } = factMarkParts(seg.attrs);
         if (!seg.text) return ph.add("INLINECMP", chip);
@@ -2570,8 +2822,13 @@ function renderInline(text: string): string {
   // Defensive: Claude occasionally outputs Slack-style angle-bracket links;
   // normalize them to markdown form before HTML-escaping (which would otherwise
   // turn the angle brackets into entities and hide the link).
-  result = result.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, "[$2]($1)");
-  result = result.replace(/<(https?:\/\/[^>]+)>/g, "[$1]($1)");
+  // Linear matchers for `<(https?:\/\/[^|>]+)\|([^>]+)>` and `<(https?:\/\/[^>]+)>`
+  // (F30: the regexes rescanned the line from every unclosed opener).
+  // A URL holding a parked code span or inline component stays as written:
+  // the link pass below would refuse it and print `[url](url)` (F53).
+  const angle = (m: string, url: string, label?: string) => (PARKED_IN_URL_RE.test(url) ? m : `[${label ?? url}](${url})`);
+  result = replaceAnglePipeLinks(result, (m, url, label) => angle(m, url, label));
+  result = replaceAngleLinks(result, (m, url) => angle(m, url));
 
   // Escape HTML entities — prevents raw HTML in Claude's response from being
   // interpreted as tags. Must happen before generated tags are emitted below.
@@ -2580,11 +2837,18 @@ function renderInline(text: string): string {
   // Markdown links → <a>. Only http/https to prevent javascript: injection,
   // plus an in-page `#fragment` (no quote or space can reach the attribute:
   // the text is escaped above and the class below excludes whitespace).
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+  // The finished open tag is parked (F53): the emphasis, chip and line-ref
+  // passes below never see the href, and a URL holding a parked code span or
+  // inline component makes no link, so no tag is ever restored into it. (A
+  // caller's own `\x00…\x00` sentinel there, a wikilink or a citation, goes
+  // back as its source text through `restoreParkedSentinels`.)
+  result = replaceMarkdownLinks(result, (m, label, url) => {
+    const linkable = /^https?:\/\//.test(url) || /^#[^\s#]+$/.test(url);
+    if (linkable && PARKED_IN_URL_RE.test(url)) return m;
     if (/^https?:\/\//.test(url)) {
-      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+      return `${ph.add("LINKOPEN", `<a href="${url}" target="_blank" rel="noopener">`)}${label}</a>`;
     }
-    if (/^#[^\s#]+$/.test(url)) return `<a href="${url}">${label}</a>`;
+    if (/^#[^\s#]+$/.test(url)) return `${ph.add("LINKOPEN", `<a href="${url}">`)}${label}</a>`;
     return label;
   });
 
@@ -2593,6 +2857,10 @@ function renderInline(text: string): string {
   result = result.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, "<em>$1</em>");
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
+  // Before → after chips, on the text between tags and parked sentinels, so
+  // code, hrefs and inline components never take one.
+  if (chips && readerShapesOn()) result = beforeAfterChipsHtml(result);
+
   return ph.restore(result);
 }
 
@@ -2600,10 +2868,15 @@ const BLOCK_TAG = "(?:h[2-6]|blockquote|ul|ol|hr|table|thead|tbody|tr|pre|p)";
 const NL_BEFORE_BLOCK = new RegExp(`\\n+(</?${BLOCK_TAG}[>\\s])`, "g");
 const NL_AFTER_BLOCK = new RegExp(`(</${BLOCK_TAG}>|<hr>)\\n+`, "g");
 
-/** Collapse excess blank lines, especially around block-level elements. */
+/** Collapse excess blank lines, especially around block-level elements,
+ *  outside rendered code: a fence's blank lines are its text (F54). */
 function collapseBlockSpacing(text: string): string {
-  return text
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(NL_BEFORE_BLOCK, "\n$1")
-    .replace(NL_AFTER_BLOCK, "$1\n");
+  const collapse = (s: string) => s.replace(/\n{3,}/g, "\n\n").replace(NL_BEFORE_BLOCK, "\n$1").replace(NL_AFTER_BLOCK, "$1\n");
+  let out = "";
+  let from = 0;
+  for (const r of renderedCodeRegions(text)) {
+    out += collapse(text.slice(from, r.start)) + text.slice(r.start, r.end);
+    from = r.end;
+  }
+  return out + collapse(text.slice(from));
 }

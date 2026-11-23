@@ -35,8 +35,23 @@ import {
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
 import { sourcesHtml } from "./wiki-gardener-sources.ts";
-import { groupStatusSummary, groupChipTone, groupDriftNote } from "./wiki-gardener-group.ts";
+import { groupAcceptCount, isLiveGroupStatus, groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
 import { approveButtonFor, FACTCHECK_UNKNOWN_NOTE, singleDriftNote } from "./wiki-gardener-drift.ts";
+import {
+  BATCH_SECTIONS,
+  batchHeadHtml,
+  hasLifeDomain,
+  batchStopReason,
+  narrowBatch,
+  isBatchCard,
+  planBatch,
+  sectionCounts,
+  sectionLabel,
+  sectionOf,
+  type BatchProgress,
+  type BatchSection,
+  type BatchVerb,
+} from "./wiki-gardener-batch.ts";
 import { wiringHtml, type WiringPreview } from "./wiki-gardener-wiring.ts";
 
 interface SourceDoc {
@@ -86,6 +101,12 @@ interface ProposalView {
   replacedBy?: string | null;
   /** Why Approve would be refused: the page changed since drafting. */
   drifted?: string | null;
+  /** `stale-check` rows: the changed page the card is about. */
+  staleChanged?: string | null;
+  /** A superseded `stale-check` group's row: the group that replaced it. */
+  replacedByGroup?: string | null;
+  /** Ungrouped drafts: the batch section the card is filed under. */
+  category?: string | null;
 }
 interface ProposalsResponse {
   proposals: ProposalView[];
@@ -118,6 +139,11 @@ function withBot(url: string): string {
 
 let allProposals: ProposalView[] = [];
 let statusFilter = "";
+/** The kind filter beside the status chips (D28): "", a kind, or "pages"
+ *  for the drafted kinds. */
+let kindFilter = "";
+
+
 
 function fmtDate(ms: number): string {
   try {
@@ -242,12 +268,12 @@ function groupCardHtml(rows: ProposalView[]): string {
   const findingPath = rows.find((r) => r.findingPath)?.findingPath;
   const head = rows.find((r) => r.targetPath === findingPath) ?? rows[0]!;
   const key = head.groupKey!;
-  const reviewable = rows.some((r) => r.status === "draft");
+  const reviewable = rows.some((r) => isLiveGroupStatus(r.status));
   let html = `<div class="gard-card" data-group="${esc(key)}">`;
 
   html += '<div class="gard-card-head"><div class="gard-title-row">';
   html += `<span class="gard-title">${esc(head.title)}</span>`;
-  html += `<span class="gard-badge badge-lint">lint</span>`;
+  html += `<span class="gard-badge badge-${esc(head.kind)}">${esc(groupKindTag(head.kind))}</span>`;
   html += `<span class="gard-badge badge-group">${rows.length} page${rows.length === 1 ? "" : "s"}</span>`;
   // Both halves of the chip read the SET. The class used to come off `head`,
   // which on a stopped group rendered `chip-applied` over text saying otherwise.
@@ -258,6 +284,9 @@ function groupCardHtml(rows: ProposalView[]): string {
   html += "</div>";
 
   html += '<div class="gard-body">';
+  // D20: a later Send replaced this group with group n+1.
+  const replacedBy = rows.find((r) => r.replacedByGroup)?.replacedByGroup;
+  if (replacedBy) html += `<div class="gard-stale-note" data-replaced-by-group="${esc(replacedBy)}">replaced by group ${esc(groupNumber(replacedBy))}</div>`;
   if (head.rationale) html += `<div class="gard-rationale">${esc(head.rationale)}</div>`;
   const driftNote = groupDriftNote(rows);
   if (driftNote) html += `<div class="gard-stale-note" data-drifted>${esc(driftNote)}</div>`;
@@ -269,13 +298,13 @@ function groupCardHtml(rows: ProposalView[]): string {
   }
   html += "</div>";
 
-  // Buttons render while ANY row is a draft — which, after a stop, is every row
-  // the apply did not reach. A group that renders no verb is a card a reviewer
-  // can only reload past.
+  // Buttons render while ANY row is live — `draft` (after a stop, every row the
+  // apply did not reach) or `approved` (an Accept a throw or a restart
+  // stranded, which both verbs take; F35). A group that renders no verb is a
+  // card a reviewer can only reload past.
   html += '<div class="gard-actions">';
   if (reviewable) {
-    const drafts = rows.filter((r) => r.status === "draft").length;
-    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${drafts}</button>`;
+    html += `<button class="gard-btn gard-approve" data-group-action="approve">Accept all ${groupAcceptCount(rows.map((r) => r.status))}</button>`;
     html += `<button class="gard-btn gard-reject" data-group-action="reject">Dismiss</button>`;
   }
   html += '<span class="gard-outcome"></span>';
@@ -301,13 +330,78 @@ function factcheckNoteHtml(p: ProposalView): string {
   return `<div class="gard-fc-note info" data-fc="missing-block">The source doc was fact-checked (${esc(date)}), but this draft carries no fact-check block or Fact check section.</div>`;
 }
 
+/** The section chip: "" for every section, else one section's drafts only. */
+let sectionFilter: BatchSection | "" = "";
+
+function shownProposals(): ProposalView[] {
+  return allProposals.filter(
+    (p) =>
+      (!statusFilter || p.status === statusFilter) &&
+      kindMatches(p.kind, kindFilter) &&
+      (!sectionFilter || (isBatchCard(p) && sectionOf(p) === sectionFilter)),
+  );
+}
+
+/** Each section chip carries its draft count under the status and kind filters
+ *  (so a chip never promises cards the list will not show), and "All sections"
+ *  their total. On a wiki with no life domain the chip group is hidden. */
+function paintSectionChips(): void {
+  const show = hasLifeDomain(allProposals);
+  document.querySelectorAll("#gardFilters [data-section-group]").forEach((el) => ((el as HTMLElement).hidden = !show));
+  if (!show && sectionFilter) sectionFilter = "";
+  const counts = sectionCounts(
+    allProposals.filter((p) => (!statusFilter || p.status === statusFilter) && kindMatches(p.kind, kindFilter)),
+  );
+  let total = 0;
+  for (const { key, chip } of BATCH_SECTIONS) {
+    total += counts[key];
+    const el = document.querySelector(`#gardFilters .gard-filter[data-section="${key}"]`);
+    if (el) el.textContent = `${chip} ${counts[key]}`;
+  }
+  const all = document.querySelector('#gardFilters .gard-filter[data-section=""]');
+  if (all) all.textContent = `All sections ${total}`;
+}
+
+/** The ungrouped drafts, filed by section under a header with the batch verbs.
+ *  Empty when the view holds no such draft. */
+function batchSectionsHtml(shown: ProposalView[]): string {
+  const drafts = shown.filter(isBatchCard);
+  // A section a batch just emptied keeps its header, so the result stays on screen.
+  if (!drafts.length && !batchState.size) return "";
+  let html = "";
+  for (const { key } of BATCH_SECTIONS) {
+    // A running batch keeps its header (and Stop) under any section chip.
+    if (sectionFilter && key !== sectionFilter && runningBatch?.section !== key) continue;
+    const inSection = drafts.filter((p) => sectionOf(p) === key);
+    if (!inSection.length && !batchState.has(key)) continue;
+    html += batchHeadHtml({
+      section: key,
+      label: sectionLabel(key, allProposals),
+      noun: hasLifeDomain(allProposals) ? BATCH_SECTIONS.find((b) => b.key === key)!.chip : "",
+      cards: shown,
+      count: inSection.length,
+      progress: batchState.get(key) ?? null,
+      anyRunning: !!runningBatch,
+      busy: busyIds(),
+      all: allProposals,
+    });
+    for (const p of inSection) html += cardHtml(p);
+  }
+  if (shown.some((p) => !isBatchCard(p))) {
+    html += '<div class="gard-batch-head"><span class="gard-batch-label">Other proposals</span></div>';
+  }
+  return html;
+}
+
 function render(): void {
   const list = document.getElementById("gardList")!;
-  const shown = statusFilter
-    ? allProposals.filter((p) => p.status === statusFilter)
-    : allProposals;
+  paintSectionChips();
+  const shown = shownProposals();
   if (!shown.length) {
+    // A batch that just emptied this view keeps its header and result above
+    // the empty note.
     list.innerHTML =
+      batchSectionsHtml(shown) +
       '<div class="gard-empty">' +
       (allProposals.length ? "No proposals in this view." : "No wiki proposals yet. The gardener drafts them on its weekly run.") +
       "</div>";
@@ -321,8 +415,9 @@ function render(): void {
   // never decide which rows a card holds, or a half-applied group renders as a
   // two-page fix with the applied member silently missing.
   const emitted = new Set<string>();
-  let html = "";
+  let html = batchSectionsHtml(shown);
   for (const p of shown) {
+    if (isBatchCard(p)) continue;
     if (!p.groupKey) {
       html += cardHtml(p);
       continue;
@@ -332,8 +427,11 @@ function render(): void {
     html += groupCardHtml(allProposals.filter((r) => r.groupKey === p.groupKey));
   }
   list.innerHTML = html;
-  // A Redraft's state lives here, not on the card this render just replaced.
-  for (const id of new Set([...redraftsInFlight, ...redraftNotes.keys()])) paintRedraftState(id);
+  // Every card's lock and note live in module state, not on the card this
+  // render just replaced.
+  for (const id of new Set([...redraftsInFlight, ...actsInFlight.keys(), ...batchQueued, ...cardNotes.keys()])) {
+    paintCardState(id);
+  }
   // A group's outcome note lives on the card, which this render just replaced.
   // Re-paint whatever the last group action said, or a `Stopped at …` note is
   // wiped by the very reload the stop triggers.
@@ -376,26 +474,37 @@ const JSON_POST: RequestInit = {
 type CardAction = "approve" | "reject" | "redraft";
 
 /** Proposals with a Redraft in flight, and the last Redraft answer per
- *  proposal. Kept outside the DOM so every re-render (a poll, a filter, an
- *  inspector action) paints them again instead of re-enabling the card. */
+ *  proposal (a batch's per-card failure lands in `cardNotes` too). Kept
+ *  outside the DOM so every re-render (a poll, a filter, an inspector action)
+ *  paints them again instead of re-enabling the card. */
 const redraftsInFlight = new Set<string>();
-const redraftNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
+const cardNotes = new Map<string, { text: string; kind: "ok" | "err" | "" }>();
 const REDRAFTING = "Redrafting… (a model call, up to a few minutes)";
 
 function cardById(id: string): HTMLElement | null {
   return document.querySelector(`#gardList .gard-card[data-id="${cssEscape(id)}"]`);
 }
 
-/** Paint one proposal's Redraft state onto its current card, if it is shown. */
-function paintRedraftState(id: string): void {
+/**
+ * Paint one single card's state onto its current element, if it is shown. Its
+ * states, in order: a click in flight (locked, "Applying…" / "Rejecting…"), a
+ * Redraft in flight (locked, REDRAFTING), queued in a running batch (locked; a
+ * plan clears the card's note), else unlocked as `cardHtml` drew it, with its
+ * last note if any. Unlocking is never done here: a card only unlocks by being
+ * drawn again, so `act()`, `redraft()` and `runBatch()` change state and
+ * `render()`. Not covered: group cards (`actOnGroup` still paints the card it
+ * captured), and a Redraft whose answer reloads the list keeps its old card
+ * locked until `loadProposals()` draws the new one.
+ */
+function paintCardState(id: string): void {
   const card = cardById(id);
   if (!card) return;
-  if (redraftsInFlight.has(id)) {
-    card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
-    setOutcome(card, REDRAFTING, "");
-    return;
-  }
-  const note = redraftNotes.get(id);
+  const inFlight = actsInFlight.get(id);
+  const locked = !!inFlight || redraftsInFlight.has(id) || batchQueued.has(id);
+  if (locked) card.querySelectorAll(".gard-btn").forEach((b) => ((b as HTMLButtonElement).disabled = true));
+  if (inFlight) return setOutcome(card, inFlight === "approve" ? "Applying…" : "Rejecting…", "");
+  if (redraftsInFlight.has(id)) return setOutcome(card, REDRAFTING, "");
+  const note = cardNotes.get(id);
   if (!note) return;
   // A card that is no longer a draft has no action row to carry the note.
   if (!card.querySelector(".gard-outcome")) {
@@ -416,45 +525,139 @@ async function jsonOrNull(res: Response): Promise<Record<string, unknown> | null
   }
 }
 
-/** Re-enable a card's buttons after a failed action, except an Approve the
- *  fact-check flag locked. */
-function unlockButtons(buttons: NodeListOf<Element>): void {
-  buttons.forEach((b) => {
-    if (!(b as HTMLElement).hasAttribute("data-fc-locked")) (b as HTMLButtonElement).disabled = false;
-  });
-}
-
-async function act(id: string, action: CardAction, card: HTMLElement): Promise<void> {
-  if (action === "redraft") return redraft(id);
-  redraftNotes.delete(id);
-  const buttons = card.querySelectorAll(".gard-btn");
-  buttons.forEach((b) => ((b as HTMLButtonElement).disabled = true));
-  setOutcome(card, action === "approve" ? "Applying…" : "Rejecting…", "");
+/**
+ * POST one card's approve/reject and fold a terminal outcome into the local
+ * row. A 500 that reports `outcome: "error"` flips the row too: the server has
+ * marked it `error`, and a card still showing Approve would only 409.
+ */
+async function postAction(
+  id: string,
+  action: "approve" | "reject",
+): Promise<{ ok: boolean; status: number; outcome: string; error: string }> {
   try {
     const res = await fetch(
       withBot("/api/wiki/proposals/" + encodeURIComponent(id) + "/" + action),
       JSON_POST,
     );
-    const data = await res.json();
-    if (!res.ok) {
-      setOutcome(card, data.error || "Failed (" + res.status + ")", "err");
-      unlockButtons(buttons);
-      return;
-    }
-    // Update local state + re-render so the status chip + filters reflect the outcome.
+    const data = (await jsonOrNull(res)) ?? {};
+    const outcome = typeof data.outcome === "string" ? data.outcome : "";
     const p = allProposals.find((x) => x.id === id);
-    if (p) {
-      p.status = ["applied", "stale", "rejected", "error"].includes(data.outcome)
-        ? data.outcome
-        : p.status;
-      p.resolvedAt = Date.now();
+    if (p && ["applied", "stale", "rejected", "error"].includes(outcome)) {
+      p.status = outcome;
+      // The server's time is unknown here, and this browser's clock is not the
+      // server's: null counts as later than any listed draft (`pageTargets`).
+      p.resolvedAt = null;
     }
-    render();
-    // A draft that just got applied/rejected changes "drafts awaiting review".
-    rerenderStrip();
+    if (!res.ok) return { ok: false, status: res.status, outcome, error: String(data.error || "Failed (" + res.status + ")") };
+    return { ok: true, status: res.status, outcome, error: "" };
   } catch (err) {
-    setOutcome(card, "Network error: " + (err as Error).message, "err");
-    unlockButtons(buttons);
+    return { ok: false, status: 0, outcome: "", error: "Network error: " + (err as Error).message };
+  }
+}
+
+/** Single-card approve/reject clicks still waiting on the server, by id. */
+const actsInFlight = new Map<string, "approve" | "reject">();
+
+/** Ids a batch must not post: a Redraft or a single click is working on them. */
+function busyIds(): Set<string> {
+  return new Set([...redraftsInFlight, ...actsInFlight.keys()]);
+}
+
+async function act(id: string, action: CardAction): Promise<void> {
+  if (action === "redraft") return redraft(id);
+  cardNotes.delete(id);
+  actsInFlight.set(id, action);
+  paintCardState(id);
+  const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
+  if (!r.ok) cardNotes.set(id, { text: r.error, kind: "err" });
+  // Re-render so the status chip, the filters and the card's lock reflect the outcome.
+  render();
+  // A draft that just got applied/rejected changes "drafts awaiting review".
+  rerenderStrip();
+}
+
+/** The last batch per section (running or finished), the one running now, and
+ *  the ids it has still to reach. Outside the DOM, like the Redraft state. */
+const batchState = new Map<BatchSection, BatchProgress>();
+let runningBatch: BatchProgress | null = null;
+const batchQueued = new Set<string>();
+
+/**
+ * Approve or reject a whole section, one card at a time through the per-card
+ * route, so every server guard runs and each card settles as it goes. Strictly
+ * sequential: approves on one wiki serialize on its write queue anyway. A
+ * failed card keeps its note and the batch moves on; Stop ends it after the
+ * card in flight.
+ */
+async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
+  if (runningBatch) return;
+  // Planned from the cards on screen at the click: the batch never takes a
+  // draft the reviewer did not see.
+  const planned = planBatch(shownProposals(), section, verb, busyIds(), allProposals).ids;
+  if (!planned.length) return;
+  const prog: BatchProgress = {
+    section, verb, total: planned.length, done: 0, failed: 0, running: true, stopped: false, preparing: true,
+  };
+  runningBatch = prog;
+  batchState.set(section, prog);
+  for (const id of planned) {
+    batchQueued.add(id);
+    cardNotes.delete(id);
+  }
+  render();
+  let ids: string[] = [];
+  try {
+    // A fresh listing only NARROWS the plan: a draft settled in another tab, or
+    // a page edited since (now `drifted`), drops out instead of being posted and
+    // burned. It never replaces local rows, which hold outcomes this tab got
+    // after the read was answered. A failed re-read keeps the plan.
+    const fresh = await fetchProposals().catch(() => null);
+    ids = fresh ? narrowBatch(planned, allProposals, fresh, verb, busyIds()) : planned.filter((id) => !busyIds().has(id));
+    if (fresh) {
+      const freshById = new Map(fresh.map((p) => [p.id, p]));
+      for (const p of allProposals) {
+        const f = freshById.get(p.id);
+        if (!f || p.status !== "draft" || !planned.includes(p.id)) continue;
+        Object.assign(p, { status: f.status, drifted: f.drifted, factcheck: f.factcheck, factcheckUnknown: f.factcheckUnknown });
+      }
+    }
+    prog.preparing = false;
+    for (const id of planned) if (!ids.includes(id)) batchQueued.delete(id);
+    if (!prog.stopped) prog.total = ids.length;
+    render();
+    for (const id of ids) {
+      if (prog.stopped) break;
+      // A single click on this card since the plan, or a Redraft: leave it.
+      if (busyIds().has(id) || allProposals.find((p) => p.id === id)?.status !== "draft") {
+        batchQueued.delete(id);
+        prog.total--;
+        continue;
+      }
+      const r = await postAction(id, verb);
+      const settled = verb === "approve" ? "applied" : "rejected";
+      const halt = batchStopReason(r);
+      if (!r.ok) {
+        prog.failed++;
+        cardNotes.set(id, { text: r.error, kind: "err" });
+      } else if (r.outcome !== settled) {
+        prog.failed++;
+        cardNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
+      }
+      batchQueued.delete(id);
+      prog.done++;
+      if (halt) {
+        prog.haltedBy = halt;
+        break;
+      }
+      if (prog.done < prog.total && !prog.stopped) render();
+    }
+  } finally {
+    prog.running = false;
+    runningBatch = null;
+    batchQueued.clear();
+    if (prog.viewChanged) batchState.delete(section);
+    render();
+    rerenderStrip();
   }
 }
 
@@ -462,14 +665,14 @@ async function act(id: string, action: CardAction, card: HTMLElement): Promise<v
  * Redraft one draft: a real model call, then the server's one-transaction
  * replace. `drafted`, `superseded_meanwhile` and `covered` all mean the rows
  * on screen are stale, so the list reloads; every other answer leaves the
- * draft as it was. The answer is kept in `redraftNotes`, so the reload does
+ * draft as it was. The answer is kept in `cardNotes`, so the reload does
  * not wipe it.
  */
 async function redraft(id: string): Promise<void> {
   if (redraftsInFlight.has(id)) return;
-  redraftNotes.delete(id);
+  cardNotes.delete(id);
   redraftsInFlight.add(id);
-  paintRedraftState(id);
+  paintCardState(id);
   let note: { text: string; kind: "ok" | "err" | "" } | null = null;
   let reload = false;
   try {
@@ -495,14 +698,12 @@ async function redraft(id: string): Promise<void> {
     note = { text: "Network error: " + (err as Error).message, kind: "err" };
   }
   redraftsInFlight.delete(id);
-  if (note) redraftNotes.set(id, note);
+  if (note) cardNotes.set(id, note);
   if (reload) {
     loadProposals();
     return;
   }
-  const card = cardById(id);
-  if (card) unlockButtons(card.querySelectorAll(".gard-btn"));
-  paintRedraftState(id);
+  render();
 }
 
 /**
@@ -527,12 +728,7 @@ async function actOnGroup(
     );
     const data = await res.json();
     if (!res.ok) {
-      const applied: string[] = data.applied || [];
-      const note = data.outcome === "stopped"
-        ? "Stopped at " + data.stoppedAt + " (" + data.stoppedOutcome + ")" +
-          (applied.length ? " — " + applied.length + " page(s) already written" : "") +
-          (data.error ? ": " + data.error : "")
-        : data.error || "Failed (" + res.status + ")";
+      const note = groupStopNote(data, res.status);
       // Stored BEFORE the reload, because `render()` replaces the card element
       // this note is painted on.
       groupOutcomes.set(groupKey, { text: note, kind: "err" });
@@ -541,17 +737,19 @@ async function actOnGroup(
       // A partial apply moved rows, so the list on screen is stale either way —
       // and the lint panel is stale too: the finding the group was FOR may be
       // gone, or may have grown a member.
-      if (data.outcome === "stopped") {
+      if (data.outcome === "stopped" || data.outcome === "conflict") {
         loadProposals();
         loadLint();
       }
       return;
     }
-    const next = action === "approve" ? "applied" : "rejected";
+    // Dismiss settles a row whose page already carries its draft as `applied`
+    // (`alreadyWritten`), every other live row as `rejected`.
+    const written = new Set<string>(action === "reject" ? data.alreadyWritten || [] : []);
     allProposals.forEach((p) => {
-      if (p.groupKey === groupKey && p.status === "draft") {
-        p.status = next;
-        p.resolvedAt = Date.now();
+      if (p.groupKey === groupKey && isLiveGroupStatus(p.status)) {
+        p.status = action === "approve" || written.has(p.targetPath) ? "applied" : "rejected";
+        p.resolvedAt = null; // server time unknown; see postAction
       }
     });
     if (action === "approve" && (data.noop?.length || 0) > 0) {
@@ -575,9 +773,19 @@ async function actOnGroup(
 document.getElementById("gardFilters")!.addEventListener("click", (e) => {
   const chipEl = (e.target as HTMLElement).closest(".gard-filter");
   if (!chipEl) return;
-  statusFilter = chipEl.getAttribute("data-status") || "";
-  document.querySelectorAll("#gardFilters .gard-filter").forEach((c) => c.classList.remove("active"));
+  // Three filters in one row: the status, kind and section chips, each with
+  // its own active chip.
+  const attr = ["data-kind", "data-section", "data-status"].find((a) => chipEl.hasAttribute(a))!;
+  const value = chipEl.getAttribute(attr) || "";
+  if (attr === "data-kind") kindFilter = value;
+  else if (attr === "data-section") sectionFilter = value as BatchSection | "";
+  else statusFilter = value;
+  document.querySelectorAll(`#gardFilters .gard-filter[${attr}]`).forEach((c) => c.classList.remove("active"));
   chipEl.classList.add("active");
+  // A batch's result belongs to the view it ran in: a finished one goes now,
+  // a running one when it ends.
+  if (runningBatch) runningBatch.viewChanged = true;
+  for (const [section, b] of batchState) if (!b.running) batchState.delete(section);
   render();
 });
 
@@ -596,6 +804,22 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
     return;
   }
 
+  if (target.closest("[data-batch-stop]")) {
+    if (runningBatch) {
+      runningBatch.stopped = true;
+      render();
+    }
+    return;
+  }
+  const batchBtn = target.closest("[data-batch-action]");
+  if (batchBtn) {
+    void runBatch(
+      batchBtn.getAttribute("data-batch") as BatchSection,
+      batchBtn.getAttribute("data-batch-action") as BatchVerb,
+    );
+    return;
+  }
+
   const groupBtn = target.closest("[data-group-action]");
   if (groupBtn) {
     const card = groupBtn.closest(".gard-card") as HTMLElement;
@@ -611,7 +835,7 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
   if (actionBtn) {
     const card = actionBtn.closest(".gard-card") as HTMLElement;
     const id = card.getAttribute("data-id")!;
-    act(id, actionBtn.getAttribute("data-action") as CardAction, card);
+    act(id, actionBtn.getAttribute("data-action") as CardAction);
   }
 });
 
@@ -1653,6 +1877,12 @@ if (wikiBotSel) {
     const value = wikiBotSel.value;
     location.href = value ? "/wiki/gardener?bot=" + encodeURIComponent(value) : "/wiki/gardener";
   });
+}
+
+/** The listing's rows, or null when it answers an error with no rows. */
+async function fetchProposals(): Promise<ProposalView[] | null> {
+  const data = (await (await fetch(withBot("/api/wiki/proposals"))).json()) as ProposalsResponse;
+  return data.error && !(data.proposals || []).length ? null : data.proposals || [];
 }
 
 function loadProposals(): void {

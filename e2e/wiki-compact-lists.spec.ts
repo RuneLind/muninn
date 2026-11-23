@@ -805,8 +805,10 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
     expectClean(seen);
   });
 
-  test("fix round 1, item 5: at 650 px the date cell drops under the text, which keeps the row", async ({ page }) => {
-    await page.setViewportSize({ width: 650, height: 900 });
+  // 360, a phone: the article column a 650 px window had while the rail kept
+  // its column there (issue #623).
+  test("fix round 1, item 5: at 360 px the date cell drops under the text, which keeps the row", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 900 });
     const seen = await open_(page);
     const row = page.locator("li.dl-item#d7");
     const [r, t, w] = await Promise.all([row.boundingBox(), row.locator(".dl-text").boundingBox(), row.locator(".dl-when").boundingBox()]);
@@ -937,7 +939,10 @@ test.describe("Wiki reader: Overview's compact DecisionLog and CaseBoard", () =>
   });
 
   test("fix round 2, item 6: between 18rem and 28rem the date cell sits under the text", async ({ page }) => {
-    await page.setViewportSize({ width: 760, height: 900 });
+    // 780: a window just over the 768 px breakpoint, where the rail still has
+    // its column (at or under it the rail has none, issue #623, and the log
+    // is wider than 28rem).
+    await page.setViewportSize({ width: 780, height: 900 });
     const seen = await open_(page);
     const log = page.locator(".wiki-article section.decision-log").first();
     const width = (await log.boundingBox())!.width;

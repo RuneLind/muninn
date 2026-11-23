@@ -680,3 +680,28 @@ export function highlightFind(text: string, terms: readonly string[]): string {
   }
   return out + escHtml(text.slice(at));
 }
+
+/** The row a palette session opened, as the query log names it. */
+export interface FindLogOpened {
+  wiki: string;
+  relPath: string;
+  rank: number;
+  section: "local" | "everywhere";
+}
+
+/**
+ * The body `POST /api/wiki/find-log` gets for one palette event, or `null`
+ * when the box holds under two characters. `typed` is the box, `shown` the
+ * text the rows on screen were ranked for. Nothing is deduped or judged here:
+ * the file's reader groups lines by `session`.
+ */
+export function findLogBody(
+  typed: string,
+  shown: string,
+  opened: FindLogOpened | null,
+  s: { wiki: string; session: string; local: number; everywhere: number | null },
+): { wiki: string; session: string; q: string; shown: string; opened: FindLogOpened | null; rows: { local: number; everywhere: number | null } } | null {
+  const q = typed.trim().slice(0, 200);
+  if (q.length < 2 || !s.wiki) return null;
+  return { wiki: s.wiki, session: s.session, q, shown: shown.trim().slice(0, 200), opened, rows: { local: s.local, everywhere: s.everywhere } };
+}

@@ -15,6 +15,8 @@
  * not on its argument count — `bun test src/watchers/` is one argument and
  * fourteen files, and `bun test` with no path at all is EVERY test file.
  */
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * A `mock.module(` CALL: at the start of a line, optionally behind `await`/`void`,
@@ -37,9 +39,34 @@ export const MOCK_ALIAS_IMPORT = /import\s*\{[^}]*\bmock\s+as\s+\w+[^}]*\}/;
 /** The substring every call form contains — what MOCK_MODULE_CALL must agree with, file by file. */
 export const MOCK_MODULE_SUBSTRING = /\bmock\.module\(/;
 
-/** Where the bun test files live, relative to the repo root, and the pattern they match. */
-export const TEST_FILE_DIRS = ["src", "db", "e2e", "scripts"] as const;
-export const TEST_FILE_GLOB = "**/*.test.ts";
+/**
+ * The files `bun test` discovers under a root, as bun 1.3.10 does (measured; the
+ * conformance tests in mock-isolation.test.ts spawn bun to hold it there): a
+ * `.test`/`_test`/`.spec`/`_spec` suffix before a JS/TS extension, case-insensitive;
+ * every directory below the root except `node_modules` and hidden ones (a hidden
+ * FILE is run). `.gitignore` is not read. Symlinked directories, which bun follows,
+ * are not: the tracked tree has none. Bun also skips `Node_Modules/` (measured on
+ * macOS); this skips only the lowercase name, and the tree has no other spelling.
+ */
+export const BUN_TEST_FILE = /[._](test|spec)\.(ts|tsx|js|jsx|mts|cts|mjs|cjs)$/i;
+
+export function discoverTestFiles(root: string, rel = ""): string[] {
+  const out: string[] = [];
+  for (const e of readdirSync(join(root, rel), { withFileTypes: true })) {
+    const p = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      if (!e.name.startsWith(".") && e.name !== "node_modules") out.push(...discoverTestFiles(root, p));
+    } else if (e.isFile() && BUN_TEST_FILE.test(e.name)) {
+      out.push(p);
+    }
+  }
+  return rel ? out : out.sort();
+}
+
+/** Playwright's files, not bun's (playwright.config.ts: testDir `./e2e`, testMatch `**\/*.spec.ts`). */
+export function isPlaywrightSpec(file: string): boolean {
+  return file.startsWith("e2e/") && file.endsWith(".spec.ts");
+}
 
 /**
  * `bun test --coverage` is bun's whole-repo, single-process run: every mock in the
@@ -50,6 +77,37 @@ export const TEST_FILE_GLOB = "**/*.test.ts";
  * reads the same set, so a second single-process chain added here is excluded there too.
  */
 export const SINGLE_PROCESS_SCRIPTS: ReadonlySet<string> = new Set(["test:coverage"]);
+
+/**
+ * Test files that need a process of their own for a reason other than
+ * `mock.module`: a file that installs happy-dom's `GlobalWindow` puts its globals
+ * (`Event`, `URL`, `fetch`, timers, ~500 keys) over Bun's for the life of the
+ * process. `src/dashboard/views/wiki-boot/` is one by directory, for a second
+ * reason too: `boot()` leaves module state behind (initChatOptions's dialog
+ * listeners and deps), which broke 14 `wiki-chat-options.test.ts` tests run in
+ * one process with it. Elsewhere, a file is one by content ({@link HAPPY_DOM_GLOBALS}).
+ * The same rule as a mock file applies — alone in every link that runs it, and
+ * run by some chain — so it is read through the same links.
+ */
+export const OWN_PROCESS_DIRS = ["src/dashboard/views/wiki-boot/"] as const;
+
+/**
+ * A static import of happy-dom's `GlobalWindow` at the start of a line, so one
+ * quoted in a fixture string is not one (a private `new Window()` installs
+ * nothing global). Detected: a named import (`{ GlobalWindow }`, also across
+ * lines), an aliased one (`{ GlobalWindow as GW }`) and default plus named
+ * (`import HappyDom, { GlobalWindow }`). NOT detected: a namespace import
+ * (`import * as hd`), a dynamic `import("happy-dom")`, a re-export, a subpath
+ * (`happy-dom/lib/...`), `@happy-dom/global-registrator`, and a non-test helper
+ * module that imports `GlobalWindow` and is imported by a test — the source of
+ * each test file is read, not its import graph.
+ */
+export const HAPPY_DOM_GLOBALS = /^\s*import\s*(?:[\w$]+\s*,\s*)?\{[^}]*\bGlobalWindow\b[^}]*\}\s*from\s*["']happy-dom["']/m;
+
+/** The test files under {@link OWN_PROCESS_DIRS}, plus any whose source imports `GlobalWindow` from happy-dom. */
+export function ownProcessFiles(allTestFiles: readonly string[], readSource: (file: string) => string): string[] {
+  return allTestFiles.filter((f) => OWN_PROCESS_DIRS.some((d) => f.startsWith(d)) || HAPPY_DOM_GLOBALS.test(readSource(f)));
+}
 
 export interface BunTestLink {
   script: string;
@@ -72,21 +130,25 @@ export function bunTestLinks(scripts: Record<string, string>): BunTestLink[] {
 }
 
 /**
- * The test files a link runs: an argument ending in `/` is a directory and covers
- * every test file under it; anything else is taken as one file; NO positional
- * argument (`bun test --coverage`) is bun's whole-repo run — every test file. A
- * directory argument WITHOUT the slash is not a shape the chains use (asserted by
- * the test).
+ * The test files a link runs, as bun matches its arguments (measured on 1.3.10):
+ * an argument is a case-sensitive SUBSTRING of the file's root-relative path, so
+ * `src/plans/` also runs `sub/src/plans/b.test.ts` and `a.test.ts` also runs
+ * `a.test.tsx`; an argument starting `./` is a path, the file itself or every
+ * file under that directory. NO positional argument (`bun test --coverage`) is
+ * bun's whole-repo run: every test file. A file argument that matches nothing is
+ * returned as itself, so callers report it as not on disk; a directory argument
+ * that matches nothing is dropped. Not modelled, as no chain uses them: bun runs a
+ * `./` path into a hidden directory (here: nothing, as discovery skips it) and reads
+ * an absolute argument as a path (here: a substring that matches nothing).
  */
 export function expandLink(args: string[], allTestFiles: readonly string[]): string[] {
   if (args.length === 0) return [...allTestFiles];
   const files = new Set<string>();
   for (const arg of args) {
-    if (arg.endsWith("/")) {
-      for (const f of allTestFiles) if (f.startsWith(arg)) files.add(f);
-    } else {
-      files.add(arg);
-    }
+    const path = arg.startsWith("./") ? arg.slice(2).replace(/\/$/, "") : null;
+    const hits = allTestFiles.filter((f) => (path === null ? f.includes(arg) : f === path || f.startsWith(`${path}/`)));
+    if (hits.length === 0 && !arg.endsWith("/")) files.add(arg);
+    for (const f of hits) files.add(f);
   }
   return [...files];
 }

@@ -36,7 +36,9 @@ import { e2ePort } from "./ports.ts";
 import {
   RAIL_TITLE_MIN,
   RAIL_CHIP_LABEL_WIDE,
+  RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_KEY,
+  RAIL_WIDTH_MIN,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import { contrastOf } from "./contrast.ts";
@@ -301,9 +303,12 @@ test.describe("Wiki rail: attachments", () => {
 
   // The rail's own minimum width. `#wikiList` scrolling sideways hides the ★, the
   // date and half the title behind a scrollbar nothing tells the reader about.
+  // A 1000 px window: under 1100 the rail's default is its 260 px minimum. (A
+  // 420 px window gave that until issue #623 made the rail a panel there.)
   test("the chip does not push the rail into a horizontal scroll", async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 900 });
+    await page.setViewportSize({ width: 1000, height: 900 });
     await openRail(page);
+    expect(Math.round((await page.locator(".wiki-layout > .wiki-pane:first-child").boundingBox())!.width)).toBe(RAIL_WIDTH_MIN);
     const overflow = await page.locator("#wikiList").evaluate((el) => ({
       scrollWidth: el.scrollWidth,
       clientWidth: el.clientWidth,
@@ -335,12 +340,13 @@ test.describe("Wiki rail: attachments", () => {
   test("both row shapes keep the title floor and an unclipped count, at both rail widths", async ({
     page,
   }) => {
-    for (const [width, height] of [
-      [1280, 720],
-      [420, 900],
+    for (const [width, height, rail] of [
+      [1280, 720, RAIL_WIDTH_DEFAULT],
+      [1000, 900, RAIL_WIDTH_MIN],
     ] as const) {
       await page.setViewportSize({ width, height });
       await openRail(page);
+      expect(Math.round((await page.locator(".wiki-layout > .wiki-pane:first-child").boundingBox())!.width), `rail at ${width}px`).toBe(rail);
       // X is an ordinary group row; W carries every optional element a row can
       // have at once — status pill, ⚑ follow-up flag, and two-digit counts of
       // both kinds in the chip; V carries a title long enough to compete with

@@ -23,11 +23,23 @@
  * remainder, superseded) is `closed`; everything else is `open`.
  */
 import type { AuthMode } from "../auth/mode.ts";
-import { stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
+import { readerFencedLines, stripFactWrappers, type Block, type ListBlock, type ListChild } from "./markdown-ast.ts";
 import { parseLogItem } from "./genre-lists.ts";
 import { maskLineCodeSpans } from "./code-spans.ts";
 import { isCalendarDay, isDayFirstDate } from "./calendar-day.ts";
 import { QUESTION_LABELS, type QuestionLanguage } from "./question-labels.ts";
+// The target and group parsers `src/config.ts` reads live a layer down
+// (architecture review 2026-11, B2).
+import {
+  foldName,
+  ownerGroupName,
+  parseQuestionTarget,
+  targetGroup,
+  type AnswerGroups,
+  type QuestionTarget,
+} from "../utils/config-parsers.ts";
+
+export { foldName, ownerGroupName, parseQuestionTarget, type AnswerGroups, type QuestionTarget };
 
 /** The fixed extra choice every card offers beside its parsed `choices`. */
 export const QUESTION_NOT_SURE = "not-sure";
@@ -48,12 +60,6 @@ export function codePointLength(s: string): number {
   let n = 0;
   for (const _ of s) n++;
   return n;
-}
-
-/** One entry of `questions_to:` or `to=`: `Name` or `Name (IDENT)`. */
-export interface QuestionTarget {
-  name: string;
-  ident: string | null;
 }
 
 export interface ParsedQuestion {
@@ -86,18 +92,13 @@ export interface QuestionRenderOptions {
   /** `WIKI_ANSWER_OWNER`, on an answerable wiki only: who a question is for
    *  when neither `to=` nor `questions_to:` names anyone (D9). */
   owner?: string | null;
+  /** On an answerable wiki: sha256 of each question's `hashInput` by id (the
+   *  first block wins), rendered on the card so a save names the wording the
+   *  reader answered and the route can refuse a stale one (arch review F49). */
+  questionHashes?: ReadonlyMap<string, string>;
 }
 
 // ── Targets ─────────────────────────────────────────────────────────────────
-
-/** `Name` or `Name (IDENT)`; a blank entry is null. */
-export function parseQuestionTarget(entry: string): QuestionTarget | null {
-  const s = entry.trim().replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
-  if (!s) return null;
-  const m = /^(.*\S)\s*\(\s*([^()\s][^()]*?)\s*\)$/.exec(s);
-  if (m) return { name: m[1]!.trim(), ident: m[2]! };
-  return { name: s, ident: null };
-}
 
 /** The frontmatter `questions_to:` value — an inline list of strings
  *  (`parseFrontmatter` hands it over as `string[]`), or one bare string. */
@@ -173,30 +174,10 @@ export function resolveQuestionTargets(
   return { to: [], source: "none" };
 }
 
-/** Format characters (zero-width space, soft hyphen, BOM …) dropped, then
- *  NFC — in that order, or a format character between a letter and its
- *  combining mark blocks the composition — white space collapsed, lower-cased:
- *  a name pasted from a document still matches. */
-const foldName = (s: string) =>
-  s.replace(/\p{Cf}/gu, "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
-
-/** `WIKI_ANSWER_GROUPS`: group name (lower-case) → member NAV idents (upper-case). */
-export type AnswerGroups = ReadonlyMap<string, ReadonlySet<string>>;
+// `foldName`, `AnswerGroups`, `targetGroup` and `ownerGroupName`:
+// `src/utils/config-parsers.ts`.
 
 const NO_GROUPS: AnswerGroups = new Map();
-
-/** The configured group a target names, if any: an entry with no `(IDENT)`
- *  whose folded name is a group name. With no groups, every name is a person. */
-function targetGroup(t: QuestionTarget, groups: AnswerGroups): ReadonlySet<string> | undefined {
-  return t.ident ? undefined : groups.get(foldName(t.name));
-}
-
-/** The group `WIKI_ANSWER_OWNER` names when given as a bare name (no
- *  `(IDENT)`) equal to a group name: the owner fallback then asks that group. */
-export function ownerGroupName(owner: string | null | undefined, groups: AnswerGroups): string | null {
-  const t = owner ? parseQuestionTarget(owner) : null;
-  return t && targetGroup(t, groups) ? foldName(t.name) : null;
-}
 
 /** The groups holding this NAV ident, sorted. Never the ident itself. */
 export function authorGroupsOf(navIdent: string | null, groups: AnswerGroups): string[] {
@@ -263,7 +244,7 @@ export function parseChoices(value: string | undefined): string[] {
 type ComponentBlock = Extract<Block, { type: "component" }>;
 
 /** Every component block on the page, depth first in source order. */
-function eachComponent(blocks: Block[], visit: (b: ComponentBlock) => void): void {
+export function eachComponent(blocks: Block[], visit: (b: ComponentBlock) => void): void {
   for (const b of blocks) {
     if (b.type !== "component") continue;
     visit(b);
@@ -529,6 +510,37 @@ export function isOpenQuestion(id: string, state: QuestionState | undefined, que
   return state?.kind === "open" && (QUESTION_ID_RE.test(id) || questionIds.has(id));
 }
 
+/** Characters an id may not touch on either side to count as named. */
+const ID_EDGE = "A-Za-z0-9ÆØÅæøå_";
+
+/** Where each `<Question>` id an item names sits, in text order. An id counts
+ *  only on its own boundary: `S1` is not named by `S10`, `PS1`, `S1.1`, `S1-2`
+ *  or `1.S1` — a `.` or `-` joined to an id character on its far side extends
+ *  the id — while a sentence-final `S1.` is named. */
+export function namedQuestionHits(text: string, ids: Iterable<string>): { id: string; at: number }[] {
+  const hits: { id: string; at: number }[] = [];
+  for (const id of ids) {
+    const m = questionIdRe(id).exec(text);
+    if (m) hits.push({ id, at: m.index });
+  }
+  return hits.sort((a, b) => a.at - b.at);
+}
+
+/** `id` on its own boundary, as {@link namedQuestionHits} reads it. */
+export function questionIdRe(id: string, flags = ""): RegExp {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![${ID_EDGE}])(?<![${ID_EDGE}][.-])${esc}(?![${ID_EDGE}])(?![.-][${ID_EDGE}])`, flags);
+}
+
+/** The `<Question>` ids an item names, in the order they appear. A caller masks
+ *  wikilinks first (the reader parks them as sentinels), so an id in a link's
+ *  target or text names nothing. The reader's peek, counts and card moves and
+ *  the index's wait count all read this, so they name the same ids. Whether a
+ *  named id is open can still differ: see `waitsOnOwner`. */
+export function namedQuestionIds(item: string, ids: Iterable<string>): string[] {
+  return namedQuestionHits(item, ids).map((h) => h.id);
+}
+
 /** The D ids the page's `<DecisionLog>` blocks define. */
 export function definedDecisions(entries: DecisionLogEntry[]): Set<string> {
   return new Set(entries.map((e) => e.id).filter((id) => DECISION_ID_RE.test(id)));
@@ -573,6 +585,29 @@ export function closedQuestionIds(blocks: Block[]): Set<string> {
   const out = new Set<string>();
   for (const [id, s] of questionStates(blocks)) if (s.kind !== "open") out.add(id);
   return out;
+}
+
+/**
+ * The choice a card's body recommends, or null. Reads `**Recommendation:` and
+ * `**Anbefaling`, with the colon inside or outside the bold, outside code spans
+ * and fenced blocks, and returns the choice the text after it opens with (the
+ * longest one, whole word, exact case: `a small fix` is prose, not choice `A`).
+ * Regexes stay in the function: `new RegExp` at module level would keep this
+ * file's weight in the browser bundles.
+ */
+export function parseRecommendation(body: string, choices: readonly string[]): string | null {
+  const text = body.normalize("NFC");
+  const fenced = readerFencedLines(text);
+  const prose = text.split("\n").map((line, i) => (fenced[i] ? " ".repeat(line.length) : line)).join("\n");
+  const marker = /\*\*(?:Recommendation|Anbefaling)(?::\*\*|\*\*:|:)/u.exec(maskCodeSpans(prose));
+  if (!marker) return null;
+  const lead = text.slice(marker.index + marker[0].length).replace(/^[\s*_`«"'“‘(]+/u, "");
+  const byLength = [...choices].sort((a, b) => b.length - a.length);
+  for (const choice of byLength) {
+    const c = choice.normalize("NFC");
+    if (lead.startsWith(c) && !/^[\p{L}\p{N}_]/u.test(lead.slice(c.length))) return choice;
+  }
+  return null;
 }
 
 /** The text-surface lead line (Telegram, Slack, email): `Question O3`, or the

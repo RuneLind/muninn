@@ -2,7 +2,7 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { enhanceQueryTables, isNumericColumn, parseCellNumber, sortOrder } from "./wiki-query-table.ts";
 
 /**
- * The repo has no DOM test environment, so `enhanceQueryTables` runs here over
+ * These tests do not use happy-dom, so `enhanceQueryTables` runs here over
  * a fake carrying exactly the members it touches — enough to call it twice on
  * one table and count what it built.
  */

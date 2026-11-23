@@ -42,7 +42,7 @@ import {
   stripOwnedAliases,
 } from "./draft.ts";
 import { categoryToDomain } from "../summaries/domain.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { missingCodeBlocks } from "./code-block-retention.ts";
 import type { SummaryFactcheck } from "../db/summary-factchecks.ts";
 import { summaryFactcheckStale } from "../summaries/factcheck-body.ts";

@@ -313,7 +313,7 @@ CREATE TABLE watchers (
   user_id TEXT NOT NULL,
   bot_name TEXT NOT NULL DEFAULT 'jarvis',
   name TEXT NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic', 'wiki-gardener', 'wiki-linter', 'wiki-committer', 'consolidation-gardener')),
+  type TEXT NOT NULL CHECK (type IN ('email', 'calendar', 'github', 'news', 'goal', 'x', 'anthropic', 'wiki-gardener', 'wiki-linter', 'wiki-committer', 'consolidation-gardener', 'youtube-discovery')),
   config JSONB NOT NULL DEFAULT '{}',
   interval_ms INTEGER NOT NULL DEFAULT 300000,  -- 5 min default
   enabled BOOLEAN NOT NULL DEFAULT true,
@@ -590,6 +590,8 @@ CREATE INDEX idx_traces_root ON traces (started_at DESC) WHERE parent_id IS NULL
 CREATE INDEX idx_traces_bot ON traces (bot_name, started_at DESC) WHERE parent_id IS NULL;
 -- The retention cleanup's batched delete walks this, oldest first (migration 083).
 CREATE INDEX idx_traces_created ON traces (created_at);
+-- `/agents` Recently finished reads the stamped spans (migration 087).
+CREATE INDEX idx_traces_agent_run ON traces (started_at DESC) WHERE attributes ? 'agentKind';
 
 -- ============================================================================
 -- Prompt snapshots: full system + user prompts per trace PASS, for inspection.
@@ -777,7 +779,7 @@ CREATE TABLE wiki_proposals (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   bot_name      TEXT NOT NULL,
   topic_key     TEXT NOT NULL,           -- stable slug for dedup across runs
-  kind          TEXT NOT NULL,           -- concept | entity | source | synthesis
+  kind          TEXT NOT NULL,           -- concept | entity | source | synthesis | lint | stale-check
   mode          TEXT NOT NULL,           -- create | update
   target_path   TEXT NOT NULL,           -- wiki-relative, e.g. concepts/Context Compaction.md
   base_hash     TEXT,                    -- sha256 of target file at draft time (update mode)
@@ -789,6 +791,7 @@ CREATE TABLE wiki_proposals (
   wiki_name     TEXT,                    -- consolidation gardener: keys a row to a standalone wiki (NULL = legacy bot-keyed) (migration 065)
   group_key     TEXT,                    -- lint fixes: the id the rows of ONE finding share (NULL = single-row proposal) (migration 077)
   lint_meta     JSONB,                   -- lint fixes: {seededBy, findingRelPath} — the seeder and the page the finding was filed against (migration 078)
+  stale_meta    JSONB,                   -- Stale check fixes: {changed, edits, supersedes} (migration 086)
   status        TEXT NOT NULL DEFAULT 'draft',  -- draft|approved|applied|rejected|stale|error
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at   TIMESTAMPTZ
@@ -799,6 +802,18 @@ CREATE UNIQUE INDEX wiki_proposals_wiki_topic_live_idx
   ON wiki_proposals (COALESCE(wiki_name, bot_name), topic_key) WHERE status IN ('draft', 'approved');
 CREATE INDEX wiki_proposals_group_key_idx
   ON wiki_proposals (group_key) WHERE group_key IS NOT NULL;
+
+-- Which Accept or Dismiss of a gardener group holds it, across processes
+-- (migration 093): claimed by insert or by taking an expired lease, renewed
+-- while the verb runs, deleted by token when it ends.
+CREATE TABLE wiki_proposal_group_leases (
+  scope       TEXT NOT NULL,           -- COALESCE(wiki_name, bot_name) of the group's rows
+  group_key   TEXT NOT NULL,
+  token       UUID NOT NULL,
+  verb        TEXT NOT NULL,           -- accept | dismiss | self-heal
+  expires_at  TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (scope, group_key)
+);
 
 -- ============================================================================
 -- Source-drafter attempt ledger: why a captured doc has no wiki page.
@@ -961,6 +976,90 @@ CREATE TABLE wiki_stale_verdicts (
 );
 
 CREATE INDEX idx_wiki_stale_verdicts_checked ON wiki_stale_verdicts (checked_at);
+
+-- ============================================================================
+-- YouTube discovery: the Discover page's stored runs and hits (migration 088).
+-- A video's state and details are per video: written to every hit row of that id.
+-- ============================================================================
+CREATE TABLE youtube_discover_runs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  seed_source   TEXT NOT NULL DEFAULT 'youtube',
+  seed_doc_id   TEXT NOT NULL,
+  seed_title    TEXT NOT NULL,
+  seed_video_id TEXT,
+  seed_category TEXT,
+  seed_date     TEXT,
+  queries       JSONB NOT NULL DEFAULT '[]'::jsonb,
+  searched      INTEGER NOT NULL DEFAULT 0,
+  known         INTEGER NOT NULL DEFAULT 0,
+  origin        TEXT NOT NULL CHECK (origin IN ('reader', 'page', 'watcher')),
+  bot_name      TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Migration 092: how many of this shelf's yt-dlp searches failed; 0 = none. A search that found nothing is a success.
+  failed        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_youtube_discover_runs_seed ON youtube_discover_runs (seed_source, seed_doc_id, created_at DESC);
+
+CREATE TABLE youtube_discover_hits (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id        UUID NOT NULL REFERENCES youtube_discover_runs(id) ON DELETE CASCADE,
+  video_id      TEXT NOT NULL,
+  title         TEXT NOT NULL,
+  channel       TEXT,
+  duration_sec  INTEGER,
+  view_count    BIGINT,
+  score         REAL NOT NULL,
+  why           TEXT,
+  query         TEXT,
+  rank          INTEGER NOT NULL,
+  state         TEXT NOT NULL DEFAULT 'new' CHECK (state IN ('new', 'later', 'dismissed', 'queued')),
+  details       JSONB,
+  details_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (run_id, video_id)
+);
+
+CREATE INDEX idx_youtube_discover_hits_video ON youtube_discover_hits (video_id);
+CREATE INDEX idx_youtube_discover_hits_known ON youtube_discover_hits (video_id) WHERE state IN ('dismissed', 'queued');
+
+-- ============================================================================
+-- Discuss's wiki agent: one row per turn of a discussion about a wiki page
+-- (migration 090, plan muninn-wiki-discuss D7). `id` is the turn id P4 names.
+-- ============================================================================
+CREATE TABLE wiki_discuss_turns (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  discussion_id  UUID NOT NULL,
+  seq            INTEGER NOT NULL,
+  wiki           TEXT NOT NULL,
+  rel_path       TEXT NOT NULL,
+  page_hash      TEXT NOT NULL,
+  selection      TEXT,
+  question       TEXT NOT NULL,
+  location       JSONB,
+  answer         TEXT NOT NULL DEFAULT '',
+  end_state      TEXT NOT NULL DEFAULT 'running' CHECK (end_state IN ('running', 'done', 'error', 'timeout', 'abandoned')),
+  error          TEXT,
+  reader_left    BOOLEAN NOT NULL DEFAULT false,
+  bot_name       TEXT NOT NULL,
+  connector      TEXT NOT NULL,
+  model          TEXT,
+  surface        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  card           TEXT,
+  tool_calls     JSONB NOT NULL DEFAULT '[]'::jsonb,
+  proposed_edit  JSONB,
+  cost_usd       DOUBLE PRECISION,
+  duration_ms    INTEGER,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  heartbeat_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at    TIMESTAMPTZ,
+  -- When the reader took the turn on to Claude Code (P3, migration 091).
+  handed_over_at TIMESTAMPTZ,
+  UNIQUE (discussion_id, seq)
+);
+
+CREATE INDEX idx_wiki_discuss_turns_page ON wiki_discuss_turns (wiki, rel_path, created_at DESC);
+CREATE INDEX idx_wiki_discuss_turns_running ON wiki_discuss_turns (heartbeat_at) WHERE end_state = 'running';
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

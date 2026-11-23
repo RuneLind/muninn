@@ -1,5 +1,6 @@
 import { observeComponentScope } from "./component-observer.ts";
 import { numberStepLists } from "./steps-focus.ts";
+import { trailingCheck } from "./check-trailing.ts";
 import type { Block, ComponentName, InlineComponentName, ListBlock, ListChild } from "./markdown-ast.ts";
 
 /** What sits under one list item: a child list one `depth` deeper or a fenced
@@ -17,6 +18,9 @@ export interface ListNest {
   /** Ordered lists: an item's own number where it does not count on from the
    *  item before (`OlBlock.values`). */
   values?: (number | undefined)[];
+  /** A top-level list whose items carry a trailing `<Check>`: each such item's
+   *  raw attribute run, the tag already gone from `items[k]` (`check-trailing.ts`). */
+  checks?: (string | undefined)[];
 }
 
 /** The number each of `count` ordered items shows: `values[k]` where set, else
@@ -74,6 +78,10 @@ export interface BlockRenderer {
    *  living on the interface is what forces every platform to implement it. */
   inlineComponent(name: InlineComponentName, attrs: Record<string, string>, text: string): string;
   text(lines: string[]): string;
+  /** Optional: runs around a component block's whole render (its body walk
+   *  and its own `component` call), so a renderer can tell which component
+   *  its tables and lists sit in. */
+  inComponent?<T>(name: ComponentName, render: () => T): T;
 }
 
 /** Render a parsed block list with a platform's {@link BlockRenderer}, joining
@@ -97,13 +105,16 @@ function renderBlock(block: Block, r: BlockRenderer): string {
       return renderList(block, r, 0);
     case "table":
       return r.table(block.headers, block.rows);
-    case "component":
+    case "component": {
       // A component may emit the walked body or render it again: the observer
       // gets each tag once either way.
-      return observeComponentScope(
-        () => renderBlocks(componentChildren(block), r),
-        (rendered) => r.component(block.name, block.attrs, rendered, componentChildren(block)),
-      );
+      const render = () =>
+        observeComponentScope(
+          () => renderBlocks(componentChildren(block), r),
+          (rendered) => r.component(block.name, block.attrs, rendered, componentChildren(block)),
+        );
+      return r.inComponent ? r.inComponent(block.name, render) : render();
+    }
     case "text":
       return r.text(block.lines);
     default: {
@@ -132,6 +143,14 @@ export function nestedChildren(children: ListChild[] | undefined, r: BlockRender
 }
 
 function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
+  let items = list.items;
+  const checks: string[] = [];
+  if (!depth) {
+    items = items.map((item, k) => {
+      const t = trailingCheck(item);
+      return t ? ((checks[k] = t[1]), t[0]) : item;
+    });
+  }
   const nest: ListNest = {
     children: list.items.map((_, k) =>
       list.nested?.[k]?.map((c): RenderedChild =>
@@ -145,8 +164,9 @@ function renderList(list: ListBlock, r: BlockRenderer, depth: number): string {
     depth,
     loose: list.loose === true,
     ...(list.type === "ol" && list.values ? { values: list.values } : {}),
+    ...(checks.length ? { checks } : {}),
   };
-  return list.type === "ul" ? r.ul(list.items, nest) : r.ol(list.items, list.start, nest);
+  return list.type === "ul" ? r.ul(items, nest) : r.ol(items, list.start, nest);
 }
 
 /**

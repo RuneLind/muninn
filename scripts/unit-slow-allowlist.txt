@@ -1,0 +1,12 @@
+# Test files allowed past the changed-file step's 10 s bar (scripts/test-chain.ts changed).
+# One file per line, `path  # reason`. Shrink it: a file that gets fast comes off.
+# Seeded from the CI test job log of run 42371904107 (in-process seconds in brackets).
+scripts/wiki-stale-handoff.test.ts  # real git at 12 sites and spawned drivers [34.2 s]
+scripts/wiki-work-replay.test.ts  # git per test, ps polling, 12 timers [23.1 s]
+src/dashboard/views/components/wiki-rail-work-cap.test.ts  # pure CPU property loops [20.8 s]
+src/dashboard/views/wiki-boot/wiki-discuss-cases.test.ts  # the bounded synthetic locate sweep plus 38 label-pair pages through the reader chain in happy-dom [10.6 s, CI run 44578525642]
+src/summaries/author-backfill-script.test.ts  # 9 bun <script> spawns and an oEmbed server [36.4 s]
+src/sync/wiki-file-lock.test.ts  # real git in temp dirs and a real lockfile [10.6 s]
+src/video/media.test.ts  # one test sleeps through a real 16 s retry budget [20.1 s]
+src/vimeo/captions.test.ts  # 54 tests waiting out real budgets [29.7 s]
+src/wiki/decision-triage/loop-deps.test.ts  # every end of a pass through the real runDecisionTriage over temp wikis, ~0.4 s a case [13.5 s]

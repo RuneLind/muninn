@@ -102,6 +102,15 @@ test("a malformed toolSourceUrls is DROPPED but the turn is kept", () => {
   for (const t of restored) expect(t.toolSourceUrls).toBeUndefined();
 });
 
+test("Remember's summary round-trips; a non-string one is DROPPED but the turn is kept", () => {
+  const raw = JSON.stringify([
+    { ...turn(), question: "saved", remembered: "sum" },
+    { ...turn(), question: "bad", remembered: 42 },
+  ]);
+  const restored = deserializeAskSession(raw) as (StoredAskTurn & { remembered?: unknown })[];
+  expect(restored.map((t) => `${t.question}:${String(t.remembered)}`)).toEqual(["saved:sum", "bad:undefined"]);
+});
+
 test("a present-but-wrong-typed toolSources drops the turn", () => {
   const raw = JSON.stringify([
     { ...turn(), toolSources: "reuters.com" }, // string, not array → drop

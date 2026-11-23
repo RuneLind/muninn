@@ -4,7 +4,7 @@
  * Three things no unit test can prove, and the first one is how a dialog on this
  * page has already broken once:
  *   1. **The dialog is opaque.** The chat dialog shipped fully TRANSPARENT because
- *      its background named `var(--bg-elevated)`, a token defined only in the chat
+ *      its background named `var(--bg-elevated)`, then a token defined only in the chat
  *      page's own styles — an invalid declaration a pure test cannot see. Every
  *      dialog added to this page gets the computed-background assertion.
  *   2. **The format tabs switch**, and each shows its own rendering: Slack

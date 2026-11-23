@@ -40,7 +40,7 @@
  * app and the listing shape stays owned by the one function that strips it.
  */
 
-import { bySeriesDateDesc } from "../dashboard/views/components/wiki-groups.ts";
+import { bySeriesDateDesc } from "./core/wiki-groups.ts";
 import type { WikiIndex } from "./store.ts";
 import { isBookkeeping, linkOf, neighbours } from "./strength.ts";
 import {

@@ -27,7 +27,9 @@ export type AgentPhase =
   // Fact-check phases — Phase 1 claim extraction, then Phase 2 bounded-parallel
   // per-claim web verification. Additive: no consumer switches exhaustively.
   | "extracting_claims"
-  | "verifying_claims";
+  | "verifying_claims"
+  // The work map's organize run: awaiting warm inputs, then the model call.
+  | "organizing";
 
 export interface AgentStatus {
   phase: AgentPhase;
@@ -72,7 +74,11 @@ export type AgentKind =
   | "digest"
   | "factcheck"
   | "extractor"
-  | "profile";
+  | "profile"
+  /** The work map's nightly organize (`src/wiki/work-map/`). */
+  | "work_map"
+  /** The decision triage's nightly pass (`src/wiki/decision-triage/`). */
+  | "decision_triage";
 
 /**
  * Kinds eligible for the single-pane waterfall (`getProgress`/`subscribeProgress`
@@ -115,7 +121,14 @@ export interface AgentRun {
   tools: ToolProgress[];
   completed?: boolean;
   completedAt?: number;
+  /** How the run ended, set at completion. Absent on a live run, and on a
+   *  completed one whose producer reports only success (read as `ok`). */
+  status?: "ok" | "error";
   traceId?: string;
+  /** The trace of a run still in flight. Separate from `traceId` because the card's
+   *  Trace and Prompt links read that one; `/agents` Recent reads this one, to keep
+   *  a root that finished before its run did out of the list. */
+  liveTraceId?: string;
   inputTokens?: number;
   outputTokens?: number;
   numTurns?: number;
@@ -182,7 +195,7 @@ let nextRequestId = 1;
 /** Cap on tools serialized per run in the `agent_runs` SSE snapshot (keeps the
  *  fan-out payload bounded — a long chat turn can accumulate dozens). */
 const SNAPSHOT_TOOLS_CAP = 20;
-/** Completed-runs ring size — feeds Recent for kinds with no durable source. */
+/** Completed-runs ring size — feeds Recent for the ring kinds, and their ETAs. */
 const COMPLETED_RING_MAX = 50;
 /** Minimum interval between `agent_runs` snapshot emissions (throttle). */
 const ALL_THROTTLE_MS = 1000;
@@ -332,6 +345,11 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
+  setLiveTraceId(requestId: string, traceId: string) {
+    const req = this.requests.get(requestId);
+    if (req) req.liveTraceId = traceId;
+  }
+
   /** Late-bind the bot that actually ran this job. The capture verticals start
    *  their run at `createJob` (route level, before the summarizer bot is
    *  resolved), so their card would otherwise carry an empty bot chip. */
@@ -381,6 +399,7 @@ class AgentStatusTracker {
   }
 
   completeRequest(requestId: string, meta: {
+    status?: "ok" | "error";
     traceId?: string;
     inputTokens?: number;
     outputTokens?: number;
@@ -392,6 +411,7 @@ class AgentStatusTracker {
     if (!req) return;
     req.completed = true;
     req.completedAt = Date.now();
+    if (meta.status) req.status = meta.status;
     req.traceId = meta.traceId;
     req.inputTokens = meta.inputTokens;
     req.outputTokens = meta.outputTokens;
@@ -400,8 +420,8 @@ class AgentStatusTracker {
     req.costUsd = meta.costUsd;
 
     // Snapshot into the completed-runs ring — this survives the 30s auto-clear
-    // below, so Recent can source kinds that have no durable trace/usage row
-    // (gardener drains, capture jobs, research, per-task granularity).
+    // below, so Recent can list the current process's runs in their richest form,
+    // beside the stamped spans that outlive it.
     this.completedRing.push({ ...req });
     if (this.completedRing.length > COMPLETED_RING_MAX) this.completedRing.shift();
 

@@ -11,6 +11,13 @@
  * `WebFetch` works on `{ web }`. The `"bot"` arm is the control: the same stub
  * records a call there, so a zero elsewhere is the fence and not a dead stub.
  *
+ * `{ readSearch }` gets its own plan over two snapshot directories beside the
+ * agent home, one named and one not: Read, Grep and Glob each aimed at a path
+ * outside, at the unnamed snapshot, with no path, and (Grep, Glob) with an
+ * absolute or climbing pattern. Neither the canary's text, the unnamed
+ * snapshot's text nor either file's name may come back, while the same three
+ * tools work inside the named snapshot.
+ *
  * The user scope is a throwaway `CLAUDE_CONFIG_DIR` seeded to be as open as
  * the developer's own: it allows Bash, Read, WebFetch and the stub, and
  * registers the stub as a user MCP server. `--restricted` and
@@ -81,7 +88,7 @@ beforeAll(() => {
   const configDir = join(f.root, "claude-config");
   mkdirSync(configDir);
   writeFileSync(join(configDir, "settings.json"), JSON.stringify({
-    permissions: { allow: ["Bash", "Read", "WebFetch", "WebSearch", "mcp__stub__record"] },
+    permissions: { allow: ["Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch", "mcp__stub__record"] },
   }));
   const botMcp = JSON.parse(readFileSync(join(f.botDir, ".mcp.json"), "utf8"));
   writeFileSync(join(configDir, ".claude.json"), JSON.stringify({ mcpServers: botMcp.mcpServers }));
@@ -149,6 +156,48 @@ function expectHostileRefused(o: Outcome) {
   expect(o.mcpCalls).toBe(0);
 }
 
+/** Text and names that live outside the named snapshot; none may appear in any tool result. */
+const UNNAMED_SECRET = "UNNAMED-SNAPSHOT-SECRET-6d2f";
+const UNNAMED_FILE = "unnamed-secret-file.txt";
+const NAMED_MARKER = "NAMED-SNAPSHOT-OK-41b9";
+
+function readSearchFixture() {
+  // Under the snapshot root of the agent home set above: a { readSearch } dir must be its direct child.
+  const snapshots = join(f.root, "agent-home", ".snapshots");
+  const named = join(snapshots, "named");
+  const unnamed = join(snapshots, "unnamed");
+  mkdirSync(named, { recursive: true });
+  mkdirSync(unnamed, { recursive: true });
+  writeFileSync(join(named, "page.txt"), `${NAMED_MARKER}\n`);
+  writeFileSync(join(unnamed, UNNAMED_FILE), `${UNNAMED_SECRET}\n`);
+  return { named, unnamed, outside: join(f.canaryPath, "..") };
+}
+
+/** Each probe: a label, the call, and whether it is a control that must run and show the named marker. */
+function readSearchPlan(d: ReturnType<typeof readSearchFixture>): Array<{ label: string; call: { name: string; input: Record<string, unknown> }; control?: boolean }> {
+  return [
+    { label: "Read inside (control)", call: { name: "Read", input: { file_path: join(d.named, "page.txt") } }, control: true },
+    { label: "Grep inside (control)", call: { name: "Grep", input: { pattern: "NAMED-SNAPSHOT", path: d.named, output_mode: "content" } }, control: true },
+    { label: "Glob inside (control)", call: { name: "Glob", input: { pattern: "*.txt", path: d.named } }, control: true },
+    { label: "Read outside", call: { name: "Read", input: { file_path: f.canaryPath } } },
+    { label: "Grep outside", call: { name: "Grep", input: { pattern: "CANARY", path: d.outside, output_mode: "content" } } },
+    { label: "Glob outside", call: { name: "Glob", input: { pattern: "*.txt", path: d.outside } } },
+    { label: "Read unnamed snapshot", call: { name: "Read", input: { file_path: join(d.unnamed, UNNAMED_FILE) } } },
+    { label: "Read climbing out of the named one", call: { name: "Read", input: { file_path: join(d.named, "..", "unnamed", UNNAMED_FILE) } } },
+    { label: "Grep unnamed snapshot", call: { name: "Grep", input: { pattern: "UNNAMED", path: d.unnamed, output_mode: "content" } } },
+    { label: "Glob unnamed snapshot", call: { name: "Glob", input: { pattern: "*", path: d.unnamed } } },
+    { label: "Read with no path", call: { name: "Read", input: {} } },
+    { label: "Grep with no path", call: { name: "Grep", input: { pattern: "UNNAMED|CANARY|NAMED", output_mode: "content" } } },
+    { label: "Glob with no path", call: { name: "Glob", input: { pattern: "**/*.txt" } } },
+    { label: "Glob climbing pattern", call: { name: "Glob", input: { pattern: "../unnamed/*", path: d.named } } },
+    { label: "Glob absolute pattern", call: { name: "Glob", input: { pattern: join(d.unnamed, "*"), path: d.named } } },
+    { label: "Grep climbing glob", call: { name: "Grep", input: { pattern: "UNNAMED", path: d.named, glob: "../unnamed/*", output_mode: "content" } } },
+    { label: "Grep absolute glob", call: { name: "Grep", input: { pattern: "UNNAMED", path: d.named, glob: join(d.unnamed, "*"), output_mode: "content" } } },
+    { label: "Bash", call: { name: "Bash", input: { command: `cat ${join(d.unnamed, UNNAMED_FILE)} > ${f.bashMarker}`, description: "probe" } } },
+    { label: "MCP stub", call: { name: "mcp__stub__record", input: { note: "probe" } } },
+  ];
+}
+
 for (const connector of ["claude-cli", "claude-sdk"] as const) {
   const ready = connector === "claude-cli" ? cliReady : sdkReady;
   const needs = connector === "claude-cli"
@@ -197,6 +246,45 @@ for (const connector of ["claude-cli", "claude-sdk"] as const) {
       expect(o.results[0]).toMatchObject({ name: "WebFetch", isError: true });
       expect(o.pageHits).toBe(0);
     }, 120_000);
+
+    test("{ readSearch }: Read, Grep and Glob reach only the named snapshot", async () => {
+      const d = readSearchFixture();
+      const plan = readSearchPlan(d);
+      const o = await probe(connector, { readSearch: [d.named] }, plan.map((p) => p.call));
+      // A file's text may never come back; its name may come back only as an
+      // echo of the path the call itself asked for (a refusal names it).
+      const secrets = [...f.secrets, UNNAMED_SECRET];
+      const names = [UNNAMED_FILE, "canary.txt"];
+      const rows = plan.map((p, i) => {
+        const r = o.results[i]!;
+        const asked = JSON.stringify(p.call.input);
+        const leaked = [...secrets, ...names.filter((n) => !asked.includes(n))].filter((s) => r.text.includes(s));
+        return { label: p.label, ran: !r.isError, leaked, shows: r.text.includes(NAMED_MARKER) || r.text.includes("page.txt") };
+      });
+      if (process.env.FENCE_ROWS === "1") {
+        for (const r of rows) console.log(`FENCE-ROW | readSearch | ${connector} | ${r.label} | ${r.ran ? "ran" : "refused"} | leaked=${r.leaked.length} | named=${r.shows}`);
+      }
+      // Controls: each tool works inside the named snapshot.
+      expect(rows.filter((_, i) => plan[i]!.control).map((r) => [r.label, r.ran, r.shows])).toEqual([
+        ["Read inside (control)", true, true],
+        ["Grep inside (control)", true, true],
+        ["Glob inside (control)", true, true],
+      ]);
+      // Nothing outside the named snapshot comes back, by text or by name.
+      expect(rows.filter((r) => r.leaked.length > 0)).toEqual([]);
+      // A call with no path reaches no snapshot: it shows not even the named one.
+      expect(rows.filter((r) => r.label.endsWith("with no path") && r.shows)).toEqual([]);
+      // Every path outside, and the unnamed snapshot, is refused outright.
+      const refused = ["Read outside", "Grep outside", "Glob outside", "Read unnamed snapshot", "Read climbing out of the named one", "Grep unnamed snapshot", "Glob unnamed snapshot", "Bash", "MCP stub"];
+      expect(rows.filter((r) => refused.includes(r.label) && r.ran).map((r) => r.label)).toEqual([]);
+      // claude-cli runs a no-path or climbing-pattern call and it lists nothing
+      // outside (above); claude-sdk's PreToolUse hook refuses it before it runs.
+      if (connector === "claude-sdk") {
+        expect(rows.filter((r) => !plan.find((p) => p.label === r.label)!.control && r.ran).map((r) => r.label)).toEqual([]);
+      }
+      expect(o.bashRan).toBe(false);
+      expect(o.mcpStarted).toBe(false);
+    }, 180_000);
 
     test('"bot" (control): the stub records a call, so the zeros above are the fence', async () => {
       const o = await probe(connector, "bot", [{ name: "mcp__stub__record", input: { note: "control" } }]);

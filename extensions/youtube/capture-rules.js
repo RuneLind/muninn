@@ -12,6 +12,7 @@ var FALLBACK_CAPTURE_OPTIONS = {
     options: FALLBACK_VISUAL_DETAIL_OPTIONS,
     defaultDetail: FALLBACK_VISUAL_DETAIL_ID
   },
+  connectors: null,
   fromServer: false
 };
 var OPTIONS_UNREACHABLE_MESSAGE = "Could not reach Muninn options — Standard only.";
@@ -45,6 +46,34 @@ function parseVisualDetail(raw) {
   const defaultDetail = isNonEmptyString(fallback) && offered.has(fallback) ? fallback : rows[0].id;
   return { options: rows, defaultDetail };
 }
+function parseConnectors(raw) {
+  if (typeof raw !== "object" || raw === null)
+    return null;
+  const { options, default_label } = raw;
+  if (!Array.isArray(options))
+    return null;
+  const rows = [];
+  for (const entry of options) {
+    if (typeof entry !== "object" || entry === null)
+      continue;
+    const { id, label, kinds, frames } = entry;
+    if (!isNonEmptyString(id))
+      continue;
+    const parsedKinds = parseOptionRows(kinds);
+    if (parsedKinds.length === 0)
+      continue;
+    const f = frames;
+    rows.push({
+      id,
+      label: isNonEmptyString(label) ? label : id,
+      kinds: parsedKinds,
+      framesSupported: typeof f === "object" && f !== null && typeof f.supported === "boolean" ? f.supported : true
+    });
+  }
+  if (rows.length === 0)
+    return null;
+  return { defaultLabel: isNonEmptyString(default_label) ? default_label : "Default", options: rows };
+}
 function parseCaptureOptions(payload) {
   if (typeof payload !== "object" || payload === null)
     return null;
@@ -63,7 +92,35 @@ function parseCaptureOptions(payload) {
     defaultKind,
     framesSupported,
     visualDetail: parseVisualDetail(raw.visual_detail),
+    connectors: parseConnectors(raw.connectors),
     fromServer: true
+  };
+}
+var DEFAULT_CONNECTOR_ID = "";
+function pickConnector(stored, options) {
+  if (isNonEmptyString(stored) && options.connectors?.options.some((c) => c.id === stored.trim())) {
+    return stored.trim();
+  }
+  return DEFAULT_CONNECTOR_ID;
+}
+function restoredConnectorNote(stored, picked, options) {
+  if (!options.fromServer)
+    return null;
+  if (!isNonEmptyString(stored))
+    return null;
+  if (stored.trim() === picked)
+    return null;
+  return "The remembered connector is not offered here — using the default.";
+}
+function optionsForConnector(options, connectorId) {
+  const row = isNonEmptyString(connectorId) ? options.connectors?.options.find((c) => c.id === connectorId.trim()) : undefined;
+  if (!row)
+    return options;
+  return {
+    ...options,
+    kinds: row.kinds,
+    defaultKind: row.kinds.some((k) => k.id === options.defaultKind) ? options.defaultKind : row.kinds[0].id,
+    framesSupported: row.framesSupported
   };
 }
 function pickKind(stored, options) {
@@ -102,19 +159,24 @@ function buildSummarizeBody(input) {
     video_id: input.videoId,
     kind: isNonEmptyString(input.kind) ? input.kind.trim() : FALLBACK_KIND_ID,
     frames: input.frames === true,
-    ...isNonEmptyString(input.visualDetail) ? { visual_detail: input.visualDetail.trim() } : {}
+    ...isNonEmptyString(input.visualDetail) ? { visual_detail: input.visualDetail.trim() } : {},
+    ...isNonEmptyString(input.connectorId) ? { connector_id: input.connectorId.trim() } : {}
   };
 }
 export {
   restoredKindNote,
+  restoredConnectorNote,
   pickVisualDetail,
   pickKind,
   pickFrames,
+  pickConnector,
   parseCaptureOptions,
+  optionsForConnector,
   buildSummarizeBody,
   OPTIONS_UNREACHABLE_MESSAGE,
   FALLBACK_VISUAL_DETAIL_OPTIONS,
   FALLBACK_VISUAL_DETAIL_ID,
   FALLBACK_KIND_ID,
-  FALLBACK_CAPTURE_OPTIONS
+  FALLBACK_CAPTURE_OPTIONS,
+  DEFAULT_CONNECTOR_ID
 };

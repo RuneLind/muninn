@@ -13,7 +13,8 @@
  * (`tracer`, `oneShot`), so nothing here touches the DB or a model.
  */
 
-import { test, expect, describe, spyOn } from "bun:test";
+import { test, expect, describe, spyOn, beforeEach } from "bun:test";
+import { agentStatus } from "../observability/agent-status.ts";
 import type { Tracer } from "../tracing/index.ts";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
@@ -24,8 +25,9 @@ function fakeTracer(): Tracer {
   let n = 0;
   const tracer: Pick<
     Tracer,
-    "start" | "end" | "addChildSpan" | "addSubSpan" | "spanStartedAt" | "finish" | "traceId"
+    "start" | "end" | "addChildSpan" | "addSubSpan" | "spanStartedAt" | "finish" | "traceId" | "name"
   > = {
+    name: "share",
     traceId: "trace-1",
     start: () => `span-${++n}`,
     end: () => 1,
@@ -69,6 +71,74 @@ const base = {
   config,
   botConfig,
 };
+
+describe("runFencedOneShot — the run's identity on the trace root", () => {
+  function recording() {
+    const finishes: Array<{ status: string; attrs?: Record<string, unknown> }> = [];
+    const tracer = fakeTracer();
+    tracer.finish = (status = "ok", attrs) => void finishes.push({ status, attrs });
+    return { tracer, finishes };
+  }
+  const runRow = () => agentStatus.getRecentCompleted().find((r) => r.name === "Share test")!;
+  const tracing = { tracingEnabled: true, tracingCaptureToolOutputs: false } as Config;
+
+  beforeEach(() => agentStatus.clearRequest());
+
+  test("a finished call stamps kind and name, and the ring row names that root", async () => {
+    const { tracer, finishes } = recording();
+    const { oneShot } = recordingOneShot();
+    await runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never });
+    expect(finishes[0]).toMatchObject({
+      status: "ok",
+      attrs: { agentKind: "capture", agentName: "Share test", source: "share", inputTokens: 1 },
+    });
+    expect(runRow()).toMatchObject({ status: "ok", traceId: "trace-1" });
+  });
+
+  test("a failed call stamps the root error, and the ring row says error and names the root", async () => {
+    const { tracer, finishes } = recording();
+    const oneShot = async () => { throw new Error("boom"); };
+    await expect(
+      runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never }),
+    ).rejects.toThrow("boom");
+    expect(finishes[0]).toMatchObject({
+      status: "error",
+      attrs: { agentKind: "capture", agentName: "Share test", error: "boom" },
+    });
+    expect(runRow()).toMatchObject({ status: "error", traceId: "trace-1" });
+  });
+
+  test("a tracer the caller owns stays unstamped: it is not this run's root", async () => {
+    // The consolidation watcher hands its own `watcher:<type>` span to every draft.
+    // Stamping it would list that span as a capture, named after the last draft.
+    const { tracer, finishes } = recording();
+    Object.defineProperty(tracer, "name", { value: "watcher:consolidation-gardener" });
+    const { oneShot } = recordingOneShot();
+    await runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never });
+    expect(finishes[0]!.attrs).not.toHaveProperty("agentKind");
+    expect(finishes[0]!.attrs).toMatchObject({ source: "share" });
+    expect(runRow()).toMatchObject({ status: "ok", traceId: "trace-1" });
+  });
+
+  test("a failed draft leaves a caller's tracer unstamped too", async () => {
+    const { tracer, finishes } = recording();
+    Object.defineProperty(tracer, "name", { value: "watcher:consolidation-gardener" });
+    const oneShot = async () => { throw new Error("boom"); };
+    await expect(
+      runFencedOneShot({ ...base, config: tracing, tracer, oneShot: oneShot as never }),
+    ).rejects.toThrow("boom");
+    expect(finishes[0]!.status).toBe("error");
+    expect(finishes[0]!.attrs).not.toHaveProperty("agentKind");
+  });
+
+  test("with tracing off a failed run names no trace, since none was written", async () => {
+    const { tracer } = recording();
+    const oneShot = async () => { throw new Error("boom"); };
+    await expect(runFencedOneShot({ ...base, tracer, oneShot: oneShot as never })).rejects.toThrow("boom");
+    expect(runRow().traceId).toBeUndefined();
+    expect(runRow().status).toBe("error");
+  });
+});
 
 describe("runFencedOneShot — onProgress passthrough", () => {
   test("forwards every connector delta to the caller's callback", async () => {

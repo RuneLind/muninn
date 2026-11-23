@@ -49,7 +49,7 @@ import {
   stripOwnedAliases,
 } from "./draft.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
-import { sha256, todayOslo } from "./util.ts";
+import { sha256, todayOslo } from "../utils/date-hash.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "runner");

@@ -8,7 +8,7 @@ import {
 } from "./wiki-factcheck-reader.ts";
 
 /**
- * The repo has no browser test env (no jsdom/happy-dom), so — exactly like the
+ * These tests do not use happy-dom, so — exactly like the
  * sibling `code-tabs.test.ts` — the DOM is a minimal hand-rolled shim and the
  * real render path is left to `e2e/wiki-factcheck-reader.spec.ts`.
  *

@@ -1,4 +1,4 @@
-import { extractJson } from "../ai/json-extract.ts";
+import { extractJson } from "../utils/json-extract.ts";
 
 /**
  * One scored candidate from a quality-gate model call. Shared contract between the

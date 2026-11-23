@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { check, flatten, parseExpectedSkips, partition, pinTitle, planShard, specFiles, timingsFromReport, untimedSpecWarnings, type JsonReport } from "./e2e-shards.ts";
+import { check, flatten, parseExpectedSkips, partition, pinTitle, planShard, specFiles, timingsFromReport, UNTIMED_SECONDS_LIMIT, untimedSpecWarnings, untimedTimeProblem, type JsonReport } from "./e2e-shards.ts";
 import { testTempDirSync } from "../src/test/temp-dir.ts";
 
 describe("partition", () => {
@@ -78,6 +78,30 @@ describe("untimedSpecWarnings", () => {
 
   test("a complete table warns about nothing", () => {
     expect(untimedSpecWarnings(["a.spec.ts"], { "a.spec.ts": 5 })).toEqual([]);
+  });
+});
+
+describe("untimedTimeProblem", () => {
+  const table = { "known.spec.ts": 10 };
+
+  test("untimed specs summing below the limit pass", () => {
+    expect(untimedTimeProblem({ "known.spec.ts": 500, "a.spec.ts": 30, "b.spec.ts": 29.9 }, table)).toBeNull();
+  });
+
+  test("untimed specs summing exactly to the limit pass", () => {
+    expect(untimedTimeProblem({ "a.spec.ts": 30, "b.spec.ts": UNTIMED_SECONDS_LIMIT - 30 }, table)).toBeNull();
+  });
+
+  test("over the limit fails, naming each untimed spec with its seconds and the refresh command", () => {
+    const p = untimedTimeProblem({ "known.spec.ts": 500, "a.spec.ts": 20.5, "b.spec.ts": 40 }, table);
+    expect(p).toContain("over the 60 s limit: b.spec.ts 40 s, a.spec.ts 20.5 s.");
+    expect(p).toContain("bun scripts/e2e-shards.ts refresh e2e-results.json");
+    expect(p).toContain("e2e-report");
+    expect(p).not.toContain("known.spec.ts");
+  });
+
+  test("a spec the table knows does not count, however long it ran", () => {
+    expect(untimedTimeProblem({ "known.spec.ts": 1000, "a.spec.ts": 50 }, table)).toBeNull();
   });
 });
 

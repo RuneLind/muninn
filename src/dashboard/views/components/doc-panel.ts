@@ -259,6 +259,9 @@ export const DOC_PANEL_FACTCHECK_BTN_ID = "docPanelFactcheck";
 /** The 🔎 Find links button's id (opt-in `findLinks`, /summaries only). */
 export const DOC_PANEL_FIND_LINKS_BTN_ID = "docPanelFindLinks";
 
+/** The ▶ Find on YouTube button's id (opt-in `discover`, /summaries only). */
+export const DOC_PANEL_DISCOVER_BTN_ID = "docPanelDiscover";
+
 /** The 🗑 Delete button's id — the render and the summaries page's click handler. */
 export const DOC_PANEL_DELETE_BTN_ID = "docPanelDelete";
 const DOC_PANEL_DELETE_TITLE = "Delete this summary from huginn, and the wiki draft written from it";
@@ -330,6 +333,7 @@ export function docPanelHtml(
     moreMenu = false,
     factcheck = false,
     findLinks = false,
+    discover = false,
   }: {
     askFollowUp?: boolean;
     share?: boolean;
@@ -340,10 +344,16 @@ export function docPanelHtml(
     factcheck?: boolean;
     /** 🔎 Find links (/summaries only); `sum-links-client.ts` owns its click and visibility. */
     findLinks?: boolean;
+    /** ▶ Find on YouTube (/summaries only); `sum-discover-client.ts` owns its click and visibility. */
+    discover?: boolean;
   } = {},
 ): string {
   const linksHtml = `
         <div class="doc-panel-links" id="docPanelLinks"></div>`;
+  // With the ⋯ More menu (/summaries) Ask a follow-up is the primary action, right after the title in the DOM
+  // as on screen, so Tab reaches it in the order it is seen.
+  const followUpHtml = `
+        <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>`;
   const deleteHtml = moreMenu
     ? `
             <button class="doc-panel-menu-item doc-panel-menu-danger" id="${DOC_PANEL_DELETE_BTN_ID}" type="button" role="menuitem"
@@ -373,7 +383,7 @@ export function docPanelHtml(
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>${moreMenu ? linksHtml : ""}${rerun ? `
+        <span class="doc-panel-title" id="docPanelTitle"></span>${moreMenu ? `${askFollowUp ? followUpHtml : ""}${linksHtml}` : ""}${rerun ? `
         <span class="doc-panel-menu" id="${DOC_PANEL_RERUN_WRAP_ID}" hidden>
           <button class="doc-panel-followup" id="${DOC_PANEL_RERUN_BTN_ID}" type="button"
             aria-haspopup="menu" aria-expanded="false" aria-controls="${DOC_PANEL_RERUN_MENU_ID}"
@@ -385,8 +395,9 @@ export function docPanelHtml(
         <button class="doc-panel-followup" id="${DOC_PANEL_FACTCHECK_BTN_ID}" type="button" hidden
           title="Check this summary's claims against the web">&#10003; Fact check</button>` : ""}${findLinks ? `
         <button class="doc-panel-followup" id="${DOC_PANEL_FIND_LINKS_BTN_ID}" type="button" hidden
-          title="Find the posts, papers, repos and tools this summary names but does not link">&#128270; Find links</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp ? `
-        <a class="doc-panel-followup${moreMenu ? " doc-panel-primary" : ""}" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}${moreMenu ? "" : linksHtml}
+          title="Find the posts, papers, repos and tools this summary names but does not link">&#128270; Find links</button>` : ""}${discover ? `
+        <button class="doc-panel-followup" id="${DOC_PANEL_DISCOVER_BTN_ID}" type="button" hidden
+          title="Search YouTube for videos you have not summarized yet, picked from this one">&#9654; Find on YouTube</button>` : ""}${moreMenu ? moreHtml : `${remove ? deleteHtml : ""}${exportPage ? exportHtml : ""}`}${askFollowUp && !moreMenu ? followUpHtml : ""}${moreMenu ? "" : linksHtml}
       </div>${rerun ? `
       <div class="doc-panel-notice" id="${DOC_PANEL_RERUN_STATUS_ID}" hidden></div>` : ""}
       <div class="doc-panel-body" id="docPanelBody"></div>
@@ -438,6 +449,10 @@ export function docPanelScript(): string {
     }
     ${factcheckCalloutScript()}
 
+    // A document's \`url\` is stored data of any scheme: it becomes a live href
+    // only when isSafeLinkHref allows it; otherwise no "Open source" link.
+    var docPanelSafeHref = ${isSafeLinkHref.toString()};
+
     // Point the opt-in "Ask a follow-up" header action at /research?q=<title>.
     // No-op unless the page rendered the button via docPanelHtml({askFollowUp:true}).
     // A document in a registered summary source's collection (SUMMARY_SOURCES)
@@ -462,7 +477,7 @@ export function docPanelScript(): string {
 
       titleEl.textContent = docId.replace(/\\.md$/, '').split('/').pop();
       setFollowUpHref(titleEl.textContent, collection, docId);
-      linksEl.innerHTML = webUrl
+      linksEl.innerHTML = webUrl && docPanelSafeHref(webUrl)
         ? '<a href="' + esc(webUrl) + '" target="_blank" rel="noopener">Open source &rarr;</a>'
         : '';
       bodyEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading document...</div>';
@@ -478,7 +493,7 @@ export function docPanelScript(): string {
         .then(function(doc) {
           titleEl.textContent = (doc.id || docId).replace(/\\.md$/, '').split('/').pop();
           setFollowUpHref(titleEl.textContent, collection, docId);
-          if (doc.url) {
+          if (doc.url && docPanelSafeHref(doc.url)) {
             linksEl.innerHTML = '<a href="' + esc(doc.url) + '" target="_blank" rel="noopener">Open source &rarr;</a>';
           }
           var text = doc.text || '';

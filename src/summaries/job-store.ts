@@ -1,7 +1,9 @@
 import { getLog } from "../logging.ts";
 import { agentStatus } from "../observability/agent-status.ts";
+import { markAgentRunFailed } from "../db/traces.ts";
+import type { AgentRunIdentity } from "../tracing/agent-run-trace.ts";
 
-// Generic in-memory job store shared by the capture verticals (youtube,
+// Generic job store, held in memory, shared by the capture verticals (youtube,
 // x-article, tiktok, anthropic, article). Each vertical's `state.ts` instantiates this
 // with its own status union + identity fields and re-exports a vertical-typed
 // API, so routes/summarizers keep importing from `<vertical>/state.ts` unchanged.
@@ -142,9 +144,10 @@ export interface RunMeta extends CompletedRunMeta {
 
 export interface JobStore<S extends string, F> {
   createJob(fields: F & { title: string; url: string }): string;
-  /** Late-bind bot/model/trace/token telemetry onto the job's `/agents` run.
-   *  Unknown jobId (or a job whose run already completed) is a silent no-op. */
-  attachRun(jobId: string, meta: RunMeta): void;
+  /** Late-bind bot/model/trace/token telemetry onto the job's `/agents` run, and
+   *  answer the run's identity for the trace root to carry. Unknown jobId (or a
+   *  job whose run already completed) is a silent no-op that answers nothing. */
+  attachRun(jobId: string, meta: RunMeta): AgentRunIdentity | undefined;
   getJob(jobId: string): Job<S, F> | undefined;
   getRecentJobs(limit?: number): Job<S, F>[];
   updateStatus(jobId: string, status: S): void;
@@ -168,7 +171,7 @@ export function createJobStore<S extends string, F>(
   // AgentRun registry mirror (/agents dashboard). One hook in the shared factory
   // covers all the capture verticals (youtube / x-article / tiktok / anthropic / article):
   // createJob → startRequest(kind "capture"), the terminal completeJob/failJob →
-  // completeRequest. `jobRuns` maps jobId → requestId for the completion lookup.
+  // completeRequest. `jobRuns` maps jobId → the run, for the completion lookup.
   // `opts.label` is the vertical name shown in the run name.
   //
   // The run starts at createJob — route level, BEFORE the summarizer bot is
@@ -179,7 +182,7 @@ export function createJobStore<S extends string, F>(
   // completion-only fields (traceId + token totals) are parked in `jobRunMeta`
   // and handed to `completeRequest` at the terminal transition — that snapshot is
   // what lands in the completed-runs ring, i.e. what `/agents` Recent shows.
-  const jobRuns = new Map<string, string>();
+  const jobRuns = new Map<string, { reqId: string; run: AgentRunIdentity }>();
   const jobRunMeta = new Map<string, CompletedRunMeta>();
 
   /** Short, single-line run name: "YouTube: <title-or-url>", capped for the card. */
@@ -189,14 +192,16 @@ export function createJobStore<S extends string, F>(
     return short ? `${opts.label}: ${short}` : opts.label;
   }
 
-  function attachRun(jobId: string, meta: RunMeta): void {
-    const reqId = jobRuns.get(jobId);
-    if (!reqId) return;
+  function attachRun(jobId: string, meta: RunMeta): AgentRunIdentity | undefined {
+    const live = jobRuns.get(jobId);
+    if (!live) return undefined;
+    const { reqId, run } = live;
     if (meta.botName) agentStatus.setBotName(reqId, meta.botName);
     if (meta.connectorLabel) agentStatus.setConnectorLabel(reqId, meta.connectorLabel);
     if (meta.model) agentStatus.setModel(reqId, meta.model);
 
     const { traceId, inputTokens, outputTokens, numTurns, toolCount, costUsd } = meta;
+    if (traceId !== undefined) agentStatus.setLiveTraceId(reqId, traceId);
     if (
       traceId !== undefined || inputTokens !== undefined || outputTokens !== undefined ||
       numTurns !== undefined || toolCount !== undefined || costUsd !== undefined
@@ -239,15 +244,25 @@ export function createJobStore<S extends string, F>(
           : {}),
       });
     }
+    return run;
   }
 
-  function completeRun(jobId: string): void {
-    const reqId = jobRuns.get(jobId);
-    if (!reqId) return;
+  function completeRun(jobId: string, outcome: { status: "ok" } | { status: "error"; error: string }): void {
+    const live = jobRuns.get(jobId);
+    if (!live) return;
     jobRuns.delete(jobId);
     const meta = jobRunMeta.get(jobId) ?? {};
     jobRunMeta.delete(jobId);
-    agentStatus.completeRequest(reqId, meta);
+    agentStatus.completeRequest(live.reqId, { ...meta, status: outcome.status });
+    // The root finished before this job's tail did, so it may still say ok.
+    if (outcome.status === "error" && meta.traceId) {
+      markAgentRunFailed(meta.traceId, live.run.name, outcome.error).catch((err) => {
+        log.warn(`${opts.label} job {jobId}: could not mark its trace failed: {error}`, {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
   }
 
   // --- Pub/Sub ---
@@ -315,11 +330,9 @@ export function createJobStore<S extends string, F>(
       ...fields,
     } as Job<S, F>;
     jobs.set(id, job);
-    const reqId = agentStatus.startRequest("", "running_task", undefined, {
-      kind: "capture",
-      name: runName(fields),
-    });
-    jobRuns.set(id, reqId);
+    const run: AgentRunIdentity = { kind: "capture", name: runName(fields) };
+    const reqId = agentStatus.startRequest("", "running_task", undefined, run);
+    jobRuns.set(id, { reqId, run });
     return id;
   }
 
@@ -374,7 +387,7 @@ export function createJobStore<S extends string, F>(
     } else {
       publish(jobId, { type: "complete" });
     }
-    completeRun(jobId);
+    completeRun(jobId, { status: "ok" });
     log.info(`${opts.label} job {jobId} completed, category: {category}`, { jobId, category });
   }
 
@@ -384,7 +397,7 @@ export function createJobStore<S extends string, F>(
     job.status = "error" as S;
     job.error = error;
     publish(jobId, { type: "error", message: error });
-    completeRun(jobId);
+    completeRun(jobId, { status: "error", error });
     log.error(`${opts.label} job {jobId} failed: {error}`, { jobId, error });
   }
 
@@ -413,8 +426,9 @@ export function createJobStore<S extends string, F>(
         jobs.delete(id);
         subscribers.delete(id);
         // Safety net: a job that never reached a terminal state would otherwise
-        // leak its registry run (auto-clear only fires on completeRequest).
-        completeRun(id);
+        // leak its registry run (auto-clear only fires on completeRequest). A run
+        // still live here was abandoned; a terminal job's run is already gone.
+        completeRun(id, { status: "error", error: "the job outran its time budget and was cleaned up" });
       }
     }
   }, opts.cleanupIntervalMs ?? CLEANUP_INTERVAL_MS);

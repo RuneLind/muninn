@@ -26,7 +26,7 @@
  */
 
 import { anchorNow, displayTitleOf, type WikiListing } from "./wiki-filter.ts";
-import { applySeriesChip, everywhereRequestQuery, rankFind, type FindResult } from "./wiki-find.ts";
+import { applySeriesChip, everywhereRequestQuery, findLogBody, rankFind, type FindLogOpened, type FindResult } from "./wiki-find.ts";
 import {
   FIND_CHIPS_ID,
   FIND_EVERY_ID,
@@ -102,6 +102,11 @@ let everySettled: FindEverywhereState | null = null;
 let everyShown: FindEverywhereResult[] = [];
 let everyTimer: ReturnType<typeof setTimeout> | null = null;
 let everyCtrl: AbortController | null = null;
+/** The text the rows on screen were ranked for; the query log records it
+ *  beside the box's text, since the two differ inside the re-rank debounce. */
+let shownQ = "";
+/** This palette opening, for the query log. */
+let findSession = "";
 const mac = typeof navigator !== "undefined" && isMacPlatform(navigator.platform || navigator.userAgent || "");
 
 export function isFindOpen(): boolean {
@@ -162,6 +167,7 @@ function render(keep = false): void {
   const kept = keep ? captureRows() : null;
   const hadRowFocus = !!kept && kept.focused !== null;
   const query = box.value;
+  shownQ = query;
   shownState = port.listingState();
   if (shownState !== "ready") {
     // No listing yet (or it failed): Everywhere is the fallback list.
@@ -360,8 +366,42 @@ function scheduleRender(): void {
   }, FIND_DEBOUNCE_MS);
 }
 
+/** One line to the query log (`POST /api/wiki/find-log`): the row opened, or
+ *  `null` for a dismissal. Fire and forget; `keepalive` lets it outlive the
+ *  page load a cross-wiki open starts. */
+function logFind(opened: FindLogOpened | null): void {
+  if (!port || !port.everywhere()) return;
+  const typed = input()?.value ?? "";
+  // A count only for an answer to this text. `every` can hold an older one:
+  // under a filter (no fetch plan), and during an IME composition, when
+  // `onInput` returns before `updateEverywhere` (the key match; no test pins it).
+  const plan = everywherePlan(typed, true);
+  const answered = plan.kind === "fetch" && every?.key === plan.key && every.status === "done";
+  const body = findLogBody(typed, shownQ, opened, {
+    wiki: port.selfWiki(),
+    session: findSession,
+    local: localCount(),
+    everywhere: answered ? everyShown.length : null,
+  });
+  if (!body) return;
+  void fetch("/api/wiki/find-log", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), keepalive: true }).catch(() => {});
+}
+
+/** Row `i` as the query log names it; null when there is no such row. */
+function loggedRow(i: number): FindLogOpened | null {
+  if (!port) return null;
+  if (i < localCount()) {
+    const row = result?.rows[i];
+    return row ? { wiki: port.selfWiki(), relPath: row.page.relPath, rank: i, section: "local" } : null;
+  }
+  const r = everyShown[i - localCount()];
+  return r ? { wiki: r.wiki, relPath: r.relPath, rank: i - localCount(), section: "everywhere" } : null;
+}
+
 function openRow(i: number, newTab: boolean): void {
   if (!port) return;
+  const logged = loggedRow(i);
+  if (logged) logFind(logged);
   if (i >= localCount()) {
     openEverywhereRow(everyShown[i - localCount()], newTab);
     return;
@@ -400,6 +440,9 @@ function onInput(e: Event): void {
 
 export function openFind(): void {
   if (!port || isFindOpen()) return;
+  // Not `randomUUID`: it is missing on plain http off loopback, and would throw here.
+  findSession = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+  shownQ = "";
   port.onOpen();
   const focused = document.activeElement;
   opener = focused instanceof HTMLElement && focused !== document.body ? focused : null;
@@ -411,6 +454,7 @@ export function openFind(): void {
   const root = document.getElementById(FIND_ID)!;
   root.addEventListener("keydown", onRootKeydown);
   root.addEventListener("click", onRootClick);
+  root.addEventListener("auxclick", onRootAuxclick);
   const box = root.querySelector(`#${FIND_INPUT_ID}`)!;
   box.addEventListener("input", onInput);
   box.addEventListener("compositionend", () => updateEverywhere());
@@ -432,6 +476,8 @@ export function openFind(): void {
 
 /** Close and, unless a row is being opened, give focus back to the opener. */
 export function closeFind(returnFocus = true): void {
+  // Every in-place open closes with `false` after logging its row.
+  if (returnFocus) logFind(null);
   if (debounce) {
     clearTimeout(debounce);
     debounce = null;
@@ -512,12 +558,28 @@ function onRootClick(e: MouseEvent): void {
   }
   const row = t.closest<HTMLElement>("[data-find-row]");
   if (row) {
-    // A modifier click or a middle click is the link's own; a plain one opens
-    // in place without a page load.
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    // A modifier click is the link's own; a plain one opens in place without
+    // a page load. Meta, Ctrl and Shift open the page, so the query log gets
+    // the row; Alt downloads it, which is no open.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+      if (!e.altKey) logClicked(row);
+      return;
+    }
     e.preventDefault();
     openRow(Number(row.getAttribute("data-find-row")), false);
   }
+}
+
+/** The query-log line for a row the link itself opens. */
+function logClicked(row: HTMLElement): void {
+  const logged = loggedRow(Number(row.getAttribute("data-find-row")));
+  if (logged) logFind(logged);
+}
+
+/** A middle click fires `auxclick`, never `click`: the link opens a tab. */
+function onRootAuxclick(e: MouseEvent): void {
+  const row = (e.target as HTMLElement).closest<HTMLElement>("[data-find-row]");
+  if (row && e.button === 1) logClicked(row);
 }
 
 /**

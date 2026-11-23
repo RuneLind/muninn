@@ -2,8 +2,10 @@ import { test, expect, describe } from "bun:test";
 import type { AgentRun } from "../observability/agent-status.ts";
 import type { ScheduledTask, Watcher } from "../types.ts";
 import type { RecentExtractorRow, RecentTraceRow } from "../db/agent-activity.ts";
+import type { RecentAgentRunRow } from "../db/agent-activity.ts";
 import {
   assembleAgentsOverview,
+  type AgentsOverview,
   computeWatcherNextRun,
   _internalsForTest,
   type AgentsOverviewDeps,
@@ -85,6 +87,7 @@ function deps(over: Partial<AgentsOverviewDeps> = {}): AgentsOverviewDeps {
     getScheduledTasks: over.getScheduledTasks ?? (async () => []),
     getWatchers: over.getWatchers ?? (async () => []),
     getRecentTraces: over.getRecentTraces ?? (async () => []),
+    getRecentAgentRuns: over.getRecentAgentRuns ?? (async () => []),
     getRecentExtractors: over.getRecentExtractors ?? (async () => []),
     getWatcherDurations: over.getWatcherDurations ?? (async () => []),
   };
@@ -349,6 +352,20 @@ describe("assembleAgentsOverview recent cost", () => {
     expect("costUsd" in chat).toBe(true);
   });
 
+  test("a ring row reports how its run ended; a producer that reports nothing reads as ok", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [
+        run({ kind: "capture", name: "failed", status: "error" }),
+        run({ kind: "digest", name: "fine", status: "ok" }),
+        run({ kind: "gardener_drain", name: "silent" }),
+      ],
+    }), NOW);
+    const status = (name: string) => o.recent.find((r) => r.name === name)!.status;
+    expect(status("failed")).toBe("error");
+    expect(status("fine")).toBe("ok");
+    expect(status("silent")).toBe("ok");
+  });
+
   test("ring rows (research/task/digest) carry costUsd; drain with no meta omits it", async () => {
     const o = await assembleAgentsOverview(deps({
       getCompletedRing: () => [
@@ -413,5 +430,236 @@ describe("assembleAgentsOverview running + degrade", () => {
     }), NOW);
     expect(o.errors!.some((e) => e.includes("watcher_durations"))).toBe(true);
     expect(o.estimates["watcher\u0000email"]).toBeUndefined();
+  });
+});
+
+// ── a ring kind's run across its two sources ──────────────────────────────────
+
+function agentRunRow(over: Partial<RecentAgentRunRow> = {}): RecentAgentRunRow {
+  return {
+    traceId: "tr-1",
+    kind: "capture",
+    name: "YouTube: a talk",
+    status: "ok",
+    botName: "jarvis",
+    startedAt: 5000,
+    durationMs: 700,
+    model: "claude-sonnet-5",
+    inputTokens: 100,
+    outputTokens: 20,
+    costUsd: 0.5,
+    ...over,
+  };
+}
+
+describe("assembleAgentsOverview recent, ring kinds", () => {
+  const named = (o: AgentsOverview, name: string) => o.recent.filter((r) => r.name === name);
+
+  test("after a restart the stamped span alone rebuilds the row", async () => {
+    const o = await assembleAgentsOverview(deps({ getRecentAgentRuns: async () => [agentRunRow()] }), NOW);
+    expect(o.recent).toEqual([
+      {
+        kind: "capture",
+        bot: "jarvis",
+        name: "YouTube: a talk",
+        finishedAt: 5700,
+        durationMs: 700,
+        status: "ok",
+        traceId: "tr-1",
+        model: "claude-sonnet-5",
+        inputTokens: 100,
+        outputTokens: 20,
+        costUsd: 0.5,
+      },
+    ]);
+  });
+
+  test("an explicit $0 survives, and an unknown cost stays absent", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentAgentRuns: async () => [
+        agentRunRow({ traceId: "a", name: "free", costUsd: 0 }),
+        agentRunRow({ traceId: "b", name: "unknown", costUsd: null, model: null, inputTokens: null, outputTokens: null, durationMs: null }),
+      ],
+    }), NOW);
+    expect(named(o, "free")[0]!.costUsd).toBe(0);
+    const unknown = named(o, "unknown")[0]!;
+    expect(unknown).not.toHaveProperty("costUsd");
+    expect(unknown).not.toHaveProperty("model");
+    expect(unknown).not.toHaveProperty("inputTokens");
+    expect(unknown).not.toHaveProperty("durationMs");
+    expect(unknown.finishedAt).toBe(5000);
+  });
+
+  test("a run in both sources is listed once, as the ring row", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk", traceId: "tr-1", model: "live-corrected", completedAt: 9000 })],
+      getRecentAgentRuns: async () => [agentRunRow({ model: null })],
+    }), NOW);
+    expect(named(o, "YouTube: a talk")).toHaveLength(1);
+    expect(named(o, "YouTube: a talk")[0]).toMatchObject({ model: "live-corrected", finishedAt: 9000 });
+  });
+
+  test("what the ring row lacks comes from the span, and the span names the model that ran", async () => {
+    // A goal completes its ring row with only a trace id, and a task's ring row carries
+    // the configured model, not the one the router used.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", name: "Goal", traceId: "g", model: "sonnet", completedAt: 9000 })],
+      getRecentAgentRuns: async () => [
+        agentRunRow({ kind: "scheduled_task", traceId: "g", name: "Goal", model: "haiku-ran", inputTokens: 50, outputTokens: 9, costUsd: 0.01 }),
+      ],
+    }), NOW);
+    expect(o.recent).toHaveLength(1);
+    expect(o.recent[0]).toMatchObject({ model: "haiku-ran", inputTokens: 50, outputTokens: 9, costUsd: 0.01, finishedAt: 9000 });
+  });
+
+  test("spend the ring row does have is not replaced", async () => {
+    // The ring holds a capture's whole spend, the takeaway check's included.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk", traceId: "tr-1", inputTokens: 1011, outputTokens: 507, costUsd: 0 })],
+      getRecentAgentRuns: async () => [agentRunRow({ inputTokens: 11, outputTokens: 7, costUsd: 0.5 })],
+    }), NOW);
+    expect(o.recent[0]).toMatchObject({ inputTokens: 1011, outputTokens: 507, costUsd: 0 });
+  });
+
+  test("a durable row keeps its own kind", async () => {
+    const o = await assembleAgentsOverview(deps({ getRecentAgentRuns: async () => [agentRunRow({ kind: "digest" })] }), NOW);
+    expect(o.recent[0]!.kind).toBe("digest");
+  });
+
+  test("a name the span stored cleaned still matches its ring row", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a\ud83d\u0000", traceId: "tr-1" })],
+      getRecentAgentRuns: async () => [agentRunRow({ name: "YouTube: a\ufffd" })],
+    }), NOW);
+    expect(o.recent).toHaveLength(1);
+  });
+
+  test("tasks sharing their tick's trace stay separate runs, and a failed one is not swallowed", async () => {
+    // A failed task clears its run, so it is only in the durable source.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", name: "Task A", traceId: "tick" })],
+      getRecentAgentRuns: async () => [
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Task A" }),
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Task B", status: "error" }),
+      ],
+    }), NOW);
+    expect(named(o, "Task A")).toHaveLength(1);
+    expect(named(o, "Task B")).toHaveLength(1);
+    expect(named(o, "Task B")[0]!.status).toBe("error");
+  });
+
+  test("after a restart, tasks sharing a trace are still two rows", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentAgentRuns: async () => [
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Task A" }),
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Task B" }),
+      ],
+    }), NOW);
+    expect(o.recent.map((r) => r.name).sort()).toEqual(["Task A", "Task B"]);
+  });
+
+  test("a span that ended in error turns the ring row red", async () => {
+    // A goal completes its ring row, then a last DB write throws.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", name: "Goal", traceId: "g" })],
+      getRecentAgentRuns: async () => [agentRunRow({ kind: "scheduled_task", traceId: "g", name: "Goal", status: "error" })],
+    }), NOW);
+    expect(named(o, "Goal")).toHaveLength(1);
+    expect(named(o, "Goal")[0]!.status).toBe("error");
+  });
+
+  test("a ring row that says error stays error over a span that says ok", async () => {
+    // A capture's root finishes before an ingest that can still fail.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk", traceId: "tr-1", status: "error" })],
+      getRecentAgentRuns: async () => [agentRunRow()],
+    }), NOW);
+    expect(named(o, "YouTube: a talk")[0]!.status).toBe("error");
+  });
+
+  test("a stamped span whose run is still live is left out, and a different run is not", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRunning: () => [run({ kind: "capture", name: "YouTube: a talk", completed: false, liveTraceId: "tr-1" })],
+      getRecentAgentRuns: async () => [
+        agentRunRow(),
+        agentRunRow({ traceId: "tr-1", name: "same trace, another run" }),
+        agentRunRow({ traceId: "tr-2", name: "YouTube: a talk" }),
+      ],
+    }), NOW);
+    expect(o.recent.map((r) => r.traceId + "/" + r.name).sort()).toEqual([
+      "tr-1/same trace, another run",
+      "tr-2/YouTube: a talk",
+    ]);
+  });
+
+  test("a ring row with no trace leaves a like-named span alone", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "YouTube: a talk" })],
+      getRecentAgentRuns: async () => [agentRunRow()],
+    }), NOW);
+    expect(named(o, "YouTube: a talk")).toHaveLength(2);
+  });
+
+  test("a ring row sharing a trace with a watcher row does not touch it", async () => {
+    // A consolidation draft's ring row names its tick's trace.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "Synthesis page: x", traceId: "tick" })],
+      getRecentTraces: async () => [traceRow({ name: "watcher:consolidation-gardener", traceId: "tick" })],
+    }), NOW);
+    expect(o.recent.map((r) => r.name).sort()).toEqual(["Synthesis page: x", "consolidation-gardener"]);
+  });
+
+  test("two spans sharing a run's key fill nothing: one call's cost must not show on two rows", async () => {
+    // Same-titled tasks in one tick. Each ring row has one span, but nothing says which.
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [
+        run({ kind: "scheduled_task", name: "Same", traceId: "tick", model: "configured" }),
+        run({ kind: "scheduled_task", name: "Same", traceId: "tick", model: "configured" }),
+      ],
+      getRecentAgentRuns: async () => [
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", model: "ran-a", inputTokens: 500, costUsd: 0.5 }),
+        agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", model: "ran-b", inputTokens: 700, costUsd: 0.7 }),
+      ],
+    }), NOW);
+    expect(named(o, "Same")).toHaveLength(2);
+    for (const row of named(o, "Same")) {
+      expect(row).not.toHaveProperty("inputTokens");
+      expect(row).not.toHaveProperty("costUsd");
+      expect(row.model).toBe("configured");
+    }
+  });
+
+  test("two same-named runs under one trace: an error on either turns the row red, in either order", async () => {
+    const ring = () => [run({ kind: "scheduled_task", name: "Same", traceId: "tick" })];
+    const ok = agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", status: "ok" });
+    const bad = agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "Same", status: "error" });
+    for (const rows of [[ok, bad], [bad, ok]]) {
+      const o = await assembleAgentsOverview(deps({ getCompletedRing: ring, getRecentAgentRuns: async () => rows }), NOW);
+      expect(named(o, "Same").map((r) => r.status)).toEqual(["error"]);
+    }
+  });
+
+  test("a task with no title is one row, under the kind's label", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "scheduled_task", traceId: "tick" })],
+      getRecentAgentRuns: async () => [agentRunRow({ kind: "scheduled_task", traceId: "tick", name: "" })],
+    }), NOW);
+    expect(o.recent.map((r) => r.name)).toEqual(["Scheduled task"]);
+  });
+
+  test("a span with no name at all still lists under the kind's label, and never throws", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getRecentAgentRuns: async () => [agentRunRow({ kind: "digest", name: null as unknown as string })],
+    }), NOW);
+    expect(o.recent.map((r) => r.name)).toEqual(["Wiki digest"]);
+  });
+
+  test("a degraded span source costs its rows, not the ring's or the page", async () => {
+    const o = await assembleAgentsOverview(deps({
+      getCompletedRing: () => [run({ kind: "capture", name: "from the ring", traceId: "x" })],
+      getRecentAgentRuns: async () => { throw new Error("db down"); },
+    }), NOW);
+    expect(o.errors).toEqual(["agent_runs: db down"]);
+    expect(named(o, "from the ring")).toHaveLength(1);
   });
 });

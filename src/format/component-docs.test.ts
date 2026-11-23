@@ -3,6 +3,7 @@ import { COMPONENT_DOCS, attrAliasFor, attrTeach, hintFor, suggestFor, type Comp
 import { COMPONENT_ATTRS, COMPONENT_NAMES, COMPONENT_SPEC, type AttrSpec, type ComponentName } from "./component-spec.ts";
 import { COMPONENT_VOCABULARY_RULES } from "../research/answer.ts";
 import { ATTR_RE, COMPONENT_OPEN_RE } from "./markdown-ast.ts";
+import { stepCheck } from "./check-tag.ts";
 
 const docs = COMPONENT_DOCS as Record<ComponentName, ComponentDoc>;
 const attrSpec = (name: ComponentName, attr: string) => (COMPONENT_SPEC[name].attrs as Record<string, AttrSpec>)[attr]!;
@@ -106,6 +107,24 @@ test("the prompt scan reads a quoted `>` and a hyphenated name whole, and labels
     { name: "Callout", attr: "title", value: "a > b" },
   ]);
   expect(valueProblems(variant)).toEqual([{ name: "Callout", attr: "aria-label", value: "x", problem: "not a spec attribute" }]);
+});
+
+describe("the Check doc line's example", () => {
+  test("is a step line stepCheck reads cleanly, with a real probe and on=, and says restart reads unknown", () => {
+    const doc = docs.Check.doc;
+    const examples = [...doc.matchAll(/`([^`]*<Check[^`]*)`/g)].map((m) => m[1]!);
+    expect(examples.length).toBeGreaterThan(0);
+    for (const line of examples) {
+      const read = stepCheck(line);
+      expect({ line, read }).toEqual({ line, read: expect.objectContaining({ problems: [] }) });
+      const kinds = read!.probes.map((p) => p.kind);
+      expect(kinds.length).toBeGreaterThan(0);
+      expect(kinds).not.toContain("restart");
+      expect({ line, on: read!.on }).not.toEqual({ line, on: null });
+    }
+    // restart's probe is not built yet: the doc must say a restart check reads unknown.
+    expect(doc).toMatch(/`restart`[^.]*\breads unknown\b/);
+  });
 });
 
 describe("hints", () => {

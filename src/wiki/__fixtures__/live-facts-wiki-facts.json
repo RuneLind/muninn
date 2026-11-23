@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "prs": {
+    "acme/acme-api#101": {
+      "title": "DEMO-11: first part",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2026-01-05T10:00:00Z",
+      "inProd": true,
+      "firstProd": {
+        "tag": "26.006.120000",
+        "publishedAt": "2026-01-06T12:00:00Z"
+      },
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-api#102": {
+      "title": "DEMO-11 second part",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2026-01-18T09:30:00Z",
+      "inProd": false,
+      "firstProd": null,
+      "draftTag": "26.019.070000",
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-api#103": {
+      "title": "Fix (DEMO-12)",
+      "state": "OPEN",
+      "isDraft": false,
+      "mergedAt": null,
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-api#104": {
+      "title": "DEMO-110 unrelated, longer number",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2025-03-01T10:00:00Z",
+      "inProd": true,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-api#108": {
+      "title": "DEMO-14 merged, release unknown",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2026-01-19T10:00:00Z",
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-e2e#7": {
+      "title": "DEMO-11 e2e test",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2026-01-10T10:00:00Z",
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-web#205": {
+      "title": "DEMO-12 draft frontend",
+      "state": "OPEN",
+      "isDraft": true,
+      "mergedAt": null,
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-12T08:00:00.000Z"
+    },
+    "acme/acme-web#206": {
+      "title": "DEMO-12 abandoned attempt",
+      "state": "CLOSED",
+      "isDraft": false,
+      "mergedAt": null,
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-web#209": {
+      "title": "DEMO-14 closed without merge",
+      "state": "CLOSED",
+      "isDraft": false,
+      "mergedAt": null,
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-web#210": {
+      "title": "DEMO-16 shipped",
+      "state": "MERGED",
+      "isDraft": false,
+      "mergedAt": "2026-01-07T10:00:00Z",
+      "inProd": true,
+      "firstProd": {
+        "tag": "26.008.090000",
+        "publishedAt": "2026-01-08T09:00:00Z"
+      },
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    },
+    "acme/acme-web#211": {
+      "title": "DEMO-16 first try, closed",
+      "state": "CLOSED",
+      "isDraft": false,
+      "mergedAt": null,
+      "inProd": null,
+      "firstProd": null,
+      "draftTag": null,
+      "checkedAt": "2026-01-20T08:00:00.000Z"
+    }
+  },
+  "keys": {
+    "DEMO-11": {
+      "prs": [
+        "acme/acme-api#101",
+        "acme/acme-api#102",
+        "acme/acme-e2e#7"
+      ],
+      "searchedAt": "2026-01-20T08:00:05.000Z"
+    },
+    "DEMO-110": {
+      "prs": [
+        "acme/acme-api#104"
+      ]
+    },
+    "DEMO-12": {
+      "prs": [
+        "acme/acme-api#103",
+        "acme/acme-web#205",
+        "acme/acme-web#206"
+      ],
+      "searchedAt": "2026-01-12T08:00:05.000Z"
+    },
+    "DEMO-13": {
+      "prs": []
+    },
+    "DEMO-14": {
+      "prs": [
+        "acme/acme-api#108",
+        "acme/acme-web#209"
+      ]
+    },
+    "DEMO-16": {
+      "prs": [
+        "acme/acme-web#210",
+        "acme/acme-web#211"
+      ]
+    }
+  }
+}

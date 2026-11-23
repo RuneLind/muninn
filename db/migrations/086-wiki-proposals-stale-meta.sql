@@ -1,0 +1,21 @@
+-- `wiki_proposals.stale_meta` — what a `stale-check` row (the Stale check's
+-- fix, plan muninn-wiki-drift-check PR 3) carries that no other column says:
+--
+--   {"changed": "repos/melosys-e2e-tests.md",
+--    "edits": [{"kind": "passage", "page": "…", "link": "…", "old": "…",
+--               "text": "…", "variant": "new", "reason": "…"}],
+--    "supersedes": "stale-check:repos/melosys-e2e-tests.md:1"}
+--
+--   * `changed` — the page whose STALE tab sent the fix; the card and the ⧗
+--     «in review» states are about it, and the group key names it.
+--   * `edits` — the drafted edits this row's draft applies. A later Send
+--     never edits an open group: it retires group n and inserts group n+1,
+--     redrafting each row by re-applying these to the page's current bytes
+--     with no model call (D20).
+--   * `supersedes` — the group this one replaced, for the gate's «replaced by
+--     group n+1» note.
+--
+-- A column rather than `lint_meta`: that object is the lint seeder's
+-- (`seededBy`, `findingRelPath`) and every lint reader degrades on its shape.
+-- NULL on every other kind.
+ALTER TABLE wiki_proposals ADD COLUMN stale_meta JSONB;

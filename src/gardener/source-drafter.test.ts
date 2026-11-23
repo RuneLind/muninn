@@ -20,7 +20,7 @@ import {
 } from "./source-drafter.ts";
 import { sanitizeFilename } from "./target-resolve.ts";
 import { selectWirablePages } from "./wire.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";

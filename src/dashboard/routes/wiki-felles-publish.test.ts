@@ -11,7 +11,7 @@ import path from "node:path";
 import { Hono } from "hono";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
-import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
+import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import { registerWikiFellesPublishRoute, type FellesPublishRouteDeps } from "./wiki-felles-publish.ts";
 import { ProcTimeoutError } from "../../utils/run-proc.ts";
 import type { FellesPublishConfig } from "../../wiki/felles-publish.ts";
@@ -287,6 +287,32 @@ describe("remove takes the page's data files", () => {
   test("a page with no data files still removes the page alone", async () => {
     await post(appWith(), { wiki: "kode", relPath: "plans/a.mdx", dryRun: true, action: "remove" });
     expect((await readFile(argvFile, "utf8")).trim().split("\n").slice(4, -1)).toEqual(["plans/a.mdx"]);
+  });
+
+  // Arch review 2026-11-16 F48, fix round 2: the index lists the page's own
+  // diagram sibling as a page attached to it (`pairAttachments` rule 3), so
+  // "is an indexed page" alone kept every sibling. Another page's use keeps it.
+  test("the page's own diagram sibling goes with it, though the real index lists it as a page", async () => {
+    await Bun.write(path.join(root, "flows", "side.mdx"), "# Side\n\n<Diagram src=\"flow.workflow.json\" />\n");
+    await Bun.write(path.join(root, "flows", "flow.workflow.json"), "{}\n");
+    await Bun.write(path.join(root, "flows", "flow.html"), "<html><body>flow</body></html>\n");
+    __resetWikiCacheForTest();
+    const res = await post(appWith(), { wiki: "kode", relPath: "flows/side.mdx", dryRun: true, action: "remove" });
+    const body = (await res.json()) as { removes?: string[]; keptShared?: string[] };
+    expect(body.removes).toEqual(["flows/side.mdx", "flows/flow.workflow.json", "flows/flow.html"]);
+    expect(body.keptShared).toEqual([]);
+  });
+
+  test("a sibling another page owns stays: it folds under a same-stem page", async () => {
+    await Bun.write(path.join(root, "flows2", "side.mdx"), "# Side\n\n<Diagram src=\"flow.workflow.json\" />\n");
+    await Bun.write(path.join(root, "flows2", "flow.workflow.json"), "{}\n");
+    await Bun.write(path.join(root, "flows2", "flow.html"), "<html><body>flow</body></html>\n");
+    await Bun.write(path.join(root, "flows2", "flow.md"), "# Flow\n");
+    __resetWikiCacheForTest();
+    const res = await post(appWith(), { wiki: "kode", relPath: "flows2/side.mdx", dryRun: true, action: "remove" });
+    const body = (await res.json()) as { removes?: string[]; keptShared?: string[] };
+    expect(body.removes).toEqual(["flows2/side.mdx", "flows2/flow.workflow.json"]);
+    expect(body.keptShared).toEqual(["flows2/flow.html"]);
   });
 
 });
@@ -584,6 +610,56 @@ describe("refusals before any spawn", () => {
       expect(res.status).toBe(403);
     } finally {
       __setReadonlyWikiRootsForTest();
+    }
+    expect(spawned).toBe(false);
+  });
+
+  test.each([
+    ["a publish", { ...ok, dryRun: false }],
+    ["a dry-run publish", { ...ok, dryRun: true }],
+    ["a remove", { ...ok, dryRun: false, action: "remove" }],
+    ["a dry-run remove", { ...ok, dryRun: true, action: "remove" }],
+    ["a data-file retry", { ...ok, dryRun: false, action: "remove", dataFilesOnly: true }],
+    ["a sync", { wiki: "kode", dryRun: false, allowIdent: true, action: "sync" }],
+    ["a dry-run sync", { wiki: "kode", dryRun: true, allowIdent: true, action: "sync" }],
+    // The refusal runs before the body, the page lookup and the configuration.
+    ["a body that is not an object", "not an object"],
+    ["an action that does not exist", { ...ok, action: "nonsense" }],
+    ["a page the index does not list", { ...ok, dryRun: false, relPath: "plans/no-such-page.mdx" }],
+  ])("a read-only instance refuses %s before any spawn", async (_name, body) => {
+    spawned = false;
+    __setWikiReadonlyForTest(true);
+    try {
+      const res = await post(appWith(watch()), body);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: WIKI_READONLY_REASON, readonly: true });
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+    expect(spawned).toBe(false);
+  });
+
+  test("a read-only instance leaves the same-origin gate first", async () => {
+    __setWikiReadonlyForTest(true);
+    try {
+      expect((await post(appWith(watch()), ok, { "content-type": "text/plain" })).status).toBe(415);
+      expect((await post(appWith(watch()), ok, { "sec-fetch-site": "cross-site" })).status).toBe(403);
+      expect(await (await post(appWith(watch()), ok, { "sec-fetch-site": "cross-site" })).json()).toMatchObject({
+        reason: "cross-origin",
+      });
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+  });
+
+  test("a read-only instance refuses before it looks at the configuration", async () => {
+    spawned = false;
+    __setWikiReadonlyForTest(true);
+    try {
+      const res = await post(appWith({ ...watch(), config: () => config({ bin: null }) }), ok);
+      expect(res.status).toBe(403);
+    } finally {
+      __setWikiReadonlyForTest();
     }
     expect(spawned).toBe(false);
   });
@@ -983,6 +1059,17 @@ describe("GET /api/wiki/felles-status", () => {
         host: "localhost:3010",
       });
       expect(res.status).toBe(200);
+    });
+
+    test("a read-only instance still answers: it reads the bucket and writes nothing", async () => {
+      const f = fake();
+      __setWikiReadonlyForTest(true);
+      try {
+        expect((await get(appWith({ runProc: f.runProc }))).status).toBe(200);
+      } finally {
+        __setWikiReadonlyForTest();
+      }
+      expect(f.state.calls).toBe(1);
     });
 
     test("a read-only root and an unconfigured instance", async () => {

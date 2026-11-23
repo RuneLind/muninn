@@ -40,7 +40,7 @@ import {
   isWrapperOnlyEdit,
   parseFactcheckClaims,
   type ClaimQuote,
-} from "../dashboard/views/components/wiki-integrate.ts";
+} from "./core/wiki-integrate.ts";
 
 const ORIGINAL = await Bun.file(
   new URL("./__fixtures__/factcheck-creatine-original.mdx", import.meta.url),

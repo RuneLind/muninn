@@ -1,8 +1,8 @@
 /**
  * Connections' issue section: one row per key the open page counts toward,
  * then an "also linked" line (link-only keys) and a "mentioned" line. Pure
- * string building, in its own module because `wiki-browser.ts` touches
- * `document` at import time and `bun test` cannot load it.
+ * string building, in its own module so `bun test` loads it without a
+ * DOM.
  *
  * The rows arrive twice — the index-local half inline with the page, then the
  * whole row from the deferred provenance fetch — and this renders either: a

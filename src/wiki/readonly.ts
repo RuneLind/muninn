@@ -9,16 +9,21 @@
  *
  * **Precise semantics: it forbids programmatic page CONTENT writes, not git.**
  * `commitWikiChange` is deliberately NOT guarded — the repo-sync loop on the
- * readonly instance commits and pushes through it, and the THREE content seams
+ * readonly instance commits and pushes through it, and the FOUR content seams
  * below plus the route guards already cover every content-write funnel:
  *
  *   - `writeWikiPage` (fact-check append + integrate/apply)
  *   - `applyWikiProposal` (gardener approve)
  *   - `writePlanQueue` (`src/plans/write.ts` — `plans/queue.yaml`, which
  *     `writeWikiPage`'s `.md`/`.mdx` path confinement correctly cannot carry)
+ *   - `writeWorkMapFile` (`src/wiki/work-map/write.ts` — `.work-map.json`, the
+ *     same reason)
  *
  * The `wiki-committer` watcher also calls `commitWikiChange` (it commits stray
  * dirty files and writes no page content) and stays unguarded too.
+ *
+ * One route guard is not a content write: `POST /api/wiki/felles-publish` writes a
+ * bucket, and a read-only instance refuses it too (the owner's ruling, 2026-11-03).
  *
  * Offline scripts that write with a bare `Bun.write` are out of scope — this
  * guards the HTTP surface, and the readonly instance runs no such scripts.

@@ -4,6 +4,7 @@
 
 import { factcheckCalloutScript } from "../../../summaries/factcheck-callout.ts";
 import { markdownContentStyles, sanitizedMarkedInstallScript } from "./doc-panel.ts";
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
 
 export function sumJobCardStyles(): string {
   return `
@@ -268,6 +269,7 @@ export function sumJobCardHtml(): string {
 
 export function sumJobCardScript(): string {
   return `
+    var jobCardSafeHref = ${isSafeLinkHref.toString()};
     var accumulatedText = '';
     var currentJobId = null;
     var currentJobTitle = null;
@@ -462,7 +464,7 @@ export function sumJobCardScript(): string {
         var displayTitle = (a.title || '').replace(/\\.md$/, '');
         return '<div class="similar-item">' +
           '<div class="similar-item-header">' +
-            '<a href="' + esc(a.url || '#') + '" target="_blank" rel="noopener">' + esc(displayTitle) + '</a>' +
+            '<a href="' + esc(a.url && jobCardSafeHref(a.url) ? a.url : '#') + '" target="_blank" rel="noopener">' + esc(displayTitle) + '</a>' +
             (pct !== null ? '<span class="similar-relevance">' + pct + '%</span>' : '') +
           '</div>' +
           (snippet ? '<div class="similar-snippet">' + esc(snippet) + '</div>' : '') +

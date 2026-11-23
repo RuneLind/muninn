@@ -189,6 +189,33 @@ describe("executeClaudePrompt", () => {
     spawnSpy.mockRestore();
   });
 
+  test("spawnEnvOmit strips an inherited var; a bot without it gets process.env verbatim", async () => {
+    const spawnSpy = spyOn(Bun, "spawn");
+    const mockStdout = JSON.stringify({ result: "hello", duration_ms: 1000, duration_api_ms: 800 });
+    const fakeProc = () =>
+      ({ pid: 123, stdout: new Response(mockStdout).body!, stderr: new Response("").body!, exited: Promise.resolve(0), kill: mock() }) as any;
+    spawnSpy.mockReturnValueOnce(fakeProc()).mockReturnValueOnce(fakeProc());
+    const saved = process.env.MAX_THINKING_TOKENS;
+    process.env.MAX_THINKING_TOKENS = "31999";
+    try {
+      const config = { claudeModel: "sonnet", claudeTimeoutMs: 30000 } as any;
+      await executeClaudePrompt("test", config, { name: "testbot", dir: "/tmp/testbot" } as any);
+      await executeClaudePrompt("test", config, { name: "testbot", dir: "/tmp/testbot", spawnEnvOmit: ["MAX_THINKING_TOKENS"] } as any);
+      const expected: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_ENTRYPOINT: "testbot-bot", HUGINN_TRACE_DEFAULT: "1" };
+      const [, plain] = spawnSpy.mock.calls[0]! as unknown as [string[], { env: Record<string, string | undefined> }];
+      expect(plain.env).toEqual(expected);
+      expect(plain.env.MAX_THINKING_TOKENS).toBe("31999");
+      const [, omitted] = spawnSpy.mock.calls[1]! as unknown as [string[], { env: Record<string, string | undefined> }];
+      const { MAX_THINKING_TOKENS: _gone, ...rest } = expected;
+      expect(omitted.env).toEqual(rest);
+      expect("MAX_THINKING_TOKENS" in omitted.env).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.MAX_THINKING_TOKENS;
+      else process.env.MAX_THINKING_TOKENS = saved;
+      spawnSpy.mockRestore();
+    }
+  });
+
   test("passes the bot's effort as --effort, and omits the flag when unset", async () => {
     const spawnSpy = spyOn(Bun, "spawn");
     const mockStdout = JSON.stringify({ result: "hello", duration_ms: 1000, duration_api_ms: 800 });

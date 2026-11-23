@@ -1,7 +1,9 @@
 /**
  * Two frontmatter list readers with no IO: `owns:` (lint check 14's homes) and
  * `related:` (work-thread grouping, plan `muninn-wiki-work-thread-grouping`
- * D18), plus the resolver that turns `related:` entries into pages.
+ * D18), plus the resolver that turns `related:` entries into pages. The
+ * `related:` reader also reads another key of wikilinks ({@link readLinkList},
+ * for lint check 28's `folded_into:`).
  *
  * Its own module so `store.ts` and `lint-state.ts` both import it and
  * `store.ts → lint-state.ts → lint-drift.ts → store.ts` never becomes a cycle.
@@ -14,9 +16,10 @@
 
 import path from "node:path";
 import { frontmatterBodyLine } from "./page-text.ts";
-import { JIRA_KEY_DENYLIST } from "../jira/key-scan.ts";
+import { JIRA_KEY_DENYLIST } from "../utils/jira-key-scan.ts";
 import { stampedKeys } from "./trackers/jira.ts";
-import { extractWikilinks, WIKILINK_RE } from "./wikilinks.ts";
+import { wikilinkRegExp } from "../utils/wikilink-scan.ts";
+import { extractWikilinks } from "./wikilinks.ts";
 
 /** A page's `owns:` as read: whether the frontmatter has the key, the keys it
  *  names, the entry as written (after `owns:`, whitespace collapsed) and the
@@ -167,7 +170,7 @@ const RELATED_WALK_DEPTH_MAX = 8;
  *  larger than its text, and past the budget the walk stops (one `unread`). */
 const RELATED_WALK_STEPS_PER_CHAR = 4;
 
-const HAS_WIKILINK_RE = new RegExp(WIKILINK_RE.source);
+const HAS_WIKILINK_RE = wikilinkRegExp("plain", "");
 /** A `:` after a span, past any whitespace: the span is a map key. */
 const KEY_AFTER_RE = /\s*:/y;
 
@@ -180,7 +183,7 @@ interface Span {
 }
 
 function scanSpans(text: string): Span[] {
-  return [...text.matchAll(new RegExp(WIKILINK_RE.source, "g"))].map((m) => {
+  return [...text.matchAll(wikilinkRegExp("plain"))].map((m) => {
     const inner = m[0].slice(2, -2).replace(/^\[+/, "");
     const end = m.index + m[0].length;
     return { start: end - inner.length - 4, end, inner };
@@ -214,20 +217,33 @@ export function readRelated(content: string): RelatedRead {
   return fm ? relatedFrom(fm) : NO_RELATED;
 }
 
+/** Another top-level key that holds wikilinks (`folded_into:`), read by the
+ *  walk {@link readRelated} uses. `lineRe` finds the key's line when the entry
+ *  is read alone, so the caller decides which spellings of the key count there
+ *  (`related:` takes no quoted key). */
+export function readLinkList(content: string, key: string, lineRe: RegExp): RelatedRead {
+  const fm = Frontmatter.of(content);
+  return fm ? linkListFrom(fm, key, lineRe) : NO_RELATED;
+}
+
 function relatedFrom(fm: Frontmatter): RelatedRead {
-  const { at, lines: entry } = fm.entry(RELATED_LINE_RE);
+  return linkListFrom(fm, "related", RELATED_LINE_RE);
+}
+
+function linkListFrom(fm: Frontmatter, key: string, lineRe: RegExp): RelatedRead {
+  const { at, lines: entry } = fm.entry(lineRe);
   const entryText = entry.join("\n");
   // The text YAML parsed, the value it read, and where the entry starts in it.
   let parsed: { text: string; offset: number; value: unknown } | undefined;
   const whole = fm.whole();
   if (whole) {
-    if (!Object.hasOwn(whole, "related")) return NO_RELATED;
+    if (!Object.hasOwn(whole, key)) return NO_RELATED;
     const offset = at < 0 ? 0 : fm.lines.slice(0, at).join("\n").length + (at > 0 ? 1 : 0);
-    parsed = { text: fm.lines.join("\n"), offset, value: whole.related };
+    parsed = { text: fm.lines.join("\n"), offset, value: whole[key] };
   } else {
     if (at < 0) return NO_RELATED;
     const part = yamlMap(entryText);
-    if (part) parsed = { text: entryText, offset: 0, value: part.related };
+    if (part) parsed = { text: entryText, offset: 0, value: part[key] };
   }
   const spans = scanSpans(entryText);
   const links: string[] = [];
@@ -255,7 +271,7 @@ function relatedFrom(fm: Frontmatter): RelatedRead {
     return true;
   };
 
-  const marked = markedValue(parsed, spans);
+  const marked = markedValue(parsed, spans, key);
   let steps = RELATED_WALK_STEPS_PER_CHAR * parsed.text.length;
   let skipped = false;
   let stopped = false;
@@ -304,7 +320,7 @@ function relatedFrom(fm: Frontmatter): RelatedRead {
 }
 
 /**
- * The `related` value of `parsed.text` re-parsed with every span YAML reads
+ * The `key` value of `parsed.text` re-parsed with every span YAML reads
  * alone as a sequence overwritten by a mark: its index in the span's own
  * brackets (`[[a]]` to `[7]`), so the mark sits wherever the span sat, flow
  * context included, and starts no comment. Where the value held the span's
@@ -316,7 +332,7 @@ function relatedFrom(fm: Frontmatter): RelatedRead {
  * keep their place in insertion order. Undefined when no span is overwritten
  * or the text does not re-parse.
  */
-function markedValue(parsed: { text: string; offset: number }, spans: readonly Span[]): unknown {
+function markedValue(parsed: { text: string; offset: number }, spans: readonly Span[], key: string): unknown {
   const parts: string[] = [];
   let from = 0;
   spans.forEach((s, i) => {
@@ -325,7 +341,7 @@ function markedValue(parsed: { text: string; offset: number }, spans: readonly S
     parts.push(parsed.text.slice(from, parsed.offset + s.start), `[${i}]`);
     from = parsed.offset + s.end;
   });
-  return parts.length ? yamlMap(parts.join("") + parsed.text.slice(from))?.related : undefined;
+  return parts.length ? yamlMap(parts.join("") + parsed.text.slice(from))?.[key] : undefined;
 }
 
 /** The span `v` is: the marked value holds a mark (`[n]`) where the value

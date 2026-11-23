@@ -9,6 +9,7 @@ import { getDb } from "./client.ts";
 import {
   cleanupOldStaleVerdicts,
   getStaleVerdicts,
+  getStaleVerdictPages,
   STALE_VERDICT_RETENTION_DAYS,
   upsertStaleVerdict,
   type StaleVerdictInput,
@@ -29,6 +30,15 @@ const row = (over: Partial<StaleVerdictInput> = {}): StaleVerdictInput => ({
 });
 
 describe("wiki_stale_verdicts", () => {
+  test("PR 3: a `fixed` row writes, and the pages with one are listed per wiki and kind", async () => {
+    await upsertStaleVerdict(row({ kind: "fixed", verdict: "fixed", page: "notes/a.md", keyHash: "f1", edit: null, checkedBy: "reader" }));
+    await upsertStaleVerdict(row({ kind: "fixed", verdict: "fixed", page: "notes/b.md", keyHash: "f2", edit: null, checkedBy: "reader" }));
+    await upsertStaleVerdict(row({ kind: "passage", page: "notes/c.md", keyHash: "p1" }));
+    await upsertStaleVerdict(row({ wiki: "other", kind: "fixed", verdict: "fixed", page: "notes/d.md", keyHash: "f3", edit: null, checkedBy: "reader" }));
+    expect([...(await getStaleVerdictPages("w", "fixed"))].sort()).toEqual(["notes/a.md", "notes/b.md"]);
+    expect((await getStaleVerdicts("w", "fixed", ["f1"])).get("f1")).toMatchObject({ verdict: "fixed", checkedBy: "reader" });
+  });
+
   test("an upsert on the same (wiki, kind, key_hash) replaces the row; another kind or wiki is its own row", async () => {
     const first = await upsertStaleVerdict(row());
     expect(first).toMatchObject({ verdict: "stale", edit: { old: "in-flight", new: "shipped", home: "" }, checkedBy: "model:bot" });

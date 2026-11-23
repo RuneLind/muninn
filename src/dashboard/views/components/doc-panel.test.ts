@@ -10,6 +10,7 @@ import {
   DOC_PANEL_MORE_MENU_ID,
   DOC_PANEL_COPY_LINK_ID,
   DOC_PANEL_EXPORT_LINK_ID,
+  DOC_PANEL_DISCOVER_BTN_ID,
 } from "./doc-panel.ts";
 import { MARKED_CDN_SCRIPT } from "./doc-panel.ts";
 
@@ -55,6 +56,15 @@ describe("docPanelHtml askFollowUp", () => {
     expect(html).not.toContain("docPanelFollowUp");
   });
 
+  test("▶ Find on YouTube is opt-in: without the flag every other page's markup is unchanged", () => {
+    expect(docPanelHtml()).not.toContain(DOC_PANEL_DISCOVER_BTN_ID);
+    const everyOther = { askFollowUp: true, share: true, remove: true, exportPage: true, rerun: true, moreMenu: true, factcheck: true, findLinks: true };
+    expect(docPanelHtml(everyOther)).toBe(docPanelHtml({ ...everyOther, discover: false }));
+    expect(docPanelHtml(everyOther)).not.toContain(DOC_PANEL_DISCOVER_BTN_ID);
+    // Hidden until the client sees a youtube document.
+    expect(docPanelHtml({ discover: true })).toMatch(new RegExp(`id="${DOC_PANEL_DISCOVER_BTN_ID}" type="button" hidden`));
+  });
+
   test("the re-run control is a real MENU button, so a screen reader announces the popup", () => {
     // `aria-haspopup="menu"` (not the default `true`, which announces a plain
     // menu-less popup) plus the `aria-controls` pointing at the `role="menu"`
@@ -93,6 +103,41 @@ describe("docPanelHtml askFollowUp", () => {
   });
 });
 
+// A document's stored `url` is any scheme; "Open source" links only when
+// isSafeLinkHref allows it (arch review 2026-11-16, F70).
+describe("openDocPanel: the source link is gated", () => {
+  async function open(webUrl: string, fetchedUrl: string): Promise<{ before: string; after: string }> {
+    const els: Record<string, { innerHTML: string; textContent: string; href: string; classList: { add(): void; contains(): boolean } }> = {};
+    const el = (id: string) =>
+      (els[id] ??= { innerHTML: "", textContent: "", href: "", classList: { add() {}, contains: () => false } });
+    const doc = { getElementById: el, addEventListener: () => {}, body: { style: {} } };
+    let resolve!: () => void;
+    const done = new Promise<void>((r) => (resolve = r));
+    const fetchStub = () =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve({ id: "a/T.md", text: "x", url: fetchedUrl }) });
+    const openDocPanel = new Function("document", "fetch", "esc", "marked", `${docPanelScript()}; return openDocPanel;`)(
+      doc, fetchStub, (s: string) => String(s).replace(/"/g, "&quot;"), undefined,
+    ) as (c: string, d: string, u: string) => void;
+    openDocPanel("c", "a/T.md", webUrl);
+    const before = els.docPanelLinks!.innerHTML;
+    setTimeout(resolve, 10);
+    await done;
+    return { before, after: els.docPanelLinks!.innerHTML };
+  }
+
+  test("a javascript: url renders no link, before or after the fetch", async () => {
+    const r = await open("javascript:window.__pwn=1", "javascript:window.__pwn=1");
+    expect(r.before).toBe("");
+    expect(r.after).toBe("");
+  });
+
+  test("an https url links, before and after the fetch", async () => {
+    const r = await open("https://example.com/a", "https://example.com/b");
+    expect(r.before).toContain('href="https://example.com/a"');
+    expect(r.after).toContain('href="https://example.com/b"');
+  });
+});
+
 describe("docPanelHtml moreMenu", () => {
   const menuOf = (html: string) => {
     const start = html.indexOf(`id="${DOC_PANEL_MORE_MENU_ID}"`);
@@ -119,13 +164,14 @@ describe("docPanelHtml moreMenu", () => {
     expect(menu).toContain(DOC_PANEL_COPY_LINK_ID);
   });
 
-  test("the source link moves next to the title and Ask a follow-up is the primary action, last", () => {
+  test("Ask a follow-up, the primary action, and the source link follow the title in the DOM, as on screen", () => {
     const html = docPanelHtml({ askFollowUp: true, share: true, rerun: true, moreMenu: true });
     const at = (needle: string) => html.indexOf(needle);
-    expect(at('id="docPanelTitle"')).toBeLessThan(at('id="docPanelLinks"'));
+    expect(at('id="docPanelTitle"')).toBeLessThan(at('id="docPanelFollowUp"'));
+    expect(at('id="docPanelFollowUp"')).toBeLessThan(at('id="docPanelLinks"'));
     expect(at('id="docPanelLinks"')).toBeLessThan(at(`id="${DOC_PANEL_RERUN_BTN_ID}"`));
     expect(at(`id="${DOC_PANEL_SHARE_BTN_ID}"`)).toBeLessThan(at(`id="${DOC_PANEL_MORE_BTN_ID}"`));
-    expect(at(`id="${DOC_PANEL_MORE_BTN_ID}"`)).toBeLessThan(at('id="docPanelFollowUp"'));
+    expect(html.match(/id="docPanelFollowUp"/g)).toHaveLength(1);
     expect(html).toContain('class="doc-panel-followup doc-panel-primary" id="docPanelFollowUp"');
   });
 

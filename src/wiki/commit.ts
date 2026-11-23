@@ -38,6 +38,7 @@
 
 import path from "node:path";
 import { isWikiWriteArtifact } from "./lockfile.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { realpath, stat } from "node:fs/promises";
 import { createQueue } from "./queue.ts";
 import { getLog } from "../logging.ts";
@@ -121,6 +122,26 @@ export interface GitRunOptions {
  *  the per-repo commit queue forever. */
 export const GIT_NETWORK_TIMEOUT_MS = 60_000;
 
+/**
+ * Kill a `detached` child's whole process GROUP, not the pid. Measured on a
+ * fixture push through a hung `GIT_SSH_COMMAND`: `proc.kill(9)` alone left the
+ * ssh child alive (it holds the connection and the inherited pipes), so every
+ * timed-out 15-minute tick would leak one. `-pid` works because `detached` makes
+ * git its own group leader; the plain kill stays as the fallback for a platform
+ * where that did not take.
+ */
+export function killProcessGroup(proc: { pid: number; kill: (signal?: number) => void }): void {
+  try {
+    process.kill(-proc.pid, 9);
+  } catch {
+    try {
+      proc.kill(9);
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
 /** Spawn `git -C <cwd> <args…>` and collect its output. Never throws.
  *
  * `GIT_TERMINAL_PROMPT=0` (merged over the process env) makes any git op that
@@ -173,21 +194,7 @@ export async function runGit(
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expiry = new Promise<null>((resolve) => {
       timer = setTimeout(() => {
-        // Kill the GROUP, not the pid. Measured on a fixture push through a
-        // hung `GIT_SSH_COMMAND`: `proc.kill(9)` alone left the ssh child alive
-        // (it holds the connection and the inherited pipes), so every timed-out
-        // 15-minute tick would leak one. `-pid` works because the spawn above
-        // asked for `detached`, making git its own group leader; the plain kill
-        // stays as the fallback for a platform where that did not take.
-        try {
-          process.kill(-proc.pid, 9);
-        } catch {
-          try {
-            proc.kill(9);
-          } catch {
-            /* already exited */
-          }
-        }
+        killProcessGroup(proc);
         resolve(null);
       }, opts.timeoutMs);
     });
@@ -714,6 +721,46 @@ export async function listWikiSubtreeDirty(
     if (!(await pathExists(abs))) deletions.push(wikiRel);
   }
   return { dirty, deletions, trackedModified };
+}
+
+/**
+ * Does one wiki page have uncommitted changes (modified, staged, untracked or
+ * deleted)? `false` outside a git repo — nothing is committed there, so there
+ * is nothing to hide — and `null` when `git status` fails. A Stale check write
+ * asks this inside the write section and refuses a dirty page: its fix commit
+ * is not a page change (`STALE_CHECK_COMMIT_PREFIX`), so committing a hand
+ * edit under it would hide that edit from the last-change rule.
+ */
+export async function pageHasUncommittedChanges(wikiDir: string, relPath: string): Promise<boolean | null> {
+  const top = await gitToplevel(wikiDir);
+  if (!top) return false;
+  const canonicalWiki = await realpath(wikiDir).catch(() => wikiDir);
+  const r = await git(top, [...STATUS_READONLY_ARGS, "--porcelain", "-z", "-uall", "--", path.join(canonicalWiki, relPath)], { raw: true });
+  if (r.code !== 0) return null;
+  return r.stdout.length > 0;
+}
+
+/**
+ * A page's committed bytes whose sha256 is `sha256Hex` (a proposal's
+ * `base_hash`): HEAD's copy first, then each of the last `depth` commits that
+ * touched the page, newest first. Null outside git, or when no copy matches.
+ * A Stale check row whose page a dead pass already rewrote reads its "before"
+ * content here: HEAD while the write is uncommitted, an older commit once a
+ * sweep or the dead pass committed it.
+ */
+export async function committedPageWithHash(wikiDir: string, relPath: string, sha256Hex: string, depth = 20): Promise<string | null> {
+  const top = await gitToplevel(wikiDir);
+  if (!top) return null;
+  const canonicalWiki = await realpath(wikiDir).catch(() => wikiDir);
+  const abs = path.join(canonicalWiki, relPath);
+  const inRepo = path.relative(top, abs).split(path.sep).join("/");
+  const touched = await git(top, ["log", `-n${depth}`, "--format=%H", "--", abs]);
+  const revs = ["HEAD", ...(touched.code === 0 ? touched.stdout.split("\n").filter(Boolean) : [])];
+  for (const rev of revs) {
+    const shown = await git(top, ["show", `${rev}:${inRepo}`], { raw: true });
+    if (shown.code === 0 && sha256(shown.stdout) === sha256Hex) return shown.stdout;
+  }
+  return null;
 }
 
 /** The dirty-state snapshot of a wiki's repo for the `/wiki` Index-card badge. */

@@ -73,6 +73,12 @@ export interface SourceHealth {
    * run. The per-source recorder never sets it.
    */
   seeded?: boolean;
+  /**
+   * An `error` run in which part of the source's work still succeeded (the discovery
+   * watcher: some seeds failed a step, the others made shelves). Changes only the alert
+   * text, which must not claim the source produced nothing.
+   */
+  partial?: boolean;
 }
 
 /** The whole map for one watcher, keyed by source key (e.g. `tier2:llms`). */
@@ -94,14 +100,17 @@ export function recordOutcome(
   outcome: SourceOutcome,
   now: number,
   detail?: string,
+  opts: { partial?: boolean } = {},
 ): SourceHealth {
   if (outcome === "ok") {
-    return { outcome, at: now, consecutive: 0, lastOkAt: now };
+    // An `ok` keeps a detail only when one is passed (the discovery watcher's "1 of 20 searches failed").
+    return { outcome, at: now, consecutive: 0, lastOkAt: now, ...(detail ? { detail } : {}) };
   }
   return {
     outcome,
     at: now,
     ...(detail ? { detail } : {}),
+    ...(outcome === "error" && opts.partial ? { partial: true } : {}),
     consecutive: (prior?.consecutive ?? 0) + 1,
     ...(prior?.lastOkAt != null ? { lastOkAt: prior.lastOkAt } : {}),
   };
@@ -121,8 +130,8 @@ export function recordOutcome(
  * and letting id-dedup collapse them means an undelivered alert is simply re-emitted next
  * run, because the runner only records an id it managed to send.
  */
-export function shouldEscalate(h: SourceHealth): boolean {
-  return h.outcome !== "ok" && h.consecutive >= HEALTH_ESCALATE_AFTER;
+export function shouldEscalate(h: SourceHealth, escalateAfter: number = HEALTH_ESCALATE_AFTER): boolean {
+  return h.outcome !== "ok" && h.consecutive >= escalateAfter;
 }
 
 /**
@@ -139,10 +148,15 @@ export function shouldEscalate(h: SourceHealth): boolean {
  *
  * `lastOkAt` is the episode discriminator (the moment the source was last healthy);
  * `never` covers a source that has never succeeded.
+ *
+ * The bucket counts from the recorder's own threshold (`escalateAfter`, 3 unless the
+ * watcher passes `runEscalateAfter`'s 1 for a weekly row), as `runHealthAlertId` does:
+ * dividing by 3 on a row escalating at 1 crosses zero at consecutive 3 and fires an
+ * undesigned second alert.
  */
-export function healthAlertId(watcherName: string, key: string, h: SourceHealth): string {
+export function healthAlertId(watcherName: string, key: string, h: SourceHealth, escalateAfter: number = HEALTH_ESCALATE_AFTER): string {
   const episode = h.lastOkAt ?? "never";
-  const bucket = Math.floor((h.consecutive - HEALTH_ESCALATE_AFTER) / HEALTH_RE_ESCALATE_EVERY);
+  const bucket = Math.floor((h.consecutive - escalateAfter) / HEALTH_RE_ESCALATE_EVERY);
   return `watcher-health:${watcherName}:${key}:${episode}:${bucket}`;
 }
 
@@ -187,12 +201,18 @@ export function buildHealthAlerts(
   watcherName: string,
   map: SourceHealthMap,
   now: number,
+  escalateAfter: number = HEALTH_ESCALATE_AFTER,
 ): WatcherAlert[] {
   const alerts: WatcherAlert[] = [];
   for (const [key, h] of Object.entries(map)) {
-    if (!shouldEscalate(h)) continue;
+    if (!shouldEscalate(h, escalateAfter)) continue;
     const hours = h.lastOkAt == null ? null : Math.round((now - h.lastOkAt) / 3_600_000);
-    const since = hours == null ? "never succeeded" : `no successful run in ${hours}h`;
+    // A partial failure did produce data this run: no "no successful run" claim, no "not producing data".
+    const since = h.partial
+      ? "part of the last run still succeeded"
+      : hours == null
+        ? "never succeeded"
+        : `no successful run in ${hours}h`;
     log.error("Watcher \"{name}\": source {key} unhealthy — {n} consecutive {outcome} ({detail})", {
       name: watcherName,
       key,
@@ -201,7 +221,7 @@ export function buildHealthAlerts(
       detail: h.detail ?? "no detail",
     });
     alerts.push({
-      id: healthAlertId(watcherName, key, h),
+      id: healthAlertId(watcherName, key, h, escalateAfter),
       source: HEALTH_ALERT_SOURCE,
       sender: "Watcher health",
       subject: `${watcherName}: ${key} ${h.outcome}`,
@@ -209,7 +229,9 @@ export function buildHealthAlerts(
         `⚠️ **Watcher health** — \`${watcherName}\` source \`${key}\` has been **${h.outcome}** ` +
         `for ${h.consecutive} consecutive run(s) (${since}).` +
         (h.detail ? `\n_${h.detail}_` : "") +
-        `\nThe watcher itself is running fine — this source alone is not producing data.`,
+        (h.partial
+          ? `\nThe watcher itself is running fine — this source failed for part of its work.`
+          : `\nThe watcher itself is running fine — this source alone is not producing data.`),
       urgency: "medium",
     });
   }
@@ -228,8 +250,8 @@ export function buildHealthAlerts(
  * never break the path it observes.
  */
 export interface SourceHealthRecorder {
-  /** Record this run's outcome for one source. */
-  mark(key: string, outcome: SourceOutcome, detail?: string): void;
+  /** Record this run's outcome for one source; `partial` marks an `error` in which part of the work succeeded. */
+  mark(key: string, outcome: SourceOutcome, detail?: string, opts?: { partial?: boolean }): void;
   /** Carry a source's prior record forward unjudged (this run couldn't assess it). */
   carry(key: string): void;
   /**
@@ -243,7 +265,13 @@ export async function openSourceHealth(
   watcherId: string,
   watcherName: string,
   now: number = Date.now(),
+  /**
+   * Failed runs before the alert. Default 3; a caller passes `runEscalateAfter(effectiveCadenceMs(w))`
+   * (`run-health.ts`) to share run health's rule, which gives a daily-or-slower row 1.
+   */
+  opts: { escalateAfter?: number } = {},
 ): Promise<SourceHealthRecorder> {
+  const escalateAfter = opts.escalateAfter ?? HEALTH_ESCALATE_AFTER;
   let prior: SourceHealthMap = {};
   try {
     const snap = await getWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY);
@@ -257,15 +285,15 @@ export async function openSourceHealth(
 
   const next: SourceHealthMap = {};
   return {
-    mark(key, outcome, detail) {
-      next[key] = recordOutcome(prior[key], outcome, now, detail);
+    mark(key, outcome, detail, markOpts) {
+      next[key] = recordOutcome(prior[key], outcome, now, detail, markOpts);
     },
     carry(key) {
       const p = prior[key];
       if (p) next[key] = p;
     },
     async finish() {
-      const alerts = buildHealthAlerts(watcherName, next, now);
+      const alerts = buildHealthAlerts(watcherName, next, now, escalateAfter);
       try {
         await setWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY, next);
       } catch (err) {

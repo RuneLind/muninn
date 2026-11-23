@@ -1,8 +1,16 @@
 # Gardener — Wiki Page Drafting Pipelines
 
-Three drafting pipelines feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
+Three drafting pipelines (and two mechanical fix kinds, lint and Stale check) feed the human review gate at `/wiki/gardener` (approve/reject, CAS). Watcher-side scheduling detail: `src/watchers/CLAUDE.md`.
 
 The gate's write verbs — `proposals/:id/{approve,reject}`, `proposals/group/:groupKey/{approve,reject}`, `lint-proposals`, the four backlog prune verbs, the five backlog run verbs (`backlog-{run,reset,cancel,recover,dismiss}`) and `source-draft-{run,backlog,doc}` — answer **415** to anything that is not `application/json` (`dashboard/routes/json-request.ts`), so a bodyless client sends `{}`. A `text/plain` or bodyless POST is a CORS *simple* request; the gate is defence in depth beside the origin guard (`src/auth/origin.ts`), which refuses a cross-site page in every mode. `dashboard/routes/write-route-json-gate.test.ts` walks every write route `createDashboardRoutes` registers and requires that 415 unless the route is on its reasoned allowlist, so a new write route starts red there.
+
+**Batch review (2026-11-11).** The gate files every ungrouped draft into one of three sections (`sectionOf`, `wiki-gardener-batch.ts`): "AI and tech" (outside `life/`), "Life" (`life/`, no film/TV tag) and "Entertainment — films and TV" (`category` on the listing, `proposalCategory` in `category.ts`: a `life/` target AND a film/TV tag in frontmatter `tags:`, inline, comma or block list; `documentary` and a plain `streaming` are not on the list). A wiki with no `life/` row in any status (`hasLifeDomain`) has one section, "Drafts", and no section chips. The chip row (All sections · AI · Life · Entertainment) shows one section alone; each chip counts the drafts the status and kind filters let through. Each button names its section and what it takes ("Approve 20 of 22 AI drafts"; Entertainment adds Reject all); a batch acts on one section only (client `runBatch`). A batch has no route of its own: it posts the per-card `approve`/`reject` route one card at a time, so every guard above still runs, and each approve still commits and reindexes on its own. The rules, each from a review finding:
+
+- **Planned at the click, narrowed never widened.** The batch takes the cards on screen; a fresh listing read first only drops ids (settled elsewhere, now `drifted` or locked, gone), never adds one the reviewer did not see, and never replaces local rows (`narrowBatch`).
+- **Approve all leaves for a human:** a fact-check-locked card, a drifted one, both cards of a same-`target_path` pair, and a create draft whose page an applied row wrote at or after the draft's `createdAt` ("page written since drafting"). An older applied row does not block: the page was deleted or moved since. A row applied in this tab carries `resolvedAt: null` (later than any draft), never the browser clock.
+- **It stops on a 5xx, an `error` outcome, a read-only 403 or a network failure** (`batchStopReason`), since an `error` answer has already turned its row terminal and most of those are faults every later card shares; a 409 or `stale` is the card's own and the batch moves on. Stop ends it after the card in flight.
+- **One painter per card.** Every card's lock and note come from `paintCardState` in `render()`, read off `actsInFlight`, `redraftsInFlight`, `batchQueued` and `cardNotes`; `act()`, `redraft()` and `runBatch()` change that state and re-render. A batch re-renders after each card, so a painter that wrote to the element captured at click time left a failed click stuck on "Applying…".
+- **The result belongs to its view:** a filter change drops a finished batch's result, and a running one's when it ends.
 
 ## Wiki gardener (weekly)
 
@@ -10,7 +18,7 @@ The `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile)
 
 Drafts are contained at persist + apply time: unresolvable body wikilinks de-link to bold (`containBodyLinks`), `sources:` is sanitized to http(s)-only with a pending-ingestion callout for URL-less docs.
 
-The index one-liner is truncated at a WIKILINK-SAFE boundary (`truncateOneLiner`, `wire.ts`): a bare 119-char slice can land inside `[[Some Page]]` and ship a dangling `[[`, which a line-based `\[\[([^\]]+)\]\]` scan then matches across the newline, consuming the NEXT entry's link. Truncate, never repair — appending `]]` invents a target the summary never asserted, and `insertIndexLine`'s idempotence check reads `[[Title]]` substrings. The **dangling-open cut runs regardless of length**: the invariant is "a one-liner never contains a partial link", not "truncation never creates one", and the rationale is model-written — a 40-char one carrying a bare `[[` or a nested `[[Foo [[Bar]]` shipped verbatim past a `length <= ONE_LINER_MAX` early return, whereupon the linter reported the gardener's own write. Three rules: the backup goes to the FIRST dangling opener via the SHARED `firstDanglingWikilinkOpen` (`src/wiki/store.ts`), which the linter's `index-truncation` check also runs — one predicate, so the writer and the detector cannot disagree about what "dangling" means (they DO differ on normalization: the lint strips inline code spans first, the writer decides on raw text — the writer is the strict side, so a rationale quoting `` `[[` `` in a code span is over-cut rather than ever shipping debris); the cut is by code point (`truncateUnits`), since a bare `slice` through an emoji writes a lone surrogate into `index.md`; and a rationale that degenerates under `ONE_LINER_MIN` after the safe cut falls back to the first body paragraph, which is why that source choice happens AFTER truncation. Measurements + the detector: **`src/watchers/CLAUDE.md`** owns those numbers.
+The index one-liner is truncated at a WIKILINK-SAFE boundary (`truncateOneLiner`, `wire.ts`): a bare 119-char slice can land inside `[[Some Page]]` and ship a dangling `[[`, which a line-based `\[\[([^\]]+)\]\]` scan then matches across the newline, consuming the NEXT entry's link. Truncate, never repair — appending `]]` invents a target the summary never asserted, and `insertIndexLine`'s idempotence check reads `[[Title]]` substrings. The **dangling-open cut runs regardless of length**: the invariant is "a one-liner never contains a partial link", not "truncation never creates one", and the rationale is model-written — a 40-char one carrying a bare `[[` or a nested `[[Foo [[Bar]]` shipped verbatim past a `length <= ONE_LINER_MAX` early return, whereupon the linter reported the gardener's own write. Three rules: the backup goes to the FIRST dangling opener via the SHARED `firstDanglingWikilinkOpen` (`src/wiki/store.ts`), which the linter's `index-truncation` check also runs — one predicate, so the writer and the detector cannot disagree about what "dangling" means (they DO differ on normalization: the lint strips inline code spans first, the writer decides on raw text — the writer is the strict side, so a rationale quoting `` `[[` `` in a code span is over-cut rather than ever shipping debris); the cut is by code point (`truncateUnits`), since a bare `slice` through an emoji writes a lone surrogate into `index.md`; and a rationale that degenerates under `ONE_LINER_MIN` after the safe cut falls back to the first body paragraph, which is why that source choice happens AFTER truncation. Measurements + the detector: the `index-truncation` block in **`src/watchers/reference/notes.md`** owns those numbers.
 
 Requires `wikiDir`; per-bot `gardener` config block; seed via `scripts/setup-wiki-gardener.ts`.
 
@@ -206,7 +214,7 @@ and CASes each reached row through its own terminal verb.
 ⚠️ **Every row left in `approved` goes back to `draft`** — the ones the apply
 never reached, and a `forbidden` one, which it reached and refused. The first cut
 left them `approved` and called that "re-runnable by a second click", and nothing
-rendered the click: the gate draws Accept/Reject on `draft` and on nothing else,
+rendered the click: the gate drew Accept/Reject on `draft` and on nothing else,
 so after a stop the card showed one chip reading `applied`, three pages, and no
 buttons at all. The second cut reverted only the UNREACHED ones plus the stopped
 row, which strands the read-only refusal's other rows: that path hands back a
@@ -217,15 +225,15 @@ both read-only refusals the route makes fire before the apply is ever called.
 
 Four more rules on that route, each a measured defect:
 
-- **The gate refuses a decision in flight and SKIPS what is settled.** An
-  `approved` row (another apply mid-flight over these pages) or a `rejected` one
-  (a dismissal) refuses the request, 409
-  `{outcome: "mixed", error: "an approved or rejected row blocks the group",
-  statuses}` — the message names what blocks, since `applied` and `stale` rows
-  are not draft either and are skipped rather than refused;
-  `applied` and `stale` rows are skipped and reported as
-  `skipped: {applied: n, stale: n}`, and the `draft` rows are approved and
-  applied. A group with no `draft` row left answers 409
+- **The gate refuses a decision in flight and SKIPS what is settled.** Another
+  Accept or Dismiss of the group in flight (`groupVerbsInFlight` in this
+  process, checked and set with no `await` between; the group's DB lease in
+  any process) answers 409 `{outcome: "mixed",
+  error: "another Accept or Dismiss of this group is in flight"}`, and a
+  `rejected` row (a dismissal) 409 `{outcome: "mixed", error: "a rejected row
+  blocks the group", statuses}`; `applied` and `stale` rows are skipped and
+  reported as `skipped: {applied: n, stale: n}`, and the `draft` rows are
+  claimed and applied. A group with no `draft` or `approved` row left answers 409
   `{outcome: "nothing-to-apply", statuses}` — a different fact and a different
   remedy — and **that check runs FIRST**, so an all-`rejected` group is reported
   as settled rather than as blocked: with no draft to block there is no other
@@ -294,9 +302,16 @@ rows (`listLintGroupRowsByWiki` — rows, not keys, because three different
 questions are asked of them):
 
 1. **SELF-HEAL first — and it runs on a pass with NOTHING to propose.** Every
-   live `draft` group whose key no CURRENT finding mints is marked `stale`
-   (`markLintGroupStale`; `approved` rows are mid-apply and the apply's own
-   terminal CAS owns them). The weekly watcher therefore calls the seeder
+   live group whose key no CURRENT finding mints is retired
+   (`retireVanishedLintGroup`, F35): it claims the group's lease, settles a row
+   whose page already IS its draft `applied` (logged and committed, as Dismiss
+   does) and marks every other live row, `draft` and stranded `approved` alike,
+   `stale`. Its lease is not renewed, so every write is fenced on it (next
+   section, cells S1–S6): a lease found gone answers `held` with its
+   unsettled rows live, and a `log.md` entry it cannot write leaves the
+   whole group live for the next pass. A group an Accept
+   or Dismiss holds is left whole and keeps its key and pages (`held`); the
+   next pass retires it. The weekly watcher therefore calls the seeder
    whenever the wiki is writable, before its own clean-wiki return, rather than
    short-circuiting on `fixable.length === 0`: a wiki whose fixable findings
    have all been fixed is EXACTLY the state where every live group is
@@ -333,7 +348,142 @@ A finding every page of which REFUSES the edit is counted once per pass
 (`refused`), not once per page.
 
 Single-row Approve/Reject keep working unchanged for rows with `group_key IS
-NULL`, which is every other kind.
+NULL`, which is every other kind, and answer 409 `{group: true, groupKey}` for a
+grouped row (F35): a group is accepted or dismissed whole, and a single-row verb
+honoured neither the in-flight set nor the rest of the group.
+
+### No row stays `approved` without a verb (F35, arch review 2026-11-16)
+
+An Accept that threw after its claim, or a restart mid-apply, left rows
+`approved`: Accept and Dismiss both 409'd, the card showed no buttons, and the
+rows kept holding their pages against Done, Close and Stale Apply until someone
+ran SQL. Now:
+
+- **Each verb holds the group's lease, and with it held an `approved` row is
+  stranded, so both verbs take it.** The lease is a DB row
+  (`wiki_proposal_group_leases`, migration 093, `claimWikiProposalGroupLease`):
+  one statement inserts it or takes one whose `expires_at` passed (TTL 120 s,
+  renewed every 30 s while the verb runs, deleted by token in its `finally`). It
+  holds across processes: `bun run dev:chat` runs the same routes on the same DB
+  and wikis, and a per-process set let a Dismiss there reject rows an Accept here
+  was writing, which then landed as `rejected`. A verb that cannot claim answers
+  the in-flight 409. A dead process strands its rows for at most the TTL. Accept
+  claims `draft` and stranded rows; Dismiss rejects both
+  (`rejectWikiProposalGroup` takes `approved`), so a half-stranded group settles
+  whole, never as `approved` + `rejected`. The card shows Accept and Dismiss
+  while any row is `draft` or `approved`, and "Accept all N" counts both
+  (`groupAcceptCount`).
+- **Dismiss settles a written row only after logging it, inside the write
+  section.** A live row whose page already IS its draft is settled `applied`,
+  not `rejected`, and named in `alreadyWritten`. `settleWrittenGroupRows`
+  (`apply.ts`) reads each page, compares, logs the pages still uncommitted
+  and runs the settle CAS, all in ONE `runWikiWriteExclusive` section; the
+  commit runs right after it, and only then are the other rows rejected. A
+  queued writer cannot change a page between the read and the settle.
+- **Every write a lease holder makes is fenced on its lease.** Each row CAS
+  takes the lease (`GroupLeaseRef`) and checks it in the same statement
+  (`leaseFence`: `token` matches and `expires_at > now()`): the claim, the
+  terminal marks, the revert, the settle, the reject, the self-heal's
+  `stale`. The other writes ask `held()` (a DB check) first: each page write,
+  the log entry, each Stale check verdict write. An expired lease is never
+  renewed (`renewWikiProposalGroupLease` requires `expires_at > now()`), so a
+  lease found gone stays gone; a renewal that answers false stops the timer.
+- **The log entry and the commit pass ONE gate** (`logGroupPages`, F35 class
+  check): inside the write section, the lease is checked right before the
+  append, and the append must succeed (`writeGroupLogEntry` answers false for
+  an unreadable `log.md` and for an append that throws). Either failing throws
+  (`GroupLeaseLostError`, `GroupLogWriteError`) with nothing logged and
+  nothing committed; once the entry is written the commit always runs. An
+  Accept marks a row `applied` only when its page was logged (`onLogged`) or
+  needed no entry (a no-op over a committed page, `markableApplied`); an
+  unlogged written row goes back to `draft`. The single-row apply keeps its
+  best-effort log (`applyInner` step 4): its re-run is a no-op that logs
+  nothing, so a row left live there would never be logged either.
+- **An Accept that loses a terminal CAS says so.** A `markProposal` or
+  revert that moves nothing (another verb moved the row, or the lease lapsed,
+  while this one applied it) answers 409 `{outcome: "conflict", lost,
+  applied, …}`, never `applied`. After the lease is claimed the Accept's
+  re-read refuses (`mixed`, rejected row) a group a Dismiss elsewhere settled
+  between its first read and the claim.
+- **Every claimed row is protected from before the claim.** On any throw, the
+  Accept's `finally` marks `applied` a row whose page landed and was logged
+  (`onRowOutcome` + `onLogged`, so a throw after the write still knows), and
+  puts every other claimed row back to `draft`, an unlogged written one
+  included (R3; a later Dismiss settles it `applied`, never `rejected`). A
+  Stale check group writes its `fixed` verdicts before the status marks.
+- **The apply is safe to re-run.** A page an earlier pass wrote is a no-op
+  (2a); when it carries uncommitted changes, this pass stages it and names it
+  in its entry (`recovered`). That is the path every lost-lease or failed-log
+  cell below relies on. A Stale check verdict carry's before-copy is the
+  committed copy matching the row's `base_hash` (`committedPageWithHash`).
+
+#### The group verbs × lease × log table
+
+Rules: **R1** a holder logs and commits a written page only while its lease
+holds, checked right before the entry; found gone, it logs and commits
+nothing, and the next verb logs and commits the page once through
+`recovered`/`alreadyWritten`. **R2** 200 only when every row it answered for
+reached `applied`/`rejected`/`stale`/`error` in this call; a lease lost after
+the claim answers 409 `conflict`. **R3** no row `applied` over an unlogged
+page, no unlogged page committed: a log failure answers 500 `logFailed` with
+the rows live. **R4** a lease gone at a verdict write is a 409 like any other.
+Every cell ends with each written page logged once and committed once, now or
+after the next verb. Pinned in `wiki-gardener-routes.test.ts` («F35 class
+check», A* and D* by id) and `src/db/wiki-proposals.test.ts` (S*).
+
+| Cell | Verb · lease found gone · log | Rows after | Log/commit now | Answer |
+|---|---|---|---|---|
+| A1 | Accept · never · writable or missing (created) | `applied` | 1/1 | 200 `applied` |
+| A2/A3 | Accept · never · unreadable / append throws | `draft` | 0/0, next Accept 1/1 (`recovered`) | 500 `logFailed`, `unlogged` |
+| A4 | Accept · before the claim | unchanged | 0/0 | 409 `conflict` (claimed no row) |
+| A5 | Accept · before the claim, rows already `approved` | unchanged | 0/0 | 409 `conflict`, `applied: []` |
+| A6 | Accept · after the claim, before the first write | `approved` (or the competitor's) | 0/0 | 409 `conflict`, `applied: []` |
+| A7 | Accept · between page writes, no competitor | `approved` | 0/0, next Accept 1/1 | 409 `conflict`, `unlogged` |
+| A8 | Accept · between page writes, a Dismiss takes the group | Dismiss: `applied` + `rejected` | Dismiss 1/1, Accept 0/0 | 409; Dismiss 200 `alreadyWritten` |
+| A9 | Accept · after the last write, at the log check | `approved` | 0/0, next Accept 1/1 | 409 `conflict`, `unlogged` |
+| A10/A12 | Accept · after the log check (append, commit or marks) | `approved` | 1/1; next verb settles, logs nothing | 409 `conflict`, `lost` |
+| A11 | Accept (Stale check) · at the `fixed` verdict write | `approved` | 1/1, no verdict | 409 `conflict` |
+| D1–D3 | Dismiss · never · no written row / written committed / written uncommitted | `applied` + `rejected` | 0/0 / 0/0 / 1/1 | 200 `rejected` |
+| D4 | Dismiss · never · unreadable / append throws | unchanged | 0/0, next verb 1/1 | 500 `logFailed` |
+| D6 | Dismiss · after the claim, before the entry | unchanged | 0/0, next verb 1/1 | 409 `conflict` |
+| D7 | Dismiss · after the entry, before the settle CAS | unchanged | 1/1; next verb settles, logs nothing | 409 `conflict` |
+| D8 | Dismiss · between the settle and the reject | `applied` + live | 1/1 | 409 `conflict`, `alreadyWritten` |
+| D9 | Dismiss (Stale check) · at the verdict write | `applied`/`rejected` | as D1–D3, no verdict | 409 `conflict`, `verdictsWritten: false` |
+| S1 | self-heal · never | `applied` (written) + `stale` | 1/1 for uncommitted pages | `held: false` |
+| S2 | self-heal · never · unreadable / append throws | unchanged | 0/0 | throws `GroupLogWriteError`; next pass retries |
+| S3 | self-heal · claim refused | unchanged | 0/0 | `held: true` |
+| S4 | self-heal · before the entry | unchanged | 0/0 | `held: true` |
+| S5 | self-heal · after the entry, before the settle CAS | unchanged | 1/1; next pass settles, logs nothing | `held: true` |
+| S6 | self-heal · before the `stale` CAS | settled rows `applied`, rest live | as S1 | `held: true` (rows moved < live rows) |
+
+A competitor that takes the group after expiry is its own row from its own
+start: it sees the pages on disk and logs them through its `recovered` path.
+"After the log entry, before the commit" is not a separate cell: the commit
+is not checked (a logged page that stayed uncommitted would be logged again by
+the next verb), so a loss there surfaces at the marks (A10) or the settle
+(D7/S5). Residuals: the check is not atomic with the append, so a lease that
+expires in that gap (its renewals failing for 90 s) lets one entry land, and
+the competitor may log the page again; a commit that fails after the entry
+leaves a logged, uncommitted page the next verb logs a second time; a dead
+pass's page the sync loop or the sweeper committed first gets no group log
+entry; a wiki outside git recovers nothing.
+
+## Stale check fixes (`kind: "stale-check"`, `src/gardener/stale-proposals.ts`)
+
+The fifth thing that fills the gate, plan `muninn-wiki-drift-check` PR 3 (D9, D19, D20, D28). The reader's **Send to Gardener** on the STALE tab turns one drafted edit into a card: one card per CHANGED page (the page whose tab sent it, `stale_meta.changed`), one row per page the edits write, one Accept (`applyWikiProposalGroup`). No model call anywhere on this path.
+
+- **Keys.** Topic `stale-check:<changed>:<page>:<12 hex of the row's edit list>`, group `stale-check:<changed>:<n>`. `n` is one past the highest number ever used for that changed page, in any status, so a key never names two groups.
+- **`stale_meta` (migration 086)** carries `changed`, the row's `edits` (each `{kind, page, link, old, text, variant, reason}`) and `supersedes`. A column, not `lint_meta`, whose shape the lint readers own.
+- **Send never edits an open group (D20).** `supersedeStaleCheckGroup` runs ONE transaction, serialized per wiki on the page-claims lock (`lockWikiPageClaims`, `pg_advisory_xact_lock` on `wiki-page-claims:<wiki>`): the live rows for `changed` must be exactly the ones the redraft read and all `draft` (`conflict` otherwise), no target page may be held by a live page holder outside them (`held`; a holder is a live grouped row of any kind or a live ungrouped `update` row, `listLivePageHolders`), then group n goes `stale` (D28, the status a retired lint group takes, under that filter) and group n+1 is inserted. Each row is redrafted with no model call: its edits re-applied to the page's CURRENT bytes (`applyStaleEdits`, which recomputes the windows on the live file, `src/wiki/CLAUDE.md` «Stale check — the fix paths»), `base_hash` the sha256 of those bytes. An old edit that no longer places is dropped and reported (`dropped`); the new edit not placing refuses the Send. Two edits to one page merge into one row; a fix already on the live card refuses («already in review»); a group with an `approved` row (mid-apply) refuses.
+- **Mechanical, like `lint` (`isMechanicalKind`).** The gate listing skips the preview, the unresolved-link scan and the wiring preview; the apply skips `stripOwnedAliases`, `containDraftBodyLinks` and the trailing-newline normalisation, so a pre-existing dangling wikilink on the page survives an Accept byte-exact (pinned in `apply.test.ts` and `e2e/wiki-stale-fix.spec.ts`); `catalogPage` hard-skips the kind; rows carry `related_pages: []`, so the wire stage adds no See-also.
+- **Accept** runs `applyWikiProposalGroup`: one write section, every row's pre-write checks first. `checkBeforeWrite` adds one for this kind: after the CAS, the row's edits are placed again on the live bytes and must give the stored draft, else `stale` («the drafted edits no longer place»). ONE `log.md` entry, headed `update | Stale check: <changed>` (`draftTitle` names the changed page, never the linking page's title or the topic key), `- via stale-check, N pages: …`; ONE commit, `[stale-check] fix: N pages (<group key>)` (`groupCommitMessageFor`'s kind argument); a single row's subject is `[stale-check] fix: <page>`. After it, the route writes a `fixed` verdict on each written linking page's new passage (D29, `writeFixedVerdicts`, best effort) and answers `fixed: n`.
+- **A stopped Accept** (`outcome: "stopped"`) still writes `fixed` for the rows it wrote before the stop, and answers `notLanded`: each row that wrote nothing, with the status it now has and its edits. A row whose write failed (`writeFailed`: its pre-write checks passed and the write threw) goes back to `draft`, not `error`: `error` renders no diff and no verb, and a later Send carries only live rows, so its edits would be lost. A pre-write refusal (a linking page deleted or moved since Send) keeps `error`, so the next Accept skips it and applies the other rows. A lint row keeps `error`. A failed commit does not hold back the `fixed` verdicts or their carry: the keys hash the page content, so they are the same before and after the commit, as on the single-row Apply.
+- **Dismiss** (`proposals/group/:groupKey/reject`) turns the card's edits into «kept as written» verdicts (`keptAsWritten`): a reader `true` row on each key, derived from the pages as they are now, whose stored verdict still carries the edit (`edit.old` equal), so the STALE tab reads Still true and Check skips it. A key that moved since the Send (the changed page or the linking passage changed, the target plan's status moved), a verdict re-judged with another edit, or a model row the 90-day cleanup removed gets no row: a reader row never ages out and a model upsert never overwrites it, so one there would claim a pair nobody judged. A fix carries the stored verdict to the new key (`carryPassageVerdicts`), so a fix alone skips nothing. Answers `kept: n, keptSkipped: m`.
+- **The gate (D28).** A kind filter beside the status chips (All kinds · Stale check · Lint · Drafted pages; `kindMatches`); the card tag reads STALE CHECK (`badge-stale-check`, CSS upper-case) — «Stale check», because `stale` is already a status chip; a superseded group's card says «replaced by group n+1» (`replacedByGroup` on the listing, from group n+1's `supersedes`).
+
+**The lint seeder's read is split (D19).** `listLintGroupRowsByWiki` returns every grouped row with its `kind`. The self-heal and the blocked keys read `lint` rows only, so a lint run never retires or blocks a Stale check card; the page claim reads every live grouped row of any kind, so a lint run skips — as `claimed` — a finding on a page a Stale check card holds. Send and Apply read a wider claim (`listLivePageHolders`): every live grouped row, plus every live ungrouped `update` row (a wiki-gardener concept/entity update, a consolidation update), since a write to the page would stale it; an ungrouped `create` row holds nothing. The lint seeder's own claim is unchanged.
+
+**Send and the lint seed serialize per wiki.** The seeder reads its claims once, then builds rows from the pages; a Send could commit a page in between. `insertLintGroupRows` therefore inserts one finding's rows in ONE transaction under the page-claims lock Send takes, re-checks lint's claim rule there, and inserts nothing when a live grouped row now holds a page (counted `claimed`). The lock is transaction-scoped: no lock is held across file reads, model or network calls. Pinned in `src/db/wiki-proposals.test.ts` («a Send racing a lint seed»): a barrier test, and two tests that read `pg_locks` to prove each writer waits on the other.
 
 ## Stem collisions — the apply path refuses, at approve time
 
@@ -443,7 +593,7 @@ burned the one collision retry and refused human-chosen titles. Reserved basenam
 (`index`/`log`/`CLAUDE`) are exempt, and every stem comparison folds through NFC
 (`stemKey`) so an NFD filename on macOS is not invisible to an NFC query.
 
-The linter's `stem-collision` check (`src/watchers/CLAUDE.md`, which OWNS the census
+The linter's `stem-collision` check (`src/watchers/reference/notes.md`, which OWNS the census
 numbers for both shapes) is the continuous regression guard — with one deliberate
 scope split, stated on both ends: the guard counts `.html`, the lint does not,
 because the guard refuses a write that would create a shadow while the lint reports

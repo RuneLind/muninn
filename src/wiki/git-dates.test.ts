@@ -19,6 +19,8 @@ import {
   __setClassifyBudgetForTest,
 } from "./git-dates.ts";
 import { setFrontmatterScalar } from "../plans/frontmatter.ts";
+import { commitMessageFor, groupCommitMessageFor } from "../gardener/apply.ts";
+import type { WikiProposal } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 /** `%at` is seconds; the maps are ms. */
@@ -904,6 +906,36 @@ test("parseGitLog: a sweep records no touch, and a bare `%at` log records none a
   const bare = parseGitLog([`${at("2026-05-01T10:00:00Z")}`, "M\tplans/one.md"].join("\n"));
   expect(bare.touched.get("plans/one.md")).toBe(ms("2026-05-01T10:00:00Z"));
   expect(bare.touches.size).toBe(0);
+});
+
+test("parseGitLog: a Stale check fix commit records no touch, as a sweep does; other subjects still count", () => {
+  const H4 = "d".repeat(40);
+  const single = commitMessageFor({ kind: "stale-check", targetPath: "plans/one.md" } as WikiProposal);
+  const group = groupCommitMessageFor("stale-check:hub.md:2", 2, "stale-check");
+  const { touched, touches, created } = parseGitLog(
+    [
+      `${H1} ${at("2026-05-01T10:00:00Z")}\tseed`,
+      "A\tplans/one.md",
+      "A\tplans/two.md",
+      `${H2} ${at("2026-06-01T10:00:00Z")}\t[stale-check] apply: plans/one.md`,
+      "M\tplans/one.md",
+      "M\tlog.md",
+      `${H3} ${at("2026-07-01T10:00:00Z")}\t${group}`,
+      "M\tplans/one.md",
+      "M\tplans/two.md",
+      `${H4} ${at("2026-07-02T10:00:00Z")}\t${single}`,
+      "M\tplans/two.md",
+      `${H1.replace(/a/g, "e")} ${at("2026-08-01T10:00:00Z")}\t[lint] fix: plans/two.md`,
+      "M\tplans/two.md",
+    ].join("\n"),
+  );
+  expect(touched.get("plans/one.md")).toBe(ms("2026-05-01T10:00:00Z"));
+  expect(touched.get("plans/two.md")).toBe(ms("2026-08-01T10:00:00Z"));
+  expect(touched.has("log.md")).toBe(false);
+  expect(touches.get("plans/one.md")!.map((r) => r.commit)).toEqual([H1]);
+  expect(touches.get("plans/two.md")!.map((r) => r.commit)).toEqual([H1, H1.replace(/a/g, "e")]);
+  // A fix still dates nothing it creates: creation is first appearance.
+  expect(created.get("log.md")).toBe(ms("2026-06-01T10:00:00Z"));
 });
 
 /** Commit everything staged at a fixed author date. */

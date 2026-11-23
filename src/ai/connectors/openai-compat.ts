@@ -13,7 +13,7 @@ import { loadToolsForBot, type OpenAITool } from "./openai-compat-tools.ts";
 import { createAuthorizer, requestWithRefresh } from "./openai-compat-auth.ts";
 import { optionalEnvInt } from "../../config.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
-import { refuseFencedSurface } from "../tool-surface.ts";
+import { refuseFencedSurface, refuseMcpToolsSurface } from "../tool-surface.ts";
 
 const log = getLog("ai", "openai-compat");
 
@@ -37,6 +37,7 @@ export async function executePrompt(
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
   refuseFencedSurface("openai-compat", botConfig.toolSurface);
+  refuseMcpToolsSurface("openai-compat", botConfig.toolSurface);
   // The turn this call belongs to, CAPTURED HERE rather than read at the point
   // of use. This line runs inside the turn's own async chain, so it is exact;
   // a read from inside a tool-result handler is not, on any connector with a

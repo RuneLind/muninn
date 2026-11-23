@@ -728,7 +728,7 @@ export function captureChatOptFocus(
  *  bytes the server is about to discard.
  *
  *  Lives HERE rather than in either caller because BOTH escalation paths apply it
- *  and they no longer share a file: the one-click bar is `wiki-browser.ts`'s
+ *  and they no longer share a file: the one-click bar is `wiki-ask-controller.ts`'s
  *  `submitChatEscalate`, the dialog is `wiki-chat-options.ts`. Two copies of a cap
  *  that mirrors a server constant is exactly the pair that drifts. */
 export const CHAT_ESC_ANSWER_MAX = 32_000;
@@ -1090,7 +1090,8 @@ function declineNote(reason: DeclineReason): string {
  * DECLINED to answer, rendered in place of the ordinary "Continue in chat →"
  * button. Pure `reason → html` (no user content is interpolated, so nothing here
  * needs escaping) and it is what makes the hook derivable from turn state alone —
- * `wiki-browser.ts` holds only the wiring.
+ * the bar's slot and repaint live in `wiki-ask-controller.ts`, the decline click in
+ * `wiki-chat-options.ts`.
  *
  * The action is the direct-mode chat path: an honest failure is exactly the moment
  * to offer the bot its tools and memories instead of the wiki index, and the reader

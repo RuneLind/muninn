@@ -28,6 +28,8 @@
  * state-driven — a client-side array is re-rendered on every change. Uses the shared
  * esc() + openSummaryDoc() helpers (all summaries component scripts share one page scope). */
 
+import { isSafeLinkHref } from "../../../format/safe-link-href.ts";
+
 export function sumCandidatesStyles(): string {
   return `
     .candidates-section {
@@ -396,6 +398,8 @@ export function sumCandidatesHtml(): string {
 
 export function sumCandidatesScript(): string {
   return `
+    var candSafeHref = ${isSafeLinkHref.toString()};
+
     // Score band drives the pill color: ~0.9+ are headliners (auto-promoted), 0.7+
     // the mid-band worth a look, below that the long tail.
     function candidateScoreBand(score) {
@@ -491,7 +495,8 @@ export function sumCandidatesScript(): string {
       var shown = c.score.toFixed(2);
       var band = candidateScoreBand(parseFloat(shown));
       var scorePct = Math.round(Math.max(0, Math.min(1, c.score)) * 100);
-      var titleInner = c.url
+      // c.url is not http-gated upstream (anthropic watcher, x.ts's url fallback).
+      var titleInner = c.url && candSafeHref(c.url)
         ? '<a href="' + esc(c.url) + '" target="_blank" rel="noopener">' + esc(c.title) + '</a>'
         : esc(c.title);
       return '<div class="candidate-item" data-id="' + esc(c.id) + '"' +

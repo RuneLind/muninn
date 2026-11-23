@@ -503,3 +503,10 @@ describe("class check B: the caption, every row (table)", () => {
     expect(stepsFocus.stepItemCaption("`new`, `work`", [para("plain")])).toBe("`new`, `work`");
   });
 });
+
+test("F29: a node id spelling U+0001 is compared without it, as the reader draws it", () => {
+  const life = { ...LIFE, states: [{ id: "new\u0001", label: "new", lane: "main", col: 1 }] };
+  const f = new Map([["./s.lifecycle.json", { ok: true as const, text: JSON.stringify(life) }]]);
+  const md = ['<Steps src="./s.lifecycle.json">', "", "1. Opened `new`", "", "</Steps>", ""].join("\n");
+  expect(checkSteps({ relPath: "flows/page.mdx" }, md, f)).toEqual([]);
+});

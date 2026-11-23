@@ -1,6 +1,6 @@
 /**
  * The «Felles: N changed» client (`initFellesSync`) driven over a stubbed DOM
- * and a stubbed `fetch` — the repo has no browser test env, so this is the
+ * and a stubbed `fetch` — these tests do not use happy-dom, so this is the
  * `jira-entry.test.ts` precedent: the real module runs, and only `document` and
  * `fetch` are fakes. It pins the client half of architecture review 2026-10:
  *

@@ -12,14 +12,10 @@
 import { pageDecisionData, type PageDecisionData } from "../format/decision-views.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { findLiveSentinelBlocks } from "./factcheck-context.ts";
+import { WIKILINK_WITH_LABEL_RE } from "./page-text.ts";
 import { stripFrontmatter } from "./store.ts";
 
-/** A `[[wikilink]]` with an optional `|label`, target and label both NEWLINE-FREE
- *  — `WIKILINK_RE`'s exclusion (`store.ts`), and the reader is where its absence
- *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
- *  NEXT line's `]]`, so five index.md entries rendered as one merged
- *  `wiki-link-missing` span that ate the following entry's real link. */
-export const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
+export { WIKILINK_WITH_LABEL_RE };
 
 /** The text a wikilink shows: its label, else its target. */
 export function wikiLinkText(target: string, label: string | undefined): string {

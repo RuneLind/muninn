@@ -16,6 +16,9 @@ import {
   SYNC_QUIET_MS,
   SYNC_REASON_MAX,
   SYNC_STALE_SUCCESS_MS,
+  SYNC_SUBSUME_MAX_AGE_MS,
+  syncLoopOutlook,
+  sweeperOutcome,
   syncTone,
   type DirtyItem,
   type SyncLedgerEntry,
@@ -391,6 +394,7 @@ describe("card state", () => {
     lastSuccessMs: NOW - 60_000,
     lastRunMs: NOW,
     lastLocalSectionMs: NOW,
+    lastCommitStep: "passed",
     ...over,
   });
 
@@ -433,5 +437,98 @@ describe("card state", () => {
       "deferred: active edits (3 files < 5 min)",
     );
     expect(describeSyncState("ok")).toBe("in sync");
+  });
+});
+
+// F36: Done names the loop as a committer only as far as the ledger's last
+// tick is evidence, and the sweep only where the sweeper would run.
+describe("syncLoopOutlook", () => {
+  const tick = (over: Partial<SyncLedgerEntry>): SyncLedgerEntry => ({
+    state: "ok",
+    consecutiveDeferrals: 0,
+    lastSuccessMs: NOW - 60_000,
+    lastRunMs: NOW - 60_000,
+    lastLocalSectionMs: NOW - 60_000,
+    lastCommitStep: "passed",
+    ...over,
+  });
+  const STALE = NOW - SYNC_SUBSUME_MAX_AGE_MS - 60_000;
+  test("a cold ledger has never run", () => {
+    expect(syncLoopOutlook(tick({ state: "unknown", lastRunMs: null, lastLocalSectionMs: null, lastCommitStep: "not-reached" }), NOW)).toEqual({
+      kind: "never-run",
+      sweeper: "commits",
+    });
+  });
+  test("ok, deferred, transient and retrying ticks are healthy, whatever their commit step", () => {
+    for (const state of ["ok", "deferred", "transient", "retrying"] as const) {
+      for (const lastCommitStep of ["passed", "failed", "not-reached"] as const) {
+        expect(syncLoopOutlook(tick({ state, lastCommitStep }), NOW)).toEqual({ kind: "healthy", sweeper: "stands-down" });
+        // A young index.lock or a held wiki lock stops before the commit path and stamps nothing.
+        // A transient commit step failure is a lost index.lock: the sweeper's commit is not refused for it.
+        expect(syncLoopOutlook(tick({ state, lastCommitStep, lastLocalSectionMs: null }), NOW)).toEqual({ kind: "healthy", sweeper: "commits" });
+      }
+    }
+  });
+  // F36 fix round 2: a tick that committed and then failed in the rebase or the
+  // push commits again on the next tick — it is not a loop that commits nothing.
+  test("blocked or error AFTER a passed commit step is unpushed, never stopped", () => {
+    const cases = [
+      ["blocked", "rebase conflict in wiki/concepts/Seed.md", null],
+      ["error", "rebase failed: fatal: invalid upstream", null],
+      ["error", "git push failed: denied", NOW - 60_000],
+      ["blocked", "1 commit(s) to push but this branch has no upstream", NOW - 60_000],
+    ] as const;
+    for (const [state, reason, lastLocalSectionMs] of cases) {
+      expect(syncLoopOutlook(tick({ state, reason, lastLocalSectionMs }), NOW)).toEqual({
+        kind: "unpushed",
+        state,
+        reason,
+        // blocked subsumes on its own exception; a stamped push failure on evidence; a rebase error on neither.
+        sweeper: state === "blocked" || lastLocalSectionMs !== null ? "stands-down" : "commits",
+      });
+    }
+  });
+  test("blocked, error or paused with the commit step failed or not reached is stopped", () => {
+    for (const lastCommitStep of ["failed", "not-reached"] as const) {
+      expect(syncLoopOutlook(tick({ state: "error", reason: "git fetch failed: x", lastCommitStep, lastLocalSectionMs: STALE }), NOW)).toEqual({
+        kind: "stopped",
+        state: "error",
+        reason: "git fetch failed: x",
+        // A refused add/commit is refused for the sweeper too; a fetch that never reached the step is not.
+        sweeper: lastCommitStep === "failed" ? "refused" : "commits",
+      });
+      // Fresh evidence from an earlier tick keeps the sweeper down while the loop fails.
+      expect(syncLoopOutlook(tick({ state: "error", reason: "git fetch failed: x", lastCommitStep, lastLocalSectionMs: NOW - 3_600_000 }), NOW)).toMatchObject({
+        kind: "stopped",
+        sweeper: "stands-down",
+      });
+      expect(syncLoopOutlook(tick({ state: "paused", reason: "off default branch (f)", lastCommitStep, lastLocalSectionMs: null }), NOW)).toMatchObject({ kind: "stopped", sweeper: "no-op" });
+      expect(syncLoopOutlook(tick({ state: "blocked", reason: "r", lastCommitStep, lastLocalSectionMs: null }), NOW)).toMatchObject({ kind: "stopped", sweeper: "stands-down" });
+    }
+  });
+  test("a healthy tick older than SYNC_STALE_SUCCESS_MS is idle", () => {
+    const at = NOW - SYNC_STALE_SUCCESS_MS - 3_600_000;
+    expect(syncLoopOutlook(tick({ lastRunMs: at, lastLocalSectionMs: at }), NOW)).toEqual({ kind: "idle", lastRunHoursAgo: 3, sweeper: "stands-down" });
+    expect(syncLoopOutlook(tick({ state: "error", reason: "git push failed", lastRunMs: at, lastLocalSectionMs: at }), NOW)).toMatchObject({ kind: "idle" });
+  });
+});
+
+describe("sweeperOutcome", () => {
+  const e = (over: Partial<SyncLedgerEntry>): SyncLedgerEntry => ({
+    state: "error",
+    consecutiveDeferrals: 0,
+    lastSuccessMs: null,
+    lastRunMs: NOW - 60_000,
+    lastLocalSectionMs: null,
+    lastCommitStep: "not-reached",
+    ...over,
+  });
+  test("subsumption first, then paused, then a refused add/commit, else commits", () => {
+    expect(sweeperOutcome(e({ lastLocalSectionMs: NOW - 60_000, lastCommitStep: "failed" }), NOW)).toBe("stands-down");
+    expect(sweeperOutcome(e({ state: "blocked", lastCommitStep: "failed" }), NOW)).toBe("stands-down");
+    expect(sweeperOutcome(e({ state: "paused" }), NOW)).toBe("no-op");
+    expect(sweeperOutcome(e({ lastCommitStep: "failed" }), NOW)).toBe("refused");
+    expect(sweeperOutcome(e({ state: "transient", lastCommitStep: "failed" }), NOW)).toBe("commits");
+    expect(sweeperOutcome(e({}), NOW)).toBe("commits");
   });
 });

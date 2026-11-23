@@ -60,7 +60,6 @@ const SKIP_CLASSES = new Set([
 const INLINE_TAGS = new Set(["strong", "em", "b", "i", "s", "del", "ins", "u", "mark", "span", "sup", "sub", "small"]);
 const VOID_TAGS = new Set(["br", "hr", "img", "input", "wbr", "meta", "link", "col", "source", "area", "base", "embed", "track", "param"]);
 const SECTION_TAGS = new Set(["h2", "h3"]);
-const TOKEN_RE = /<!--[\s\S]*?-->|<\/?[A-Za-z][^>]*>|[^<]+|</g;
 const WORD_CHAR_RE = /[\p{L}\p{N}\p{M}_-]/u;
 const URL_TOKEN_RE = /^[a-z][a-z0-9+.-]*:\/\/|^www\./i;
 
@@ -178,7 +177,67 @@ interface OpenTag {
   skip: boolean;
 }
 
-/** The lower-cased name of a tag token (`TOKEN_RE` guarantees a letter after `<` or `</`). */
+/** HTML whitespace as the tokenizer reads it: tab, LF, FF, CR, space. */
+const isHtmlSpace = (c: number): boolean => c === 32 || c === 9 || c === 10 || c === 12 || c === 13;
+const isAsciiLetter = (c: number): boolean => (c | 32) >= 97 && (c | 32) <= 122;
+
+/**
+ * The index just past the tag that opens at `at` (`<` or `</` and a letter),
+ * read as the browser's tokenizer reads it (F26): a quote opens a value only
+ * right after `=` (whitespace allowed between), an unquoted value ends at
+ * whitespace or `>`, and a quote anywhere else is a plain character of a name
+ * or a value. A quoted value left open runs to the end, as in the browser.
+ */
+function tagEnd(html: string, at: number): number {
+  const n = html.length;
+  const stop = (j: number) => j >= n || isHtmlSpace(html.charCodeAt(j)) || html[j] === "/" || html[j] === ">";
+  let j = at + (html.charCodeAt(at + 1) === 47 ? 2 : 1);
+  while (!stop(j)) j++; // the tag name
+  for (;;) {
+    while (j < n && (isHtmlSpace(html.charCodeAt(j)) || html[j] === "/")) j++;
+    if (j >= n) return n;
+    if (html[j] === ">") return j + 1;
+    // An attribute name: its first character is taken whatever it is, `=` and quotes too.
+    for (j++; !stop(j) && html[j] !== "="; j++);
+    while (j < n && isHtmlSpace(html.charCodeAt(j))) j++;
+    if (html[j] !== "=") continue;
+    for (j++; j < n && isHtmlSpace(html.charCodeAt(j)); j++);
+    const q = html[j];
+    if (q === '"' || q === "'") {
+      const close = html.indexOf(q, j + 1);
+      if (close < 0) return n;
+      j = close + 1;
+    } else {
+      while (j < n && !isHtmlSpace(html.charCodeAt(j)) && html[j] !== ">") j++;
+    }
+  }
+}
+
+/** `html` as comments, tags ({@link tagEnd}), text runs and lone `<`s, which
+ *  join back to `html`. */
+function htmlTokens(html: string): string[] {
+  const out: string[] = [];
+  const n = html.length;
+  for (let i = 0; i < n; ) {
+    let end: number;
+    if (html.charCodeAt(i) !== 60) {
+      end = html.indexOf("<", i);
+      if (end < 0) end = n;
+    } else if (html.startsWith("<!--", i)) {
+      const close = html.indexOf("-->", i + 4);
+      end = close < 0 ? i + 1 : close + 3;
+    } else if (isAsciiLetter(html.charCodeAt(i + 1)) || (html.charCodeAt(i + 1) === 47 && isAsciiLetter(html.charCodeAt(i + 2)))) {
+      end = tagEnd(html, i);
+    } else {
+      end = i + 1;
+    }
+    out.push(html.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
+/** The lower-cased name of a tag token (`htmlTokens` guarantees a letter after `<` or `</`). */
 function tagName(tag: string): string {
   const from = tag.charCodeAt(1) === 47 ? 2 : 1;
   let to = from;
@@ -215,7 +274,7 @@ export function markGlossaryTerms(html: string, entries: readonly GlossaryEntry[
     .map((e) => ({ e, re: termPattern(e) }));
   if (terms.length === 0) return html;
   const scan = termScanner(terms.map((t) => t.re));
-  const tokens = html.match(TOKEN_RE) ?? [];
+  const tokens = htmlTokens(html);
   // Per tag token its name and whether words run through it (null: not a tag);
   // per token the first visible character after it, read across inline tags.
   const names: (string | null)[] = new Array(tokens.length).fill(null);

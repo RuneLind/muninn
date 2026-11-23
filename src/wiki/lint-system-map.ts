@@ -30,7 +30,7 @@ import { chartBody } from "../format/chart-block.ts";
 import { parseBlocks, type Block } from "../format/markdown-ast.ts";
 import { visibleText } from "../format/report-top.ts";
 import { nodeKey, readSystemMapBlock, resolveSystemNode, type SystemMapRead } from "../format/system-map.ts";
-import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import { fencedLineMask } from "./core/wiki-integrate.ts";
 import { stripLineCodeSpansKeepingLinks } from "./park-links.ts";
 import { extractMarkdownLinks, linkHeadingName, stripFrontmatter, type WikiIndex, type WikiPageMeta } from "./store.ts";
 import { extractWikilinks } from "./wikilinks.ts";

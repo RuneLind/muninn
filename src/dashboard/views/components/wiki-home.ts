@@ -27,7 +27,7 @@ export const LAST_WIKI_KEY = "muninn.wiki.last.v1";
 /** localStorage key prefix for the remembered start tab; suffixed `:<wiki>`. */
 export const START_TAB_KEY_PREFIX = "muninn.wiki.startTab.v1";
 
-export type StartTab = "hubs" | "timeline" | "atlas";
+export type StartTab = "hubs" | "timeline" | "atlas" | "stale";
 
 /** The default tab, and the one a start URL carries no `view=` for. */
 export const DEFAULT_START_TAB: StartTab = "hubs";
@@ -41,7 +41,7 @@ export function startTabKey(wiki: string): string {
 
 /** A tab name from a URL param or a stored value; `null` for anything else. */
 export function parseStartTab(raw: string | null | undefined): StartTab | null {
-  if (raw === "hubs" || raw === "timeline" || raw === "atlas") return raw;
+  if (raw === "hubs" || raw === "timeline" || raw === "atlas" || raw === "stale") return raw;
   return null;
 }
 
@@ -112,7 +112,8 @@ export function lastWikiRedirect(input: RedirectInput): string | null {
  * rendered one; names compare case-insensitively, as `findWiki` does), no page,
  * and the tab the URL resolves to — through the SAME rule the boot uses, so
  * `stored` is the per-wiki value `resolveStartTab` would read, and `tools` is
- * the boot's `wikiToolsFlag()` (under the read slice `view=atlas` boots Hubs).
+ * the boot's `wikiToolsFlag()` (under the read slice `view=atlas` boots Hubs), and
+ * `stale` whether the Stale tab shows (`view=stale` boots Hubs where it does not).
  */
 export function sameStartUrl(
   search: string,
@@ -120,6 +121,7 @@ export function sameStartUrl(
   tab: StartTab,
   stored: string | null,
   tools = true,
+  stale = tools,
 ): boolean {
   const params = new URLSearchParams(search);
   const named = (params.get("wiki") ?? params.get("bot") ?? "").trim();
@@ -128,7 +130,7 @@ export function sameStartUrl(
   // An issue-only graph names no page, yet is not the overview. Read on meaning
   // (`readDisplayParams`): a `display=` naming no valid issue boots the overview.
   if (readDisplayParams(search).issue) return false;
-  return readSliceStartTab(resolveStartTab(params.get(START_VIEW_PARAM), stored), tools) === tab;
+  return readSliceStartTab(resolveStartTab(params.get(START_VIEW_PARAM), stored), tools, stale) === tab;
 }
 
 /** A param with a non-blank value — the server's own test (`trim() ||`), so

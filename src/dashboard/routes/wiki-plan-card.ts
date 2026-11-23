@@ -37,15 +37,12 @@ import {
   PLAN_CARD_TIMEOUT_MS,
   isPlanCardId,
   isPlanCardSince,
-  parsePlanCardJson,
-  planCardArgs,
-  planCardChildEnv,
   planCardConfigFromEnv,
   planCardRootFor,
   type PlanCardConfig,
 } from "../../wiki/plan-card.ts";
-import { stampInterpreterArgv } from "./wiki-stamp.ts";
-import { ProcTimeoutError, runProc, type ProcResult } from "../../utils/run-proc.ts";
+import { planCardFromOutcome, runPlanCard, type RunOutcome } from "../../wiki/plan-card-run.ts";
+import type { runProc } from "../../utils/run-proc.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("wiki", "plan-card");
@@ -67,10 +64,7 @@ export interface PlanCardRouteDeps {
 
 export { PLAN_CARD_MAX_WAITING };
 
-export type RunOutcome =
-  | { ok: true; proc: ProcResult; ms: number }
-  | { ok: false; timeout: boolean; message: string }
-  | { ok: false; abandoned: true };
+export type { RunOutcome };
 
 /** One page + argument set: its run, whether its child has started, and the
  *  abort signals of the requests waiting on it. */
@@ -157,22 +151,10 @@ export function registerWikiPlanCardRoute(app: Hono, config: Config, deps: PlanC
 
     // plan-card's own spelling of the root, so its containment test agrees.
     const abs = path.join(root, page.meta.relPath);
-    const argv = [...(deps.interpreter ?? stampInterpreterArgv(process.execPath)), ...planCardArgs(cfg.bin, abs, { since, id })];
     const bin = cfg.bin;
-    const run = async (): Promise<RunOutcome> => {
-      const t0 = performance.now();
-      try {
-        const proc = await (deps.runProc ?? runProc)(argv, deps.timeoutMs ?? PLAN_CARD_TIMEOUT_MS, "plan-card", {
-          env: planCardChildEnv(deps.port ?? config.dashboardPort),
-          cwd: path.dirname(bin),
-          processGroup: true,
-          ...(deps.killGraceMs !== undefined ? { killGraceMs: deps.killGraceMs } : {}),
-        });
-        return { ok: true, proc, ms: Math.round(performance.now() - t0) };
-      } catch (err) {
-        return { ok: false, timeout: err instanceof ProcTimeoutError, message: err instanceof Error ? err.message : String(err) };
-      }
-    };
+    const run = (): Promise<RunOutcome> =>
+      // The test seams share the runner's option names (the process runner, the timeout, the interpreter, the kill grace).
+      runPlanCard({ ...deps, bin, abs, since, id, port: deps.port ?? config.dashboardPort });
     const flight = joinPlanCardFlight(inFlight, JSON.stringify([abs, since, id]), abs, c.req.raw.signal, run);
     if (flight === "busy") {
       return c.json(
@@ -182,27 +164,17 @@ export function registerWikiPlanCardRoute(app: Hono, config: Config, deps: PlanC
     }
     const outcome = await flight.promise;
 
-    if (!outcome.ok && "abandoned" in outcome) {
-      // Only every requester's abort gets here, so nobody reads this answer.
-      return c.json({ error: "the request was cancelled before plan-card started", reason: "cancelled" }, 499 as never);
-    }
-    if (!outcome.ok) {
-      log.warn("plan-card {kind}: {error}", { kind: outcome.timeout ? "timed out" : "failed to start", error: outcome.message });
-      return outcome.timeout
-        ? c.json({ error: `plan-card did not answer within ${Math.round((deps.timeoutMs ?? PLAN_CARD_TIMEOUT_MS) / 1000)} s`, reason: "timeout" }, 504)
-        : c.json({ error: outcome.message }, 502);
-    }
-    const card = parsePlanCardJson(outcome.proc.stdout);
-    if (outcome.proc.exitCode !== 0 || !card) {
-      let message = outcome.proc.stderr.trim().split("\n")[0] || "plan-card printed no card";
-      try {
-        const e = JSON.parse(outcome.proc.stdout) as { error?: unknown };
-        if (typeof e.error === "string") message = e.error;
-      } catch {
-        // not JSON: keep stderr's first line
+    const card = planCardFromOutcome(outcome, deps.timeoutMs ?? PLAN_CARD_TIMEOUT_MS);
+    if (!card.ok) {
+      // 499: only every requester's abort gets here, so nobody reads this answer.
+      if (card.status === 499) return c.json({ error: card.error, reason: "cancelled" }, 499 as never);
+      if (card.status === 504) {
+        log.warn("plan-card {kind}: {error}", { kind: "timed out", error: card.error });
+        return c.json({ error: card.error, reason: "timeout" }, 504);
       }
-      return c.json({ error: message, exitCode: outcome.proc.exitCode }, 502);
+      if (card.exitCode === undefined) log.warn("plan-card {kind}: {error}", { kind: "failed to start", error: card.error });
+      return c.json(card.exitCode === undefined ? { error: card.error } : { error: card.error, exitCode: card.exitCode }, 502);
     }
-    return c.json({ text: card.text, chars: card.chars, cuts: card.cuts, ms: outcome.ms });
+    return c.json({ text: card.text, chars: card.chars, cuts: card.cuts, ms: card.ms });
   });
 }

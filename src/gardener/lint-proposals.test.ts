@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildLintProposalRows, seedLintProposals } from "./lint-proposals.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import type { LintFinding } from "../wiki/lint.ts";
 import type { InsertWikiProposalParams, LintGroupRow } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -190,6 +190,8 @@ describe("lint proposals", () => {
   async function seed(
     findings: LintFinding[],
     existing: LintGroupRow[],
+    /** Group keys a verb holds: the retire seam answers `held` for them. */
+    held: ReadonlySet<string> = new Set(),
   ): Promise<{
     result: Awaited<ReturnType<typeof seedLintProposals>>;
     inserted: InsertWikiProposalParams[];
@@ -201,9 +203,10 @@ describe("lint proposals", () => {
       ...deps(),
       wikiName: "lintwiki",
       listGroupRows: async () => existing,
-      markGroupStale: async (_wiki, key) => {
+      retireGroup: async (_wiki, key) => {
+        if (held.has(key)) return { staled: 0, settled: 0, held: true };
         staled.push(key);
-        return 1;
+        return { staled: 1, settled: 0, held: false };
       },
       insert: async (p) => {
         inserted.push(p);
@@ -300,14 +303,51 @@ describe("lint proposals", () => {
     expect(inserted).toHaveLength(2);
   });
 
-  test("an APPROVED group is neither staled nor re-proposed", async () => {
-    const { result, staled } = await seed(
-      [seriesFinding([{ op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "a" }])],
-      // Mid-apply under another key: the apply's own terminal CAS owns it.
-      [{ groupKey: "lint:series-unnamed:midapply1234", targetPath: "plans/a.mdx", status: "approved" }],
+  test("D19: a lint run never retires a Stale check card, and skips a page one holds as claimed", async () => {
+    const { result, staled, inserted } = await seed(
+      [pairFinding("plans/a.mdx")],
+      [
+        // A live Stale check card on plans/a.mdx under a key no lint finding
+        // mints: the self-heal must leave it alone, and the page is claimed.
+        { groupKey: "stale-check:hub.md:1", targetPath: "plans/a.mdx", status: "draft", kind: "stale-check" },
+        // A rejected Stale check card blocks no lint key.
+        { groupKey: PAIR, targetPath: "plans/z.mdx", status: "rejected", kind: "stale-check" },
+      ],
     );
     expect(staled).toEqual([]);
-    expect(result).toMatchObject({ staled: 0, claimed: 1, proposed: 0 });
+    expect(result).toMatchObject({ staled: 0, claimed: 1, proposed: 0, skipped: 0 });
+    expect(inserted).toEqual([]);
+    // Without the card on plans/a.mdx the same rejected row blocks nothing.
+    const free = await seed([pairFinding("plans/a.mdx")], [{ groupKey: PAIR, targetPath: "plans/z.mdx", status: "rejected", kind: "stale-check" }]);
+    expect(free.result).toMatchObject({ proposed: 1, skipped: 0, claimed: 0 });
+  });
+
+  test("an APPROVED group a verb holds is neither retired nor re-proposed, and keeps its page", async () => {
+    const MID = "lint:series-unnamed:midapply1234";
+    const { result, staled } = await seed(
+      [seriesFinding([{ op: "frontmatter", relPath: "plans/a.mdx", key: "series", value: "a" }])],
+      // Mid-apply under another key: the Accept holds the group's lease.
+      [{ groupKey: MID, targetPath: "plans/a.mdx", status: "approved" }],
+      new Set([MID]),
+    );
+    expect(staled).toEqual([]);
+    expect(result).toMatchObject({ staled: 0, held: 1, claimed: 1, proposed: 0 });
+  });
+
+  test("F35: a superseded group's stranded APPROVED row is retired with its drafts", async () => {
+    const OLD = "lint:series-unnamed:stranded1234";
+    const { result, staled } = await seed(
+      [],
+      [
+        { groupKey: OLD, targetPath: "plans/a.mdx", status: "approved" },
+        { groupKey: OLD, targetPath: "plans/b.mdx", status: "draft" },
+      ],
+    );
+    expect(staled).toEqual([OLD]);
+    expect(result).toMatchObject({ staled: 1, held: 0 });
+    // A group whose only live row is a stranded `approved` one is superseded too.
+    const lone = await seed([], [{ groupKey: OLD, targetPath: "plans/a.mdx", status: "approved" }]);
+    expect(lone.staled).toEqual([OLD]);
   });
 
   test("a finding every page of which refuses is counted ONCE per pass", async () => {

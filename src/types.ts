@@ -163,7 +163,7 @@ export interface ScheduledTask {
   updatedAt: number;
 }
 
-export type WatcherType = "email" | "calendar" | "github" | "news" | "goal" | "x" | "anthropic" | "wiki-gardener" | "wiki-linter" | "wiki-committer" | "consolidation-gardener";
+export type WatcherType = "email" | "calendar" | "github" | "news" | "goal" | "x" | "anthropic" | "wiki-gardener" | "wiki-linter" | "wiki-committer" | "consolidation-gardener" | "youtube-discovery";
 
 export interface Watcher {
   id: string;

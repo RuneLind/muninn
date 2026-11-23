@@ -1,0 +1,187 @@
+/**
+ * The Stale check's counts outside the STALE tab (PR 2b): every surface says
+ * the tab's two numbers (D26) in the tab's words.
+ */
+import { describe, expect, test } from "bun:test";
+import { staleCountMap, staleHomeBodyHtml, staleHomeLineHtml, stalePillHtml, staleRailBadgeHtml, type StaleSummaryView } from "./wiki-stale-summary.ts";
+import { staleBodyHtml, staleCounts, staleCountsText, staleTabBadge, type StaleReportView } from "./wiki-stale-tab.ts";
+
+const report: StaleReportView = {
+  page: { relPath: "hub.md", title: "Hub" },
+  hits: [
+    { line: 3, target: "plans/p.md", said: ["in-flight"], now: "shipped", text: "- [[p]] is in-flight", confirmation: { verdict: "stale" } },
+    { line: 4, target: "plans/p.md", said: ["proposed"], now: "shipped", text: "- [[p]] is a draft", confirmation: "unconfirmed" },
+    { line: 5, target: "plans/p.md", said: ["blocked"], now: "shipped", text: "- [[p]] is blocked", confirmation: { verdict: "not-status", checkedBy: "reader" } },
+  ],
+  buckets: { counts: { toCheck: 2 }, linking: [] },
+};
+
+const summary: StaleSummaryView = {
+  pages: [
+    { relPath: "hub.md", title: "Hub", staleLines: 1, toCheck: 2, changed: true },
+    { relPath: "b<x>.md", title: "B <x>", staleLines: 1, toCheck: 0, changed: false },
+    { relPath: "quiet.md", title: "Quiet", staleLines: 0, toCheck: 0, changed: true },
+  ],
+  totals: { staleLines: 2, toCheck: 2 },
+};
+
+describe("the counts everywhere (PR 2b)", () => {
+  test("the pill says what the tab's head says, from the same report", () => {
+    const head = /<div class="wiki-stale-head"[^>]*>([^<]*)<\/div>/.exec(staleBodyHtml(report))![1];
+    expect(head).toBe("⚠ 1 stale status line · 2 linking pages to check");
+    expect(stalePillHtml(report)).toContain(`>${head}</button>`);
+    expect(stalePillHtml(report)).toContain('data-stale-pill="1·2"');
+  });
+
+  test("no pill before the report loads or when it failed; ✓ when nothing is stale", () => {
+    expect(stalePillHtml(null)).toBe("");
+    expect(stalePillHtml({ error: "x" })).toBe("");
+    expect(stalePillHtml({ hits: [], buckets: null })).toContain(">0 stale status lines · 0 linking pages to check</button>");
+    // The zero case names what was counted, with no «✓»: it is no verdict on the page.
+    expect(staleCountsText({ staleLines: 0, toCheck: 0 })).toBe("0 stale status lines · 0 linking pages to check");
+    expect(staleCountsText({ staleLines: 0, toCheck: 1 })).toBe("⚠ 0 stale status lines · 1 linking page to check");
+    expect(staleCountsText({ staleLines: 1, toCheck: 0 })).toBe("⚠ 1 stale status line · 0 linking pages to check");
+  });
+
+  test("the rail badge carries both numbers, and nothing at 0 · 0", () => {
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2 })).toContain(">⚠ 1 · 2</span>");
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2 })).toContain('title="1 stale status line · 2 linking pages to check"');
+    expect(staleRailBadgeHtml({ staleLines: 0, toCheck: 0 })).toBe("");
+    expect(staleRailBadgeHtml(undefined)).toBe("");
+  });
+
+  test("the count map keeps every row, and an error or a bad answer is empty", () => {
+    const m = staleCountMap(summary);
+    expect(m.get("hub.md")).toEqual({ staleLines: 1, toCheck: 2 });
+    expect(m.get("quiet.md")).toEqual({ staleLines: 0, toCheck: 0 });
+    expect(staleCountMap({ error: "x" }).size).toBe(0);
+    expect(staleCountMap({} as StaleSummaryView).size).toBe(0);
+    expect(staleCountMap(null).size).toBe(0);
+  });
+
+  test("the home line totals the rows and the home tab lists the stale ones, escaped", () => {
+    expect(staleHomeLineHtml(summary)).toContain(">⚠ 2 stale status lines · 2 linking pages to check on 2 pages<");
+    expect(staleHomeLineHtml(summary)).toContain("data-stale-home-open");
+    expect(staleHomeLineHtml({ pages: [], totals: { staleLines: 0, toCheck: 0 } })).toContain(">0 stale status lines · 0 linking pages to check<");
+    expect(staleHomeLineHtml({ pages: [] })).not.toContain("data-stale-home-open");
+    expect(staleHomeLineHtml(null)).toContain("Loading…");
+    const body = staleHomeBodyHtml(summary);
+    expect(body).toContain('data-relpath="hub.md"');
+    expect(body).toContain("⚠ 1 stale status line · 2 linking pages to check");
+    expect(body).toContain("B &lt;x&gt;");
+    expect(body).not.toContain('data-relpath="quiet.md"');
+    expect(body).toContain("+ 1 changed page with nothing stale.");
+    expect(staleHomeBodyHtml({ ...summary, verdicts: "unavailable" })).toContain("Verdicts are unavailable");
+  });
+
+  test("«+ N changed pages» counts changed pages only, not an unchanged page whose hits are unconfirmed", () => {
+    // The route sends an unchanged page with a hit as `changed: false`, its
+    // `staleLines` 0 until the hit is confirmed stale.
+    const withUnconfirmed: StaleSummaryView = {
+      ...summary,
+      pages: [...summary.pages!, { relPath: "u.md", title: "U", staleLines: 0, toCheck: 0, changed: false }],
+    };
+    expect(staleHomeBodyHtml(withUnconfirmed)).toContain("+ 1 changed page with nothing stale.");
+    expect(staleHomeBodyHtml({ ...withUnconfirmed, pages: withUnconfirmed.pages!.filter((r) => r.relPath !== "quiet.md") })).not.toContain("with nothing stale");
+  });
+});
+
+describe("PR 3: the ⧗ «in review» states (D31)", () => {
+  test("the rail badge adds ⧗ K beside the counts, and shows ⧗ K alone on a page with nothing else stale", () => {
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2, inReview: 3 })).toContain('data-stale-review="3"');
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2, inReview: 3 })).toContain("⚠ 1 · 2 <span class=\"wiki-stale-rail-review\">⧗ 3</span>");
+    const alone = staleRailBadgeHtml({ staleLines: 0, toCheck: 0, inReview: 2 });
+    expect(alone).toContain("review-only");
+    expect(alone).toContain("⧗ 2");
+    expect(alone).not.toContain("⚠");
+    expect(alone).toContain('title="2 fixes in review in the Gardener"');
+    // No fixes in review: the PR 2b badge, unchanged.
+    expect(staleRailBadgeHtml({ staleLines: 1, toCheck: 2 })).not.toContain("⧗");
+  });
+
+  test("the pill gains «⧗ N fixes in review» from the page report", () => {
+    const html = stalePillHtml({ ...report, inReview: { fixes: 2 } });
+    expect(html).toContain('data-stale-pill-review="2"');
+    expect(html).toContain("⧗ 2 fixes in review");
+    expect(stalePillHtml({ ...report, inReview: { fixes: 1 } })).toContain("⧗ 1 fix in review");
+    expect(stalePillHtml(report)).not.toContain("⧗");
+  });
+
+  test("the summary's count map carries each row's fixes in review", () => {
+    const m = staleCountMap({ pages: [{ relPath: "hub.md", title: "Hub", staleLines: 0, toCheck: 1, inReview: 2 }] });
+    expect(m.get("hub.md")).toEqual({ staleLines: 0, toCheck: 1, inReview: 2 });
+  });
+});
+
+describe("a verdict store that is down (F11)", () => {
+  test("the flag travels with a row that has hits; a row with none keeps its plain counts", () => {
+    const m = staleCountMap({
+      pages: [
+        { relPath: "hit.md", title: "Hit", staleLines: 0, toCheck: 0, hits: 2 },
+        { relPath: "quiet.md", title: "Quiet", staleLines: 0, toCheck: 0, hits: 0, changed: true },
+      ],
+      verdicts: "unavailable",
+    });
+    expect(m.get("hit.md")).toEqual({ staleLines: 0, toCheck: 0, verdicts: "unavailable" });
+    expect(staleRailBadgeHtml(m.get("hit.md"))).toContain(">⚠ ? · 0</span>");
+    expect(staleRailBadgeHtml(m.get("quiet.md"))).toBe("");
+  });
+
+  test("the pill shows the unavailable state, not the clean zero, on a page with hits", () => {
+    const pill = stalePillHtml({ hits: [{ line: 1, target: "t.md", said: ["proposed"], now: "shipped", text: "x", confirmation: "unconfirmed" }], buckets: null, verdicts: "unavailable" });
+    expect(pill).toContain('data-stale-verdicts="unavailable"');
+    expect(pill).not.toContain("wiki-stale-pill none");
+    expect(pill).toContain(">⚠ stale status lines unknown (verdicts unavailable) · 0 linking pages to check</button>");
+  });
+});
+
+describe("F11 fix round 1: one «unknown» rule on every count surface", () => {
+  // (store ok / unavailable) × (hits / no hits) × (toCheck 0 / > 0): the page's
+  // report and the wiki summary holding only that page, as the routes send them.
+  const cases = [false, true].flatMap((down) => [false, true].flatMap((hit) => [0, 2].map((toCheck) => ({ down, hit, toCheck }))));
+  const attr = (html: string, name: string) => new RegExp(`${name}="([^"]*)"`).exec(html)?.[1];
+  const text = (html: string, cls: string) => new RegExp(`class="${cls}"[^>]*>([^<]*)<`).exec(html)?.[1];
+  const zero = (v: string | undefined) => v ?? "0·0";
+  for (const { down, hit, toCheck } of cases) {
+    test(`store ${down ? "unavailable" : "ok"}, ${hit ? "a hit" : "no hits"}, toCheck ${toCheck}: every surface agrees`, () => {
+      const staleLines = hit && !down ? 1 : 0;
+      const r: StaleReportView = {
+        page: { relPath: "p.md", title: "P" },
+        hits: hit ? [{ line: 3, target: "t.md", said: ["proposed"], now: "shipped", text: "- [[t]] proposed", confirmation: down ? "unconfirmed" : { verdict: "stale" } }] : [],
+        buckets: { counts: { toCheck }, linking: [] },
+        ...(down ? { verdicts: "unavailable" as const } : {}),
+      };
+      const s: StaleSummaryView = {
+        pages: [{ relPath: "p.md", title: "P", staleLines, toCheck, hits: hit ? 1 : 0, changed: true }],
+        totals: { staleLines, toCheck, hits: hit ? 1 : 0 },
+        ...(down ? { verdicts: "unavailable" as const } : {}),
+      };
+      const unknown = down && hit;
+      const shown = staleLines > 0 || toCheck > 0 || unknown;
+      const want = { staleLines, toCheck, ...(unknown ? { verdicts: "unavailable" as const } : {}) };
+      const token = `${unknown ? "?" : staleLines}·${toCheck}`;
+      const words = staleCountsText(want);
+      const pill = stalePillHtml(r);
+      const line = staleHomeLineHtml(s);
+      const body = staleHomeBodyHtml(s);
+      const badge = staleTabBadge(r);
+      const tab = staleBodyHtml(r);
+      expect({
+        pill: attr(pill, "data-stale-pill"),
+        railOpen: zero(attr(staleRailBadgeHtml(staleCounts(r)), "data-stale-rail")),
+        railSummary: zero(attr(staleRailBadgeHtml(staleCountMap(s).get("p.md")), "data-stale-rail")),
+        homeTotals: attr(line, "data-stale-home-totals"),
+        homeRow: zero(attr(body, "data-stale-home-row")),
+        badge: badge.text ? badge.text.replace(" · ", "·") : "0·0",
+        tabHead: `${attr(tab, "data-stale-lines")}·${attr(tab, "data-stale-tocheck")}`,
+      }).toEqual({ pill: token, railOpen: token, railSummary: token, homeTotals: token, homeRow: token, badge: token, tabHead: token });
+      expect({
+        pill: text(pill, `wiki-stale-pill${shown ? "" : " none"}`),
+        homeLine: text(line, "wiki-stale-home-v")?.replace(/ on \d+ pages?$/, ""),
+        homeHead: text(body, "wiki-stale-home-head"),
+        tabHead: text(tab, "wiki-stale-head"),
+        badgeTitle: badge.title,
+      }).toEqual({ pill: words, homeLine: words, homeHead: words, tabHead: words, badgeTitle: shown ? words.replace(/^⚠ /, "") : "Nothing stale" });
+    });
+  }
+});

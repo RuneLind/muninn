@@ -47,7 +47,7 @@ import {
   seriesMembersByFoldKey,
   SERIES_CONTINUE_MAX,
   SERIES_TERMINAL_STATUSES,
-} from "../dashboard/views/components/wiki-groups.ts";
+} from "./core/wiki-groups.ts";
 import { isBookkeeping } from "./related.ts";
 import { coinSeriesKey, isNarrativePage } from "./series-rules.ts";
 import {

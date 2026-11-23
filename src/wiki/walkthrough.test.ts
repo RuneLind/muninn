@@ -119,11 +119,28 @@ describe("locateSection", () => {
     expect(at("Setup bun now", 2, 3)).toEqual({ ok: false, reason: "count_mismatch", found: 2 });
   });
 
-  test(".mdx: a section ends at the next top-level heading, a folded one stays inside it", () => {
+  test(".mdx: a same-level heading inside a Fold ends the section at the Fold's opening tag", () => {
     const r = locateSection(MDX, { heading: "Overview beta", ordinal: 0, count: 1, stripTitle: "Native" });
-    expect(r.ok && r.section.markdown).toContain("Folded prose.");
-    expect(r.ok && r.section.markdown).not.toContain("Closing prose.");
+    expect(r.ok && r.section.markdown.trim()).toBe("The overview with a [[Linked Page|link label]].");
     expect(locateSection(MDX, { heading: "Inside the fold", ordinal: 0, count: 1 }).ok).toBe(false);
+  });
+
+  test(".mdx: a deeper heading inside a Fold stays in the section", () => {
+    const md = ["## Brief", "", "Brief prose.", "", "<Fold title=\"More\">", "", "### Detail", "", "Detail prose.", "", "</Fold>", "", "## Next", "", "Next prose."].join("\n");
+    const r = locateSection(md, { heading: "Brief", ordinal: 0, count: 1 });
+    expect(r.ok && r.section.markdown).toContain("Detail prose.");
+    expect(r.ok && r.section.markdown).not.toContain("Next prose.");
+  });
+
+  test(".mdx: a plan page whose later sections all sit in Folds ends Brief at the first Fold", () => {
+    const md = [
+      "## Brief", "", "Brief prose.", "",
+      "<Fold title=\"Current state\" open=\"true\">", "", "## Current state", "", "State prose.", "", "</Fold>", "",
+      "<Fold title=\"Design\">", "", "## Design", "", "Design prose.", "", "</Fold>", "",
+      "## Sources", "", "Source prose.",
+    ].join("\n");
+    const r = locateSection(md, { heading: "Brief", ordinal: 0, count: 1 });
+    expect(r.ok && r.section.markdown.trim()).toBe("Brief prose.");
   });
 });
 

@@ -53,7 +53,7 @@
  * Pure and IO-free, like its `src/jira/` siblings.
  */
 
-import { maskFencedCode, maskInlineCode } from "./markdown-scan.ts";
+import { maskFencedCode, maskInlineCode } from "../utils/markdown-scan.ts";
 
 /** One `[n]`, found on the MASKED text so code can never supply one. */
 const ONE_MARKER_RE = /\[(\d+)\]/g;

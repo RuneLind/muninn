@@ -1034,9 +1034,10 @@ describe("chatEscBarHtml", () => {
 });
 
 // ── Client call sites ────────────────────────────────────────────────
-// Both client files run DOM code at module load and cannot be imported here, so
-// the wiring facts that no pure helper can hold are pinned at the SOURCE level
+// The wiring facts that no pure helper can hold are pinned at the SOURCE level
 // (the `research-page.test.ts` / `connector-selector.test.ts` precedent).
+// `wiki-browser.ts` is importable since its load-time code moved into `boot()`,
+// and `wiki-shell-boot.test.ts` drives it in happy-dom; these greps predate that.
 //
 // The dialog's DOM half now lives in `wiki-chat-options.ts` (2026-08 cut 2), so
 // most of these read THAT file; the two that are genuinely about the reader shell
@@ -1309,30 +1310,13 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(at).toBeLessThan(body.indexOf("data.threadExists"));
   });
 
-  test("the shell calls initChatOptions AFTER registering its own click delegate", async () => {
-    // Load-bearing ordering, and the ONLY thing holding it is the position of one
-    // call in a file: the dialog registers its click delegate inside
-    // `initChatOptions`, and the click-away decision it runs at the end of that
-    // listener reads `document.contains(target)`. A shell branch that
-    // synchronously detaches its own target (`cancelFactcheckIntegrate`) must
-    // therefore run BEFORE the dialog's listener, i.e. be registered first —
-    // exactly as it was when both lived in one listener. Moving the call up would
-    // close the dialog on the integrate panel's Cancel, which neither tsc nor the
-    // module's own listener tests can see.
-    const src = await browserSrc();
-    const delegate = src.indexOf('document.addEventListener("click"');
-    const detaching = src.indexOf('t.closest("#wikiFcIntCancel")');
-    const init = src.indexOf("initChatOptions({");
-    expect(delegate).toBeGreaterThan(-1);
-    expect(detaching).toBeGreaterThan(-1);
-    expect(init).toBeGreaterThan(-1);
-    expect(delegate).toBeLessThan(init);
-    expect(detaching).toBeLessThan(init);
-  });
+  // The click delegate's order against `initChatOptions` used to be pinned here
+  // by source position; it is now asserted on the listeners `boot()` actually
+  // registers, in `src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts`.
 
   test("the shell wires every port member to its real binding", async () => {
-    // The port is six callbacks to module-scoped `let`s the dialog can no longer
-    // reach. Each one has an inert default (`() => null`, `() => []`, a rejected
+    // The port is six callbacks to module-scoped `let`s (the shell's, the Ask
+    // controller's since C4, the article controller's since C5) the dialog can no longer reach. Each one has an inert default (`() => null`, `() => []`, a rejected
     // POST), so a member wired to the WRONG `let` degrades SILENTLY: the
     // suggestion chips lose the page's outgoing links, the "Continue …" chip loses
     // the session, the escalate bar stops repainting — and tsc sees a well-typed
@@ -1342,13 +1326,113 @@ describe("wiki reader chat-dialog wiring", () => {
     const at = src.indexOf("initChatOptions({");
     expect(at).toBeGreaterThan(-1);
     const literal = src.slice(at, src.indexOf("});", at));
-    expect(literal).toMatch(/getShownTurn:\s*\(\)\s*=>\s*askShownTurn\b/);
-    expect(literal).toMatch(/getAskTurns:\s*\(\)\s*=>\s*askTurns\b/);
+    // The two turn getters are the Ask controller's (C4): the shell passes them
+    // through, and each must return its own `let` there.
+    expect(literal).toMatch(/getShownTurn:\s*(getAskShownTurn\b|\(\)\s*=>\s*getAskShownTurn\(\))/);
+    expect(literal).toMatch(/getAskTurns(\s*,|:\s*(getAskTurns\b|\(\)\s*=>\s*getAskTurns\(\)))/);
+    const ask = await srcOf("wiki-ask-controller.ts");
+    // The WHOLE body, up to its closing brace: a substring pin let a getter that
+    // returns another turn first (`if (i > 0) return askTurns[i - 1];`) through.
+    const wholeFn = (name: string) => {
+      const f = fnBody(ask, name);
+      return f.slice(0, f.indexOf("\n}") + 2).trim();
+    };
+    expect(wholeFn("getAskShownTurn")).toMatch(/^export function getAskShownTurn\(\): AskTurn \| null \{\s*return askShownTurn;\s*\}$/);
+    expect(wholeFn("getAskTurns")).toMatch(/^export function getAskTurns\(\): AskTurn\[\] \{\s*return askTurns;\s*\}$/);
     expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
-    expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
-    // The last two are the shell's own functions, passed by shorthand.
+    // The outgoing titles are the article controller's (C5), passed through the
+    // same way, and its getter must return its own `let`.
+    expect(literal).toMatch(/getOutgoingTitles:\s*(getCurrentOutgoingTitles\b|\(\)\s*=>\s*getCurrentOutgoingTitles\(\))/);
+    const article = await srcOf("wiki-article-controller.ts");
+    const getter = fnBody(article, "getCurrentOutgoingTitles");
+    expect(getter.slice(0, getter.indexOf("\n}") + 2).trim()).toMatch(
+      /^export function getCurrentOutgoingTitles\(\): string\[\] \{\s*return currentOutgoingTitles;\s*\}$/,
+    );
+    // The last two are the Ask controller's exports (C4), which the shell
+    // imports and passes by shorthand.
     expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
     expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
+  });
+
+  test("the shell's controller ports (Ask, menus, article, series) wire every member to its real binding", async () => {
+    // Same silent half as the test above, for four port builders. No member of
+    // AskTurnPort, MenusDeps, ArticlePort or SeriesPort is optional, so tsc
+    // already fails on a dropped one. What it cannot see is a member wired to
+    // another binding of the same type: a no-op stub, the wrong `let`, a value
+    // captured once instead of read on each call, or a getter body returning
+    // the wrong thing. Each builder's literal must be EXACTLY this member set,
+    // one member per line, shorthand pinned as shorthand and each getter's
+    // body pinned as text.
+    const src = await browserSrc();
+    const members = (name: string): string[] => {
+      const body = fnBody(src, name);
+      const open = body.indexOf("return {\n");
+      const close = body.indexOf("\n  };\n}");
+      expect(open).toBeGreaterThan(-1);
+      expect(close).toBeGreaterThan(open);
+      return body
+        .slice(open + "return {\n".length, close)
+        .split("\n")
+        .map((l) => l.trim().replace(/,$/, "").replace(/\s+/g, " "))
+        .filter((l) => l !== "")
+        .sort();
+    };
+    const expected: Record<string, string[]> = {
+      askDeps: ["WIKI: () => WIKI", "switchConnTab", "reloadPageInPlace"],
+      menusDeps: [
+        "WIKI: () => WIKI",
+        "allPages: () => allPages",
+        "workFacts: () => workFacts",
+        "seriesMenuOpener",
+        "postSeriesWrite: getPostSeriesWrite",
+        "withWiki",
+        "closeSeriesMenu",
+        "seriesBaseHash",
+        "openPageAtLoad",
+        "adoptOwnSeriesHashes",
+        "refreshAfterSeriesWrite",
+      ],
+      articleDeps: [
+        "WIKI: () => WIKI",
+        "WIKI_ROOT: () => WIKI_ROOT",
+        "allPages: () => allPages",
+        "currentRelPath: () => currentRelPath",
+        "currentArticle: () => currentArticle",
+        "typeOrder: () => typeOrder",
+        "typeLabel",
+        "workedGate: () => workedGate",
+        "workedAxisOn: () => workedAxisOn",
+        "jiraKeys: () => jiraKeys",
+        "trackerLabels: () => trackerLabels",
+        "withWiki",
+        "recencyNow",
+      ],
+      seriesDeps: [
+        "WIKI: () => WIKI",
+        "allPages: () => allPages",
+        "currentRelPath: () => currentRelPath",
+        "withWiki",
+        "recencyNow",
+        "requestPagesAwaited",
+        "seriesStripHtml",
+        "openPageAtLoad",
+        "adoptOwnSeriesHashes",
+      ],
+    };
+    for (const [name, want] of Object.entries(expected)) {
+      expect({ name, members: members(name) }).toEqual({ name, members: [...want].sort() });
+    }
+    // The two getters the menus port relays live in the series controller:
+    // each must return its own live state, whole body.
+    const series = await srcOf("wiki-series-controller.ts");
+    const wholeFn = (name: string) => {
+      const f = fnBody(series, name);
+      return f.slice(0, f.indexOf("\n}") + 2).trim();
+    };
+    expect(wholeFn("getPostSeriesWrite")).toMatch(/^export function getPostSeriesWrite\(\): SeriesPoster \{\s*return postSeriesWrite;\s*\}$/);
+    expect(wholeFn("seriesMenuOpener")).toMatch(
+      /^export function seriesMenuOpener\(\): HTMLElement \| null \{\s*return seriesMenu\?\.opener \?\? null;\s*\}$/,
+    );
   });
 });
 

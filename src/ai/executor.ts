@@ -10,10 +10,11 @@ import { logTraceFlagsOnce } from "./huginn-trace.ts";
 import { resolveFencedAgentCwd } from "./agent-cwd.ts";
 import {
   assertRestrictedCliAvailable,
+  fencedDirs,
   fencedSettings,
   fencedSurface,
   fencedTools,
-  isReadSurface,
+  refuseMcpToolsSurface,
 } from "./tool-surface.ts";
 import { getLog } from "../logging.ts";
 
@@ -35,6 +36,7 @@ export async function executeClaudePrompt(
 
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
+  refuseMcpToolsSurface("claude-cli", botConfig.toolSurface);
   const fence = fencedSurface(botConfig.toolSurface);
   if (fence) {
     await assertRestrictedCliAvailable(fence);
@@ -74,11 +76,10 @@ export async function executeClaudePrompt(
     // `--restricted` ignores the user, project and local settings files, confines
     // the file tools to the working dirs and refuses bypass; `--tools` names the
     // whole built-in set and `--strict-mcp-config` with no `--mcp-config` loads
-    // no MCP server. One `--settings` only: the last flag wins.
+    // no MCP server. One `--settings` only: the last flag wins. A `{ readSearch }`
+    // run's Grep and Glob are confined by the same working dirs as its Read.
     args.push("--restricted", "--tools", fencedTools(fence).join(","), "--strict-mcp-config");
-    if (isReadSurface(fence)) {
-      for (const dir of fence.read) args.push("--add-dir", dir);
-    }
+    for (const dir of fencedDirs(fence) ?? []) args.push("--add-dir", dir);
     const settings = fencedSettings(fence);
     if (settings) args.push("--settings", JSON.stringify(settings));
   } else if (botConfig.toolsDisabled) {
@@ -124,6 +125,7 @@ export async function executeClaudePrompt(
   if (botConfig.thinkingMaxTokens !== undefined) {
     env.MAX_THINKING_TOKENS = String(botConfig.thinkingMaxTokens);
   }
+  for (const name of botConfig.spawnEnvOmit ?? []) delete env[name];
 
   const proc = Bun.spawn(
     args,

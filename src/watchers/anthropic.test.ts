@@ -405,6 +405,21 @@ describe("parseBlogSlugs", () => {
   test("returns empty map when no section hrefs are present", () => {
     expect(parseBlogSlugs(`<a href="/about">x</a>`, "news").size).toBe(0);
   });
+
+  test("engineering listing: /research/ article links parse, legacy /engineering/ ones canonicalize to /research/", () => {
+    const html =
+      `<a href="/research/managed-agents">a</a>` +
+      `<a href="/engineering/old-post">b</a>` +
+      `<a href="/engineering">section root</a>`;
+    expect([...parseBlogSlugs(html, "engineering").keys()].sort()).toEqual([
+      "https://www.anthropic.com/research/managed-agents",
+      "https://www.anthropic.com/research/old-post",
+    ]);
+  });
+
+  test("news listing does not pick up /research/ links", () => {
+    expect(parseBlogSlugs(`<a href="/research/managed-agents">a</a>`, "news").size).toBe(0);
+  });
 });
 
 describe("checkAnthropic", () => {
@@ -781,6 +796,64 @@ describe("checkAnthropic", () => {
     expect(visible.length).toBe(1);
     expect(visible[0]!.id).toBe(`an:${D2}`);
     expect(visible[0]!.summary).toContain("new guide");
+  });
+
+  test("engineering listing on /research/ links: a pre-move /engineering/ baseline yields only the new post", async () => {
+    // The live shape since ~2026-10-20: the /engineering listing links /research/<slug>.
+    const engHtml =
+      `<a href="/research/eng-post">e</a><a href="/research/eng-new">n</a>${BLOG_PAD}${BLOG_RSC_TAIL}`;
+    stub((url) => {
+      if (url.includes("feed.test")) return COMMITS_ATOM;
+      if (url.includes("llms.txt")) return LLMS_SAMPLE;
+      if (url.includes("/news")) return NEWS_HTML;
+      if (url.includes("/engineering")) return engHtml;
+      if (url.includes("/research")) return RES_HTML;
+      return "";
+    });
+    snapStore.set("tier2:llms", [D1, D2]);
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]); // stored pre-move
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "new eng post" }]);
+
+    const alerts = await checkAnthropic(tier2Watcher());
+    const visible = alerts.filter((a) => !a.silent);
+    expect(visible.map((a) => a.id)).toEqual(["an:https://www.anthropic.com/research/eng-new"]);
+    expect(lastGatePrompt).not.toContain("eng-post");
+    expect((snapStore.get("tier2:blog:engineering") as string[]).sort()).toEqual([
+      "https://www.anthropic.com/research/eng-new",
+      "https://www.anthropic.com/research/eng-post",
+    ]);
+    const health = snapStore.get("source:health") as Record<string, { outcome: string }>;
+    expect(health["tier2:blog:engineering"]!.outcome).toBe("ok");
+  });
+
+  test("a post new on both the engineering and research listings becomes ONE candidate", async () => {
+    const shared = `<a href="/research/shared-post">s</a>`;
+    stub((url) => {
+      if (url.includes("feed.test")) return COMMITS_ATOM;
+      if (url.includes("llms.txt")) return LLMS_SAMPLE;
+      if (url.includes("/news")) return NEWS_HTML;
+      if (url.includes("/engineering")) return `<a href="/research/eng-post">e</a>${shared}${BLOG_PAD}${BLOG_RSC_TAIL}`;
+      if (url.includes("/research")) return `<a href="/research/res-paper">r</a>${shared}${BLOG_PAD}${BLOG_RSC_TAIL}`;
+      return "";
+    });
+    snapStore.set("tier2:llms", [D1, D2]);
+    snapStore.set("tier2:blog:news", [
+      "https://www.anthropic.com/news/claude-opus-4-8",
+      "https://www.anthropic.com/news/some-post",
+    ]);
+    snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/research/eng-post"]);
+    snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "shared" }]);
+
+    const alerts = await checkAnthropic(tier2Watcher());
+    const visible = alerts.filter((a) => !a.silent);
+    expect(visible.map((a) => a.id)).toEqual(["an:https://www.anthropic.com/research/shared-post"]);
+    expect(lastGatePrompt.match(/shared-post/g)?.length).toBe(1);
   });
 
   // --- Phase 4: digest mode (Daily/Weekly rows) ---

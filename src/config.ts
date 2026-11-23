@@ -1,8 +1,13 @@
 import { getLog } from "./logging.ts";
-import { ownerGroupName, type AnswerGroups } from "./format/question.ts";
 // The group-name grammar is a role key's (`<Lane role=>`, `roleKeys`): one copy.
-import { DIGIT_RUN_RE, ROLE_KEY_RE } from "./format/lane-roles.ts";
-import { parseWikiDefaultLens, type WikiDefaultLens } from "./format/reader-lens.ts";
+import {
+  DIGIT_RUN_RE,
+  ownerGroupName,
+  parseWikiDefaultLens,
+  ROLE_KEY_RE,
+  type AnswerGroups,
+  type WikiDefaultLens,
+} from "./utils/config-parsers.ts";
 
 const log = getLog("config");
 
@@ -836,6 +841,52 @@ export function schedulerEnabledFromEnv(): boolean {
   return optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true";
 }
 
+/** Effort levels `WORK_MAP_EFFORT` accepts — `EFFORT_VALUES` (`src/bots/config.ts`)
+ *  spelled again so this file imports no bot discovery; a test pins the two equal. */
+export const WORK_MAP_EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"] as const;
+export type WorkMapEffort = (typeof WORK_MAP_EFFORT_VALUES)[number];
+export const WORK_MAP_DEFAULT_MODEL = "claude-opus-5-5";
+export const WORK_MAP_DEFAULT_HOUR = 5;
+
+/**
+ * `WORK_MAP_WIKIS` (comma-separated wiki names), `WORK_MAP_HOUR` (0–23, the
+ * Europe/Oslo hour from which a day's run may start, whatever the host's time
+ * zone; default 5), `WORK_MAP_MODEL` (default {@link WORK_MAP_DEFAULT_MODEL}) and
+ * `WORK_MAP_EFFORT` (unset ⇒ the CLI's own default). `loadConfig` parses these on
+ * every instance, so a bad hour or an unknown effort warns once and falls back
+ * (hour 5, no effort) instead of failing boot.
+ */
+export function workMapEnv(env: Record<string, string | undefined> = process.env): {
+  workMapWikis: string[];
+  workMapHour: number;
+  workMapModel: string;
+  workMapEffort: WorkMapEffort | undefined;
+} {
+  const warnOnce = (name: string, raw: string, fallback: string) => {
+    if (warnedEnvFlagValues.has(`${name}=${raw}`)) return;
+    warnedEnvFlagValues.add(`${name}=${raw}`);
+    log.warn("Invalid {name}: \"{value}\" — using {fallback}", { name, value: raw, fallback });
+  };
+  const wikis = (env.WORK_MAP_WIKIS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const rawHour = (env.WORK_MAP_HOUR ?? "").trim();
+  let hour = WORK_MAP_DEFAULT_HOUR;
+  if (rawHour !== "") {
+    if (/^\d{1,2}$/.test(rawHour) && Number(rawHour) <= 23) hour = Number(rawHour);
+    else warnOnce("WORK_MAP_HOUR", rawHour, `hour ${WORK_MAP_DEFAULT_HOUR}`);
+  }
+  let rawEffort = (env.WORK_MAP_EFFORT ?? "").trim();
+  if (rawEffort !== "" && !(WORK_MAP_EFFORT_VALUES as readonly string[]).includes(rawEffort)) {
+    warnOnce("WORK_MAP_EFFORT", rawEffort, "the CLI's default effort");
+    rawEffort = "";
+  }
+  return {
+    workMapWikis: wikis,
+    workMapHour: hour,
+    workMapModel: (env.WORK_MAP_MODEL ?? "").trim() || WORK_MAP_DEFAULT_MODEL,
+    workMapEffort: rawEffort === "" ? undefined : (rawEffort as WorkMapEffort),
+  };
+}
+
 export function optionalEnvInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
   if (!raw) return defaultValue;
@@ -890,6 +941,92 @@ export function positiveEnvInt(name: string, defaultValue: number): number {
     );
   }
   return defaultValue;
+}
+
+/**
+ * `MUNINN_MACHINE` — which machine this muninn answers owner-step checks for
+ * (`<Check on="laptop,mini">`, `src/wiki/step-checks/`). Trimmed and
+ * lower-cased; unset, blank or not a machine name (`^[a-z0-9][\w.-]*$`, the
+ * tag's own `on` shape) is null. Null only makes a check that names machines
+ * answer `unknown`, so nothing fails closed here; the hostname is never guessed
+ * from. It logs nothing: `loadConfig()` runs before `setupLogging()` and again
+ * at runtime, so the boot line ({@link machineBootWarning}) warns, once.
+ */
+export function resolveMachineName(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
+  const v = (raw ?? "").trim().toLowerCase();
+  return v && /^[a-z0-9][\w.-]*$/.test(v) ? v : null;
+}
+
+/** The boot warning for a `MUNINN_MACHINE` that is set but not a machine name, or null. Never echoes the value. */
+export function machineBootWarning(raw: string | undefined = process.env.MUNINN_MACHINE): string | null {
+  return (raw ?? "").trim() !== "" && resolveMachineName(raw) === null
+    ? "MUNINN_MACHINE is not a machine name (lower-case letters, digits, . _ -); step checks answer as if it were unset"
+    : null;
+}
+
+export interface PeersParse {
+  /** Machine name → the peer's origin (`https://host[:port]`, no trailing slash). */
+  peers: ReadonlyMap<string, string>;
+  /** One line per dropped entry, by position; never echoes a URL. */
+  warnings: string[];
+}
+
+/**
+ * `MUNINN_PEERS` — the other machines' muninns that answer owner-step checks for
+ * themselves (`GET /api/checks/answer`) and show their own boot line on the Your
+ * work card (`GET /api/checks/boot-line`): comma-separated `name=url`, e.g.
+ * `mini=https://mini.example.ts.net`. Names take {@link resolveMachineName}'s
+ * grammar. A url is kept only when its text, lower-cased, IS its parsed origin
+ * (optionally plus `/`), so anything WHATWG normalisation would change (dot
+ * segments, `https:host`, a short IPv4, an explicit default port) is dropped;
+ * the host must be a DNS name, an IPv4 literal or a bracketed IPv6, the port
+ * not 0. Plain `http:` only to a loopback host: anyone on the path can forge a
+ * reply. A malformed entry, a duplicate name and an entry naming `ownMachine`
+ * are each dropped with a warning (the `SYNC_REPOS` rule: never guess), never a
+ * boot failure: a dropped peer only leaves that machine's checks `unknown`. A
+ * set list with no `ownMachine` adds one warning: neither the step checks nor
+ * the boot line consult it then. Pure: the boot line logs the warnings.
+ */
+export function parsePeers(raw: string | undefined = process.env.MUNINN_PEERS, ownMachine: string | null = resolveMachineName()): PeersParse {
+  const peers = new Map<string, string>();
+  const warnings: string[] = [];
+  const entries = (raw ?? "").split(",").map((s) => s.trim());
+  const HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])$/;
+  const LOOPBACK = /^(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])$/;
+  entries.forEach((entry, i) => {
+    if (!entry) return;
+    const at = `MUNINN_PEERS entry ${i + 1}`;
+    const eq = entry.indexOf("=");
+    const name = eq > 0 ? resolveMachineName(entry.slice(0, eq)) : null;
+    if (!name) return void warnings.push(`${at} is skipped: expected name=url with a machine name (lower-case letters, digits, . _ -)`);
+    const urlRaw = entry.slice(eq + 1).trim();
+    let url: URL | null = null;
+    try {
+      url = new URL(urlRaw);
+    } catch {
+      url = null;
+    }
+    const text = urlRaw.toLowerCase();
+    if (
+      !url ||
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      (text !== url.origin && text !== `${url.origin}/`) ||
+      !HOST.test(url.hostname) ||
+      url.port === "0"
+    ) {
+      return void warnings.push(`${at} (${name}) is skipped: the url must be exactly http(s)://host[:port] with an optional trailing /, a non-default non-zero port and no credentials, path, query, fragment or anything the URL parser would rewrite`);
+    }
+    if (url.protocol === "http:" && !LOOPBACK.test(url.hostname)) {
+      return void warnings.push(`${at} (${name}) is skipped: plain http is allowed only to a loopback host (localhost, 127.x.x.x, [::1]); use https`);
+    }
+    if (name === ownMachine) return void warnings.push(`${at} (${name}) is skipped: it names this machine (MUNINN_MACHINE)`);
+    if (peers.has(name)) return void warnings.push(`${at} (${name}) is skipped: duplicate name`);
+    peers.set(name, url.origin);
+  });
+  if (ownMachine === null && entries.some((e) => e !== "")) {
+    warnings.push("MUNINN_PEERS is unused until MUNINN_MACHINE is set to a machine name: with it unset every machine a check names answers unknown before a peer is asked, and the boot line shows no peer rows");
+  }
+  return { peers, warnings };
 }
 
 export function loadConfig() {
@@ -958,6 +1095,16 @@ export function loadConfig() {
     // registry when the loop starts; an unregistered name is skipped with a
     // warning, not a boot failure (as WIKI_READONLY_ROOTS treats its entries).
     wikiStaleConfirmWikis: optionalEnv("WIKI_STALE_CONFIRM_WIKIS", "").split(",").map((s) => s.trim()).filter(Boolean),
+    // The work map's nightly organize (`src/wiki/work-map/`): which wikis, the
+    // Europe/Oslo hour it may run from, and the model. Unset WORK_MAP_WIKIS means off.
+    ...workMapEnv(),
+    // The decision triage's repo roots (`src/wiki/decision-triage/`), and its
+    // switch: unset, the nightly pass stays off.
+    decisionTriageRepoRoots: (process.env.DECISION_TRIAGE_REPO_ROOTS ?? "").trim() || null,
+    // Which machine this is, for owner-step checks that name machines (`on=`).
+    machine: resolveMachineName(),
+    // The other machines' muninns that answer step checks for themselves (`MUNINN_PEERS`).
+    peers: parsePeers().peers,
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

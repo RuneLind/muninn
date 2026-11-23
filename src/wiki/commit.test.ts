@@ -15,6 +15,7 @@ import {
 } from "./commit.ts";
 import { existsSync } from "node:fs";
 import { isWikiWriteArtifact, WIKI_LOCK_BASENAME } from "./lockfile.ts";
+import { workMapTmpPath } from "./work-map/write.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
 /**
@@ -605,7 +606,7 @@ describe("the wiki write lock is never swept, staged or counted", () => {
     await rm(base, { recursive: true, force: true });
   });
 
-  test("isWikiWriteArtifact names exactly the two transient files", () => {
+  test("isWikiWriteArtifact names exactly the transient files", () => {
     expect(isWikiWriteArtifact(WIKI_LOCK_BASENAME)).toBe(true);
     expect(isWikiWriteArtifact(".wiki-stamp.a1b2.tmp")).toBe(true);
     // Not an artifact: a real page, and near-misses that are content.
@@ -642,6 +643,24 @@ describe("the wiki write lock is never swept, staged or counted", () => {
     const top = await gitToplevel(wikiDir);
     const entries = await listDirtyEntries(top!, wikiDir);
     expect(entries.map((e) => e.path)).toEqual(["data/wiki/concepts/Real.md"]);
+  });
+
+  test("a work-map temp file a crash left behind is never swept, staged or counted", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    const tmp = path.basename(workMapTmpPath(wikiDir));
+    await writeFile(path.join(wikiDir, tmp), '{"version":1');
+    await writeFile(path.join(wikiDir, ".work-map.json"), "{}\n");
+    const top = await gitToplevel(wikiDir);
+    const { dirty } = await listWikiSubtreeDirty(top!, wikiDir);
+    expect(dirty).toEqual([".work-map.json"]);
+    expect((await listDirtyEntries(top!, wikiDir)).map((e) => e.path)).toEqual(["data/wiki/.work-map.json"]);
+    expect((await wikiDirtyStat(wikiDir)).dirtyCount).toBe(1);
+    await commitWikiChange(wikiDir, dirty, "[sweep] daily wiki sweep", { push: false });
+    expect((await git(repo, ["show", "--name-only", "--format=", "HEAD"])).out).toBe("data/wiki/.work-map.json");
+    // Narrow: the map itself and near-misses are not artifacts.
+    expect(isWikiWriteArtifact(".work-map.json")).toBe(false);
+    expect(isWikiWriteArtifact(".work-map.json.bak")).toBe(false);
+    expect(isWikiWriteArtifact("work-map.json.1.x.tmp")).toBe(false);
   });
 
   test("wikiDirtyStat does not count a two-second lock as an uncommitted change", async () => {

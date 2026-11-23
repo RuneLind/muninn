@@ -7,7 +7,7 @@
  * **Scope, stated exactly, because the first version of this comment was wrong
  * twice.** Seven places on the dashboard write the clipboard; this module
  * unified THREE — the fenced-code copy button (`code-block-chrome.ts`), the ⧉
- * Copy path pair (`plan-board.ts`, `wiki-browser.ts`) and the /summaries doc
+ * Copy path pair (`plan-board.ts`, `wiki-article-controller.ts`) and the /summaries doc
  * panel's ⋯ More → Copy link (`sum-reader.ts`, which injects `copyText` with
  * `.toString()`, so this function must stay free of imports). The other four
  * keep their own write:

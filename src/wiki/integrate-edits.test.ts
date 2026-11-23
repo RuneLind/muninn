@@ -304,6 +304,15 @@ describe("pageHasComponentVocabulary", () => {
     expect(pageHasComponentVocabulary("plans/x.md", marked)).toBe(false);
   });
 
+  test("a line-owning <Check> zones and flags exactly as a line-owning <Verdict> does", () => {
+    for (const name of ["Check", "Verdict"]) {
+      const page = `Prose.\n\n<${name} env="X" />\n\nMore.\n`;
+      const zones = findExclusionZones(page, true).filter((z) => z.kind === "component");
+      expect({ name, zones: zones.map((z) => page.slice(z.start, z.end)) }).toEqual({ name, zones: [`<${name} env="X" />`] });
+      expect({ name, flag: pageHasComponentVocabulary("plans/x.md", page) }).toEqual({ name, flag: true });
+    }
+  });
+
   test("a plain .md page does not", () => {
     expect(pageHasComponentVocabulary("plans/x.md", "# A plan\n\nprose only.\n")).toBe(false);
   });

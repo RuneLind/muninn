@@ -16,6 +16,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
+import { replaceMarkdownLinks, replaceTagShapes } from "../format/linear-scan.ts";
 import { statusRows } from "../format/report-top.ts";
 import { questionLeadText } from "../format/question.ts";
 import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRenderer } from "../format/block-renderer.ts";
@@ -213,6 +214,10 @@ const telegramRenderer: BlockRenderer = {
       case "Question":
         // No card and no state: a bold lead line naming the question, then its body.
         return `<b>${escapeHtml(questionLeadText(attrs))}</b>\n${children}`;
+      case "Check":
+        // Off its step's line it names no step (lint `check-placement`): a
+        // paired one prints its body alone.
+        return children;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -230,6 +235,10 @@ const telegramRenderer: BlockRenderer = {
         return `[${text.trim()}]`;
       case "Fact":
         return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "Check":
+        // Off its step's line: a paired tag's body rides on as prose, a
+        // self-closing one prints nothing. A step's trailing tag never gets here (`renderList`).
+        return text;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -263,9 +272,7 @@ function renderInline(text: string): string {
 
   // Link text is NOT inline-processed — prevents nested-tag tangles like
   // <a><i>...</a></i> that Telegram rejects.
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
-    ph.add("LINK", `<a href="${url}">${label}</a>`),
-  );
+  result = replaceMarkdownLinks(result, (_m, label, url) => ph.add("LINK", `<a href="${url}">${label}</a>`));
 
   result = result.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   result = result.replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, "<i>$1</i>");
@@ -276,7 +283,7 @@ function renderInline(text: string): string {
 
   // Telegram only renders a fixed set of HTML tags; anything else must be
   // escaped or it returns a 400.
-  result = result.replace(/<([^>]+)>/g, (match, inner: string) => {
+  result = replaceTagShapes(result, (match, inner) => {
     if (TG_ALLOWED_TAG.test(inner)) return match;
     return `&lt;${inner}&gt;`;
   });

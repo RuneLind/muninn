@@ -280,3 +280,20 @@ export function captureBotConfigFor(botConfig: BotConfig, preset: CapturePreset)
 export function captureThinkingFor(preset: CapturePreset): number | null | undefined {
   return preset.run.thinking === "inherit" ? null : undefined;
 }
+
+/** The `deep` label when a picked connector names its own model (see below). */
+export const DEEP_KEEPS_MODEL_LABEL = "Deep (full thinking)";
+
+/**
+ * The kinds as they run on a connector the reader PICKED that names its own
+ * model: a kind that would swap in {@link CAPTURE_DEEP_MODEL} keeps the picked
+ * model instead and keeps only its thinking half, and its label stops promising
+ * opus. Picking "claude-sdk sonnet-5-5" and then Deep is a request for sonnet
+ * with full thinking; silently running opus would override the explicit pick.
+ * A picked connector with no model falls back to the bot's, so the swap stays.
+ */
+export function presetsForPickedModel(presets: readonly CapturePreset[]): CapturePreset[] {
+  return presets.map((p) =>
+    p.run.model === "opus" ? { ...p, label: DEEP_KEEPS_MODEL_LABEL, run: { ...p.run, model: "bot" } } : p,
+  );
+}

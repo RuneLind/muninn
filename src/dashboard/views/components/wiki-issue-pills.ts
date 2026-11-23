@@ -7,8 +7,8 @@
  * budgeted flex items (`wiki-rail-width.ts`; `e2e/wiki-rail-series.spec.ts`
  * pins the child count).
  *
- * Pure string building, in its own module because `wiki-browser.ts` touches
- * `document` at import time and `bun test` cannot load it.
+ * Pure string building, in its own module so `bun test` loads it without a
+ * DOM.
  */
 
 import { escHtml as esc } from "./escape.ts";

@@ -83,6 +83,12 @@ export interface QuestionLabels {
     editRedacted: string;
     /** A 409 question_closed: the question closed while the reader wrote. */
     questionClosed: string;
+    /** A 409 question_changed: the page's wording moved since this tab rendered it. */
+    questionChanged: string;
+    /** A 422 version_cap: the answer holds the most versions a role user may save. */
+    versionCap: string;
+    /** A 429 rate_limited: too many saves in the window; the draft stays. */
+    rateLimited: string;
     failed: string;
     loadFailed: string;
     /** The POST succeeded, the reload of the answers did not. */
@@ -175,6 +181,9 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
         "You already answered this question. Your text is now an edit of that answer, shown above it; saving it replaces that answer.",
       editRedacted: "The answer you were editing was redacted. Your change was not saved.",
       questionClosed: "The answer was not saved: the question was closed while you were writing.",
+      questionChanged: "The answer was not saved: the question was changed since this page loaded. Reload the page, read the new wording and answer again.",
+      versionCap: "The answer was not saved: it already has the most versions an answer can hold.",
+      rateLimited: "The answer was not saved: you have saved many times in the last few minutes. Wait a few minutes and save again; your text is kept.",
       failed: "The answer was not saved",
       loadFailed: "Answers could not be loaded.",
       savedReloadFailed: "The answer was saved, but the answers could not be loaded again.",
@@ -251,6 +260,9 @@ export const QUESTION_LABELS: Record<QuestionLanguage, QuestionLabels> = {
         "Du har allerede svart på dette spørsmålet. Teksten din er nå en endring av det svaret, som vises over; lagrer du den, erstatter den svaret.",
       editRedacted: "Svaret du endret er fjernet av en administrator. Endringen din ble ikke lagret.",
       questionClosed: "Svaret ble ikke lagret: spørsmålet ble lukket mens du skrev.",
+      questionChanged: "Svaret ble ikke lagret: spørsmålet er endret siden siden ble lastet. Last siden på nytt, les den nye ordlyden og svar igjen.",
+      versionCap: "Svaret ble ikke lagret: det har allerede så mange versjoner som et svar kan ha.",
+      rateLimited: "Svaret ble ikke lagret: du har lagret mange ganger de siste minuttene. Vent noen minutter og lagre igjen; teksten din er beholdt.",
       failed: "Svaret ble ikke lagret",
       loadFailed: "Kunne ikke hente svarene.",
       savedReloadFailed: "Svaret ble lagret, men svarene kunne ikke hentes på nytt.",

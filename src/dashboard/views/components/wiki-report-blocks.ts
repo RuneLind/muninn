@@ -129,7 +129,7 @@ interface MovesTally {
  *  `.next-moves` block that is neither inside another block nor inside a
  *  settled section (`SETTLED_SECTION_SELECTOR`). The index walk
  *  (`countedNextMovesLanes`) never descends into a block either. */
-function countedLanes(article: HTMLElement): HTMLElement[] {
+export function countedLanes(article: HTMLElement): HTMLElement[] {
   return Array.from(article.querySelectorAll<HTMLElement>(".next-moves"))
     .filter((block) => !block.parentElement?.closest(".next-moves") && !block.closest(SETTLED_SECTION_SELECTOR))
     .flatMap((block) =>

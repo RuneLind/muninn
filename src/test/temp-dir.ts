@@ -28,7 +28,7 @@ export async function testTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-/** The dirs recorded and not yet removed, in creation order. */
+/** The dirs recorded and not yet removed by `removeTestTempDirs`, in creation order; a dir a test removed itself is still listed. */
 export function recordedTestTempDirs(): string[] {
   return [...created];
 }

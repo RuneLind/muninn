@@ -42,6 +42,18 @@ export interface CaptureKindOption {
   readonly label: string;
 }
 
+/**
+ * One named connector the reader can run the capture on, with what the server
+ * says that connector offers. The kinds and Slides depend on the connector, so
+ * each row carries its own and switching connector is a repaint, not a request.
+ */
+export interface CaptureConnectorOption {
+  readonly id: string;
+  readonly label: string;
+  readonly kinds: CaptureKindOption[];
+  readonly framesSupported: boolean;
+}
+
 /** What `GET /api/youtube/options` tells the popup, once validated. */
 export interface CaptureOptions {
   readonly kinds: CaptureKindOption[];
@@ -54,6 +66,13 @@ export interface CaptureOptions {
    * which is exactly what that instance would ignore anyway.
    */
   readonly visualDetail: { options: CaptureKindOption[]; defaultDetail: string } | null;
+  /**
+   * The connector picker, or null on an instance with no named connectors (or
+   * one from before the picker). Null means no such control and no such field:
+   * every capture runs on the summarizer bot's own connector. `defaultLabel`
+   * names that default; the top-level `kinds` and `framesSupported` are its.
+   */
+  readonly connectors: { defaultLabel: string; options: CaptureConnectorOption[] } | null;
   /**
    * Whether these options came from the server. `false` ⇒ the fallback below,
    * and the popup MUST say so — the reader is looking at one kind because
@@ -100,6 +119,7 @@ export const FALLBACK_CAPTURE_OPTIONS: CaptureOptions = {
     options: FALLBACK_VISUAL_DETAIL_OPTIONS,
     defaultDetail: FALLBACK_VISUAL_DETAIL_ID,
   },
+  connectors: null,
   fromServer: false,
 };
 
@@ -155,6 +175,40 @@ function parseVisualDetail(raw: unknown): CaptureOptions["visualDetail"] {
 }
 
 /**
+ * The connector picker, or null. A row with no id or no usable kinds is
+ * dropped (it is not something the popup could submit against); a row whose
+ * `frames.supported` is not a boolean reads as available, the top-level rule.
+ */
+function parseConnectors(raw: unknown): CaptureOptions["connectors"] {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { options, default_label } = raw as { options?: unknown; default_label?: unknown };
+  if (!Array.isArray(options)) return null;
+  const rows: CaptureConnectorOption[] = [];
+  for (const entry of options) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { id, label, kinds, frames } = entry as {
+      id?: unknown;
+      label?: unknown;
+      kinds?: unknown;
+      frames?: unknown;
+    };
+    if (!isNonEmptyString(id)) continue;
+    const parsedKinds = parseOptionRows(kinds);
+    if (parsedKinds.length === 0) continue;
+    const f = frames as { supported?: unknown } | undefined;
+    rows.push({
+      id,
+      label: isNonEmptyString(label) ? label : id,
+      kinds: parsedKinds,
+      framesSupported:
+        typeof f === "object" && f !== null && typeof f.supported === "boolean" ? f.supported : true,
+    });
+  }
+  if (rows.length === 0) return null;
+  return { defaultLabel: isNonEmptyString(default_label) ? default_label : "Default", options: rows };
+}
+
+/**
  * Validate `GET /api/youtube/options`, or return null.
  *
  * Null means "use {@link FALLBACK_CAPTURE_OPTIONS} and say so". Anything short
@@ -175,6 +229,7 @@ export function parseCaptureOptions(payload: unknown): CaptureOptions | null {
     default_kind?: unknown;
     frames?: unknown;
     visual_detail?: unknown;
+    connectors?: unknown;
   };
   if (!Array.isArray(raw.kinds)) return null;
 
@@ -198,7 +253,61 @@ export function parseCaptureOptions(payload: unknown): CaptureOptions | null {
     defaultKind,
     framesSupported,
     visualDetail: parseVisualDetail(raw.visual_detail),
+    connectors: parseConnectors(raw.connectors),
     fromServer: true,
+  };
+}
+
+/** The id the popup uses for "no connector picked": the summarizer bot's own. */
+export const DEFAULT_CONNECTOR_ID = "";
+
+/**
+ * The connector to SELECT: a remembered id the server still lists, else the
+ * default. Never an id outside `options.connectors`, so the value a click
+ * submits is one the route accepts.
+ */
+export function pickConnector(stored: unknown, options: CaptureOptions): string {
+  if (
+    isNonEmptyString(stored) &&
+    options.connectors?.options.some((c) => c.id === stored.trim())
+  ) {
+    return stored.trim();
+  }
+  return DEFAULT_CONNECTOR_ID;
+}
+
+/**
+ * The line shown when a remembered connector is no longer listed (renamed,
+ * deleted, another Muninn) — or null. The `restoredKindNote` rule: a silent
+ * fallback to the default would run a model the reader did not pick. Silent
+ * under the unreachable fallback, which has its own line.
+ */
+export function restoredConnectorNote(
+  stored: unknown,
+  picked: string,
+  options: CaptureOptions,
+): string | null {
+  if (!options.fromServer) return null;
+  if (!isNonEmptyString(stored)) return null;
+  if (stored.trim() === picked) return null;
+  return "The remembered connector is not offered here — using the default.";
+}
+
+/**
+ * The options as they apply on one connector: its kinds and Slides in place of
+ * the default's. The default id, or one not listed, is `options` unchanged. The
+ * default kind stays the server's when that connector offers it, else its first.
+ */
+export function optionsForConnector(options: CaptureOptions, connectorId: unknown): CaptureOptions {
+  const row = isNonEmptyString(connectorId)
+    ? options.connectors?.options.find((c) => c.id === connectorId.trim())
+    : undefined;
+  if (!row) return options;
+  return {
+    ...options,
+    kinds: row.kinds,
+    defaultKind: row.kinds.some((k) => k.id === options.defaultKind) ? options.defaultKind : row.kinds[0]!.id,
+    framesSupported: row.framesSupported,
   };
 }
 
@@ -301,6 +410,7 @@ export function buildSummarizeBody(input: {
   kind?: unknown;
   frames?: unknown;
   visualDetail?: unknown;
+  connectorId?: unknown;
 }): {
   title: string;
   url: string;
@@ -308,6 +418,7 @@ export function buildSummarizeBody(input: {
   kind: string;
   frames: boolean;
   visual_detail?: string;
+  connector_id?: string;
 } {
   return {
     title: typeof input.title === "string" ? input.title : "",
@@ -318,5 +429,8 @@ export function buildSummarizeBody(input: {
     ...(isNonEmptyString(input.visualDetail)
       ? { visual_detail: input.visualDetail.trim() }
       : {}),
+    // Absent for the default, the `visual_detail` rule: the route refuses a
+    // present blank id, while an absent one is the summarizer bot as configured.
+    ...(isNonEmptyString(input.connectorId) ? { connector_id: input.connectorId.trim() } : {}),
   };
 }

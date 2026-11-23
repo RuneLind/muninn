@@ -1,7 +1,7 @@
 /**
  * The culled (retired, `signal: none`) page in the reader: its per-wiki labels,
  * the markups built from them, and the rail's hide rule. Pure string building,
- * so `bun test` loads it — `wiki-browser.ts` touches `document` at import time.
+ * so `bun test` loads it without a DOM.
  *
  * The labels are per wiki (`.wiki-reader.json` `cullLabels`, parsed by
  * {@link parseCullLabels} on the server and shipped RESOLVED on the listing).

@@ -991,13 +991,11 @@ test.describe("Wiki rail: Work threads", () => {
       { rail: 260, win: 1400, scheme: "dark" },
       { rail: 300, win: 1400, scheme: "light" },
       { rail: 300, win: 1400, scheme: "dark" },
-      // Under 260 only through the viewport bound (a 445 px window): the meta
-      // lines may wrap at their separators, but nothing may be cut.
-      { rail: 200, win: 445, scheme: "light" },
-      // A 330 px window: the widest part is wider than the line, so it wraps
-      // inside itself rather than running under the 📌.
-      { rail: 148, win: 330, scheme: "light" },
-    ] as const;
+      // A rail under 260 was reachable only through the viewport bound, in a
+      // 445 or 330 px window. At or under 768 px the rail is now the Pages
+      // panel, the window's width less its gutters (issue #623), so those two
+      // passes and their wrapping allowances are gone.
+    ] as const satisfies ReadonlyArray<{ rail: number; win: number; scheme: "light" | "dark" }>;
     for (const p of passes) {
       await page.emulateMedia({ colorScheme: p.scheme });
       await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, p.rail] as const);
@@ -1012,21 +1010,17 @@ test.describe("Wiki rail: Work threads", () => {
       const railW = await page.locator(".wiki-layout > .wiki-pane:first-child").evaluate((e) => Math.round(e.getBoundingClientRect().width));
       expect(railW, `${JSON.stringify(p)}`).toBe(p.rail);
       const list = await page.locator("#wikiList").evaluate((e) => e.scrollWidth - e.clientWidth);
-      if (list > 0 && p.rail >= 200) failures.push(`${p.rail}/${p.scheme}: #wikiList scrolls ${list} px sideways`);
+      if (list > 0) failures.push(`${p.rail}/${p.scheme}: #wikiList scrolls ${list} px sideways`);
       for (const [i, f] of fits.entries()) {
         const at = `${font} ${p.rail}/${p.scheme} [${rows[i]!.id}]`;
         for (const issue of f.issues) failures.push(`${at}: ${issue}`);
         if (f.lines.length !== 2) failures.push(`${at}: ${f.lines.length} meta lines, not 2`);
-        // Every row here is a lone card: at 200 px its span line keeps the
-        // 2-line bound (the 3-line allowance is a child card's only). At 148
-        // px the span's three parts (`since`, the date, the age chip, D14)
-        // take 5 lines, the date wrapping inside itself, measured on macOS.
-        const maxLines = (cls: string) => (p.rail >= 260 ? 1 : p.rail >= 200 ? 2 : cls.includes("wiki-thread-span") ? 5 : 4);
-        for (const l of f.lines) if (l.lines > maxLines(l.cls)) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
-        // Down to 200 px a line breaks only BETWEEN its parts.
-        if (p.rail >= 200) for (const q of f.partLines) if (q.lines > 1) failures.push(`${at}: "${q.text}" breaks inside itself`);
+        // At 260 and 300 px each meta line is one line.
+        for (const l of f.lines) if (l.lines > 1) failures.push(`${at}: .${l.cls} takes ${l.lines} lines`);
+        // A line breaks only BETWEEN its parts.
+        for (const q of f.partLines) if (q.lines > 1) failures.push(`${at}: "${q.text}" breaks inside itself`);
         if (f.nameLines > 2) failures.push(`${at}: the name takes ${f.nameLines} lines`);
-        if (p.rail >= 260 && p.scheme === "light") {
+        if (p.scheme === "light") {
           widest.set(`label @${p.rail}`, Math.min(widest.get(`label @${p.rail}`) ?? Infinity, f.label));
           for (const part of f.parts)
             if (!NAMES.includes(part.text)) widest.set(part.text, Math.max(widest.get(part.text) ?? 0, part.width));

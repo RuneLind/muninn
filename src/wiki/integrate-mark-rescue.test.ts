@@ -14,7 +14,7 @@ import {
   dropReasonTally,
   RESCUE_DELIM_FAMILIES,
 } from "./integrate-edits.ts";
-import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
+import type { FactcheckClaimAnchor } from "./core/wiki-integrate.ts";
 
 const okClaim = (index: number): FactcheckClaimAnchor => ({
   index,

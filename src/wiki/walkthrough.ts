@@ -15,8 +15,12 @@
  * through `renderWikiHtml` and reduced to text. Inline code, links, emphasis,
  * wikilinks and inline components therefore compare as the reader shows them.
  *
- * **Where a section ends.** At the next top-level heading of the same or a
- * higher level (fewer `#`), else at the end of the page.
+ * **Where a section ends.** At the next heading of the same or a higher level
+ * (fewer `#`), else at the end of the page. A heading inside a `<Fold>` or any
+ * other component gets no button but still ends a section, at the line of the
+ * top-level component that holds it: plan pages wrap every `##` after the
+ * first in a Fold, and ending only at top-level headings made «Brief» run to
+ * the page's last section.
  *
  * **One plain text, two readers.** The model is given the section as
  * {@link sectionPlainText}. A quote matches when it is a substring of that text
@@ -36,7 +40,7 @@
  * section, and {@link WALKTHROUGH_QUOTE_MIN} is measured on that span.
  */
 
-import { parseBlocks, headingLine } from "../format/markdown-ast.ts";
+import { parseBlocks, headingLine, type Block } from "../format/markdown-ast.ts";
 import { readerBody, renderWikiHtml } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { neutralizePromptFence, stripWrappingFence } from "../utils/prompt-fence.ts";
@@ -160,10 +164,26 @@ export function locateSection(
     return { ok: false, reason: "count_mismatch", found: same.length };
   }
   const head = same[req.ordinal]!;
-  const next = all.find((h) => h.line > head.line && h.level <= head.level);
-  const lines = readerBody(markdown, req.stripTitle).replace(/\r\n/g, "\n").split("\n");
-  const section = lines.slice(head.line + 1, next ? next.line : lines.length).join("\n");
+  const body = readerBody(markdown, req.stripTitle);
+  const end = sectionEndLine(parseBlocks(body), head.line, head.level);
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const section = lines.slice(head.line + 1, end ?? lines.length).join("\n");
   return { ok: true, section: { level: head.level, headingText: head.text, markdown: section } };
+}
+
+/** The first top-level block after `afterLine` that is, or holds, a heading of
+ *  `level` or higher: its start line, or undefined when none follows. */
+function sectionEndLine(blocks: Block[], afterLine: number, level: number): number | undefined {
+  const closes = (b: Block): boolean =>
+    b.type === "heading"
+      ? b.level <= level
+      : b.type === "component" && b.children.some(closes);
+  for (const b of blocks) {
+    const start = b.type === "heading" ? headingLine(b) : b.type === "component" ? b.line : undefined;
+    if (start === undefined || start <= afterLine) continue;
+    if (closes(b)) return start;
+  }
+  return undefined;
 }
 
 export function buildWalkthroughSystemPrompt(wikiName: string): string {

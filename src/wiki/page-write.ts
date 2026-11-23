@@ -47,7 +47,7 @@
 import path from "node:path";
 import { isPathConfined } from "../gardener/draft.ts";
 import { appendWikiLogEntry } from "../gardener/apply.ts";
-import { sha256, todayOslo } from "../gardener/util.ts";
+import { sha256, todayOslo } from "../utils/date-hash.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
 import { takeWikiWriteLock } from "./lockfile.ts";
 import { getWikiIndex } from "./store.ts";
@@ -100,6 +100,19 @@ export interface PageWriteCommonOptions {
    * the freshly-read body. Return `null` to abort cleanly (a `noop` outcome).
    */
   transform: (current: string) => string | null;
+  /**
+   * An async check INSIDE the critical section, after the CAS and before
+   * `transform`: false declines the write (a `noop`, nothing written or
+   * logged — the caller keeps its own reason, as with `transform`'s null).
+   * Optional; the Stale check's Apply declines a page with uncommitted edits.
+   */
+  proceed?: () => Promise<boolean>;
+  /**
+   * Runs INSIDE the critical section, after steps 2–5, with their outcome and
+   * before the locks release: undo what `proceed` claimed when nothing was
+   * written, before another writer can enter. A throw is logged, never fatal.
+   */
+  settle?: (outcome: PageWriteOutcome) => Promise<void>;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
   now: () => number;
@@ -254,6 +267,12 @@ export function defaultPageWriteIo(root: string): Pick<
  */
 export const PAGE_GONE_REASON = "target file no longer exists";
 
+/** Step 1's rule alone: would {@link writeWikiPage} write `relPath` under
+ *  `wikiDir`? False for `index.md`, `log.md`, `CLAUDE.md`, a non-.md/.mdx page. */
+export function pageWriteConfined(wikiDir: string, relPath: string): boolean {
+  return isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath });
+}
+
 /**
  * Run one page write through the shared sequence above. Returns the outcome; the
  * caller maps it to an HTTP status (written→200, noop→200-with-0-applied,
@@ -293,9 +312,7 @@ export async function writeWikiPage(
   //    `existingRelPath: relPath` selects the exists-page confinement branch
   //    (relative, `..`-free, .md/.mdx, not a reserved infra basename, inside
   //    root); domain/kind are unused there.
-  if (
-    !isPathConfined({ targetPath: relPath, wikiDir, domain: "ai", kind: "concept", existingRelPath: relPath })
-  ) {
+  if (!pageWriteConfined(wikiDir, relPath)) {
     return { outcome: "error", reason: `path confinement failed for "${relPath}"` };
   }
 
@@ -327,7 +344,15 @@ export async function writeWikiPage(
         return { outcome: "locked", reason: lock.reason };
       }
       try {
-        return await writeSection();
+        const outcome = await writeSection();
+        if (opts.settle) {
+          try {
+            await opts.settle(outcome);
+          } catch (err) {
+            log.warn("Wiki page write: settle failed for {path}: {error}", { kind: opts.logKind, path: relPath, error: errMsg(err) });
+          }
+        }
+        return outcome;
       } finally {
         lock.lock?.release();
       }
@@ -341,6 +366,14 @@ export async function writeWikiPage(
     if (current === null) return { outcome: "stale", reason: PAGE_GONE_REASON };
     if (!baseHash || sha256(current) !== baseHash) {
       return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
+    }
+
+    if (opts.proceed) {
+      try {
+        if (!(await opts.proceed())) return { outcome: "noop" };
+      } catch (err) {
+        return { outcome: "error", reason: `pre-write check failed: ${errMsg(err)}` };
+      }
     }
 
     let updated: string | null;

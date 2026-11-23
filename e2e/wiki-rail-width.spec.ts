@@ -31,10 +31,17 @@ import { SETTLED_CREATED_LINE, settleWikiMtimes } from "./settled-wiki.ts";
 import {
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
+  RAIL_WIDTH_MIN,
   RAIL_WIDTH_KEY,
   RAIL_WIDTH_KEY_STEP,
   RAIL_WIDTH_MAX,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import { stubBootLine } from "./wiki-work-card-fixture.ts";
+
+// The Your work card asks for its boot line; answered with a fixed payload so no spec runs git here or reaches GitHub.
+test.beforeEach(async ({ page }) => {
+  await stubBootLine(page);
+});
 
 const PORT = e2ePort("wiki-rail-width");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -216,6 +223,44 @@ const CLOSED_ROWS = 2 + 7 + 1 + 12;
 let server: ChildProcess | undefined;
 let root = "";
 
+/** A second wiki, with a work map (P4): one effort fold row at its widest — a
+ *  name far past any rail, the longest state word, ✋ 12 (twelve Needs-you
+ *  items) and a four-status roll-up — and a short-named one beside it. Its
+ *  pages are new, so Activity holds them. D14: the long fold's body carries a
+ *  one-line summary far past the rail with a page link in it, the longest
+ *  role words, and «+1 more» (five pages). */
+const EF_WIKI = "e2e-rail-efforts-width";
+let efRoot = "";
+const EF_LONG_NAME = "An effort whose name runs far past the widest rail the reader allows — the plan, its follow-up, the report and the explainer";
+const EF_PAGES: Array<[string, string, string]> = [
+  ["plans/ef-a.md", "Effort page A", "in-flight"],
+  ["plans/ef-b.md", "Effort page B", "shipped"],
+  ["plans/ef-c.md", "Effort page C", "proposed"],
+  ["plans/ef-d.md", "Effort page D", "superseded"],
+  ["plans/ef-short.md", "Short effort page", "in-flight"],
+  ["plans/ef-e.md", "Effort page E with a title long enough to wrap inside the fold", "in-flight"],
+];
+// ~300 chars: long enough that an unclamped summary runs to 8 lines at 260 px (measured).
+const EF_ONELINE =
+  "Carry ⟦plans/ef-a.md⟧ through review, then fold the follow-up, the report and the explainer into one long-running piece of work that keeps going " +
+  "until every open question is settled, every reviewer has signed off, the explainer matches the code and the report records what the campaign measured.";
+const EF_ROLES = ["prototype", "explainer", "spin-off", "followup", "reference"];
+const efMap = (runAtMs: number) =>
+  JSON.stringify({
+    version: 1, wiki: EF_WIKI, runAtMs, model: "test-model",
+    coverage: { sessionsSinceMs: runAtMs, sessionsAsOfMs: runAtMs, touchWindowDays: 28, activePages: 5, threads: 0, logEntries: 0, digestChars: 1, warnings: [] },
+    summary: "", themes: [], loose: [],
+    needsYou: Array.from({ length: 12 }, (_, i) => ({ title: `Step ${i + 1}`, kind: "decision", why: "", action: "", pages: [], effort: "long" })),
+    efforts: [
+      {
+        id: "long", name: EF_LONG_NAME, aliases: [], oneLine: EF_ONELINE, state: "proposed",
+        pages: [...EF_PAGES.slice(0, 4), EF_PAGES[5]!].map(([id], i) => ({ id, role: EF_ROLES[i]! })),
+        why: "", confidence: 1, next: "", related: [], daily: [],
+      },
+      { id: "short", name: "Short", aliases: [], oneLine: "", state: "active", pages: [{ id: "plans/ef-short.md", role: "plan" }], why: "", confidence: 1, next: "", related: [], daily: [] },
+    ],
+  });
+
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-"));
   await writeFile(
@@ -238,6 +283,13 @@ test.beforeAll(async () => {
   await rm(path.join(root, NEW_FLIGHT));
   await writeFile(path.join(root, NEW_FLIGHT), fresh, "utf8");
 
+  efRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-ef-"));
+  await mkdir(path.join(efRoot, "plans"), { recursive: true });
+  for (const [rel, title, status] of EF_PAGES) {
+    await writeFile(path.join(efRoot, rel), ["---", `title: ${title}`, `plan_status: ${status}`, "---", "", `# ${title}`, ""].join("\n"), "utf8");
+  }
+  await writeFile(path.join(efRoot, ".work-map.json"), efMap(Date.now()), "utf8");
+
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -246,7 +298,7 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${EF_WIKI}=${efRoot}`,
     },
     stdio: "ignore",
   });
@@ -267,6 +319,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (root) await rm(root, { recursive: true, force: true });
+  if (efRoot) await rm(efRoot, { recursive: true, force: true });
 });
 
 const RAIL = ".wiki-layout > .wiki-pane:first-child";
@@ -327,15 +380,17 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     expect(await railWidth(page)).toBe(after);
   });
 
+  // 800px, not narrower: at or under RAIL_DRAWER_MAX (768) the rail has no
+  // column to bound (issue #623; `wiki-phone-width.spec.ts`).
   test("a width stored on a wide monitor is bounded by a narrow window", async ({ page }) => {
     await open(page);
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
-    // 45% of 700 = 315: the stored value is bounded at APPLY time, never
+    // 45% of 800 = 360: the stored value is bounded at APPLY time, never
     // rewritten — widening the window again gets the stored width back.
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     await page.setViewportSize({ width: 1400, height: 900 });
     await expect.poll(() => railWidth(page)).toBe(560);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
@@ -378,33 +433,33 @@ test.describe("Wiki rail: full titles + remembered width", () => {
   }) => {
     await open(page);
     await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     // Stepping from the STORED 560 moved nothing press after press while
     // rewriting the stored value (measured in review); the base is what is shown.
     // A GROW the bound makes inert must not lower the stored desktop width.
     await page.locator(HANDLE).focus();
     await page.keyboard.press("ArrowRight");
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
-    // The same inert grow by a SHORT drag (to 320, under the stored 560).
+    // The same inert grow by a SHORT drag (to 365, under the stored 560).
     const hb0 = await page.locator(HANDLE).boundingBox();
     if (!hb0) throw new Error("handle not laid out");
     await page.mouse.move(hb0.x + hb0.width / 2, hb0.y + 40);
     await page.mouse.down();
     await page.mouse.move(hb0.x + hb0.width / 2 + 5, hb0.y + 40, { steps: 2 });
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
     await page.keyboard.press("ArrowLeft");
-    expect(await railWidth(page)).toBe(315 - RAIL_WIDTH_KEY_STEP);
+    expect(await railWidth(page)).toBe(360 - RAIL_WIDTH_KEY_STEP);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(
-      315 - RAIL_WIDTH_KEY_STEP,
+      360 - RAIL_WIDTH_KEY_STEP,
     );
     // A drag all the way right is a GROW: it stores what was asked for (the
-    // pointer's clamped width, 560) while the bound keeps showing 315 — the same
+    // pointer's clamped width, 560) while the bound keeps showing 360 — the same
     // rule as the arrow keys, so the desktop width is what the reader dragged to.
     const hb = await page.locator(HANDLE).boundingBox();
     if (!hb) throw new Error("handle not laid out");
@@ -412,7 +467,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.mouse.down();
     await page.mouse.move(650, hb.y + 40, { steps: 4 });
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe(String(RAIL_WIDTH_MAX));
     // And a drag back to a width UNDER the bound is a shrink: stored = shown.
     const hb2 = await page.locator(HANDLE).boundingBox();
@@ -422,7 +477,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.mouse.move(hb2.x - 40, hb2.y + 40, { steps: 4 });
     await page.mouse.up();
     const shown = await railWidth(page);
-    expect(shown).toBeLessThan(315);
+    expect(shown).toBeLessThan(360);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(shown);
   });
 
@@ -430,7 +485,7 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     page,
   }) => {
     await open(page);
-    await page.setViewportSize({ width: 700, height: 900 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(CLOSED_ROWS);
     const rb = await page.locator(RAIL).boundingBox();
@@ -440,13 +495,13 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     const y = hb.y + 40;
     await page.mouse.move(hb.x + hb.width / 2, y);
     await page.mouse.down();
-    await page.mouse.move(rb.x + 500, y, { steps: 4 }); // out past the bound (shown pins at 315)
-    await page.mouse.move(rb.x + 330, y, { steps: 4 }); // back, still over the bound
+    await page.mouse.move(rb.x + 500, y, { steps: 4 }); // out past the bound (shown pins at 360)
+    await page.mouse.move(rb.x + 380, y, { steps: 4 }); // back, still over the bound
     await page.mouse.up();
-    expect(await railWidth(page)).toBe(315);
+    expect(await railWidth(page)).toBe(360);
     // The rule is judged against the state at the START of the gesture; fed its
     // own running result it stored the maximum the pointer ever reached (500).
-    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("330");
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("380");
   });
 
   test("the hit zone starts at the pane's border: the list's last pixel never starts a drag", async ({
@@ -801,21 +856,30 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     expect(clipped).toEqual([]);
   });
 
-  test("no header-row chip label is clipped, in windows down to 400px", async ({ page }) => {
+  // Until issue #623 this swept windows from 700 to 400 px, where the 45%
+  // bound took the rail from 300 down to 180. Those windows now show the rail
+  // as the Pages panel, so the sweep has two halves: the column from 300 down
+  // to its 260 minimum, and the panel in windows from 700 down to 320.
+  test("no header-row chip label is clipped, at a 300 to 260px rail and in the Pages panel down to a 320px window", async ({ page }) => {
     const clipped: string[] = [];
-    await page.addInitScript(
-      ([key, foldsKey]) => {
-        localStorage.setItem(key as string, "300");
-        localStorage.setItem(foldsKey as string, JSON.stringify(["toggle:families"]));
-      },
-      [RAIL_WIDTH_KEY, `muninn.wiki.folds.v1:${WIKI}`] as const,
-    );
-    for (let vw = 700; vw >= 400; vw -= 20) {
+    const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
+    await page.addInitScript((foldsKey) => localStorage.setItem(foldsKey, JSON.stringify(["toggle:families"])), `muninn.wiki.folds.v1:${WIKI}`);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    for (let rail = 300; rail >= RAIL_WIDTH_MIN; rail -= 4) {
+      // Init scripts run in the order added, so the latest width wins.
+      await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, rail] as const);
+      await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+      await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      expect(await railWidth(page), `column at ${rail}`).toBe(rail);
+      for (const c of await clippedChips(page)) clipped.push(`${rail}px rail ${c}`);
+    }
+    for (let vw = 700; vw >= 320; vw -= 20) {
       await page.setViewportSize({ width: vw, height: 900 });
       await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
-      const header = page.locator('.wiki-list-group[data-group="family:plans/gone-slate"]');
-      await expect(header).toHaveCount(1);
       await expect(header.locator(".wiki-fold-chip-label")).toHaveText("12 superseded");
+      await page.locator("#wikiRailToggle").click();
+      await expect(header).toBeVisible();
+      expect(await railWidth(page), `panel in a ${vw}px window`).toBe(vw - 32);
       for (const c of await clippedChips(page)) clipped.push(`${vw}px window ${c}`);
     }
     expect(clipped).toEqual([]);
@@ -839,5 +903,123 @@ test.describe("Wiki rail: row layout at the width budgets", () => {
     await expect(row.locator(".wiki-list-sub .wiki-new-tag")).toHaveText("NEW");
     await expect(row.locator(".wiki-list-end .wiki-new-tag")).toHaveCount(0);
     await expect(row.locator(".wiki-list-end .wiki-list-meta")).toHaveClass(/\bnew\b/);
+  });
+});
+
+test.describe("Wiki rail: effort fold rows at the width budgets (work map P4)", () => {
+  type Page = import("@playwright/test").Page;
+  async function openEf(page: Page, width: number): Promise<void> {
+    await page.addInitScript(([key, w]) => localStorage.setItem(key as string, String(w)), [RAIL_WIDTH_KEY, width] as const);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await page.goto(`${BASE}/wiki?wiki=${EF_WIKI}`);
+    await expect(page.locator('#wikiList .wiki-list-group.effort[data-effort="long"]')).toHaveCount(1);
+    expect(await railWidth(page)).toBe(width);
+  }
+
+  test("from 260 to 400px: a long name ellipsizes inside the row, the age stays on line one, and no meta part clips or leaves the row", async ({ page }) => {
+    const bad: string[] = [];
+    for (let width = 260; width <= 400; width += 10) {
+      await openEf(page, width);
+      for (const id of ["long", "short"]) {
+        const g = await page.locator(`#wikiList .wiki-list-group.effort[data-effort="${id}"]`).evaluate((el) => {
+          const r = (e: Element) => e.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          const right = r(el).right - parseFloat(cs.paddingRight) + 0.5;
+          const name = el.querySelector(".wiki-effort-name") as HTMLElement;
+          const age = el.querySelector(".wiki-effort-age") as HTMLElement;
+          const caret = el.querySelector(".wiki-effort-fold") as HTMLElement;
+          const parts = Array.from(el.querySelectorAll(".wiki-effort-meta .wiki-rollup-part")) as HTMLElement[];
+          const list = document.getElementById("wikiList")!;
+          return {
+            rowOverflow: el.scrollWidth - el.clientWidth,
+            listOverflow: list.scrollWidth - list.clientWidth,
+            nameClipped: name.scrollWidth > name.clientWidth + 1,
+            nameIntoAge: r(name).right - r(age).left,
+            ageOnNameLine: Math.abs(r(age).top - r(name).top) < 6,
+            agePastRow: r(age).right > right,
+            caretVisible: r(caret).width >= 16 && r(caret).left >= r(el).left,
+            parts: parts.map((p) => p.textContent),
+            partsClipped: parts.filter((p) => p.scrollWidth > p.clientWidth + 1 || r(p).right > right).map((p) => p.textContent),
+            partsTwoLines: parts.filter((p) => r(p).height > 20).map((p) => p.textContent),
+          };
+        });
+        const at = `${id} at ${width}: ${JSON.stringify(g)}`;
+        if (g.rowOverflow > 0 || g.listOverflow > 0) bad.push(`overflow ${at}`);
+        if (id === "long" && !g.nameClipped) bad.push(`long name not ellipsized ${at}`);
+        if (id === "short" && g.nameClipped) bad.push(`short name clipped ${at}`);
+        if (g.nameIntoAge > 0.5 || !g.ageOnNameLine || g.agePastRow) bad.push(`age ${at}`);
+        if (!g.caretVisible) bad.push(`caret ${at}`);
+        if (g.partsClipped.length || g.partsTwoLines.length) bad.push(`meta ${at}`);
+        if (id === "long" && g.parts.join("|") !== "proposed ·|✋ 12 ·|1 proposed ·|2 in-flight ·|1 shipped ·|1 superseded") bad.push(`meta text ${at}`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  test("B1: at 260px a ~300-char summary is plain text clamped to three lines, its title holds the whole text, it holds no link or Tab stop, and «Open effort →» shows whole below it and stays put when Tab reaches it", async ({ page }) => {
+    expect(EF_ONELINE.length).toBeGreaterThanOrEqual(290);
+    await openEf(page, 260);
+    const intro = page.locator('#wikiList .wiki-effort-intro[data-effort="long"]');
+    const line = intro.locator(".wiki-effort-oneline");
+    const open = intro.locator("a.wiki-effort-open");
+    const lines = () => line.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
+    expect(await lines()).toBe(3);
+    expect(await line.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    const full = EF_ONELINE.replace("⟦plans/ef-a.md⟧", "Effort page A");
+    await expect(line).toHaveAttribute("title", full);
+    await expect(line).toHaveText(full);
+    expect(await line.evaluate((el) => el.querySelectorAll("a, button, [tabindex], input, select, textarea").length)).toBe(0);
+    const g = await intro.evaluate((el) => {
+      const o = el.querySelector(".wiki-effort-open") as HTMLElement;
+      const one = el.querySelector(".wiki-effort-oneline") as HTMLElement;
+      const ir = el.getBoundingClientRect();
+      const or = o.getBoundingClientRect();
+      return { below: or.top >= one.getBoundingClientRect().bottom - 0.5, inside: or.left >= ir.left && or.right <= ir.right + 0.5 && or.bottom <= ir.bottom + 0.5, oneLine: or.height < 20 };
+    });
+    expect(g).toEqual({ below: true, inside: true, oneLine: true });
+    // Tab from the effort's name lands on «Open effort →» next, and nothing moves.
+    const top = () => open.evaluate((el) => el.getBoundingClientRect().top);
+    const before = await top();
+    await page.locator('#wikiList .wiki-list-group.effort[data-effort="long"] .wiki-effort-name').focus();
+    await page.keyboard.press("Tab");
+    expect(await open.evaluate((el) => el === document.activeElement)).toBe(true);
+    expect(await lines()).toBe(3);
+    expect(await top()).toBe(before);
+  });
+
+  test("D14: from 260 to 400px the open fold's body — a long summary, role chips, «+1 more» — stays inside the rail", async ({ page }) => {
+    const bad: string[] = [];
+    for (let width = 260; width <= 400; width += 10) {
+      await openEf(page, width);
+      const g = await page.evaluate(() => {
+        const list = document.getElementById("wikiList")!;
+        const lr = list.getBoundingClientRect();
+        const intro = list.querySelector('.wiki-effort-intro[data-effort="long"]') as HTMLElement | null;
+        const open = intro?.querySelector(".wiki-effort-open") as HTMLElement | null;
+        const more = list.querySelector('.wiki-effort-more[data-fold-key="effort-all:long"]') as HTMLElement | null;
+        const chips = Array.from(list.querySelectorAll(".wiki-effort-role")) as HTMLElement[];
+        const inside = (e: HTMLElement) => {
+          const r = e.getBoundingClientRect();
+          return r.left >= lr.left - 0.5 && r.right <= lr.right + 0.5;
+        };
+        return {
+          listOverflow: list.scrollWidth - list.clientWidth,
+          intro: !!intro,
+          introOverflow: intro ? intro.scrollWidth - intro.clientWidth : -1,
+          introText: intro?.textContent ?? "",
+          openInside: open ? inside(open) : false,
+          moreText: more?.textContent ?? "",
+          moreInside: more ? inside(more) : false,
+          chips: chips.map((c) => c.textContent),
+          chipsBad: chips.filter((c) => c.scrollWidth > c.clientWidth + 1 || !inside(c) || c.getBoundingClientRect().height > 20).map((c) => c.textContent),
+        };
+      });
+      const at = `at ${width}: ${JSON.stringify(g)}`;
+      if (g.listOverflow > 0) bad.push(`overflow ${at}`);
+      if (!g.intro || g.introOverflow > 0 || g.introText.includes("⟦") || !g.openInside) bad.push(`intro ${at}`);
+      if (g.moreText !== "+1 more" || !g.moreInside) bad.push(`more ${at}`);
+      if (g.chips.length !== 5 || g.chipsBad.length) bad.push(`chips ${at}`);
+    }
+    expect(bad).toEqual([]);
   });
 });

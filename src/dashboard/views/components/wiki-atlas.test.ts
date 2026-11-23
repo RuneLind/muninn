@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { atlasCullOf, atlasPoolView, shellHtml, nodeHtml } from "./wiki-atlas.ts";
 
 /**
- * The Atlas tab has no browser test env (no jsdom/happy-dom — the interactive DOM
+ * These Atlas tab tests do not use happy-dom (the interactive DOM
  * paths are covered by the orchestrator's headless smoke). Here we lock the ONE
  * property that matters at the string-build seam: a payload WITHOUT `semantic`
  * produces byte-identical markup to the pre-overlay behaviour — no toggle, no

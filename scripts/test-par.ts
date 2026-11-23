@@ -1,0 +1,279 @@
+/**
+ * `bun run test:par`: every link of the generated `test` chain, several processes
+ * at a time, so a local run holds exactly CI's file sets.
+ *
+ *   bun scripts/test-par.ts [--jobs N]    run the chain, N links at a time (default 6)
+ *   bun scripts/test-par.ts --list-stale  print `_test` databases that are neither muninn_test nor slot 1..6's
+ *
+ * Each slot gets its own database, `muninn_par_<slot>_test`, rebuilt the way
+ * `db:setup:test` builds `muninn_test` and reused across runs; its links see it in
+ * both `MUNINN_TEST_DATABASE_URL` and `DATABASE_URL`. The fixed-name scratch
+ * databases and role some DB tests create (`db/provision.test.ts`'s
+ * `muninn_provision_test` and its role; `muninn_dburl_test` and
+ * `muninn_unprovisioned_test` under `src/db/`) each belong to one link, so no two
+ * slots touch them at once. Those names are server-wide, so a run collides with any
+ * other run on the same server, a second `test:par` or a plain `bun run test`.
+ *
+ * `--list-stale` only lists. A live run can hold no connection (between links), so
+ * nothing here can tell a leftover from another session's database: drop the
+ * listed ones by hand only when no other session is testing. Slots above 6 are
+ * listed too; they are leftovers only if you do not run `--jobs` above 6.
+ *
+ * Children stay in the runner's process group, so a signal to the group reaches
+ * them directly. SIGINT, SIGTERM or SIGHUP to the runner alone kills them through
+ * its exit handler; SIGKILL to the runner alone leaves them running.
+ */
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync } from "node:fs";
+import path from "node:path";
+import { openPostgres } from "../db/postgres-connection.ts";
+import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
+import { check, junitName, linkCost, loadChain, readTimings, SHARD_TOTAL, type ChainLink, type CheckInput, type CheckResult } from "./test-chain.ts";
+
+const ROOT = path.join(import.meta.dir, "..");
+const OUT_DIR = path.join(ROOT, ".test-par");
+export const DEFAULT_JOBS = 6;
+const SLOT_DB = /^muninn_par_(\d+)_test$/;
+const TEST_DB = /^[A-Za-z0-9_]+_test$/;
+
+export function slotDbName(slot: number): string {
+  if (!Number.isInteger(slot) || slot < 1) throw new Error(`slot must be a positive integer, got ${slot}`);
+  return `muninn_par_${slot}_test`;
+}
+
+/** `base` with its database swapped; credentials, host and query kept. */
+export function withDatabase(base: string, name: string): string {
+  const u = new URL(base);
+  u.pathname = `/${name}`;
+  return u.toString();
+}
+
+export function childEnv(env: Record<string, string | undefined>, url: string): Record<string, string | undefined> {
+  return { ...env, MUNINN_TEST_DATABASE_URL: url, DATABASE_URL: url };
+}
+
+/** `--jobs N` or `--jobs=N`, a positive integer; `DEFAULT_JOBS` when absent. */
+export function parseJobs(argv: readonly string[]): number {
+  let raw: string | undefined;
+  argv.forEach((a, i) => {
+    if (a === "--jobs") raw = argv[i + 1] ?? "";
+    else if (a.startsWith("--jobs=")) raw = a.slice("--jobs=".length);
+  });
+  if (raw === undefined) return DEFAULT_JOBS;
+  if (!/^[1-9]\d*$/.test(raw)) throw new Error(`--jobs takes a positive integer, got "${raw}"`);
+  return Number(raw);
+}
+
+/** Slots 1..DEFAULT_JOBS; a higher one is left over from a run with a larger `--jobs`. */
+function keptSlot(name: string): boolean {
+  const m = name.match(SLOT_DB);
+  return m !== null && Number(m[1]) >= 1 && Number(m[1]) <= DEFAULT_JOBS;
+}
+
+/**
+ * The `_test` databases `--list-stale` prints: never `muninn_test`, slot
+ * 1..DEFAULT_JOBS's, or one named in `keep` (the database this run's
+ * TEST_DATABASE_URL names).
+ */
+export function staleDatabases(names: readonly string[], keep: readonly string[] = []): string[] {
+  const kept = new Set(["muninn", "muninn_test", ...keep]);
+  return names.filter((n) => TEST_DB.test(n) && !kept.has(n) && !keptSlot(n)).sort();
+}
+
+/** The fan-in's check over every shard, as CI runs it after the shards. */
+export function parCheck(input: Pick<CheckInput, "links" | "table" | "tree" | "junit" | "timings">): CheckResult {
+  return check({ ...input, shards: Array.from({ length: SHARD_TOTAL }, (_, i) => i + 1), results: [] });
+}
+
+export function checkLines(r: CheckResult): string[] {
+  return [...r.problems.map((p) => `✗ ${p}`), ...r.warnings.map((w) => `⚠ ${w}`)];
+}
+
+/** Live children, killed together when the runner exits. */
+export class ChildRegistry {
+  private readonly live = new Set<number>();
+  constructor(private readonly kill: (pid: number, sig: NodeJS.Signals) => void = (pid, sig) => process.kill(pid, sig)) {}
+  add(pid: number): void {
+    this.live.add(pid);
+  }
+  delete(pid: number): void {
+    this.live.delete(pid);
+  }
+  /** Signals each live child; one already gone does not stop the rest. */
+  killAll(sig: NodeJS.Signals): number {
+    let n = 0;
+    for (const pid of this.live) {
+      try {
+        this.kill(pid, sig);
+        n++;
+      } catch {
+        // ESRCH: the child is already gone
+      }
+    }
+    this.live.clear();
+    return n;
+  }
+}
+
+const SIGNAL_NUMBER = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 } as const;
+
+export function signalExitCode(sig: keyof typeof SIGNAL_NUMBER): number {
+  return 128 + SIGNAL_NUMBER[sig];
+}
+
+/** Longest first by `cost`, so the slowest links do not start last. */
+export function parOrder<T extends { key: string }>(links: readonly T[], cost: (l: T) => number): T[] {
+  return [...links].sort((a, b) => cost(b) - cost(a) || a.key.localeCompare(b.key));
+}
+
+/**
+ * `run` over `items`, at most `jobs` at a time. Each worker owns one slot
+ * (1..min(jobs, items)) for its whole life, so two concurrent runs never share
+ * a slot. `run` must not throw.
+ */
+export async function runPool<T, R>(items: readonly T[], jobs: number, run: (item: T, slot: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(jobs, items.length) }, async (_, i) => {
+    while (next < items.length) {
+      const at = next++;
+      results[at] = await run(items[at]!, i + 1);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// --- I/O ---
+
+const children = new ChildRegistry();
+
+function spawnTracked(cmd: string[], opts: Parameters<typeof Bun.spawn>[1]): Bun.Subprocess {
+  const proc = Bun.spawn(cmd, opts);
+  children.add(proc.pid);
+  void proc.exited.then(() => children.delete(proc.pid));
+  return proc;
+}
+
+function adminUrl(): string {
+  return withDatabase(TEST_DATABASE_URL, "muninn");
+}
+
+async function listTestDatabases(): Promise<string[]> {
+  const { sql } = openPostgres(adminUrl(), { max: 1 });
+  try {
+    const rows = await sql<{ datname: string }[]>`SELECT datname FROM pg_database WHERE datname LIKE '%\\_test'`;
+    return rows.map((r) => r.datname);
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function cmdListStale(): Promise<number> {
+  const keep = [new URL(TEST_DATABASE_URL).pathname.slice(1)];
+  const stale = staleDatabases(await listTestDatabases(), keep);
+  for (const n of stale) console.log(n);
+  console.log(`${stale.length} stale _test database(s); drop them by hand only when no other session is testing`);
+  return 0;
+}
+
+async function setupSlot(slot: number): Promise<{ slot: number; url: string; code: number; output: string }> {
+  const url = withDatabase(TEST_DATABASE_URL, slotDbName(slot));
+  const proc = spawnTracked(["bun", "db/setup-test-db.ts"], { cwd: ROOT, env: childEnv(process.env, url), stdout: "pipe", stderr: "pipe" });
+  const [out, err, code] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), new Response(proc.stderr as ReadableStream).text(), proc.exited]);
+  return { slot, url, code, output: out + err };
+}
+
+interface LinkRun {
+  link: ChainLink;
+  slot: number;
+  code: number;
+  seconds: number;
+  log: string;
+}
+
+async function cmdRun(jobs: number): Promise<number> {
+  const t0 = performance.now();
+  const { tree, table, links } = loadChain();
+  const timings = readTimings();
+  const cost = linkCost(tree, timings);
+  const order = parOrder(links, cost);
+  const slots = Math.min(jobs, order.length);
+
+  rmSync(OUT_DIR, { recursive: true, force: true });
+  const logDir = path.join(OUT_DIR, "logs");
+  const junitDir = path.join(OUT_DIR, "junit");
+  mkdirSync(logDir, { recursive: true });
+  mkdirSync(junitDir, { recursive: true });
+
+  const setups = await Promise.all(Array.from({ length: slots }, (_, i) => setupSlot(i + 1)));
+  const badSetup = setups.filter((s) => s.code !== 0);
+  for (const s of badSetup) console.error(`✗ setting up ${slotDbName(s.slot)} failed (exit ${s.code}):\n${s.output.trimEnd()}`);
+  if (badSetup.length > 0) return 1;
+  const urlOf = new Map(setups.map((s) => [s.slot, s.url]));
+  console.log(`${order.length} links, ${slots} at a time; databases ready in ${((performance.now() - t0) / 1000).toFixed(1)} s; logs in ${path.relative(ROOT, logDir)}/`);
+
+  const runs = await runPool(order, slots, async (link, slot): Promise<LinkRun> => {
+    const log = path.join(logDir, junitName(link.key).replace(/\.xml$/, ".log"));
+    const start = performance.now();
+    let code: number;
+    let fd: number | undefined;
+    try {
+      fd = openSync(log, "w");
+      const out = path.join(junitDir, junitName(link.key));
+      const proc = spawnTracked(["bun", "test", "--reporter=junit", `--reporter-outfile=${out}`, ...link.args], {
+        cwd: ROOT,
+        env: childEnv(process.env, urlOf.get(slot)!),
+        stdout: fd,
+        stderr: fd,
+      });
+      code = await proc.exited;
+    } catch (e) {
+      code = -1;
+      console.error(`could not start ${link.key}: ${(e as Error).message}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    const seconds = (performance.now() - start) / 1000;
+    console.log(`${code === 0 ? "✓" : "✗"} ${seconds.toFixed(1).padStart(6)} s  [${slot}]  ${link.key}${code === 0 ? "" : `  exit ${code}`}`);
+    return { link, slot, code, seconds, log };
+  });
+
+  const junit = new Map<string, string>();
+  for (const f of new Bun.Glob("*.xml").scanSync({ cwd: junitDir })) junit.set(f, readFileSync(path.join(junitDir, f), "utf8"));
+  const ranOnce = parCheck({ links, table, tree, junit, timings });
+
+  const wall = (performance.now() - t0) / 1000;
+  const failed = runs.filter((r) => r.code !== 0);
+  console.log(`\nslowest links:`);
+  for (const r of [...runs].sort((a, b) => b.seconds - a.seconds).slice(0, 8)) console.log(`  ${r.seconds.toFixed(1).padStart(6)} s  ${r.link.key}`);
+  for (const line of checkLines(ranOnce)) console.log(line);
+  if (failed.length > 0) {
+    console.log(`\n${failed.length} failing link(s):`);
+    for (const r of failed) console.log(`  ${r.link.key}  exit ${r.code}  ${path.relative(ROOT, r.log)}`);
+  }
+  console.log(`\n${runs.length - failed.length}/${runs.length} links passed, ${ranOnce.ran} files ran once, wall ${wall.toFixed(1)} s (${slots} jobs)`);
+  return failed.length === 0 && ranOnce.problems.length === 0 ? 0 : 1;
+}
+
+async function main(argv: string[]): Promise<number> {
+  try {
+    if (argv.includes("--list-stale")) return await cmdListStale();
+    const unknown = argv.filter((a, i) => a !== "--jobs" && !a.startsWith("--jobs=") && argv[i - 1] !== "--jobs");
+    if (unknown.length > 0) {
+      console.error(`usage: bun scripts/test-par.ts [--jobs N] | --list-stale (unknown: ${unknown.join(" ")})`);
+      return 2;
+    }
+    return await cmdRun(parseJobs(argv));
+  } catch (e) {
+    console.error(`✗ ${(e as Error).message}`);
+    return 1;
+  }
+}
+
+if (import.meta.main) {
+  // SIGKILL: the runner is going away and nothing a child writes after this is wanted.
+  process.on("exit", () => children.killAll("SIGKILL"));
+  // Without a handler a signal ends the process without the `exit` event.
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(sig, () => process.exit(signalExitCode(sig)));
+  process.exit(await main(process.argv.slice(2)));
+}

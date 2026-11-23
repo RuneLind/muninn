@@ -641,3 +641,26 @@ describe("fix round 2 batch 1 — mutant pins (description-links)", () => {
     ]);
   });
 });
+
+describe("F60: trimUrl is linear on third-party tails", () => {
+  // The `[…]+$` regex plus a recount per strip: 500 emoji then 500 dots took
+  // 7.5 s (cubic), and a run of closers recounted the whole URL per strip.
+  test("a URL followed by an emoji run and then punctuation", () => {
+    const raw = `https://a.example/x${"😀".repeat(400)}${".".repeat(400)}`;
+    const t = performance.now();
+    expect(trimUrl(raw)).toBe("https://a.example/x");
+    expect(performance.now() - t).toBeLessThan(100);
+  });
+
+  test("a URL followed by a long run of unbalanced closing brackets", () => {
+    const raw = `https://a.example/x${")]）".repeat(30_000)}`;
+    const t = performance.now();
+    expect(trimUrl(raw)).toBe("https://a.example/x");
+    expect(performance.now() - t).toBeLessThan(250);
+  });
+
+  test("balanced brackets inside the URL still stay, after the tail is stripped", () => {
+    expect(trimUrl("https://en.example/wiki/Foo_(bar))😀.")).toBe("https://en.example/wiki/Foo_(bar)");
+    expect(trimUrl("https://a.example/「x」」👍🏽!")).toBe("https://a.example/「x」");
+  });
+});

@@ -143,6 +143,13 @@ describe("stripComponentTags", () => {
     ).toBe("\nEvidence line.\n");
   });
 
+  test("strips <Check> like <Verdict>: trailing, misplaced, paired and in a code span", () => {
+    for (const name of ["Check", "Verdict"]) {
+      expect({ name, out: stripComponentTags(`1. Restart now <${name} env="WIKI_X" restart="3010" />`) }).toEqual({ name, out: "1. Restart now " });
+      expect({ name, out: stripComponentTags(`Say <${name} env="X">hi</${name}> and \`<${name} />\`.`) }).toEqual({ name, out: "Say hi and ``." });
+    }
+  });
+
   test("leaves non-component angle-bracket text untouched", () => {
     expect(stripComponentTags("A <div> and <NotAComponent> stay.")).toBe(
       "A <div> and <NotAComponent> stay.",

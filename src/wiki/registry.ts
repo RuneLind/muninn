@@ -42,8 +42,8 @@ export interface WikiRegistryEntry {
   /**
    * Is this wiki's root listed in `WIKI_READONLY_ROOTS` (see `readonly.ts`)?
    *
-   * **Presentation only.** The client half (dimmed write + egress affordances)
-   * and the `/models` Machine card read it; ENFORCEMENT never does — the three
+   * **Presentation only.** The `/models` Machine card reads it; the client half
+   * reads `readonlyWiki`, from the root; ENFORCEMENT never reads it — the three
    * write seams and the egress-route prologues call `isReadonlyWikiRoot(root)`
    * against the root they already hold, so a registry built without the roots
    * (or a stale memo) cannot un-protect a wiki.

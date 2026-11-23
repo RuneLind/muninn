@@ -31,6 +31,7 @@ import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import type { RunMeta, SimilarArticle } from "../summaries/job-store.ts";
+import type { AgentRunIdentity } from "../tracing/agent-run-trace.ts";
 import { getLog } from "../logging.ts";
 import { ingestSummary, runCaptureOneShot } from "../summaries/summarizer-shared.ts";
 import { appendTranscriptSection } from "../summaries/transcript-appendix.ts";
@@ -73,7 +74,7 @@ export type ShortVideoStatus =
 
 /** The job-store writes this job makes — the vertical's own registry, passed in. */
 export interface ShortVideoStore {
-  attachRun(jobId: string, meta: RunMeta): void;
+  attachRun(jobId: string, meta: RunMeta): AgentRunIdentity | undefined | void;
   updateStatus(jobId: string, status: ShortVideoStatus): void;
   appendText(jobId: string, text: string): void;
   setCategory(jobId: string, category: string): void;

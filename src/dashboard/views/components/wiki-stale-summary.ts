@@ -1,0 +1,165 @@
+/**
+ * The Stale check's counts outside the STALE tab (plan muninn-wiki-drift-check,
+ * PR 2b): the rail badge, the article head's pill, the wiki home's line
+ * beside the Index card and its Stale tab. Pure and DOM-free;
+ * `wiki-stale-controller.ts` fetches and paints, and the shell's start view
+ * (`wiki-browser.ts`) renders the home line and the Stale tab from it too.
+ *
+ * One source each, so every surface shows the tab's two numbers (D26):
+ * confirmed stale status lines on the page, and its linking pages to check.
+ * The rail and the home read the wiki-wide summary (`GET /api/wiki/stale`
+ * with no page, D31); the pill reads the open page's report, the one the
+ * STALE tab renders, and that report's counts overwrite the page's summary
+ * row, so the rail never disagrees with the tab on the open page.
+ */
+import { escHtml as esc } from "./escape.ts";
+import { staleCounts, staleCountsShown, staleCountsText, staleCountsToken, staleLinesUnknown, toCheckUnknown, type StalePageCounts, type StaleReportView } from "./wiki-stale-tab.ts";
+
+export interface StaleSummaryRow {
+  relPath: string;
+  title: string;
+  staleLines: number;
+  toCheck: number;
+  /** The free hit count: the status-line hits, confirmed or not. */
+  hits?: number;
+  changed?: boolean;
+  /** PR 3 (D31): fixes for this page waiting in the Gardener. */
+  inReview?: number;
+  /** The `fixed` rows could not be read: `toCheck` is an upper bound. */
+  fixed?: "unavailable";
+}
+
+export interface StaleSummaryView {
+  pages?: StaleSummaryRow[];
+  totals?: { staleLines: number; toCheck: number; hits?: number; changedPages?: number; inReview?: number };
+  verdicts?: "unavailable";
+  inReview?: "unavailable";
+  error?: string;
+}
+
+/** The summary's counts by relPath; rows with nothing stale are kept, at 0 · 0. */
+export function staleCountMap(s: StaleSummaryView | null | undefined): Map<string, StalePageCounts> {
+  const out = new Map<string, StalePageCounts>();
+  if (!s || s.error || !Array.isArray(s.pages)) return out;
+  for (const { r, c } of countedRows(s)) out.set(r.relPath, c);
+  return out;
+}
+
+const plural = (n: number, one: string, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+
+/** «N fixes in review» (PR 3, D31). */
+export const inReviewText = (n: number) => `${plural(n, "fix", "fixes")} in review`;
+
+/** The rail row's badge: «⚠ N · M» with the words on hover, then «⧗ K» while
+ *  K fixes wait in the Gardener (PR 3); "" when all are 0. */
+export function staleRailBadgeHtml(c: StalePageCounts | undefined): string {
+  const review = Number(c?.inReview) || 0;
+  const unknown = c?.verdicts === "unavailable";
+  if (!c || (!c.staleLines && !c.toCheck && !review && !unknown)) return "";
+  const stale = c.staleLines || c.toCheck || unknown;
+  const words = [stale ? staleCountsText(c).replace(/^⚠ /, "") : "", review ? `${inReviewText(review)} in the Gardener` : ""].filter(Boolean).join(" · ");
+  return (
+    `<span class="wiki-stale-rail${stale ? "" : " review-only"}${unknown ? " unavailable" : ""}" data-stale-rail="${staleCountsToken(c)}"${unknown ? ` data-stale-verdicts="unavailable"` : ""}${review ? ` data-stale-review="${review}"` : ""} title="${esc(words)}">` +
+    (stale ? `⚠ ${staleCountsToken(c, " · ")}` : "") +
+    (review ? `${stale ? " " : ""}<span class="wiki-stale-rail-review">⧗ ${review}</span>` : "") +
+    `</span>`
+  );
+}
+
+/** The article head's pill, from the open page's report: "" until it loads
+ *  or when it failed, so the pill never shows another page's numbers. */
+export function stalePillHtml(r: StaleReportView | null | undefined): string {
+  if (!r || r.error) return "";
+  // The rail row's own counts, so the two never disagree (F11).
+  const c = staleCounts(r);
+  const unknown = c.verdicts === "unavailable";
+  const none = !staleCountsShown(c);
+  const review = Number(c.inReview) || 0;
+  return (
+    `<button type="button" class="wiki-stale-pill${none ? " none" : ""}" data-stale-pill="${staleCountsToken(c)}"${unknown ? ` data-stale-verdicts="unavailable"` : ""} title="Open the STALE tab">` +
+    esc(staleCountsText(c)) +
+    (review ? ` <span class="wiki-stale-pill-review" data-stale-pill-review="${review}">⧗ ${esc(inReviewText(review))}</span>` : "") +
+    `</button>`
+  );
+}
+
+/** Every row with its two counts read as numbers once, in the summary's order. */
+const countedRows = (s: StaleSummaryView) =>
+  (s.pages ?? []).map((r) => {
+    const inReview = Number(r.inReview) || 0;
+    const unknown = staleLinesUnknown(s.verdicts, r.hits);
+    const fixed = toCheckUnknown(r.fixed, r.toCheck);
+    return { r, c: { staleLines: Number(r.staleLines) || 0, toCheck: Number(r.toCheck) || 0, ...(inReview ? { inReview } : {}), ...(unknown ? { verdicts: "unavailable" } : {}), ...(fixed ? { fixed: "unavailable" } : {}) } as StalePageCounts };
+  });
+
+const isStale = staleCountsShown;
+
+/** The wiki's totals as the route sends them (confirmed stale lines, D26),
+ *  unknown when the wiki's hits or any row's are (`staleLinesUnknown`, F11). */
+const totalsOf = (s: StaleSummaryView): StalePageCounts => {
+  const unknown = staleLinesUnknown(s.verdicts, s.totals?.hits) || countedRows(s).some((x) => x.c.verdicts === "unavailable");
+  const fixed = countedRows(s).some((x) => x.c.fixed === "unavailable");
+  return { staleLines: Number(s.totals?.staleLines) || 0, toCheck: Number(s.totals?.toCheck) || 0, ...(unknown ? { verdicts: "unavailable" as const } : {}), ...(fixed ? { fixed: "unavailable" as const } : {}) };
+};
+
+/** The wiki home line: the wiki's totals and a way into the Stale tab. */
+export function staleHomeLineHtml(s: StaleSummaryView | null | undefined): string {
+  if (!s) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">Loading…</span>`;
+  if (s.error) return `<span class="wiki-stale-home-k">Stale check</span> <span class="wiki-stale-home-v">unavailable</span>`;
+  const t = totalsOf(s);
+  const pages = countedRows(s).filter((x) => isStale(x.c)).length;
+  return (
+    `<span class="wiki-stale-home-k">Stale check</span> ` +
+    `<span class="wiki-stale-home-v" data-stale-home-totals="${staleCountsToken(t)}">${esc(staleCountsText(t))}${pages ? ` on ${plural(pages, "page")}` : ""}</span>` +
+    (s.verdicts === "unavailable" ? ` <span class="wiki-stale-home-note">verdicts unavailable</span>` : "") +
+    (pages ? ` <button type="button" class="wiki-stale-home-open" data-stale-home-open>Show</button>` : "")
+  );
+}
+
+/** The wiki home's Stale tab: each page with something stale, its two numbers. */
+export function staleHomeBodyHtml(s: StaleSummaryView | null | undefined): string {
+  if (!s) return `<div class="wiki-conn-empty">Loading…</div>`;
+  if (s.error) return `<div class="wiki-conn-empty">Stale check unavailable: ${esc(s.error)}</div>`;
+  const rows = countedRows(s);
+  let html = `<div class="wiki-stale-home-head">${esc(staleCountsText(totalsOf(s)))}</div>`;
+  if (s.verdicts === "unavailable") html += `<div class="wiki-stale-note">Verdicts are unavailable right now, so no status line shows as confirmed.</div>`;
+  for (const { r, c } of rows) {
+    if (!isStale(c)) continue;
+    html +=
+      `<div class="wiki-stale-home-row" data-relpath="${esc(r.relPath)}" data-stale-home-row="${staleCountsToken(c)}">` +
+      `<span class="wiki-stale-home-title">${esc(r.title || r.relPath)}</span>` +
+      `<span class="wiki-stale-home-counts">${esc(staleCountsText(c))}</span>` +
+      `<span class="wiki-stale-home-path">${esc(r.relPath)}</span>` +
+      `</div>`;
+  }
+  // An unchanged page with unconfirmed hits is a row too (`changed: false`).
+  const quiet = rows.filter((x) => x.r.changed && !isStale(x.c)).length;
+  if (quiet > 0) html += `<div class="wiki-stale-note">+ ${plural(quiet, "changed page")} with nothing stale.</div>`;
+  return html;
+}
+
+/** CSS for the badge, the pill and the home line and tab, injected by `wiki-page.ts`. */
+export function wikiStaleSummaryStyles(): string {
+  return `
+    .wiki-stale-rail { font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 8px; white-space: nowrap; background: color-mix(in srgb, var(--status-warning) 22%, transparent); color: var(--text-primary); }
+    .wiki-stale-rail.review-only { background: color-mix(in srgb, var(--status-info) 18%, transparent); }
+    .wiki-stale-rail.unavailable { background: color-mix(in srgb, var(--text-dim) 22%, transparent); }
+    .wiki-stale-rail-review, .wiki-stale-pill-review { white-space: nowrap; }
+    .wiki-stale-pill-slot:empty { display: none; }
+    .wiki-stale-pill { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; cursor: pointer; border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }
+    .wiki-stale-pill.none { border-color: var(--border-primary); background: transparent; color: var(--text-dim); }
+    .wiki-stale-pill:hover { border-color: var(--accent); }
+    .wiki-status-date { display: inline-block; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border-primary); color: var(--text-dim); }
+    .wiki-status-date.late { border-color: color-mix(in srgb, var(--status-warning) 55%, transparent); background: color-mix(in srgb, var(--status-warning) 14%, transparent); color: var(--text-primary); }
+    .wiki-stale-home { font-size: 12.5px; color: var(--text-secondary); padding: 8px 12px; margin: 0 0 12px; border-radius: 8px; border: 1px solid var(--border-primary); background: var(--bg-panel); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .wiki-stale-home-k { font-weight: 600; color: var(--text-muted); }
+    .wiki-stale-home-note { font-size: 11px; color: var(--text-faint); }
+    .wiki-stale-home-open { font: inherit; font-size: 11.5px; padding: 1px 8px; border-radius: 5px; border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--accent-light); cursor: pointer; }
+    .wiki-stale-home-head { font-size: 13px; font-weight: 600; color: var(--text-secondary); padding: 4px 4px 10px; }
+    .wiki-stale-home-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 8px 10px; margin: 4px 0; border-radius: 6px; border: 1px solid var(--border-primary); background: var(--bg-surface); cursor: pointer; }
+    .wiki-stale-home-row:hover { border-color: var(--accent); }
+    .wiki-stale-home-title { color: var(--text-primary); font-size: 13px; overflow-wrap: anywhere; }
+    .wiki-stale-home-counts { font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+    .wiki-stale-home-path { grid-column: 1 / -1; font-size: 11px; color: var(--text-faint); overflow-wrap: anywhere; }
+  `;
+}

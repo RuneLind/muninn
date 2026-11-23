@@ -8,10 +8,10 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { rm, mkdir, writeFile, utimes, readFile, symlink } from "node:fs/promises";
+import { rm, mkdir, writeFile, utimes, readFile, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { __resetForTest } from "../wiki/commit.ts";
+import { __resetForTest, commitWikiChange, onDefaultBranch } from "../wiki/commit.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import {
   INDEX_LOCK_STALE_MS,
@@ -24,9 +24,11 @@ import {
   syncSubsumesSweeper,
   SYNC_SUBSUME_MAX_AGE_MS,
   __resetSyncStateForTest,
+  __setSyncLedgerEntryForTest,
   type SyncDeps,
 } from "./run.ts";
-import { SYNC_QUIET_MS } from "./decide.ts";
+import { SYNC_QUIET_MS, syncLoopOutlook, type SyncCommitStep, type SyncLedgerEntry, type SyncState } from "./decide.ts";
+import { dirtIsPendingBoardWrite, pendingBoardWriteMessage } from "../plans/board-dirt.ts";
 import type { SyncRepo } from "./config.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
@@ -528,6 +530,70 @@ describe("syncRepo", () => {
       expect(r.state).toBe("blocked");
       expect(r.reason).toContain(marker);
     }
+  });
+
+  // F37 (arch review 2026-11-16): a revert (`--no-commit` included), a sequence
+  // paused after a resolved conflict and a bisect are operations in progress too.
+  test("REVERT_HEAD, a paused sequencer and BISECT_LOG block it too", async () => {
+    for (const marker of ["REVERT_HEAD", "sequencer", "BISECT_LOG"]) {
+      const f = await makeFixture(await testTempDir(path.join(base, "s-")));
+      if (marker === "sequencer") await mkdir(path.join(f.A, ".git", marker), { recursive: true });
+      else await writeFile(path.join(f.A, ".git", marker), "deadbeef\n");
+      const page = path.join(f.wikiA, "concepts", "Settled.md");
+      await writeFile(page, "# Settled\n");
+      await ageFile(page);
+      const r = await syncRepo(wikiRepo(f), deps());
+      expect([marker, r.state]).toEqual([marker, "blocked"]);
+      expect(r.reason).toContain(marker);
+      expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
+    }
+  });
+
+  test("a FUTURE-dated index.lock is blocked, not transient on every tick", async () => {
+    const f = await makeFixture(base);
+    const lock = path.join(f.A, ".git", "index.lock");
+    await writeFile(lock, "");
+    const future = new Date(Date.now() + INDEX_LOCK_STALE_MS + 60_000);
+    await utimes(lock, future, future);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.reason).toContain("in the future");
+    expect(await Bun.file(lock).exists()).toBe(true);
+  });
+
+  // F37 fix round 1: the fetch runs before the pre-flight, so ahead/behind stay
+  // live through a bisect or an abandoned sequence, and the reason names the
+  // command that clears the block.
+  test("a bisect in progress: the fetch still runs and the reason says `git bisect reset`", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await git(f.A, ["bisect", "start"]);
+    expect(await Bun.file(path.join(f.A, ".git", "BISECT_LOG")).exists()).toBe(true);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.behind).toBe(1);
+    expect(r.lastFetchMs).not.toBeNull();
+    expect(r.reason).toContain("git bisect reset");
+    expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
+  });
+
+  test("an abandoned sequencer: the fetch still runs and the reason names `--quit`", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await mkdir(path.join(f.A, ".git", "sequencer"), { recursive: true });
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.behind).toBe(1);
+    expect(r.reason).toContain("git cherry-pick --quit");
+    expect(r.reason).toContain("git revert --quit");
   });
 
   test("a YOUNG index.lock is transient, a STALE one needs a human", async () => {
@@ -1063,6 +1129,8 @@ describe("syncRepo", () => {
     // Ran, yes; evidence, no.
     expect(getSyncLedgerEntry("fixture").lastRunMs).not.toBeNull();
     expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
+    // And Done reads the retry's refused commit as a loop that commits nothing (F36 fix round 2).
+    expect(getSyncLedgerEntry("fixture").lastCommitStep).toBe("failed");
     const res = await syncSubsumesSweeper(top, { repos });
     expect(res.subsumed).toBe(false);
     expect(res.configuredButIdle).toBe(true);
@@ -1126,10 +1194,9 @@ describe("syncRepo", () => {
   });
 
   test("a BLOCKED tick still subsumes — the sweeper would commit the half-finished merge", async () => {
-    // `blocked` is the unmerged-paths refusal, and the sweeper has no pre-flight
-    // of its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt),
-    // so routing a blocked tick to it would stage and commit a human's conflict
-    // markers. Only `error`-shaped ticks that never reached the local section
+    // `blocked` is the unmerged-paths refusal, and a sweep there would stage and
+    // commit a human's conflict markers (the sweeper's own `treeOperationBlock`
+    // check refuses the same tree when the ledger is cold, F37). Only `error`-shaped ticks that never reached the local section
     // may fall through.
     const f = await makeFixture(base);
     const repos = [wikiRepo(f)];
@@ -1167,11 +1234,10 @@ describe("syncRepo", () => {
   });
 
   test("a PRE-FLIGHT blocked tick subsumes too — and still reports the loop idle", async () => {
-    // The pre-flight stop happens BEFORE the fetch, so on a cold ledger it is the
+    // The pre-flight stop happens BEFORE the local section, so on a cold ledger it is the
     // only thing the ledger knows: no local section has ever run. It must still
-    // subsume (the sweeper has no unmerged-paths pre-flight of its own —
-    // `listWikiSubtreeDirty` treats `UU` as ordinary dirt — so it would stage a
-    // human's half-finished merge), and must still WARN, because "nobody is
+    // subsume (a sweep there would stage a human's half-finished merge), and
+    // must still WARN, because "nobody is
     // committing this wiki" is true regardless of whose fault it is.
     const f = await makeFixture(base);
     const repos = [wikiRepo(f)];
@@ -1363,5 +1429,380 @@ describe("syncRepo", () => {
     const states = [a.state, b.state].sort();
     expect(states).toEqual(["ok", "running"]);
     expect((await git(f.A, ["rev-list", "--count", "HEAD"])).out).toBe("2");
+  });
+});
+
+// ── F36 fix round 2 (arch review 2026-11-16): Done reads this ledger ─────────
+
+describe("the ledger Done reads after a tick that committed and then failed", () => {
+  let base: string;
+  beforeEach(async () => {
+    __resetForTest();
+    __resetWikiWriteQueueForTest();
+    __resetSyncStateForTest();
+    base = await testTempDir(path.join(tmpdir(), "sync-outlook-"));
+  });
+  afterEach(async () => {
+    __resetSyncStateForTest();
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const PLAN = "plans/p.mdx";
+  /** A plan page committed and pushed from A, so B's later pushes do not touch it. */
+  async function seedPlan(f: Fixture): Promise<string> {
+    const abs = path.join(f.wikiA, PLAN);
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFile(abs, "---\ntitle: P\npriority: low\n---\n# P\n");
+    await git(f.A, ["add", "-A"]);
+    await git(f.A, ["commit", "-q", "-m", "plan"]);
+    await git(f.A, ["push", "-q"]);
+    await git(f.B, ["pull", "-q"]);
+    return abs;
+  }
+  /** The board's priority flip, settled past the quiet period. */
+  async function flip(abs: string): Promise<void> {
+    await writeFile(abs, "---\ntitle: P\npriority: high\n---\n# P\n");
+    await ageFile(abs);
+  }
+  const doneText = (now: number) =>
+    pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(getSyncLedgerEntry("fixture"), now), sweeper: false });
+
+  test("a rebase-conflict tick committed first: Done does not say it will not commit, and the next tick commits the page", async () => {
+    const f = await makeFixture(base);
+    const plan = await seedPlan(f);
+    await writeFile(path.join(f.wikiB, "concepts", "Seed.md"), "# Seed — B's version\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B edits seed"]);
+    await git(f.B, ["push", "-q"]);
+    const seed = path.join(f.wikiA, "concepts", "Seed.md");
+    await writeFile(seed, "# Seed — A's version\n");
+    await ageFile(seed);
+
+    const first = await syncRepo(wikiRepo(f), deps());
+    expect(first.state).toBe("blocked");
+    expect(first.reason).toContain("rebase conflict");
+    expect(first.committed).toEqual(["wiki/concepts/Seed.md"]);
+    // Asserted last, so a red on the unfixed code shows the message, not the missing field.
+    const step = getSyncLedgerEntry("fixture").lastCommitStep;
+
+    await flip(plan);
+    expect(await dirtIsPendingBoardWrite(f.wikiA, PLAN)).toBe(true);
+    const text = doneText(Date.now());
+    expect(text).not.toContain("will not commit it");
+    expect(text).toContain("The repo-sync loop commits it after its quiet period");
+    expect(text).toContain("rebase conflict in wiki/concepts/Seed.md");
+
+    const next = await syncRepo(wikiRepo(f), deps());
+    expect(next.committed).toEqual(["wiki/plans/p.mdx"]);
+    expect((await git(f.A, ["status", "--porcelain", "--", "wiki/plans"])).out).toBe("");
+    expect((await git(f.A, ["log", "-1", "--format=%s"])).out).toContain("[sync] 1 file(s)");
+    expect(step).toBe("passed");
+  });
+
+  test("a rebase that never starts, after the commit landed, is unpushed too — not a loop that commits nothing", async () => {
+    const f = await makeFixture(base);
+    const plan = await seedPlan(f);
+    // B tracks a file A holds UNTRACKED outside the wiki subtree: A's commit
+    // step passes (the path is not its to stage), then `git rebase` refuses to
+    // overwrite the untracked file before it starts.
+    await writeFile(path.join(f.B, "Other.md"), "B\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B other"]);
+    await git(f.B, ["push", "-q"]);
+    await writeFile(path.join(f.A, "Other.md"), "A\n");
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const first = await syncRepo(wikiRepo(f), deps());
+    expect(first.state).toBe("error");
+    expect(first.reason).toContain("rebase failed");
+    // One line on the card and in Done's text; git's verbatim text stays on `error`.
+    expect(first.reason).not.toContain("\n");
+    expect(first.error).toContain("Other.md");
+    expect(first.committed).toEqual(["wiki/concepts/Settled.md"]);
+    // Asserted last, so a red on the unfixed code shows the message, not the missing field.
+    const step = getSyncLedgerEntry("fixture").lastCommitStep;
+
+    await flip(plan);
+    const text = doneText(Date.now());
+    expect(text).not.toContain("will not commit it");
+    expect(text).toContain("The repo-sync loop commits it after its quiet period");
+
+    const next = await syncRepo(wikiRepo(f), deps());
+    expect(next.committed).toEqual(["wiki/plans/p.mdx"]);
+    expect(step).toBe("passed");
+  });
+
+  test("a refused git commit is stopped: Done says the loop will not commit it", async () => {
+    const f = await makeFixture(base);
+    const plan = await seedPlan(f);
+    await git(f.A, ["config", "commit.gpgsign", "true"]);
+    await git(f.A, ["config", "gpg.format", "openpgp"]);
+    await git(f.A, ["config", "gpg.program", "/bin/false"]);
+    await flip(plan);
+    const first = await syncRepo(wikiRepo(f), deps());
+    expect(first.state).toBe("error");
+    expect(first.reason).toContain("git commit failed");
+    // Asserted last, so a red on the unfixed code shows the message, not the missing field.
+    const step = getSyncLedgerEntry("fixture").lastCommitStep;
+    expect(doneText(Date.now())).toContain("is failing and will not commit it until that is cleared: git commit failed");
+    expect(step).toBe("failed");
+  });
+
+  test("a failed fetch on a covered repo: the commit step was not reached, and the sweep is named only if the sweeper runs", async () => {
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const plan = await seedPlan(f);
+    await syncRepo(wikiRepo(f), deps()); // a healthy tick: fresh evidence
+    await git(f.A, ["remote", "set-url", "origin", path.join(base, "gone.git")]);
+    const failed = await syncRepo(wikiRepo(f), deps());
+    expect(failed.state).toBe("error");
+    // Asserted last, so a red on the unfixed code shows the message, not the missing field.
+    const step = getSyncLedgerEntry("fixture").lastCommitStep;
+    await flip(plan);
+    const now = Date.now();
+    // Fresh evidence from the healthy tick keeps the sweeper down, so the sweep is not named.
+    expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(true);
+    const text = pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(getSyncLedgerEntry("fixture"), now), sweeper: true });
+    expect(text).toContain("is failing and will not commit it until that is cleared: git fetch failed");
+    expect(text).not.toContain("daily wiki sweep");
+    // A day later the evidence is stale: the sweeper runs, and is named.
+    const later = now + SYNC_SUBSUME_MAX_AGE_MS + 60_000;
+    expect((await syncSubsumesSweeper(top, { repos, now: later })).subsumed).toBe(false);
+    expect(pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(getSyncLedgerEntry("fixture"), later), sweeper: true })).toContain(
+      "The daily wiki sweep commits it",
+    );
+    expect(step).toBe("not-reached");
+  });
+
+  test("one ledger entry gives one answer: the sweep is named only when syncSubsumesSweeper says not subsumed", async () => {
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const now = Date.now();
+    const states: SyncState[] = ["unknown", "ok", "status-only", "deferred", "paused", "transient", "retrying", "blocked", "error"];
+    const steps: SyncCommitStep[] = ["passed", "failed", "not-reached"];
+    const clocks = [null, now - 60_000, now - 3_600_000, now - SYNC_SUBSUME_MAX_AGE_MS - 60_000];
+    const runs = [now - 60_000, now - 3 * 3_600_000];
+    const wrong: string[] = [];
+    let named = 0;
+    for (const state of states) {
+      for (const lastCommitStep of steps) {
+        for (const lastLocalSectionMs of clocks) {
+          for (const run of runs) {
+            const entry: SyncLedgerEntry = {
+              state,
+              reason: "why",
+              consecutiveDeferrals: 0,
+              lastSuccessMs: null,
+              lastRunMs: state === "unknown" ? null : run,
+              lastLocalSectionMs,
+              lastCommitStep,
+            };
+            __setSyncLedgerEntryForTest("fixture", entry);
+            const { subsumed } = await syncSubsumesSweeper(top, { repos, now });
+            const text = pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(entry, now), sweeper: true });
+            const namesSweep = text.includes("daily wiki sweep");
+            if (namesSweep) named++;
+            const label = `${state}/${lastCommitStep}/${lastLocalSectionMs === null ? "null" : now - lastLocalSectionMs}/${now - run}`;
+            if (namesSweep && subsumed) wrong.push(`${label}: names the sweep while subsumed`);
+            // The two other reasons the sweeper commits nothing: off the default branch it
+            // no-ops, and where the loop's add/commit was refused its own is refused too.
+            const refused = lastCommitStep === "failed" && state === "error";
+            if (namesSweep && refused) wrong.push(`${label}: names a sweep the repo refuses`);
+            if (!namesSweep && !subsumed && state !== "paused" && !refused) wrong.push(`${label}: hides a sweep that runs`);
+          }
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(named).toBeGreaterThan(0);
+  });
+});
+
+// ── F36 class check (round 3): one state table for who commits a board write ──
+// The table is «Who commits a page the plans board left dirty» in
+// src/sync/CLAUDE.md. Each row below is one row of it; the assertions read the
+// public answers (`syncSubsumesSweeper`, Done's text), not `sweeperOutcome`.
+
+type Kind = "never-run" | "healthy" | "stopped" | "unpushed";
+type SweeperStale = "stands-down" | "no-op" | "refused" | "commits" | null;
+/** [row, state, commit step, stamps, Done's outlook, sweeper when stale (null: the row stamps), sweep named when stale] */
+const BOARD_DIRT_TABLE: [number, SyncState, SyncCommitStep, boolean, Kind, SweeperStale, boolean | null][] = [
+  [1, "unknown", "not-reached", false, "never-run", "commits", true],
+  [3, "blocked", "not-reached", false, "stopped", "stands-down", false],
+  [4, "transient", "not-reached", false, "healthy", "commits", true],
+  [5, "error", "not-reached", false, "stopped", "commits", true],
+  [6, "blocked", "not-reached", false, "stopped", "stands-down", false],
+  [7, "paused", "not-reached", false, "stopped", "no-op", false],
+  [8, "error", "not-reached", false, "stopped", "commits", true],
+  [9, "deferred", "not-reached", false, "healthy", "commits", true],
+  [10, "transient", "failed", false, "healthy", "commits", true],
+  [11, "error", "failed", false, "stopped", "refused", false],
+  [12, "error", "failed", false, "stopped", "refused", false],
+  [13, "deferred", "passed", true, "healthy", null, null],
+  [14, "blocked", "passed", false, "unpushed", "stands-down", false],
+  [15, "error", "passed", false, "unpushed", "commits", true],
+  [16, "ok", "passed", true, "healthy", null, null],
+  [17, "error", "passed", true, "unpushed", null, null],
+  [18, "retrying", "passed", true, "healthy", null, null],
+  [19, "blocked", "passed", true, "unpushed", null, null],
+  [20, "error", "failed", false, "stopped", "refused", false],
+  [21, "transient", "failed", false, "healthy", "commits", true],
+  [22, "blocked", "passed", false, "unpushed", "stands-down", false],
+  [23, "error", "passed", false, "unpushed", "commits", true],
+  [24, "deferred", "passed", true, "healthy", null, null],
+  [25, "deferred", "passed", false, "healthy", "commits", true],
+  [26, "error", "not-reached", false, "stopped", "commits", true],
+];
+
+describe("the board-dirt state table", () => {
+  let base: string;
+  beforeEach(async () => {
+    __resetForTest();
+    __resetWikiWriteQueueForTest();
+    __resetSyncStateForTest();
+    base = await testTempDir(path.join(tmpdir(), "sync-board-table-"));
+  });
+  afterEach(async () => {
+    __resetSyncStateForTest();
+    await chmod(path.join(base, "A", "wiki", "concepts", "Locked.md"), 0o644).catch(() => {});
+    await rm(base, { recursive: true, force: true });
+  });
+
+  const PLAN = "plans/p.mdx";
+  const SWEEP = "daily wiki sweep";
+  const done = (entry: SyncLedgerEntry, now: number, sweeper: boolean) =>
+    pendingBoardWriteMessage(PLAN, { syncLoop: syncLoopOutlook(entry, now), sweeper });
+
+  test.each(BOARD_DIRT_TABLE)("row %d: %s / %s", async (_row, state, lastCommitStep, stamps, kind, sweeperStale, namedStale) => {
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const now = Date.now();
+    const entry = (lastLocalSectionMs: number | null): SyncLedgerEntry => ({
+      state,
+      reason: "why",
+      consecutiveDeferrals: 0,
+      lastSuccessMs: null,
+      lastRunMs: state === "unknown" ? null : now - 60_000,
+      lastLocalSectionMs,
+      lastCommitStep,
+    });
+    // Fresh evidence (this tick's stamp or an earlier one's) stands the sweeper down in every row.
+    const fresh = entry(state === "unknown" ? null : now - 60_000);
+    if (state !== "unknown") {
+      __setSyncLedgerEntryForTest("fixture", fresh);
+      expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(true);
+      expect(done(fresh, now, true)).not.toContain(SWEEP);
+    }
+    expect(syncLoopOutlook(fresh, now).kind).toBe(kind);
+    if (stamps) {
+      expect(sweeperStale).toBeNull();
+      return;
+    }
+    for (const at of [null, now - SYNC_SUBSUME_MAX_AGE_MS - 60_000]) {
+      const stale = entry(at);
+      __setSyncLedgerEntryForTest("fixture", stale);
+      expect(syncLoopOutlook(stale, now).kind).toBe(kind);
+      expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(sweeperStale === "stands-down");
+      expect(done(stale, now, false)).not.toContain(SWEEP);
+      expect(done(stale, now, true).includes(SWEEP)).toBe(namedStale!);
+    }
+  });
+
+  test("row 2: outside a git repo Done never reaches the board-write message", async () => {
+    const dir = path.join(base, "not-a-repo");
+    await mkdir(path.join(dir, "plans"), { recursive: true });
+    await writeFile(path.join(dir, PLAN), "---\ntitle: P\npriority: high\n---\n# P\n");
+    expect(await dirtIsPendingBoardWrite(dir, PLAN)).toBe(false);
+  });
+
+  /** A real tick on clone A, then Done's text and the sweeper's answer a day later. */
+  async function aDayLater(f: Fixture) {
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const later = Date.now() + SYNC_SUBSUME_MAX_AGE_MS + 60_000;
+    const entry = getSyncLedgerEntry("fixture");
+    return {
+      entry,
+      sub: await syncSubsumesSweeper(top, { repos, now: later }),
+      text: done(entry, later, true),
+    };
+  }
+
+  test("row 12, real: a refused git commit with stale evidence does not name the sweep, whose own commit is refused too", async () => {
+    const f = await makeFixture(base);
+    await git(f.A, ["config", "commit.gpgsign", "true"]);
+    await git(f.A, ["config", "gpg.format", "openpgp"]);
+    await git(f.A, ["config", "gpg.program", "/bin/false"]);
+    const page = path.join(f.wikiA, "concepts", "New.md");
+    await writeFile(page, "# New\n");
+    await ageFile(page);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git commit failed");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastCommitStep).toBe("failed");
+    // The sweeper runs: the evidence is stale and nothing is blocked.
+    expect(sub.subsumed).toBe(false);
+    // Its commit goes through the same repo config, so it is refused the same way.
+    const sweep = await commitWikiChange(f.wikiA, ["concepts/New.md"], "[sweep] daily wiki sweep: 1 files", { push: false });
+    expect(sweep).toEqual({ committed: false, reason: "error" });
+    expect(text).toContain("is failing and will not commit it until that is cleared: git commit failed");
+    expect(text).not.toContain(SWEEP);
+  });
+
+  test("row 11, real: a refused git add records a failed commit step and does not name the sweep", async () => {
+    const f = await makeFixture(base);
+    const page = path.join(f.wikiA, "concepts", "Locked.md");
+    await writeFile(page, "# Locked\n");
+    await ageFile(page);
+    await chmod(page, 0o000);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git add failed");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastCommitStep).toBe("failed");
+    expect(sub.subsumed).toBe(false);
+    expect(text).toContain("will not commit it until that is cleared: git add failed");
+    expect(text).not.toContain(SWEEP);
+  });
+
+  test("row 14, real: a rebase conflict repeating with no evidence stands the sweeper down and is not named", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "Seed.md"), "# Seed — B\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B edits seed"]);
+    await git(f.B, ["push", "-q"]);
+    const seed = path.join(f.wikiA, "concepts", "Seed.md");
+    await writeFile(seed, "# Seed — A\n");
+    await ageFile(seed);
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("blocked");
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("blocked");
+    const { entry, sub, text } = await aDayLater(f);
+    expect(entry.lastLocalSectionMs).toBeNull();
+    // Stood down at any evidence age, and warning: the docs may not say it runs past ~26 h.
+    expect(sub).toMatchObject({ subsumed: true, configuredButIdle: true });
+    // A day with no tick reads idle; right after the tick it reads unpushed. Neither names the sweep.
+    expect(text).toContain("its last run was");
+    expect(text).not.toContain(SWEEP);
+    const nowText = done(entry, Date.now(), true);
+    expect(nowText).toContain("rebase conflict");
+    expect(nowText).not.toContain(SWEEP);
+  });
+
+  test("row 7, real: a paused loop with stale evidence lets the sweeper run, which no-ops off the default branch, so it is not named", async () => {
+    const f = await makeFixture(base);
+    await git(f.A, ["checkout", "-q", "-b", "feature"]);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("paused");
+    const { sub, text } = await aDayLater(f);
+    expect(sub.subsumed).toBe(false);
+    expect(await onDefaultBranch((await git(f.A, ["rev-parse", "--show-toplevel"])).out)).toBe(false);
+    expect(text).toContain("is paused and will not commit it");
+    expect(text).not.toContain(SWEEP);
   });
 });

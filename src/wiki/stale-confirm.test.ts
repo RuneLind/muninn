@@ -14,14 +14,19 @@ import { __setReadonlyWikiRootsForTest, __setWikiReadonlyForTest } from "./reado
 import type { WikiRegistryEntry } from "./registry.ts";
 import {
   buildStalePrompt,
+  changedHashOf,
   changedPageContentHash,
   commitsFor,
   CONFIRM_MAX_CALLS,
   CONFIRM_START_CUTOFF_MS,
+  hitConfirmations,
+  hitKey,
   memoryStaleVerdictStore,
   otherPlansIn,
   parseStaleAnswer,
   passageKeyHash,
+  passageVerdictKey,
+  passageVerdicts,
   runStaleCheck,
   runStaleConfirm,
   startStaleConfirmLoop,
@@ -32,6 +37,7 @@ import {
   type StaleModel,
 } from "./stale-confirm.ts";
 import { __resetWikiCacheForTest, getWikiIndex, type WikiPageMeta } from "./store.ts";
+import { linkingBuckets } from "./stale.ts";
 
 const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
 
@@ -207,8 +213,9 @@ describe("parseStaleAnswer: home keeps old's links as written (fix round 2)", ()
   test("a link twice in old must be twice in home", () => {
     const passage = "- [[p]] og [[p]] er i gang";
     const old = "[[p]] og [[p]] er i gang";
-    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]]" }), passage).edit).toEqual({ old, new: "x" });
-    expect(parseStaleAnswer(ans({ old, new: "x", home: "se [[p]] og [[p]]" }), passage).edit?.home).toBe("se [[p]] og [[p]]");
+    const keep = "[[p]] og [[p]] er levert";
+    expect(parseStaleAnswer(ans({ old, new: keep, home: "se [[p]]" }), passage).edit).toEqual({ old, new: keep });
+    expect(parseStaleAnswer(ans({ old, new: keep, home: "se [[p]] og [[p]]" }), passage).edit?.home).toBe("se [[p]] og [[p]]");
   });
   test("a link inside inline code is not a link: home may drop it", () => {
     const passage = "- the `[[p]]` form er i gang";
@@ -254,8 +261,8 @@ describe("parseStaleAnswer: old is unique in the passage and on its full line (f
     const passage = "- [[a]] er i gang\n…[[b]] er levert…";
     const lines = ["- [[a]] er i gang", "z [[b]] er levert, og [[a]] er i gang"];
     // Once in the passage and once on its own row's full line: kept, though row 2's hidden part repeats it.
-    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "x" }), passage, lines).edit).toEqual({ old: "[[a]] er i gang", new: "x" });
-    expect(parseStaleAnswer(ans({ old: "[[b]] er levert", new: "x" }), passage, lines).edit).toEqual({ old: "[[b]] er levert", new: "x" });
+    expect(parseStaleAnswer(ans({ old: "[[a]] er i gang", new: "[[a]] x" }), passage, lines).edit).toEqual({ old: "[[a]] er i gang", new: "[[a]] x" });
+    expect(parseStaleAnswer(ans({ old: "[[b]] er levert", new: "[[b]] x" }), passage, lines).edit).toEqual({ old: "[[b]] er levert", new: "[[b]] x" });
   });
   test("a full line that is unreadable or no longer holds old drops the edit", () => {
     const passage = "- [[p]] er i gang";
@@ -469,6 +476,26 @@ describe("runStaleConfirm (D16)", () => {
     }
   });
 
+  // Fix round 2 batch 2: the loop passes the page, so an edit placement
+  // would refuse on an .mdx page is dropped at parse time.
+  test("the loop drops an edit with an MDX brace on an .mdx page, or an alias on a front-matter line", async () => {
+    await write("brace.mdx", page("Brace", "[[p]] is in-flight now."));
+    await write("fmline.md", page("Fmline", "Body.", 'rel: {a: "[[p]]", b: is in-flight}\n'));
+    try {
+      const model: StaleModel = async (p) => {
+        const n = p.includes("Wiki page: fmline.md") ? "*nope" : "is shipped {soon}";
+        return JSON.stringify({ verdict: "stale", reason: "shipped", edit: { old: "is in-flight", new: n } });
+      };
+      const { deps, store } = makeDeps({ model: () => model });
+      await runStaleConfirm(["cw"], deps);
+      const rows = [...store.rows.values()].filter((r) => r.page === "brace.mdx" || r.page === "fmline.md").map((r) => [r.page, r.verdict, r.edit]);
+      expect(rows.sort()).toEqual([["brace.mdx", "stale", null], ["fmline.md", "stale", null]]);
+    } finally {
+      await rm(path.join(root, "brace.mdx"));
+      await rm(path.join(root, "fmline.md"));
+    }
+  });
+
   test("A4: an unreadable answer writes nothing and counts as an error, so the next run asks again", async () => {
     let calls = 0;
     const { deps, store } = makeDeps({ model: () => async () => (calls++, "Sorry, I cannot answer in JSON.") });
@@ -591,6 +618,90 @@ describe("runStaleConfirm (D16)", () => {
     expect(Date.now() - t0).toBeLessThan(900);
   });
 
+  // Fix round 1 (CI): on the runner the budget timer fired while Date.now()
+  // still read short of the run's end, and a second call started past the bound.
+  test("A6: once the run's bound fires, no call starts, whatever the wall clock reads", async () => {
+    const realNow = Date.now;
+    let lagMs = 0;
+    Date.now = () => realNow() - lagMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      // The wall clock falls behind the timers once the write hangs.
+      const hung = { ...store, upsert: () => (setTimeout(() => (lagMs = 200), 0), never<never>()) };
+      const { deps } = makeDeps({ store: () => hung, failures: new Map(), limits: { budgetMs: 400 } });
+      const r = await within(runStaleConfirm(["cw"], deps), 1_500);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  // Fix round 2 batch 5, finding 1: every budgeted step checks the run's
+  // deadline before it starts, not only the loop's guard.
+  test("A6: a rebuild is not started once the run's bound is spent", async () => {
+    const started: string[] = [];
+    const twin = { ...entry, name: "cw-twin" } as WikiRegistryEntry;
+    // The first rebuild hangs while the clock passes the budget. Two real 300 ms
+    // timers raced the wall clock, and on CI a timer fired just before
+    // `Date.now()` reached the deadline, so the twin's rebuild started.
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const index: ConfirmDeps["index"] = () => (started.push("rebuild"), started.length === 1 ? ((jumpMs = 10 * 60_000), never()) : getWikiIndex({ root: entry.root, refresh: true }));
+      const { deps } = makeDeps({ registry: () => [entry, twin], index, failures: new Map(), limits: { budgetMs: 300 } });
+      const r = await runStaleConfirm(["cw", "cw-twin"], deps);
+      expect(started).toEqual(["rebuild"]);
+      expect(r).toMatchObject({ calls: 0, errors: 1 });
+      expect(r.wikis[1]).toMatchObject({ wiki: "cw-twin", skipped: "run budget spent" });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("A6: a call whose deadline passed while its input was read is not started", async () => {
+    let t = Date.UTC(2026, 9, 28, 8);
+    let armed = false;
+    const prompts: string[] = [];
+    // The clock passes the run's deadline as the call input is read.
+    const index: ConfirmDeps["index"] = async (r) => {
+      const ix = (await getWikiIndex({ root: r, refresh: true }))!;
+      return new Proxy(ix, {
+        get(target, p) {
+          const v = Reflect.get(target, p);
+          if (p === "resolveRelPath" && typeof v === "function") return (...a: unknown[]) => (armed && (t += 10 * 60_000), (v as (...x: unknown[]) => unknown).apply(target, a));
+          return typeof v === "function" ? v.bind(target) : v;
+        },
+      });
+    };
+    const store = memoryStaleVerdictStore();
+    const arming = { ...store, get: (...a: Parameters<typeof store.get>) => ((armed = true), store.get(...a)) };
+    const model: StaleModel = async (prompt) => (prompts.push(prompt), '{"verdict":"true","reason":"ok"}');
+    const { deps } = makeDeps({ index, store: () => arming, model: () => model, now: () => t, failures: new Map() });
+    const r = await runStaleConfirm(["cw"], deps);
+    expect(prompts).toEqual([]);
+    expect(r).toMatchObject({ calls: 0, errors: 0, left: 2 });
+  });
+
+  test("A6: a verdict write is not started once the run's bound is spent", async () => {
+    const realNow = Date.now;
+    let jumpMs = 0;
+    Date.now = () => realNow() + jumpMs;
+    try {
+      const store = memoryStaleVerdictStore();
+      const upserts: unknown[] = [];
+      const counting = { ...store, upsert: (v: Parameters<typeof store.upsert>[0]) => (upserts.push(v), store.upsert(v)) };
+      // The clock passes the run's end while the model answers.
+      const model: StaleModel = async () => ((jumpMs = 10 * 60_000), '{"verdict":"true","reason":"ok"}');
+      const { deps } = makeDeps({ store: () => counting, model: () => model, failures: new Map() });
+      const r = await runStaleConfirm(["cw"], deps);
+      expect(upserts).toEqual([]);
+      expect(r).toMatchObject({ calls: 1, errors: 1, left: 1 });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   test("the loop starts only with the scheduler on, a writable instance and a registered wiki", async () => {
     const { deps } = makeDeps();
     expect(startStaleConfirmLoop({ schedulerEnabled: false, wikiStaleConfirmWikis: ["cw"], profile: "default" }, { deps })).toEqual([]);
@@ -665,20 +776,16 @@ describe("commitsFor (A15)", () => {
     expect(await commitsFor({ root }, undefined, t0 - 7 * DAY)).toBeUndefined();
   });
 
-  test("the subjects after sinceMs, newest first, and none after untilMs", async () => {
+  test("the subjects after sinceMs, newest first", async () => {
     expect(await commitsFor({ root }, meta(), t0 - 7 * DAY)).toEqual(["three", "two"]);
-    expect(await commitsFor({ root }, meta(), t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
     expect(await commitsFor({ root }, meta(), undefined)).toEqual(["three", "two", "one"]);
   });
 
-  test("an uncommitted change newer than every commit is null; under asOf the commits still count", async () => {
+  test("an uncommitted change is null", async () => {
     const dirty = meta({ gitDirty: true, gitTouchedMs: t0 - DAY });
     expect(await commitsFor({ root }, dirty, t0 - DAY)).toBeNull();
     expect(await commitsFor({ root }, meta({ gitDirty: true }), t0 - 7 * DAY)).toBeNull();
-    // The same uncommitted page judged as of a past day: its commits up to then count.
-    const dirtyOld = meta({ gitDirty: true, gitTouchedMs: t0 - 10 * DAY });
-    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY)).toBeNull();
-    expect(await commitsFor({ root }, dirtyOld, t0 - 7 * DAY, t0 - 3 * DAY)).toEqual(["two"]);
+    expect(await commitsFor({ root }, meta({ gitDirty: true, gitTouchedMs: t0 - 10 * DAY }), t0 - 7 * DAY)).toBeNull();
   });
 
   test("git unavailable for the root: no commit section, not an empty one", async () => {
@@ -740,5 +847,201 @@ describe("Check drops an edit the full line holds twice (fix round 2)", () => {
       "notes/old.md": ["stale", null],
       "notes/two.md": ["stale", { old: "landed on 23.05", new: "landed on 18.06" }],
     });
+  });
+});
+
+// Fix round 2 batch 2: Check passes the page, so an edit placement would
+// refuse on an .mdx page is dropped when the answer is read.
+describe("Check drops an edit placement would refuse (R2B2-2)", () => {
+  let root = "";
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
+  };
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-check-rule-"));
+    await git("init", "-q", "-b", "main");
+    await write("hub.md", page("Hub", "Body."));
+    await write("notes/brace.mdx", page("Brace", "The pin in [[hub]] landed on 23.05."));
+    await write("notes/plain.md", page("Plain", "The pin in [[hub]] landed on 23.05."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("hub.md", page("Hub", "Body two."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "hub: the pin moves");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a brace on the .mdx page drops the edit; the .md page keeps it", async () => {
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const model: StaleModel = async () => JSON.stringify({ verdict: "stale", reason: "moved", edit: { old: "landed on 23.05", new: "landed on {18.06}" } });
+    const events: { type: string; edit?: unknown; verdict?: string }[] = [];
+    const ok = await runStaleCheck({ wiki: "w", index, relPath: "hub.md", asOfMs: Date.parse("2026-06-20T00:00:00Z"), bot: BOT, store: memoryStaleVerdictStore(), model, onEvent: (e) => void events.push(e as never) });
+    expect(ok).toBe(true);
+    const by = Object.fromEntries(events.filter((e) => e.type === "verdict").map((e) => [(e as { relPath?: string }).relPath, [e.verdict, e.edit]]));
+    expect(by).toEqual({
+      "notes/brace.mdx": ["stale", null],
+      "notes/plain.md": ["stale", { old: "landed on 23.05", new: "landed on {18.06}" }],
+    });
+  });
+});
+
+// Fix round 2 batch 2: the parse runs placement's own rule on the row's
+// line, so a draft the STALE tab offers is one Apply can write.
+describe("parseStaleAnswer: an edit placement would refuse is dropped (R2B2-2)", () => {
+  const ans = (edit: Record<string, unknown>) => JSON.stringify({ verdict: "stale", reason: "r", edit });
+  const editOf = (edit: Record<string, unknown>, passage: string, page = "notes/a.md") => parseStaleAnswer(ans(edit), passage, [passage], { page }).edit;
+
+  test("a new that drops a link of any kind drops the edit", () => {
+    expect(editOf({ old: "[[p]] er i gang", new: "p er levert" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "[the doc] er i gang", new: "the doc er levert" }, "- [[p]] per [the doc] er i gang")).toBeNull();
+    expect(editOf({ old: "i gang[^1]", new: "levert" }, "- [[p]] er i gang[^1]")).toBeNull();
+    expect(editOf({ old: "[[p]] er i gang", new: "[[p]] er levert" }, "- [[p]] er i gang")).toEqual({ old: "[[p]] er i gang", new: "[[p]] er levert" });
+  });
+
+  test("a new that adds a link, or a home that does, is dropped", () => {
+    expect(editOf({ old: "er i gang", new: "er levert, se [[q]]" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert", home: "se [[q]]" }, "- [[p]] er i gang")).toEqual({ old: "er i gang", new: "er levert" });
+  });
+
+  test("a tag, or on an .mdx page a `<` or a brace, drops the edit", () => {
+    expect(editOf({ old: "er i gang", new: "er <b>levert</b>" }, "- [[p]] er i gang")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert {x}" }, "- [[p]] er i gang", "notes/a.mdx")).toBeNull();
+    expect(editOf({ old: "er i gang", new: "er levert < 2 dager" }, "- [[p]] er i gang", "notes/a.mdx")).toBeNull();
+    // The same text on a .md page places, so it is kept.
+    expect(editOf({ old: "er i gang", new: "er levert {x}" }, "- [[p]] er i gang")).toEqual({ old: "er i gang", new: "er levert {x}" });
+  });
+
+  test("a new that changes how the line starts drops the edit", () => {
+    expect(editOf({ old: "- [[p]] er i gang", new: "[[p]] er levert" }, "- [[p]] er i gang")).toBeNull();
+  });
+
+  test("old is found in the window's pieces as placement cuts them: the join's space is not text", () => {
+    const text = "[[p]] lead … then shipped…";
+    const line = "[[p]] lead x then shipped now";
+    expect(parseStaleAnswer(ans({ old: "lead ", new: "led " }), text, [line], { page: "notes/a.md" }).edit).toBeNull();
+    expect(parseStaleAnswer(ans({ old: "then shipped", new: "then in-flight" }), text, [line], { page: "notes/a.md" }).edit).toEqual({ old: "then shipped", new: "then in-flight" });
+  });
+
+  test("an edit on a front-matter line is checked against the YAML, and never throws", () => {
+    const content = 'title: Note\nrel: {a: "[[hub]]", b: landed on 23.05}';
+    const fm = `---\n${content}\n---\n\nBody.\n`;
+    const row = 'rel: {a: "[[hub]]", b: landed on 23.05}';
+    const parse = (n: string) => parseStaleAnswer(ans({ old: "landed on 23.05", new: n }), row, [row], { page: "notes/a.md", file: { content: fm, lines: [3] } }).edit;
+    expect(parse("*nope")).toBeNull();
+    expect(parse("landed, c: 1")).toBeNull();
+    expect(parse("landed on 18.06")).toEqual({ old: "landed on 23.05", new: "landed on 18.06" });
+  });
+});
+
+// F68: two identical hit lines on one page share one key; one run buys it once.
+describe("the confirm loop buys a shared key once (F68)", () => {
+  let root = "";
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-confirm-dup-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await writeFile(path.join(root, "plans/p.md"), page("P", "Body.", "plan_status: shipped\n"));
+    await writeFile(path.join(root, "hub.md"), page("Hub", "- [[p]] is in-flight\n\nOther text.\n\n- [[p]] is in-flight"));
+  });
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("one model call for two identical lines, and its verdict confirms both", async () => {
+    const store = memoryStaleVerdictStore();
+    const prompts: string[] = [];
+    const model: StaleModel = async (p) => (prompts.push(p), '{"verdict":"stale","reason":"shipped","edit":{"old":"in-flight","new":"shipped"}}');
+    const entry = { name: "dup", root, source: "extra" } as WikiRegistryEntry;
+    const deps: ConfirmDeps = {
+      registry: () => [entry],
+      bots: () => [BOT],
+      index: (r) => getWikiIndex({ root: r, refresh: true }),
+      store: () => store,
+      model: () => model,
+      now: Date.now,
+      span: () => {},
+      tracer: () => null,
+      failures: new Map(),
+      rebuildFailures: new Map(),
+    };
+    const r = await runStaleConfirm(["dup"], deps);
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    const hits = index.statusLineHits!.get("hub.md")!;
+    expect(hits).toHaveLength(2);
+    expect(new Set(hits.map((h) => statusLineVerdictKey(index, "hub.md", h))).size).toBe(1);
+    expect({ calls: r.calls, prompts: prompts.length, hits: r.wikis[0]!.hits }).toEqual({ calls: 1, prompts: 1, hits: 2 });
+    const views = await hitConfirmations("dup", index, [["hub.md", hits]], store);
+    expect(hits.map((h) => views.get(hitKey("hub.md", h))?.verdict)).toEqual(["stale", "stale"]);
+    // Fix round 1 batch 2: every hit line lands in one count, and `stale` counts lines.
+    const row = r.wikis[0]!;
+    expect(row.stale).toBe(2);
+    // `?? 0` so a row without the count fails on the sum, not on a NaN.
+    expect(row.hits).toBe(row.cached + row.backoff + row.calls + row.left + (row.deduped ?? 0));
+    expect(row.deduped).toBe(1);
+  });
+});
+
+// F65: Check states the changed page's status from the read its hash came
+// from, so an out-of-band `plan_status` edit the cached index has not seen is
+// what the prompt says, and the verdict lands on that content's key.
+describe("Check reads the changed page's status where its hash comes from (F65)", () => {
+  let root = "";
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${err}`);
+  };
+  const write = async (rel: string, text: string) => {
+    await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
+    await writeFile(path.join(root, rel), text);
+  };
+  const asOfMs = Date.parse("2026-06-20T00:00:00Z");
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "stale-check-oob-"));
+    await git("init", "-q", "-b", "main");
+    await write("plans/p.md", page("P", "Body.", "plan_status: proposed\n"));
+    await write("notes/n.md", page("N", "The plan [[p]] lands in PR #42."));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-05-01T10:00:00Z", "-m", "seed");
+    await write("plans/p.md", page("P", "Body two.", "plan_status: in-flight\n"));
+    await git("add", "-A");
+    await git("commit", "-q", "--date", "2026-06-18T10:00:00Z", "-m", "p: starts");
+  }, 30_000);
+  afterAll(async () => {
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("the prompt carries the new plan_status, and the cached verdict's key matches that content", async () => {
+    const index = (await getWikiIndex({ root, refresh: true }))!;
+    expect(index.resolveRelPath("plans/p.md")!.plan_status).toBe("in-flight");
+    // Out of band: the index above is not rebuilt.
+    const now = page("P", "Body two.", "plan_status: shipped\nstatus_note: all merged\n");
+    await write("plans/p.md", now);
+    const prompts: string[] = [];
+    const model: StaleModel = async (p) => (prompts.push(p), '{"verdict":"true","reason":"fine"}');
+    const store = memoryStaleVerdictStore();
+    const ok = await runStaleCheck({ wiki: "w", index, relPath: "plans/p.md", asOfMs, bot: BOT, store, model, onEvent: () => {} });
+    expect(ok).toBe(true);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("plan_status: shipped");
+    expect(prompts[0]).toContain("status_note: all merged");
+    expect(prompts[0]).not.toContain("plan_status: in-flight");
+    // The stored row is the one the GET finds for the content on disk now.
+    const buckets = (await linkingBuckets(index, "plans/p.md", { asOfMs }))!;
+    const hash = await changedHashOf(index, "plans/p.md");
+    expect(hash).toBe(changedPageContentHash(now));
+    const n = buckets.linking.find((l) => l.relPath === "notes/n.md")!;
+    expect([...store.rows.values()].map((r) => r.keyHash)).toEqual([passageVerdictKey(index, "plans/p.md", hash!, n)]);
+    expect([...(await passageVerdicts("w", index, "plans/p.md", buckets.linking, { store })).keys()]).toEqual(["notes/n.md"]);
   });
 });

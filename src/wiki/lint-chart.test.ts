@@ -78,6 +78,34 @@ describe("lint check 17 (chart-table)", () => {
     }
   });
 
+  test("range: a flipped interval warns on its row, a mixed sign is info; bars: an unreadable cell warns", () => {
+    expect(
+      lint([
+        '<Chart kind="range" value="Interval">', // 1
+        "", // 2
+        "| Slice | Interval |", // 3
+        "|---|---|", // 4
+        "| a | $1–2 |", // 5
+        "| b | €3–4 |", // 6
+        "| c | $9–2 |", // 7
+        "", // 8
+        "</Chart>", // 9
+        "", // 10
+        '<Chart kind="bars" value="N">', // 11
+        "", // 12
+        "| Run | N |", // 13
+        "|---|---|", // 14
+        "| a | soon |", // 15
+        "", // 16
+        "</Chart>", // 17
+      ]),
+    ).toEqual([
+      [6, "info", '<Chart kind="range"> row "b": € differs from $ in row "a"'],
+      [7, "warning", '<Chart kind="range"> row "c": the low end of $9–2 is above its high end; it renders as its table'],
+      [15, "warning", '<Chart kind="bars"> row "a": "soon" in N is not a number; it renders as its table'],
+    ]);
+  });
+
   test("checkPageText runs it on an .mdx page that is not culled", () => {
     const text = ['<Chart kind="funnel">', "", "| Step | Count |", "|---|---|", "| all | 8 |", "", "</Chart>"].join("\n");
     expect(checkPageText({ relPath: "plans/c.mdx" }, text, []).filter((f) => f.check === "chart-table")).toHaveLength(1);

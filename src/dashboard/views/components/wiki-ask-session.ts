@@ -1,8 +1,8 @@
 /**
  * Pure, side-effect-free (DOM-free) helpers for persisting the /wiki reader's
  * **Ask** session across page reloads via localStorage. Split out of
- * `wiki-browser.ts` (which runs DOM code at module load, so it can't be imported
- * in tests) so the serialize/validate logic can be unit-tested directly — the
+ * `wiki-browser.ts` (which then ran DOM code at module load; it is importable
+ * since `boot()`, but needs a DOM) so the serialize/validate logic can be unit-tested directly — the
  * same split rationale as `wiki-explain.ts`, `wiki-filter.ts`, `wiki-ask-render.ts`.
  *
  * The client stores the last N committed Ask/Explain turns under
@@ -19,7 +19,7 @@
 import { isClaimOutcome } from "./wiki-claim-retry.ts";
 import { toDeclineReason, type DeclineReason } from "../../../wiki/ask-chat.ts";
 
-/** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-browser.ts.
+/** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-ask-controller.ts.
  *  `citations` is kept loose (`unknown[]`) so this module stays free of the
  *  DOM-side `AskCitation` type; the client casts back to `AskTurn[]` on rehydrate. */
 export interface StoredAskTurn {
@@ -240,6 +240,9 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (typeof t.toolSourceUrls !== "undefined") {
     if (!isValidUrlMap(t.toolSourceUrls)) delete t.toolSourceUrls;
   }
+  // Remember's saved summary: rendered on the turn's bar, so a non-string is
+  // dropped (the turn shows "Remember this" again), not fatal.
+  if (typeof t.remembered !== "undefined" && typeof t.remembered !== "string") delete t.remembered;
   // `wrote` is a two-value union, and BOTH values gate a write button. An unknown
   // string would fall through every branch and silently re-enable both actions
   // against a baseHash the real write already staled — so validate the union, not

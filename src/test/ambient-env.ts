@@ -206,6 +206,21 @@ const WIKI_LENS_FLAGS = ["WIKI_DEFAULT_LENS"];
  *  server on that machine only. The loop's tests pass the list explicitly. */
 const WIKI_STALE_FLAGS = ["WIKI_STALE_CONFIRM_WIKIS"];
 
+/** The decision triage's switch and repo roots (`src/wiki/decision-triage/`): a
+ *  developer's value would start a nightly model pass in every spawned server.
+ *  `DECISION_TRIAGE_DIR` moves the log and state a spec seeds or a run appends to. */
+const DECISION_TRIAGE_FLAGS = ["DECISION_TRIAGE_REPO_ROOTS", "DECISION_TRIAGE_DIR"];
+
+/** Where the find palette's query log is appended (`src/wiki/find-log.ts`). */
+const WIKI_FIND_LOG_FLAGS = ["WIKI_FIND_LOG_DIR"];
+
+/** The work map's nightly organize (`src/wiki/work-map/`): `WORK_MAP_WIKIS`
+ *  would start a background Opus loop in every spawned server on that machine
+ *  only, and the other three change what it runs. The loop's tests pass their
+ *  config explicitly. `WORK_MAP_GH_CHECK` turns the card's GitHub check off;
+ *  `e2eEnv()` sets it to `off` after blanking this list, since blank means on. */
+const WORK_MAP_FLAGS = ["WORK_MAP_WIKIS", "WORK_MAP_HOUR", "WORK_MAP_MODEL", "WORK_MAP_EFFORT", "WORK_MAP_GH_CHECK"];
+
 /**
  * Instance-profile env families that are open-ended PREFIXES rather than names.
  *
@@ -235,6 +250,9 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_BUCKET_MIRROR_FLAGS,
   ...WIKI_LENS_FLAGS,
   ...WIKI_STALE_FLAGS,
+  ...WORK_MAP_FLAGS,
+  ...DECISION_TRIAGE_FLAGS,
+  ...WIKI_FIND_LOG_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // fourteen route groups and turns every Claude-CLI spawn into a throw, so the
@@ -263,4 +281,12 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   // anonymous-lookup case into an authenticated one on that machine only; the
   // suite passes `token` explicitly.
   "MUNINN_GITHUB_TOKEN",
+  // `MUNINN_MACHINE` — which machine an owner-step check answers for
+  // (`src/wiki/step-checks/`). A developer's `laptop` would turn every
+  // `on=`-less case into a named one on that machine only.
+  "MUNINN_MACHINE",
+  // `MUNINN_PEERS` — the other machines' muninns a step check asks
+  // (`src/wiki/step-checks/peer.ts`). A developer's value would point a suite's
+  // named-machine cases at a real tailnet address on that machine only.
+  "MUNINN_PEERS",
 ];

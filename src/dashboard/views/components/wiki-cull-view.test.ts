@@ -1,7 +1,7 @@
 /**
  * The culled page's per-wiki labels, the markups built from them (a Connections
  * row, a mini-graph node, the banner) and the rail's hide rule. Pure, so
- * `bun test` loads it — `wiki-browser.ts` touches `document` at import time.
+ * `bun test` loads it without a DOM.
  */
 
 import { afterEach, describe, expect, test } from "bun:test";

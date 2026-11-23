@@ -33,7 +33,7 @@ import {
   type IntegrateEdit,
   type IntegrateEditorVoice,
 } from "../wiki/integrate-edits.ts";
-import { lineDiff } from "../gardener/diff.ts";
+import { lineDiff } from "../utils/line-diff.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { stripSummaryFactcheckBlock } from "./factcheck-block.ts";
 import { summaryCheckedRanges } from "./factcheck-body.ts";

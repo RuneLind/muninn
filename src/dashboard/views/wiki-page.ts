@@ -10,6 +10,9 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { walkthroughStyles } from "./components/wiki-walkthrough-view.ts";
+import { stepDoneStyles } from "./components/wiki-step-done.ts";
+import { discussHandoffStyles } from "./components/wiki-discuss-handoff.ts";
+import { discussTabBodyHtml, discussTabStyles } from "./components/wiki-discuss-tab-view.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
 import { mirrorStatusSlotHtml, mirrorStatusStyles } from "./components/wiki-mirror-status.ts";
@@ -31,6 +34,7 @@ import {
   RAIL_TOOLBAR_COMPACT,
   RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_DEFAULT_NARROW,
+  RAIL_DRAWER_MAX,
 } from "./components/wiki-rail-width.ts";
 import { STRIP_WIDTH } from "./components/wiki-panes.ts";
 import {
@@ -46,9 +50,12 @@ import {
   ROLE_VIEW_CLASS,
 } from "./components/wiki-report-blocks.ts";
 import { refLinksCss } from "./components/wiki-ref-links.ts";
+import { crossRefsCss } from "./components/wiki-cross-refs.ts";
+import { liveFactsCss } from "./components/wiki-live-facts.ts";
 import { GRAPH_ON_CLASS } from "./components/wiki-graph-view.ts";
 import { lensCss } from "./components/wiki-lens.ts";
 import { NEW_TAG_LOOK, newSinceCss } from "./components/wiki-new-since.ts";
+import { SECTION_BAR_ID, sectionBarCss } from "./components/wiki-section-bar.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -57,6 +64,8 @@ import {
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 import { WIKI_READ_SLICE_CLASS, wikiReadSliceStyles } from "./components/wiki-read-slice.ts";
 import { STALE_TAB_TITLE, wikiStaleTabStyles } from "./components/wiki-stale-tab.ts";
+import { wikiStaleSummaryStyles } from "./components/wiki-stale-summary.ts";
+import { wikiStaleMarkStyles } from "./components/wiki-stale-marks.ts";
 import { ISSUE_STATUS_STYLES } from "./components/wiki-issue-rows.ts";
 import { FACTCHECK_CONF_CHIP_CSS } from "./components/factcheck-conf-chip-styles.ts";
 import type { AuthRole } from "../../auth/role.ts";
@@ -69,6 +78,7 @@ const SVG_ASK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11
 const SVG_FOCUS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>';
 const SVG_FILTER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18l-7 8.5V19l-4-2v-3.5z"/></svg>';
 const SVG_OPTIONS = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h10M18 7h3M3 17h3M11 17h10"/><circle cx="15.5" cy="7" r="2.5"/><circle cx="8.5" cy="17" r="2.5"/></svg>';
+const SVG_PAGES = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>';
 const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>';
 
 /**
@@ -79,8 +89,12 @@ const SVG_FOCUS_EXIT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 
  * The whole page listing loads once (/api/wiki/pages) and filters client-side;
  * article + connections come per-page from /api/wiki/page.
  *
- * The client logic is a real bundled TS entrypoint (`components/wiki-browser.ts`),
- * injected below via `wikiClientScript()`.
+ * The client logic is a real bundled TS entrypoint (`components/wiki-shell-client.ts`,
+ * which calls `boot()` from `components/wiki-browser.ts`), minified by
+ * `wikiClientScript()`. It and the stylesheet (`buildWikiPageCss`) are NOT
+ * inlined: the page links them at content-hashed URLs under `/wiki/assets/`
+ * (`getWikiAssets`), which the browser caches as immutable. Only the per-request
+ * `window.__WIKI_*__` globals stay inline, before the script tag.
  *
  * `wikis` populates the wiki picker — every registered wiki (bot wikis with a
  * `wikiDir` plus `WIKI_EXTRA` standalone wikis). `selected` is the canonical
@@ -139,7 +153,7 @@ export async function renderWikiPage(opts?: {
   /** The viewer's role, for the nav (`renderNav`'s `role`). */
   role?: AuthRole | null;
 }): Promise<string> {
-  const clientScript = await wikiClientScript();
+  const assets = await getWikiAssets();
   const wikis = opts?.wikis ?? [];
   const wikiDates = opts?.wikiDates ?? {};
   const selected = opts?.selected ?? "";
@@ -197,7 +211,208 @@ export async function renderWikiPage(opts?: {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>Wiki — Muninn</title>
-  <style>
+  <link rel="stylesheet" href="${assets.css.path}">
+</head>
+<body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
+  ${renderNav("wiki", { role: opts?.role })}
+  <div class="wiki-layout">
+    <div class="wiki-pane" id="wikiRailPane">
+      <div class="wiki-browse-head">
+        ${
+          wikiSelector || gardenerLink || boardLink
+            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
+            : ""
+        }
+        ${tools ? `<div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>` : ""}
+        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
+        <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
+             more than one domain (i.e. one with a life/ subtree). -->
+        <div class="wiki-chip-row wiki-segmented" id="domainChips" style="display:none">
+          <button class="wiki-chip active" data-domain="">All</button>
+          <button class="wiki-chip" data-domain="ai">AI</button>
+          <button class="wiki-chip" data-domain="life">Life</button>
+        </div>
+        <div class="wiki-sort-row wiki-sort-row-main">
+          <select id="wikiSort" class="wiki-sort">
+            <option value="updated" selected>Recently updated</option>
+            <option value="created">Recently added</option>
+            <!-- The worked-on axis: the day an agent session last wrote the page,
+                 out of claude-usage's ledger. HIDDEN until the listing says this
+                 wiki has any covered page (workedCoverage.matched > 0) — on a
+                 corpus written entirely by bulk passes every page falls back to
+                 its update date, so the option would be "Recently updated" under
+                 a second name (the measured corpus is named once, on
+                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
+                 that can never be chosen is furniture (the rail's own F2 rule).
+                 Once shown it becomes the DEFAULT unless the reader picked a
+                 sort (resolveSortMode in wiki-filter.ts). -->
+            <option value="worked" hidden>Worked on</option>
+            <option value="backlinks">Most linked</option>
+            <option value="title">Title A–Z</option>
+          </select>
+          <!-- Filters: the toolbar's button for the <details> below. The details
+               keeps its own (hidden) summary so its open state, toggle event and
+               auto-open stay what they were; this button only flips it. -->
+          <button type="button" class="wiki-tool-btn" id="wikiFiltersBtn" aria-controls="wikiFilters" aria-expanded="false" title="Filters">${SVG_FILTER}<span class="wiki-tool-label">Filters</span><span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></button>
+          <span class="wiki-count" id="wikiCount"></span>
+          <!-- View options: the two per-wiki toggles the reader sets once and
+               rarely touches, out of the toolbar. Both are unchecked here and
+               painted from the folds store at boot (the server does not know
+               what this browser remembers). The dot says a toggle is on while
+               the pane is closed; the strip under the toolbar names it. The pane
+               is a non-modal role="dialog"; it closes when focus or a pointer
+               leaves it, on Escape, and on a reader shortcut key pressed
+               outside it, which then runs (wiki-rail-controller.ts, setOptionsOpen). -->
+          <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
+          <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
+            <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
+              <input type="checkbox" id="wikiGroupFamilies">group families
+            </label>
+            <!-- group by effort (work map P4): ON by default on a wiki with a
+                 work map, so it is the one toggle painted checked; shown only
+                 where the listing says a map exists. -->
+            <label class="wiki-efforts-toggle" id="wikiEffortsToggle" title="Fold Activity under the work map's efforts" hidden>
+              <input type="checkbox" id="wikiGroupEfforts">group by effort
+            </label>
+            <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
+                 while the facets select none (unless checked); the label and its
+                 count are painted by the client from the wiki's cullLabels, so it
+                 carries no English hover of its own. -->
+            <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
+              <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
+            </label>
+          </div>
+        </div>
+        <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
+        <!-- «Felles: N changed» — painted by the client on a wiki that offers
+             ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
+        <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
+        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
+             listing's \`mirror\` field (wiki-mirror-status.ts). -->
+        ${mirrorStatusSlotHtml()}
+        <details class="wiki-filters" id="wikiFilters">
+          <summary class="wiki-filters-summary">Filters</summary>
+          <div class="wiki-filters-body">
+            <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
+              <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
+            </div>
+            <div class="wiki-chip-row" id="typeChips"></div>
+            <!-- Plan-status facet — populated (and un-hidden) only on wikis where
+                 at least one page carries a valid plan_status. -->
+            <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
+            <!-- Project facet — populated (and un-hidden) only on wikis whose
+                 .wiki-reader.json declares a project rule that resolved at least
+                 one page. -->
+            <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
+            <!-- Jira facet — populated (and un-hidden) only on wikis the
+                 claude-usage stamper has written a jira: key to. -->
+            <div class="wiki-chip-row" id="jiraChips" style="display:none"></div>
+            <div class="wiki-chip-row" id="tagChips"></div>
+          </div>
+        </details>
+      </div>
+      <div class="wiki-list" id="wikiList"></div>
+      <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
+      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
+    </div>
+
+    <div class="wiki-pane">
+      <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
+      <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
+      <div class="wiki-sec" id="${SECTION_BAR_ID}" hidden></div>
+      <div class="wiki-article-wrap" id="articleWrap">
+        <div class="wiki-empty-state">Loading wiki…</div>
+      </div>
+    </div>
+
+    <div class="wiki-pane wiki-conn-pane">
+      <!-- Collapsed form: shown only under .right-collapsed (wiki-pane-toggle.ts). -->
+      <div class="wiki-conn-strip" id="wikiConnStrip">
+        <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-open="conn" title="Connections">${SVG_CONN}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-open="ask" title="Ask">${SVG_ASK}</button>
+        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
+      </div>
+      <div class="wiki-conn-tabs">
+        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
+        <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
+        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
+        <button class="wiki-conn-tab" data-conntab="discuss" hidden title="Discuss this page with the wiki's agent">Discuss</button>
+        <div class="wiki-conn-tools">
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
+          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
+        </div>
+      </div>
+      <div class="wiki-conn-body" id="connBody">
+        <div class="wiki-conn-empty">Select a page to see its connections.</div>
+      </div>
+      <div class="wiki-conn-body wiki-stale-body" id="staleBody" style="display:none">
+        <div class="wiki-conn-empty">Select a page to see what may be stale.</div>
+      </div>
+      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
+        <div class="wiki-ask-compose">
+          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="${readonlyWiki ? escHtml(WIKI_READONLY_INPUT_PLACEHOLDER) : "Ask this wiki…"}"${readonlyWiki ? " disabled" : ""}></textarea>
+          <div class="wiki-ask-actions">
+            <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
+            <button class="wiki-ask-newchat" id="wikiNewChatBtn"
+              title="Send this question straight to a chat thread — full context and tools, no wiki-only answer first">New chat</button>
+          </div>
+        </div>
+        <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
+        <div class="wiki-ask-hint" id="wikiAskHint">${readonlyWiki ? escHtml(WIKI_READONLY_ASK_HINT) : "Ask a question and this wiki answers in the main pane, with citations you can open as pages."}</div>
+        ${askBotLine}
+        <div class="wiki-ask-history" id="wikiAskHistory"></div>
+      </div>
+      ${discussTabBodyHtml()}
+    </div>
+    <!-- Shown only at or under RAIL_DRAWER_MAX, where the rail has no column
+         (issue #623): the one way to the page list there. LAST child, placed
+         in the grid's first row by CSS: the pane rules count children from
+         the start (:first-child, :nth-child(2)). -->
+    <div class="wiki-rail-bar"><button class="wiki-focus-exit" id="wikiRailToggle" type="button" data-pane-toggle="rail" aria-controls="wikiRailPane" aria-expanded="false" title="Show or hide the page list">${SVG_PAGES} Pages</button></div>
+  </div>
+
+  <script>
+    window.__WIKI_NAME__ = ${escJsonScript(selected)};
+    // Wiki-readonly instance: the client dims + blocks the write actions so the
+    // 403 is visible before the click (the server is still the authority).
+    window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
+    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
+    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
+    // Independent of the one above — this laptop owns writes and still reads one
+    // wiki it must never write or send to a model. The picker navigates with a
+    // full page load, so the flag is always the open wiki's.
+    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
+    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
+    // yield a path an agent can open. A boot-time fact for the open wiki; the
+    // picker navigates with a full page load, so it cannot go stale in place.
+    // Under the read slice (role \`user\` on the pod) the host path is withheld:
+    // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
+    // the relPath alone.
+    window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
+    // The registry name of the wiki served here, under the WIKI_DIR override
+    // too: the answer cards, new-since and the Agent lens send it as \`wiki\`.
+    window.__WIKI_FIND_SELF__ = ${escJsonScript(opts?.findSelf ?? selected)};
+    // The name Everywhere rows carry for this ROOT (the first registry entry on
+    // it): the palette's dedupe and open-in-place key, never a request param.
+    window.__WIKI_FIND_ROWS__ = ${escJsonScript(opts?.findRows ?? opts?.findSelf ?? selected)};
+  </script>
+  <!-- Plain (no defer/async): it runs after the globals above, as the inline
+       bundle did, and before the presence script below. -->
+  <script src="${assets.js.path}"></script>
+  ${tools ? `<script>
+    ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
+  </script>` : ""}
+</body>
+</html>`;
+}
+
+/** The reader's stylesheet: every rule the page used to carry in its inline
+ *  `<style>`. Nothing in it varies per request (theme, profile and role are
+ *  body classes and tokens the rules key on), so it is built once per process
+ *  and served as an asset. */
+function buildWikiPageCss(): string {
+  return `
     ${SHARED_STYLES}
 
     /* The rail column reads --wiki-rail-w, which the drag handle sets inline
@@ -247,6 +462,7 @@ export async function renderWikiPage(opts?: {
        the pane's top-right sat on Share/Discuss (measured in review). */
     .wiki-focus-bar { display: none; justify-content: flex-end; padding: 6px 12px 0; flex-shrink: 0; }
     .wiki-layout.focus-mode .wiki-focus-bar { display: flex; }
+    .wiki-rail-bar { display: none; }
     .wiki-focus-exit {
       display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 3px 6px; border-radius: 6px;
       border: 1px solid var(--border-primary); background: var(--bg-panel); white-space: nowrap;
@@ -368,13 +584,13 @@ export async function renderWikiPage(opts?: {
        measurement the group chip's own comment records), under the 4.5:1 floor.
        Pinned by the spec's both-themes contrast case, which measures against
        whatever actually paints behind it. */
-    .wiki-group-toggle, .wiki-retired-toggle {
+    .wiki-group-toggle, .wiki-efforts-toggle, .wiki-retired-toggle {
       display: inline-flex; align-items: center; gap: 4px;
       font-size: 11.5px; color: var(--text-secondary); cursor: pointer;
       user-select: none;
     }
-    .wiki-group-toggle input, .wiki-retired-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
-    .wiki-retired-toggle[hidden] { display: none; }
+    .wiki-group-toggle input, .wiki-efforts-toggle input, .wiki-retired-toggle input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+    .wiki-retired-toggle[hidden], .wiki-efforts-toggle[hidden] { display: none; }
     /* A retired row the toggle (or a search) put on screen: italic, never a
        seventh flex item — the marker word rides the row's hover. */
     .wiki-list-item.culled .wiki-list-title { font-style: italic; }
@@ -820,6 +1036,58 @@ export async function renderWikiPage(opts?: {
     .wiki-rollup-part.s-in-flight { color: var(--accent-light); }
     .wiki-rollup-sep { color: var(--text-muted); }
     .wiki-group-fold:hover .wiki-group-rollup { color: var(--text-secondary); }
+    /* An EFFORT fold row (work map P4): two controls side by side, never one
+       button — the caret folds the effort, the name opens its page (D2) — so
+       each is its own tab stop with its own focus ring. Line one is caret ·
+       name · age; the meta line (state · ✋ N · plan-status roll-up) wraps
+       between its parts and never clips one. The name ellipsizes on one line,
+       so a long name never widens the rail. */
+    .wiki-list-group.effort {
+      display: flex; align-items: flex-start; gap: 6px; padding: 5px 10px 5px 6px;
+    }
+    .wiki-effort-fold {
+      flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; margin-top: 0; padding: 0; border: 0; border-radius: 4px;
+      background: none; color: var(--text-muted); cursor: pointer; font-family: inherit;
+    }
+    .wiki-effort-fold:hover { color: var(--text-secondary); background: var(--bg-surface); }
+    .wiki-effort-fold[disabled] { cursor: default; }
+    .wiki-effort-fold:focus-visible, .wiki-effort-name:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 1px;
+    }
+    .wiki-effort-body { flex: 1 1 0; min-width: 0; }
+    .wiki-effort-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .wiki-effort-name {
+      flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 12.5px; line-height: 18px; font-weight: 600; color: var(--accent-light);
+      text-decoration: none; border-radius: 2px;
+    }
+    .wiki-effort-name:hover { text-decoration: underline; }
+    .wiki-effort-age {
+      flex: 0 0 auto; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+    }
+    .wiki-effort-meta { margin-top: 0; }
+    .wiki-effort-state { color: var(--text-secondary); }
+    /* An OPEN effort fold's head (D14): the map's one-line summary, then
+       «Open effort →». Indented to the member rows' depth. The summary is
+       plain text clamped to three lines (full text in its title), and
+       «Open effort →» sits outside the clamp on its own line. */
+    .wiki-effort-intro {
+      padding: 0 10px 4px 20px; font-size: 11.5px; line-height: 1.45;
+      color: var(--text-secondary); overflow-wrap: anywhere;
+    }
+    .wiki-effort-oneline {
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .wiki-effort-open { color: var(--accent-light); text-decoration: none; white-space: nowrap; border-radius: 2px; }
+    .wiki-effort-open:hover { text-decoration: underline; }
+    .wiki-effort-open:focus-visible, .wiki-effort-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* A row's role in its effort, on the meta line of a row in an open fold. */
+    .wiki-effort-role {
+      flex-shrink: 0; font-size: 10.5px; line-height: 14px; padding: 0 4px;
+      border: 1px solid var(--border-secondary); border-radius: 4px; color: var(--text-muted);
+    }
+    .wiki-list-more.wiki-effort-more { padding-left: 20px; }
     /* \`N of M shown\` — a facet is hiding part of the series. Its OWN line under
        the name, because the census is the one thing on a group row a reader has
        to READ and the name is allowed to take the rest. */
@@ -2319,7 +2587,7 @@ export async function renderWikiPage(opts?: {
     .wiki-chain-stamp:hover { color: var(--text-primary); }
     .wiki-chain-stamp:disabled { cursor: default; opacity: 0.7; }
     /* A refusal from the Stamp route. Its own span, never the button's label —
-       see stampGhost() in wiki-browser.ts. Hidden until there is something to
+       see stampGhost() in wiki-article-controller.ts. Hidden until there is something to
        say; the [hidden] rule is spelled out for .wiki-prov-chain[hidden]'s reason. */
     .wiki-chain-stamp-msg {
       font-size: 11px; color: var(--text-muted);
@@ -2421,10 +2689,14 @@ export async function renderWikiPage(opts?: {
     }
     /* In-page references, their peek card and the back pill (wiki-ref-links.ts). */
     ${refLinksCss()}
+    ${crossRefsCss()}
+    /* Live chips after PR and key mentions (wiki-live-facts.ts). */
+    ${liveFactsCss()}
     /* The lens switch, what Overview hides, and the fold sizes (wiki-lens.ts). */
     ${lensCss()}
     /* "New since last read" (D20): item marks and the head line (wiki-new-since.ts). */
     ${newSinceCss()}
+    ${sectionBarCss()}
     /* Reader-only: the fact-check interaction layer's toolbar/card/layer-off
        rules. Only this page's client inserts that chrome. */
     ${factcheckReaderCss(".wiki-article")}
@@ -2512,6 +2784,10 @@ export async function renderWikiPage(opts?: {
     .wiki-wn-bullets ul { margin: 4px 0 4px 20px; }
     .wiki-wn-bullets li { margin: 3px 0; }
     .wiki-wn-bullets p { margin: 4px 0; }
+    .wiki-wn-bullets h3 { font-size: 12.5px; font-weight: 600; color: var(--text-primary); margin: 10px 0 2px; }
+    .wiki-wn-changed { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+    .wiki-wn-changed summary { cursor: pointer; }
+    .wiki-wn-changed ul { margin: 4px 0 4px 20px; columns: 2 220px; }
     .wiki-wn-gen { font-size: 10.5px; color: var(--text-faint); margin-top: 8px; }
     .wiki-wn-error { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
     .wiki-wn-retry {
@@ -2526,6 +2802,421 @@ export async function renderWikiPage(opts?: {
       font-family: inherit;
     }
     .wiki-wn-retry:hover { color: var(--accent-light); border-color: var(--accent); }
+
+    /* Your work card (start view, work map P2) — What's new's slot and box;
+       every colour is a theme token; text uses --text-soft and the --tone-*
+       inks, which clear 4.5:1 in every palette (the e2e measures each). */
+    .wiki-workcard .wiki-wn-head { flex-wrap: wrap; row-gap: 4px; }
+    .wiki-workcard .wiki-wn-error, .wiki-workcard .wiki-wn-retry, .wiki-workcard .wiki-wn-refresh { color: var(--text-soft); }
+    /* The override above outranks the shared :hover rules; restate them, and the keyboard's twin. */
+    .wiki-workcard .wiki-wn-refresh:not(:disabled):hover, .wiki-workcard .wiki-wn-refresh:not(:disabled):focus-visible,
+    .wiki-workcard .wiki-wn-retry:hover, .wiki-workcard .wiki-wn-retry:focus-visible { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-wm-age, .wiki-wm-model { font-size: 11.5px; color: var(--text-soft); }
+    .wiki-wm-stale {
+      font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+      background: var(--tint-warning); color: var(--tone-warn);
+    }
+    .wiki-wm-status { font-size: 12px; color: var(--text-soft); margin: 2px 0 6px; }
+    .wiki-wm-status.warn { color: var(--tone-warn); }
+    .wiki-boot-line { font-size: 11.5px; color: var(--text-soft); margin: 8px 0 0; overflow-wrap: anywhere; }
+    .wiki-boot-line.restart, .wiki-boot-row.restart { color: var(--tone-warn); }
+    /* «no answer»: the calm row's colour, quieter by italics alone; --text-faint measured 2.3:1 on the card (AA is 4.5:1). */
+    .wiki-boot-row.muted { color: var(--text-soft); font-style: italic; }
+    /* Equal cells. The floor is "follow-ups", the strip's longest word, plus the cell's padding, and five fit the 485 px a 1265 viewport leaves.
+       P1's 112 px does not. A wider fallback font runs a word into the padding; a cell's words never break. */
+    .wiki-wm-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin: 2px 0 8px; }
+    /* A remedy spans a row; its neighbours take P1's floor, which fills a row only where four fit. */
+    .wiki-wm-strip:has(> .wide) { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }
+    .wiki-wm-cell {
+      min-width: 0;
+      border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px; background: var(--bg-surface);
+      display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+      text-align: left; font: inherit; color: var(--text-secondary); cursor: pointer;
+    }
+    .wiki-wm-cell:disabled { cursor: default; }
+    .wiki-wm-cell:not(:disabled):hover { border-color: var(--accent); }
+    /* The outline is focus alone, so an open cell can show both: open is drawn inside the border. */
+    .wiki-wm-cell:focus-visible { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-wm-cell.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .wiki-wm-cell.on:hover { box-shadow: inset 0 0 0 2px var(--accent); }
+    /* Forced colors drop the shadow and force a non-system border colour; the padding keeps the box still. */
+    @media (forced-colors: active) { .wiki-wm-cell.on { border: 2px solid Highlight; padding: 7px 9px; } }
+    .wiki-wm-cell b { display: block; font-size: 22px; line-height: 1.1; color: var(--text-primary); }
+    .wiki-wm-cell span { font-size: 12.5px; }
+    .wiki-wm-cell.warn b { color: var(--tone-warn); }
+    .wiki-wm-cell.muted b { color: var(--text-soft); }
+    .wiki-wm-cell.unset b { font-size: 13px; line-height: 1.3; font-weight: 600; color: var(--text-soft); }
+    .wiki-wm-cell.bad b { color: var(--tone-err); }
+    /* Only the remedy's cell may break a word: a repo name has no break of its own. */
+    .wiki-wm-cell.wide { grid-column: 1 / -1; overflow-wrap: anywhere; }
+    .wiki-wm-cell span.wiki-wm-cell-note { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-soft); }
+    .wiki-wm-cell-note code { overflow-wrap: anywhere; font-size: 11px; background: var(--bg-inset); color: var(--text-secondary); padding: 0 4px; border-radius: 4px; }
+    .wiki-wm-need.gh-done .wiki-wm-need-title, .wiki-wm-need.gh-done .wiki-wm-action { text-decoration: line-through; }
+    .wiki-wm-ghnote { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--tone-info); overflow-wrap: anywhere; }
+    .wiki-wm-ghnote.done { color: var(--tone-good); }
+    .wiki-wm-ghnote.warn { color: var(--tone-warn); font-weight: 600; }
+    .wiki-wm-drill { border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 12px; margin: 4px 0 8px; font-size: 13px; background: var(--bg-surface); }
+    .wiki-wm-drill-title { font-weight: 600; color: var(--text-primary); }
+    .wiki-wm-drill-list { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wm-drill-row { margin: 2px 0; }
+    .wiki-wm-drill-meta { color: var(--text-soft); }
+    .wiki-wm-drill-counts { margin: 4px 0 6px; color: var(--text-secondary); }
+    .wiki-wm-drill-stale { margin: 4px 0; font-size: 12px; color: var(--text-soft); }
+    .wiki-wm-drill-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-primary); }
+    .wiki-wm-drill-group-head { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+    .wiki-wm-drill-group-head .wiki-wm-drill-more { font-weight: 400; margin-left: 4px; }
+    [data-wm-gh-group="contradictions"] .wiki-wm-drill-group-head { color: var(--tone-err); }
+    .wiki-wm-drill-more { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--accent-light); cursor: pointer; }
+    .wiki-wm-drill-more:hover, .wiki-wm-drill-more:focus-visible { text-decoration: underline; }
+    .wiki-wm-summary { font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 4px 0 8px; }
+    .wiki-wm-link {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    .wiki-wm-link:hover { text-decoration-color: currentColor; }
+    .wiki-wm-section { margin: 8px 0; }
+    .wiki-wm-section-title, .wiki-wm-lane-title {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+      color: var(--text-soft); margin-bottom: 6px;
+    }
+    .wiki-wm-needs { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+    .wiki-wm-need {
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+      border-radius: 8px; padding: 8px 10px; font-size: 12.5px; min-width: 0;
+    }
+    .wiki-wm-need-head { display: flex; align-items: flex-start; gap: 6px; }
+    .wiki-wm-need-title { flex: 1; min-width: 0; color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+    .wiki-wm-kind {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wiki-wm-why, .wiki-wm-action { color: var(--text-secondary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-action { color: var(--text-primary); }
+    .wiki-wm-why-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .wiki-wm-why.open .wiki-wm-why-text { display: block; }
+    .wiki-wm-why-more {
+      background: none; border: none; padding: 0; margin-top: 2px; font: inherit; font-size: 11.5px;
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+    }
+    .wiki-wm-why-more[hidden] { display: none; }
+    .wiki-wm-done, .wiki-wm-restore {
+      background: transparent; border: 1px solid var(--border-secondary); border-radius: 6px;
+      color: var(--text-soft); font-size: 11px; line-height: 1; padding: 3px 7px;
+      cursor: pointer; font-family: inherit; flex-shrink: 0;
+    }
+    .wiki-wm-restore { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+    .wiki-wm-done:hover, .wiki-wm-restore:hover { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-wm-empty { font-size: 12px; color: var(--text-soft); }
+    .wiki-wm-lane { margin: 8px 0 0; }
+    .wiki-wm-lane-title { cursor: pointer; list-style-position: inside; }
+    .wiki-wm-count { color: var(--text-soft); font-weight: 400; }
+    /* The Decisions section (decision inbox P3a, wiki-work-inbox.ts). */
+    .wiki-wi { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border-primary); }
+    .wiki-wi-hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
+    .wiki-wi-rows { list-style: none; margin: 0; padding: 0; }
+    .wiki-wi-item { border-top: 1px solid var(--border-primary); font-size: 12.5px; }
+    .wiki-wi-row {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; width: 100%; padding: 6px 2px;
+      background: none; border: 0; font: inherit; text-align: left; color: var(--text-primary); cursor: pointer;
+    }
+    .wiki-wi-row:hover { background: var(--bg-inset); }
+    .wiki-wi-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .wiki-wi-q { flex: 1 1 260px; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+    .wiki-wi-page { display: block; font-weight: 400; color: var(--text-soft); }
+    .wiki-wi-who { color: var(--tone-info); }
+    .wiki-wi-tag { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--tint-success); color: var(--tone-good); }
+    .wiki-wi-tag.warn { background: var(--tint-warning); color: var(--tone-warn); }
+    .wiki-wi-age { font-size: 11.5px; color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    .wiki-wi-age.old { color: var(--tone-warn); font-weight: 600; }
+    .wiki-wi-detail { padding: 2px 2px 10px; }
+    .wiki-wi-body {
+      white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; margin: 4px 0 8px; padding: 8px 10px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px; color: var(--text-secondary);
+    }
+    .wiki-wi-rendered { white-space: pre-line; }
+    .wiki-wi-rendered :is(ul, ol) { margin: 4px 0; padding-left: 20px; white-space: normal; }
+    .wiki-wi-context { margin: 4px 0 8px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wi-empty { margin-top: 8px; }
+    .wiki-wi-choices { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+    .wiki-wi-choice {
+      display: flex; align-items: baseline; gap: 8px; width: 100%; box-sizing: border-box; padding: 6px 10px; text-align: left;
+      font: inherit; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-secondary); border-radius: 8px;
+    }
+    button.wiki-wi-letter { font: inherit; font-weight: 700; color: var(--text-primary); cursor: pointer; padding: 2px 8px; }
+    button.wiki-wi-letter:hover:not(:disabled), button.wiki-wi-letter:focus-visible { border-color: var(--accent); }
+    button.wiki-wi-letter:disabled { opacity: .55; cursor: default; }
+    /* --accent-hover as .wiki-wi-btn.on: white on --accent measured 4.3:1 in Dark. */
+    .wiki-wi-choice.on button.wiki-wi-letter { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+    .wiki-wi-choice.rec { border-color: var(--tone-good); }
+    .wiki-wi-choice.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--bg-inset); }
+    .wiki-wi-letter {
+      flex: none; min-width: 1.6em; text-align: center; font-weight: 700; padding: 0 4px; border-radius: 6px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+    }
+    .wiki-wi-choice-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--text-secondary); }
+    .wiki-wi-choice-text b { color: var(--text-primary); }
+    .wiki-wi-rec { flex: none; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--tint-success); color: var(--tone-good); }
+    .wiki-wi-why { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--tone-good); border-radius: 0 8px 8px 0; background: var(--bg-inset); color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wi-why > b:first-child { color: var(--text-primary); }
+    .wiki-wi-btn.small { font-size: 11.5px; padding: 2px 8px; }
+    .wiki-wi-ev { margin: 0 0 8px; padding: 6px 10px; border-left: 3px solid var(--tone-good); border-radius: 0 8px 8px 0; background: var(--tint-success); color: var(--text-primary); }
+    .wiki-wi-ev.warn { border-left-color: var(--tone-warn); background: var(--tint-warning); }
+    .wiki-wi-quote { margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-secondary); }
+    .wiki-wi-pre {
+      white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 8px; padding: 8px 10px; font-size: 12px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px; color: var(--text-primary);
+    }
+    .wiki-wi-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+    .wiki-wi-btn {
+      font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface); color: var(--text-primary);
+    }
+    .wiki-wi-btn:hover:not(:disabled):not([aria-disabled="true"]), .wiki-wi-btn:focus-visible { border-color: var(--accent); }
+    /* --accent-hover, not --accent: white on --accent measured 4.3:1 in Dark. */
+    .wiki-wi-btn.primary, .wiki-wi-btn.on { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+    .wiki-wi-btn:disabled, .wiki-wi-btn[aria-disabled="true"] { opacity: .55; cursor: default; }
+    .wiki-wi-note {
+      display: block; width: 100%; box-sizing: border-box; font: inherit; font-size: 12.5px; padding: 6px 8px; margin: 4px 0;
+      border: 1px solid var(--border-secondary); border-radius: 6px; background: var(--bg-surface); color: var(--text-primary);
+    }
+    .wiki-wi-msg { margin: 0 2px 6px; color: var(--tone-good); }
+    .wiki-wi-msg.warn { color: var(--tone-warn); }
+    /* The triage status line and its Details table (decision triage visibility PR 2). */
+    .wiki-wi-tri {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 8px; padding: 6px 10px;
+      font-size: 12.5px; color: var(--text-secondary); background: var(--bg-inset); border-radius: 8px;
+    }
+    .wiki-wi-tri b { color: var(--text-primary); }
+    .wiki-wi-tri-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone-good); }
+    .wiki-wi-tri-dot.warn { background: var(--tone-warn); }
+    .wiki-wi-tri-warn { color: var(--tone-warn); font-weight: 600; }
+    .wiki-wi-tri-sp { flex: 1; }
+    .wiki-wi-tri-stats { margin: -2px 0 10px; overflow-x: auto; font-size: 12px; }
+    .wiki-wi-tri-stats table { border-collapse: collapse; width: 100%; }
+    .wiki-wi-tri-stats :is(th, td) { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border-primary); font-variant-numeric: tabular-nums; color: var(--text-primary); }
+    .wiki-wi-tri-stats th { font-weight: 600; color: var(--text-soft); }
+    .wiki-wm-efforts { list-style: none; margin: 0; padding: 0; }
+    .wiki-wm-effort { padding: 6px 0; border-top: 1px solid var(--border-primary); font-size: 12.5px; min-width: 0; }
+    .wiki-wm-efforts > .wiki-wm-effort:first-child { border-top: none; }
+    .wiki-wm-effort-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .wiki-wm-effort-name { font-weight: 600; color: var(--text-primary); }
+    .wiki-wm-state {
+      font-size: 10px; padding: 1px 7px; border-radius: 999px; font-weight: 600;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wm-state-active { background: var(--tint-purple); color: var(--accent-light); }
+    .wm-state-blocked { background: var(--tint-warning); color: var(--tone-warn); }
+    .wm-state-shipped { background: var(--tint-success); color: var(--tone-good); }
+    .wiki-wm-active { font-size: 11px; color: var(--text-soft); }
+    .wiki-wm-partof { font-size: 11px; color: var(--text-soft); font-style: italic; }
+    .wiki-wm-oneline { color: var(--text-secondary); margin-top: 2px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-pages { margin-top: 3px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+    .wiki-wm-sep, .wiki-wm-more { color: var(--text-soft); }
+    .wiki-wm-next { margin-top: 3px; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-wm-next-label { color: var(--text-soft); font-weight: 600; }
+    .wiki-wm-coverage { font-size: 11px; color: var(--text-soft); margin-top: 10px; }
+    /* The board (your-work board P3). Layout is CSS alone, so F and a resize need no repaint.
+       Five 200 px tracks and four 10 px gaps need 1040 px: from there every column shows, so
+       nothing is left to fold, and the head takes no pointer, focus or key. Behind @supports:
+       without ::details-content the summary rule would make shut columns unopenable, so that
+       browser keeps working folds. A browser without interactivity keeps a head that can be
+       tabbed to and flipped unseen. */
+    .wiki-wm-board { container-type: inline-size; container-name: wmboard; margin-top: 10px; }
+    /* Waiting on you spans all the rows, so the rest flow beside it, and from three tracks
+       (three 200 px tracks and two 10 px gaps need 620 px) Moving does too; at two it shares
+       its track with the shut columns. An item crossing an fr track gives its extra height
+       to that track alone, so a tall column stretches no auto row. The row gap is a margin
+       because a gap would also space the empty rows. */
+    .wiki-wm-cols {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+      grid-template-rows: repeat(4, auto) 1fr; column-gap: 10px; align-items: start; margin-bottom: -10px;
+    }
+    .wiki-wm-col { min-width: 0; margin-bottom: 10px; }
+    .wiki-wm-col[data-wm-lane="you"] { grid-row: 1 / -1; }
+    @container wmboard (min-width: 620px) { .wiki-wm-col[data-wm-lane="moving"] { grid-row: 1 / -1; } }
+    .wiki-wm-col[data-wm-lane="you"] > summary, .wiki-wm-col[data-wm-lane="you"] > summary .wiki-wm-count { color: var(--accent-light); }
+    @supports selector(::details-content) {
+      @container wmboard (min-width: 1040px) {
+        .wiki-wm-col::details-content { content-visibility: visible; }
+        .wiki-wm-col > summary { display: flex; justify-content: space-between; cursor: default; pointer-events: none; interactivity: inert; }
+      }
+    }
+    .wiki-wm-col-none { font-size: 12.5px; color: var(--text-soft); padding: 4px 2px; }
+    .wiki-wm-col .wiki-wm-efforts > .wiki-wm-tile {
+      border: 1px solid var(--border-primary); border-radius: 10px; padding: 8px 10px;
+      background: var(--bg-inset); margin-bottom: 8px; overflow-wrap: anywhere;
+    }
+    .wiki-wm-col[data-wm-lane="you"] .wiki-wm-efforts > .wiki-wm-tile { border: 1.5px solid var(--accent); }
+    .wiki-wm-tile .wiki-wm-effort-head { gap: 2px 6px; line-height: 1.3; }
+    .wiki-wm-spark { display: block; width: 100%; height: 24px; margin: 5px 0 3px; }
+    .wiki-wm-spark rect { fill: var(--accent-light); }
+    .wiki-wm-spark rect.zero { fill: var(--text-dim); }
+    @media (forced-colors: active) {
+      .wiki-wm-spark rect { fill: CanvasText; }
+      .wiki-wm-spark rect.zero { fill: GrayText; }
+    }
+    .wiki-wm-pills { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+    .wiki-wm-pill { font-size: 11.5px; line-height: 1.4; padding: 1px 7px; border-radius: 9px; background: var(--bg-surface); color: var(--text-soft); min-width: 0; }
+    .wiki-wm-pill.warn { background: var(--tint-warning); color: var(--tone-warn); }
+    .wiki-wm-pill.acc { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-wm-kids { list-style: none; margin: 6px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--border-primary); }
+    /* Two lines: name and a fixed sparkline, then pills. The name takes one line, with the
+       whole of it in its title. */
+    .wiki-wm-kids > .wiki-wm-kid {
+      display: grid; grid-template-columns: minmax(0, 1fr) 56px; column-gap: 6px; align-items: center;
+      padding: 4px 0; border-top-color: var(--border-secondary); line-height: 1.3;
+    }
+    .wiki-wm-kids > .wiki-wm-kid:first-child { border-top: none; padding-top: 0; }
+    .wiki-wm-kid .wiki-wm-effort-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .wiki-wm-kid .wiki-wm-spark { grid-column: 2; grid-row: 1; height: 12px; margin: 0; }
+    /* 56 px over 28 days is 2 px a day, so a 0.8-unit bar covers no pixel fully at 1x. Half
+       a unit with crisp edges is one whole pixel on and one off, wherever the row lands.
+       Below 1x a crisp bar can miss every pixel centre and vanish, so it stays soft there. */
+    @media (min-resolution: 1dppx) {
+      .wiki-wm-kid .wiki-wm-spark { shape-rendering: crispEdges; }
+      .wiki-wm-kid .wiki-wm-spark rect { width: 0.5px; }
+    }
+    .wiki-wm-kid .wiki-wm-pills { grid-column: 1 / -1; margin: 2px 0 0; }
+    /* What you're following (themes map, theme map P2). */
+    .wm-state-new, .wm-state-rising { background: var(--tint-purple); color: var(--accent-light); }
+    .wiki-wm-need-count {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-warning); color: var(--tone-warn);
+    }
+    .wiki-wm-hubs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; font-size: 11.5px; }
+    .wiki-wm-hub { padding: 1px 7px; border-radius: 999px; background: var(--tint-neutral); min-width: 0; overflow-wrap: anywhere; }
+    .wiki-wm-weeks { display: flex; align-items: flex-end; gap: 5px; height: 18px; margin: 6px 0 2px 2px; }
+    .wiki-wm-weeks-earlier { align-self: center; margin-right: 3px; font-size: 11px; color: var(--text-soft); white-space: nowrap; }
+    .wiki-wm-slot { display: flex; align-items: flex-end; width: 10px; height: 100%; }
+    /* A framed slot: the running week (dashed) or a partial week (dotted), 1px
+       off the bar in a text token, so a full bar (the bar's own colour) never
+       swallows its frame. The gap and margin leave the frame room. */
+    .wiki-wm-slot.current { outline: 1px dashed var(--text-primary); outline-offset: 1px; }
+    .wiki-wm-slot.partial { outline: 1px dotted var(--text-soft); outline-offset: 1px; }
+    .wiki-wm-week { width: 100%; min-height: 2px; border-radius: 2px 2px 0 0; background: var(--accent-light); }
+    .wiki-wm-week.lvl-0 { height: 2px; background: var(--border-secondary); }
+    .wiki-wm-week.lvl-1 { height: 25%; } .wiki-wm-week.lvl-2 { height: 50%; }
+    .wiki-wm-week.lvl-3 { height: 75%; } .wiki-wm-week.lvl-4 { height: 100%; }
+    .wiki-wm-conns { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+    .wiki-wm-conn { padding: 3px 0; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-wm-conn-arrow { color: var(--text-soft); }
+    .wiki-wm-conn-why { color: var(--text-secondary); }
+    .wiki-wm-life { margin-top: 12px; }
+    .wiki-wm-warnings { margin: 4px 0 0 18px; padding: 0; font-size: 11.5px; color: var(--tone-warn); }
+    /* A linked effort name reads as a link at rest (WCAG 1.4.1), as .wiki-wm-link does. */
+    a.wiki-wm-effort-name {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    a.wiki-wm-effort-name:hover, a.wiki-wm-effort-name:focus-visible { text-decoration-color: currentColor; }
+
+    /* Effort page (?effort=, work map P3). Text uses --text-primary/-secondary/
+       -soft, --accent-light and the --tone-* inks, which clear 4.5:1 in every
+       palette (e2e/wiki-effort-page.spec.ts measures each). */
+    .wiki-effort { max-width: 860px; }
+    .wiki-ef-crumbs { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 12.5px; margin-bottom: 8px; color: var(--text-soft); }
+    .wiki-ef-crumbs .wiki-bc-wiki, .wiki-ef-crumb { color: var(--accent-light); text-decoration: none; }
+    .wiki-ef-crumbs .wiki-bc-wiki:hover, .wiki-ef-crumb:hover { text-decoration: underline; }
+    .wiki-ef-sep { color: var(--text-soft); }
+    .wiki-ef-crumb-theme { color: var(--text-secondary); }
+    .wiki-ef-metarow { gap: 10px; }
+    .wiki-ef-meta { font-size: 12px; color: var(--text-soft); }
+    .wiki-ef-tldr {
+      margin: 0 0 18px; padding: 10px 14px; border-radius: 10px; background: var(--bg-surface);
+      border: 1px solid var(--border-secondary); border-top: 3px solid var(--accent);
+    }
+    .wiki-ef-tldr-label {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--accent-light); margin-bottom: 4px;
+    }
+    .wiki-ef-oneline, .wiki-ef-next { margin: 4px 0 0; font-size: 14px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
+    .wiki-ef-next-label { font-weight: 600; color: var(--text-secondary); }
+    .wiki-ef-section { margin: 0 0 20px; }
+    .wiki-ef-h { font-size: 12px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-soft); margin: 0 0 8px; }
+    .wiki-ef-count { color: var(--text-soft); font-weight: 400; }
+    .wiki-ef-needs, .wiki-ef-subs, .wiki-ef-pages, .wiki-ef-conns { list-style: none; margin: 0; padding: 0; }
+    .wiki-ef-need {
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+      border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-bottom: 8px;
+    }
+    .wiki-ef-need-head { display: flex; align-items: baseline; gap: 6px; }
+    .wiki-ef-need-title { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+    .wiki-ef-kind {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    .wiki-ef-need-why { color: var(--text-secondary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-ef-need-action { color: var(--text-primary); margin-top: 4px; line-height: 1.5; overflow-wrap: anywhere; }
+    .wiki-ef-note { font-size: 12px; color: var(--text-soft); }
+    .wiki-ef-sub, .wiki-ef-page, .wiki-ef-conn { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 13px; min-width: 0; }
+    .wiki-ef-page { padding-left: calc(var(--ef-depth, 0) * 18px); border-top: 1px solid var(--border-primary); }
+    .wiki-ef-pages > .wiki-ef-page:first-child { border-top: none; }
+    .wiki-ef-branch { color: var(--text-soft); }
+    .wiki-ef-plink, .wiki-ef-elink {
+      color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere;
+      text-decoration-color: color-mix(in srgb, var(--accent-light) 45%, transparent);
+    }
+    .wiki-ef-plink:hover, .wiki-ef-elink:hover { text-decoration-color: currentColor; }
+    /* The shared pill's neutral ink (--text-muted) measured 4.26:1 in Light. */
+    .wiki-ef-page .wiki-status:not(.plan-shipped):not(.plan-in-flight):not(.plan-blocked) { color: var(--text-soft); }
+    .wiki-ef-role {
+      font-size: 10.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+      background: var(--tint-neutral); color: var(--text-soft);
+    }
+    /* Cells share the article width (8–18 px each), so the strip fits from a
+       phone up; below that it scrolls, and the bottom padding holds the
+       session dots, which overflow-x: auto would otherwise clip. */
+    .wiki-ef-strip { display: flex; gap: 10px; align-items: flex-end; overflow-x: auto; padding-bottom: 10px; }
+    .wiki-ef-strip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .wiki-ef-run { display: flex; flex-direction: column; gap: 4px; flex: var(--ef-cells, 1) 1 0; min-width: min-content; max-width: calc(var(--ef-cells, 1) * 21px); }
+    .wiki-ef-run-label { font-size: 11px; color: var(--text-soft); overflow-wrap: anywhere; }
+    .wiki-ef-cells { display: flex; gap: 3px; }
+    .wiki-ef-day {
+      position: relative; flex: 1 1 0; min-width: 8px; max-width: 18px; height: 22px; border-radius: 3px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary);
+    }
+    .wiki-ef-day.lvl-1 { background: color-mix(in srgb, var(--accent) 30%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-2 { background: color-mix(in srgb, var(--accent) 50%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-3 { background: color-mix(in srgb, var(--accent) 72%, var(--bg-inset)); }
+    .wiki-ef-day.lvl-4 { background: var(--accent); }
+    .wiki-ef-run.old .wiki-ef-day { border-style: dashed; }
+    .wiki-ef-sess {
+      position: absolute; left: 50%; bottom: -8px; width: 5px; height: 5px; margin-left: -2.5px;
+      border-radius: 50%; background: var(--tone-good);
+    }
+    .wiki-ef-strip-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 11px; color: var(--text-soft); flex-wrap: wrap; }
+    .wiki-ef-strip-sum { color: var(--text-secondary); }
+    .wiki-ef-legend { font-size: 11.5px; color: var(--text-soft); margin-top: 4px; }
+    .wiki-ef-why { font-size: 13.5px; line-height: 1.6; color: var(--text-secondary); margin: 0; overflow-wrap: anywhere; }
+    .wiki-ef-foot { font-size: 11px; color: var(--text-soft); margin-top: 8px; }
+    .wiki-ef-gone, .wiki-ef-gone-match, .wiki-ef-gone-home { font-size: 14px; color: var(--text-primary); margin: 0 0 10px; }
+    .wiki-ef-status { font-size: 13.5px; color: var(--text-secondary); margin: 0 0 10px; }
+    .wiki-ef-status.warn { color: var(--tone-warn); }
+    .wiki-ef-retry {
+      background: transparent; border: 1px solid var(--border-secondary); border-radius: 6px;
+      color: var(--text-soft); font-size: 12px; padding: 3px 9px; cursor: pointer; font-family: inherit;
+    }
+    .wiki-ef-retry:hover, .wiki-ef-retry:focus-visible { color: var(--accent-light); border-color: var(--accent); }
+    .wiki-ef-conn-title { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; color: var(--text-soft); padding: 4px 8px; }
+    .wiki-ef-conns { padding: 0 8px; }
+    .wiki-ef-conn { font-size: 12.5px; }
+    .wiki-ef-conn-why { flex-basis: 100%; font-size: 12px; line-height: 1.5; color: var(--text-secondary); overflow-wrap: anywhere; }
+    .wiki-ef-conn-gone { color: var(--text-secondary); }
+    .wiki-ef-conn-empty { font-size: 12px; color: var(--text-soft); padding: 4px 8px; }
+    /* Theme page (themes map P3): the card's weekly strip, taller and over every
+       stored week (at most 26); the padding leaves the slot frames room. */
+    .wiki-ef-weekly .wiki-wm-weeks { height: 44px; gap: 6px; overflow-x: auto; padding: 3px; margin: 0; }
+    .wiki-ef-weekly .wiki-wm-slot { flex: 0 0 16px; width: 16px; }
+    /* The box is the strip's width; the footer adds none (inline-size containment),
+       its padding matches the strip's, and a footer too narrow for both labels
+       puts the newest on a second row, right-aligned under the last bar. */
+    .wiki-ef-weekbox { width: max-content; max-width: 100%; }
+    .wiki-ef-week-foot { display: grid; grid-template-columns: minmax(0, 1fr); container-type: inline-size; padding: 0 3px; }
+    .wiki-ef-week-foot > span { grid-area: 1 / 1; white-space: nowrap; }
+    .wiki-ef-week-first { justify-self: start; }
+    .wiki-ef-week-last { justify-self: end; }
+    @container (max-width: 120px) { .wiki-ef-week-foot > .wiki-ef-week-last { grid-row: 2; } }
+    .wiki-ef-hubs { margin-top: 0; font-size: 12.5px; }
 
     /* Index coverage card (start view) */
     .wiki-index-card {
@@ -2825,7 +3516,7 @@ export async function renderWikiPage(opts?: {
     .wiki-fc-int-msg { margin-top: 8px; }
     .wiki-fc-int-msg.error { color: var(--status-error); }
     /* ↻ Claim retry — one row injected under each retryable claim heading by the
-       DOM pass in wiki-browser.ts (the answer body is opaque HTML, so the rows are
+       DOM pass in wiki-ask-controller.ts (the answer body is opaque HTML, so the rows are
        built from the headings, not rendered with them), plus the batch bar. */
     .wiki-fc-retry {
       display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
@@ -2906,8 +3597,8 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       width: min(480px, calc(100vw - 32px));
       padding: 14px; border-radius: 12px; border: 1px solid var(--border-secondary);
       /* NB: an explicit token. This was var(--bg-elevated, var(--bg-secondary)),
-         and NEITHER name is defined on this page (--bg-elevated exists only in the
-         chat page's own styles) — so the whole declaration was invalid and the
+         and NEITHER name was defined on this page then (today --bg-elevated comes from
+         the System theme and the palettes) — so the whole declaration was invalid and the
          dialog rendered fully TRANSPARENT, with the article text showing through
          it. Any replacement must name a token this page actually defines. */
       background: var(--bg-surface); box-shadow: 0 18px 48px rgba(0,0,0,0.5);
@@ -3119,193 +3810,95 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
       .wiki-layout.atlas-full, .wiki-layout.focus-mode { grid-template-columns: minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
+    /* Phone and small tablet (issue #623): the rail kept its 260px column down
+       to any width, so at 390px the article was 0px wide and the document
+       scrolled sideways. Here the grid is one column with a 16px gutter: the
+       Pages button in the first row, the article in the second. \`.rail-open\`
+       (wiki-pane-toggle.ts) puts the rail in the article's cell and hides
+       the article without removing its box, so it keeps its scroll position. The open rule comes
+       after the \`:first-child\` hides, focus mode's and the Atlas tab's
+       included: equal specificity, so source order lets the button win in
+       those states too. \`e2e/wiki-phone-width.spec.ts\` measures 390, 430,
+       600 and 768px. */
+    @media (max-width: ${RAIL_DRAWER_MAX}px) {
+      /* \`.right-collapsed\` is named because the 1100px block gives it a rail
+         column at this specificity; focus mode's and the Atlas tab's rule
+         there is already this one column. */
+      .wiki-layout, .wiki-layout.right-collapsed {
+        grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
+        row-gap: 8px; padding: 16px;
+      }
+      .wiki-rail-bar { display: flex; grid-row: 1; grid-column: 1; }
+      .wiki-layout > .wiki-pane { grid-row: 2; grid-column: 1; }
+      .wiki-layout > .wiki-pane:first-child { display: none; }
+      .wiki-layout.rail-open > .wiki-pane:first-child { display: flex; }
+      /* Hidden, not covered: the article keeps its box and scroll position
+         but takes no tap or Tab, and nothing in it (the Atlas's nodes carry
+         their own z-index) shows through the list. */
+      .wiki-layout.rail-open > .wiki-pane:nth-child(2) { visibility: hidden; }
+      .wiki-rail-resizer { display: none; }
+      .wiki-article-wrap { padding: 16px; }
+      /* An unbroken URL in prose breaks instead of scrolling the pane. */
+      .wiki-article { overflow-wrap: break-word; }
+    }
     ${agentPresenceStyles()}
     ${shareDialogStyles()}
     ${walkthroughStyles()}
+    ${stepDoneStyles()}
+    ${discussHandoffStyles()}
+    ${discussTabStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${mirrorStatusStyles()}
     ${wikiReadonlyStyles()}
     ${wikiReadSliceStyles()}
     ${wikiStaleTabStyles()}
-  </style>
-</head>
-<body${tools ? "" : ` class="${WIKI_READ_SLICE_CLASS}"`}>
-  ${renderNav("wiki", { role: opts?.role })}
-  <div class="wiki-layout">
-    <div class="wiki-pane">
-      <div class="wiki-browse-head">
-        ${
-          wikiSelector || gardenerLink || boardLink
-            ? `<div class="wiki-head-top">${wikiSelector ? `<span class="wiki-count wiki-head-label">Wiki</span>${wikiSelector}` : ""}${boardLink}${gardenerLink}</div>`
-            : ""
-        }
-        ${tools ? `<div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>` : ""}
-        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
-        <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
-             more than one domain (i.e. one with a life/ subtree). -->
-        <div class="wiki-chip-row wiki-segmented" id="domainChips" style="display:none">
-          <button class="wiki-chip active" data-domain="">All</button>
-          <button class="wiki-chip" data-domain="ai">AI</button>
-          <button class="wiki-chip" data-domain="life">Life</button>
-        </div>
-        <div class="wiki-sort-row wiki-sort-row-main">
-          <select id="wikiSort" class="wiki-sort">
-            <option value="updated" selected>Recently updated</option>
-            <option value="created">Recently added</option>
-            <!-- The worked-on axis: the day an agent session last wrote the page,
-                 out of claude-usage's ledger. HIDDEN until the listing says this
-                 wiki has any covered page (workedCoverage.matched > 0) — on a
-                 corpus written entirely by bulk passes every page falls back to
-                 its update date, so the option would be "Recently updated" under
-                 a second name (the measured corpus is named once, on
-                 WikiIndex.workedCoverage). Hidden rather than disabled: a control
-                 that can never be chosen is furniture (the rail's own F2 rule).
-                 Once shown it becomes the DEFAULT unless the reader picked a
-                 sort (resolveSortMode in wiki-filter.ts). -->
-            <option value="worked" hidden>Worked on</option>
-            <option value="backlinks">Most linked</option>
-            <option value="title">Title A–Z</option>
-          </select>
-          <!-- Filters: the toolbar's button for the <details> below. The details
-               keeps its own (hidden) summary so its open state, toggle event and
-               auto-open stay what they were; this button only flips it. -->
-          <button type="button" class="wiki-tool-btn" id="wikiFiltersBtn" aria-controls="wikiFilters" aria-expanded="false" title="Filters">${SVG_FILTER}<span class="wiki-tool-label">Filters</span><span class="wiki-filter-count" id="wikiFilterCount" style="display:none"></span></button>
-          <span class="wiki-count" id="wikiCount"></span>
-          <!-- View options: the two per-wiki toggles the reader sets once and
-               rarely touches, out of the toolbar. Both are unchecked here and
-               painted from the folds store at boot (the server does not know
-               what this browser remembers). The dot says a toggle is on while
-               the pane is closed; the strip under the toolbar names it. The pane
-               is a non-modal role="dialog"; it closes when focus or a pointer
-               leaves it, on Escape, and on a reader shortcut key pressed
-               outside it, which then runs (wiki-browser.ts, setOptionsOpen). -->
-          <button type="button" class="wiki-tool-btn wiki-tool-icon" id="wikiOptionsBtn" aria-controls="wikiOptions" aria-expanded="false" aria-label="View options" title="View options">${SVG_OPTIONS}<span class="wiki-options-dot" id="wikiOptionsDot" hidden></span></button>
-          <div class="wiki-options-pane" id="wikiOptions" role="dialog" aria-label="View options" hidden>
-            <label class="wiki-group-toggle" title="Fold stem families into one row — and the archive by month">
-              <input type="checkbox" id="wikiGroupFamilies">group families
-            </label>
-            <!-- Retired (culled) pages, per wiki. Hidden on a wiki with none and
-                 while the facets select none (unless checked); the label and its
-                 count are painted by the client from the wiki's cullLabels, so it
-                 carries no English hover of its own. -->
-            <label class="wiki-retired-toggle" id="wikiRetiredToggle" hidden>
-              <input type="checkbox" id="wikiShowRetired"><span id="wikiRetiredLabel"></span>
-            </label>
-          </div>
-        </div>
-        <div class="wiki-active-options" id="wikiActiveOptions" hidden></div>
-        <!-- «Felles: N changed» — painted by the client on a wiki that offers
-             ⇪ Felles, after the page has rendered (wiki-felles-publish.ts). -->
-        <div class="wiki-felles-sync" id="wikiFellesSync" aria-live="polite" hidden></div>
-        <!-- A bucket-mirrored wiki whose copy is stale — painted from the
-             listing's \`mirror\` field (wiki-mirror-status.ts). -->
-        ${mirrorStatusSlotHtml()}
-        <details class="wiki-filters" id="wikiFilters">
-          <summary class="wiki-filters-summary">Filters</summary>
-          <div class="wiki-filters-body">
-            <div class="wiki-sort-row" id="wikiFolderRow" style="display:none">
-              <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
-            </div>
-            <div class="wiki-chip-row" id="typeChips"></div>
-            <!-- Plan-status facet — populated (and un-hidden) only on wikis where
-                 at least one page carries a valid plan_status. -->
-            <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
-            <!-- Project facet — populated (and un-hidden) only on wikis whose
-                 .wiki-reader.json declares a project rule that resolved at least
-                 one page. -->
-            <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
-            <!-- Jira facet — populated (and un-hidden) only on wikis the
-                 claude-usage stamper has written a jira: key to. -->
-            <div class="wiki-chip-row" id="jiraChips" style="display:none"></div>
-            <div class="wiki-chip-row" id="tagChips"></div>
-          </div>
-        </details>
-      </div>
-      <div class="wiki-list" id="wikiList"></div>
-      <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
-      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
-    </div>
+    ${wikiStaleSummaryStyles()}
+    ${wikiStaleMarkStyles()}
+`;
+}
 
-    <div class="wiki-pane">
-      <div class="wiki-focus-bar"><button class="wiki-focus-exit" id="wikiFocusExit" type="button" data-pane-toggle="focus" title="Leave focus (Esc)">${SVG_FOCUS_EXIT} Exit focus <kbd>Esc</kbd></button></div>
-      <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
-      <div class="wiki-article-wrap" id="articleWrap">
-        <div class="wiki-empty-state">Loading wiki…</div>
-      </div>
-    </div>
+/** One built asset: its bytes, a gzip of them, and the hashed URL it is served at. */
+export interface WikiAsset {
+  readonly body: string;
+  readonly gzip: Uint8Array;
+  readonly contentType: string;
+  /** `/wiki/assets/wiki.<hash>.<ext>` — the hash is of `body`, so a URL names
+   *  exactly one byte sequence and can be cached as immutable. */
+  readonly path: string;
+}
 
-    <div class="wiki-pane wiki-conn-pane">
-      <!-- Collapsed form: shown only under .right-collapsed (wiki-pane-toggle.ts). -->
-      <div class="wiki-conn-strip" id="wikiConnStrip">
-        <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-open="conn" title="Connections">${SVG_CONN}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-open="ask" title="Ask">${SVG_ASK}</button>
-        <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
-      </div>
-      <div class="wiki-conn-tabs">
-        <button class="wiki-conn-tab active" data-conntab="conn">Connections</button>
-        <button class="wiki-conn-tab" data-conntab="stale" title="${STALE_TAB_TITLE}">Stale<span class="wiki-stale-count" id="wikiStaleCount"></span></button>
-        <button class="wiki-conn-tab" data-conntab="ask">Ask</button>
-        <div class="wiki-conn-tools">
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="focus" aria-pressed="false" title="Focus (F)">${SVG_FOCUS}</button>
-          <button class="wiki-pane-btn" type="button" data-pane-toggle="right" aria-pressed="false" title="Hide connections (])">${SVG_COLLAPSE}</button>
-        </div>
-      </div>
-      <div class="wiki-conn-body" id="connBody">
-        <div class="wiki-conn-empty">Select a page to see its connections.</div>
-      </div>
-      <div class="wiki-conn-body wiki-stale-body" id="staleBody" style="display:none">
-        <div class="wiki-conn-empty">Select a page to see what may be stale.</div>
-      </div>
-      <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
-        <div class="wiki-ask-compose">
-          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="${readonlyWiki ? escHtml(WIKI_READONLY_INPUT_PLACEHOLDER) : "Ask this wiki…"}"${readonlyWiki ? " disabled" : ""}></textarea>
-          <div class="wiki-ask-actions">
-            <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
-            <button class="wiki-ask-newchat" id="wikiNewChatBtn"
-              title="Send this question straight to a chat thread — full context and tools, no wiki-only answer first">New chat</button>
-          </div>
-        </div>
-        <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
-        <div class="wiki-ask-hint" id="wikiAskHint">${readonlyWiki ? escHtml(WIKI_READONLY_ASK_HINT) : "Ask a question and this wiki answers in the main pane, with citations you can open as pages."}</div>
-        ${askBotLine}
-        <div class="wiki-ask-history" id="wikiAskHistory"></div>
-      </div>
-    </div>
-  </div>
+export interface WikiAssets {
+  readonly js: WikiAsset;
+  readonly css: WikiAsset;
+}
 
-  <script>
-    window.__WIKI_NAME__ = ${escJsonScript(selected)};
-    // Wiki-readonly instance: the client dims + blocks the write actions so the
-    // 403 is visible before the click (the server is still the authority).
-    window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
-    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
-    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
-    // Independent of the one above — this laptop owns writes and still reads one
-    // wiki it must never write or send to a model. The picker navigates with a
-    // full page load, so the flag is always the open wiki's.
-    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
-    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
-    // yield a path an agent can open. A boot-time fact for the open wiki; the
-    // picker navigates with a full page load, so it cannot go stale in place.
-    // Under the read slice (role \`user\` on the pod) the host path is withheld:
-    // "" still says "a wiki is served" (the nav's check) and ⧉ Copy path copies
-    // the relPath alone.
-    window.__WIKI_ROOT__ = ${escJsonScript(tools || wikiRoot === null ? wikiRoot : "")};
-    // The registry name of the wiki served here, under the WIKI_DIR override
-    // too: the answer cards, new-since and the Agent lens send it as \`wiki\`.
-    window.__WIKI_FIND_SELF__ = ${escJsonScript(opts?.findSelf ?? selected)};
-    // The name Everywhere rows carry for this ROOT (the first registry entry on
-    // it): the palette's dedupe and open-in-place key, never a request param.
-    window.__WIKI_FIND_ROWS__ = ${escJsonScript(opts?.findRows ?? opts?.findSelf ?? selected)};
-  </script>
-  <script>
-    ${clientScript}
-  </script>
-  ${tools ? `<script>
-    ${agentPresenceScript("wikiPresence", { kinds: ["gardener_drain", "research"] })}
-  </script>` : ""}
-</body>
-</html>`;
+/** Where the reader's assets are served (`registerWikiReadRoutes`). */
+export const WIKI_ASSET_PREFIX = "/wiki/assets/";
+
+function wikiAsset(body: string, ext: "js" | "css", contentType: string): WikiAsset {
+  const hash = new Bun.CryptoHasher("sha256").update(body).digest("hex").slice(0, 16);
+  return { body, gzip: Bun.gzipSync(Buffer.from(body)), contentType, path: `${WIKI_ASSET_PREFIX}wiki.${hash}.${ext}` };
+}
+
+let wikiAssetsCache: Promise<WikiAssets> | null = null;
+
+/** The reader's script and stylesheet, built and hashed once per process. The
+ *  page and the asset route both read this one memo, so the URL a page names is
+ *  always one the route serves. Like `wikiClientScript`'s memo it keeps no
+ *  failure: a failed build is built again on the next request. */
+export function getWikiAssets(): Promise<WikiAssets> {
+  if (wikiAssetsCache) return wikiAssetsCache;
+  const p = (async () => {
+    const js = await wikiClientScript();
+    return {
+      js: wikiAsset(js, "js", "text/javascript; charset=utf-8"),
+      css: wikiAsset(buildWikiPageCss(), "css", "text/css; charset=utf-8"),
+    };
+  })();
+  wikiAssetsCache = p;
+  p.catch(() => {
+    if (wikiAssetsCache === p) wikiAssetsCache = null;
+  });
+  return p;
 }

@@ -1,11 +1,12 @@
 import { beforeAll, afterAll, beforeEach } from "bun:test";
-import { initDb, getDb } from "../db/client.ts";
+import { initDb, getDb, closeDb } from "../db/client.ts";
 import { TEST_DATABASE_URL } from "./test-db-url.ts";
 
 
 
 const ALL_TABLES = [
   "wiki_proposals",
+  "wiki_proposal_group_leases",
   "research_citations",
   "search_signals",
   "traces",
@@ -15,6 +16,8 @@ const ALL_TABLES = [
   "prompt_snapshots",
   "haiku_usage",
   "summary_candidates",
+  "youtube_discover_hits",
+  "youtube_discover_runs",
   "x_link_amplifiers",
   "watchers",
   "scheduled_tasks",
@@ -48,6 +51,7 @@ const ALL_TABLES = [
   "summary_factchecks",
   "wiki_answers",
   "wiki_stale_verdicts",
+  "wiki_discuss_turns",
   // Cleared before each test, so no test starts with another file's override.
   // It does not stop a suite's last row outliving it: role-overrides.test.ts
   // clears its own rows in afterAll, and the e2e spec deletes HAIKU_BACKEND
@@ -56,6 +60,20 @@ const ALL_TABLES = [
 ];
 
 let dbInitialized = false;
+
+/**
+ * Close the shared pool and open a new one. For a test that changes a shared
+ * table's row type (drops and re-adds a column): every pooled connection that
+ * prepared a `SELECT *` or `RETURNING *` on it holds a stale plan, and
+ * postgres.js 3.4.9's retry of a stale plan serializes the parameters a second
+ * time, so a `sql.json` value is stored as a jsonb string (measured). Later
+ * files in the same `bun test` process then read it back wrong.
+ */
+export async function replaceTestDbPool(): Promise<void> {
+  await closeDb();
+  initDb({ databaseUrl: TEST_DATABASE_URL } as any);
+  await getDb().unsafe("SET client_min_messages = WARNING");
+}
 
 export function setupTestDb() {
   beforeAll(async () => {

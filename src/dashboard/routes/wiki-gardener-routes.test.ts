@@ -1,9 +1,13 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
+import { Tracer } from "../../tracing/tracer.ts";
+import type { BotConfig } from "../../bots/config.ts";
 import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import {
+  runDrainUnderTrace,
+  drainGardenerRun,
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   computeBacklogFloorCounts,
@@ -18,12 +22,16 @@ import {
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   __setBotsForTest,
+  __setGroupVerbInFlightForTest,
   type BacklogRouteDeps,
   type GardenerWatcherRef,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
 import { onSummaryDocumentDeleted } from "../../summaries/document-deleted.ts";
+import { applyWikiProposalGroup, settleWrittenGroupRows } from "../../gardener/apply.ts";
+import { runGit } from "../../wiki/commit.ts";
+import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { summarySaveClaims } from "../../summaries/summary-save.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import {
@@ -40,6 +48,13 @@ import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 import { SUMMARY_SOURCES } from "../../summaries/sources.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { linkingBuckets } from "../../wiki/stale.ts";
+import { __setStaleVerdictStoreForTest, changedHashOf, memoryStaleVerdictStore, passageVerdictKey } from "../../wiki/stale-confirm.ts";
+import { __setStaleProposalStoreForTest, sendStaleFix } from "../../gardener/stale-proposals.ts";
+import { registerWikiRoutes } from "./wiki-routes.ts";
+import { carryPassageVerdicts, snapshotPassageKeys } from "../../wiki/stale-fix-verdicts.ts";
+import { memoryStaleProposalStore } from "../../test/stale-proposal-store.ts";
+import type { WikiProposal } from "../../db/wiki-proposals.ts";
 
 /** The gated gardener POSTs take application/json (a 415 otherwise — `json-request.ts`). */
 const JSON_POST: RequestInit = { method: "POST", headers: { "content-type": "application/json" }, body: "{}" };
@@ -314,15 +329,25 @@ const lintGroupStubs = {
   listProposalsByGroup: async () => [],
   approveProposalGroup: async () => [],
   rejectProposalGroup: async () => [],
+  settleProposalApplied: async () => null,
+  claimGroupLease: async () => "lease-token",
+  renewGroupLease: async () => true,
+  releaseGroupLease: async () => {},
+  groupLeaseHeld: async () => true,
   markProposal: async () => true,
   seedLintProposals: async () => ({
-    proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [],
+    proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [],
   }),
 } satisfies Pick<
   BacklogRouteDeps,
     | "listProposalsByGroup"
   | "approveProposalGroup"
   | "rejectProposalGroup"
+  | "settleProposalApplied"
+  | "claimGroupLease"
+  | "renewGroupLease"
+  | "releaseGroupLease"
+  | "groupLeaseHeld"
   | "markProposal"
   | "seedLintProposals"
 >;
@@ -2930,7 +2955,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a READ-ONLY INSTANCE refuses before the lint even runs", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     __setWikiReadonlyForTest(true);
 
     const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
@@ -2942,7 +2967,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a READ-ONLY ROOT refuses too, and the two refusals are distinct", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     __setReadonlyWikiRootsForTest([root]);
 
     const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", JSON_POST);
@@ -2962,7 +2987,7 @@ describe("lint proposals — seeding and the group verbs", () => {
       deps({
         seedLintProposals: async (_f: unknown, d: { wikiDir: string; wikiName: string }) => {
           handed = d;
-          return { proposed: 2, rows: 5, skipped: 1, claimed: 0, refused: 0, staled: 0, refusals: [] };
+          return { proposed: 2, rows: 5, skipped: 1, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] };
         },
       }),
     );
@@ -2981,32 +3006,72 @@ describe("lint proposals — seeding and the group verbs", () => {
   function groupStore(initial: unknown[]) {
     type Row = { id: string; status: string };
     let state = initial as Row[];
+    // The DB lease (migration 093), shared by every app registered on this
+    // store the way two processes share one database.
+    const leases = new Map<string, string>();
+    let tokens = 0;
     const marked: Array<[string, string]> = [];
     const reverted: string[] = [];
     const set = (id: string, status: string) => {
       state = state.map((r) => (r.id === id ? { ...r, status } : r));
     };
+    type Lease = { scope: string; groupKey: string; token: string };
+    // The fence every group CAS carries: with a lease passed, the statement
+    // moves nothing unless that token still holds the group.
+    const fenced = (lease?: Lease) => !lease || leases.get(`${lease.scope}\0${lease.groupKey}`) === lease.token;
     return {
       marked,
       reverted,
+      leases,
       rows: () => state,
+      /** What another process does to a row behind this one's back. */
+      setStatus: set,
       deps: {
         listProposalsByGroup: async () => state,
-        approveProposalGroup: async () => {
+        approveProposalGroup: async (_w: string, _g: string, lease?: Lease) => {
+          if (!fenced(lease)) return [];
           state = state.map((r) => (r.status === "draft" ? { ...r, status: "approved" } : r));
           return state.filter((r) => r.status === "approved");
         },
-        rejectProposalGroup: async () => {
-          const taken = state.filter((r) => r.status === "draft");
-          state = state.map((r) => (r.status === "draft" ? { ...r, status: "rejected" } : r));
+        // `draft` and `approved`, except the given ids — the DB verb's predicate.
+        rejectProposalGroup: async (_w: string, _g: string, exceptIds: readonly string[] = [], lease?: Lease) => {
+          if (!fenced(lease)) return [];
+          const takes = (r: Row) => (r.status === "draft" || r.status === "approved") && !exceptIds.includes(r.id);
+          const taken = state.filter(takes);
+          state = state.map((r) => (takes(r) ? { ...r, status: "rejected" } : r));
           return taken;
         },
-        markProposal: async (id: string, status: string) => {
+        settleProposalApplied: async (id: string, lease?: Lease) => {
+          if (!fenced(lease)) return null;
+          const row = state.find((r) => r.id === id && (r.status === "draft" || r.status === "approved"));
+          if (!row) return null;
+          set(id, "applied");
+          return row as never;
+        },
+        getProposalById: async (id: string) => state.find((r) => r.id === id) ?? null,
+        claimGroupLease: async (w: string, g: string) => {
+          const key = `${w}\0${g}`;
+          if (leases.has(key)) return null;
+          const token = `t${++tokens}`;
+          leases.set(key, token);
+          return token;
+        },
+        renewGroupLease: async (w: string, g: string, token: string) => leases.get(`${w}\0${g}`) === token,
+        releaseGroupLease: async (w: string, g: string, token: string) => {
+          if (leases.get(`${w}\0${g}`) === token) leases.delete(`${w}\0${g}`);
+        },
+        groupLeaseHeld: async (w: string, g: string, token: string) => leases.get(`${w}\0${g}`) === token,
+        // Both CAS on `approved`, as the DB verbs do.
+        markProposal: async (id: string, status: string, lease?: Lease) => {
+          if (!fenced(lease)) return false;
+          if (state.find((r) => r.id === id)?.status !== "approved") return false;
           marked.push([id, status]);
           set(id, status);
           return true;
         },
-        revertProposal: async (id: string) => {
+        revertProposal: async (id: string, lease?: Lease) => {
+          if (!fenced(lease)) return null;
+          if (state.find((r) => r.id === id)?.status !== "approved") return null;
           reverted.push(id);
           set(id, "draft");
           return { id } as never;
@@ -3025,7 +3090,7 @@ describe("lint proposals — seeding and the group verbs", () => {
 
   test("lint-proposals: a non-JSON POST is 415 and seeds nothing", async () => {
     let seeded = false;
-    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, refusals: [] }; } }));
+    registerWikiGardenerRoutes(app, deps({ seedLintProposals: async () => { seeded = true; return { proposed: 0, rows: 0, skipped: 0, claimed: 0, refused: 0, staled: 0, settled: 0, held: 0, refusals: [] }; } }));
     for (const init of NON_JSON) {
       const res = await app.request("/api/wiki/lint-proposals?wiki=lintwiki", init);
       expect(res.status).toBe(415);
@@ -3073,31 +3138,892 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(log).toContain(`- via lint-proposals, 2 pages: ${PAGE_A}, ${PAGE_B}`);
   });
 
-  test("group approve REFUSES a group holding an approved or rejected row", async () => {
-    for (const blocking of ["approved", "rejected"]) {
-      await Bun.write(path.join(root, PAGE_B), body("B"));
-      const half = [
-        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: blocking },
-        await lintRow("r2", PAGE_B, "prov"),
-      ];
-      const store = groupStore(half);
-      const one = new Hono();
-      registerWikiGardenerRoutes(one, deps(store.deps));
+  test("group approve REFUSES a group holding a rejected row", async () => {
+    const half = [
+      { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "rejected" },
+      await lintRow("r2", PAGE_B, "prov"),
+    ];
+    const store = groupStore(half);
+    registerWikiGardenerRoutes(app, deps(store.deps));
 
-      const res = await one.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
-      expect([blocking, res.status]).toEqual([blocking, 409]);
-      // A reviewer who dismissed one member cannot then accept the group, and an
-      // `approved` row means another apply is mid-flight over these same pages.
-      // The message names what BLOCKS: `applied`/`stale` rows are not draft
-      // either and are skipped, so "not all draft" described another condition.
-      expect(await res.json()).toMatchObject({
-        outcome: "mixed",
-        error: "an approved or rejected row blocks the group",
-        statuses: { [blocking]: 1, draft: 1 },
-      });
-      expect(store.marked).toEqual([]);
-      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+    const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+    expect(res.status).toBe(409);
+    // A reviewer who dismissed one member cannot then accept the group. The
+    // message names what BLOCKS: `applied`/`stale` rows are skipped, and an
+    // `approved` one with no Accept in flight is claimed (F35, below).
+    expect(await res.json()).toMatchObject({
+      outcome: "mixed",
+      error: "a rejected row blocks the group",
+      statuses: { rejected: 1, draft: 1 },
+    });
+    expect(store.marked).toEqual([]);
+    expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+  });
+
+  /**
+   * F35 (arch review 2026-11-16) — the whole state space of a two-row group:
+   * the rows' statuses × whether an Accept/Dismiss of the group is in flight in
+   * this process × the request. What the cells pin together: with no verb in
+   * flight, Dismiss settles every group that has a live row, so no row is left
+   * `approved` without a verb that works; a 200 leaves no row `approved`; with
+   * a verb in flight, nothing moves. Mirrored as a table in the PR body.
+   */
+  describe("F35 — group state space", () => {
+    type Verb = "accept" | "dismiss" | "approve-one" | "reject-one";
+    const GROUPS: [string, string][] = [
+      ["draft", "draft"],
+      ["approved", "approved"],
+      ["approved", "draft"],
+      ["draft", "rejected"],
+      ["approved", "rejected"],
+      ["applied", "draft"],
+      ["applied", "stale"],
+      ["rejected", "rejected"],
+    ];
+    const live = (s: string) => s === "draft" || s === "approved";
+
+    /** What each cell must answer, and the statuses it must leave. */
+    function expected(statuses: [string, string], inFlight: boolean, verb: Verb): { status: number; body: Record<string, unknown>; after: string[] } {
+      const unchanged = [...statuses];
+      if (verb === "approve-one" || verb === "reject-one") return { status: 409, body: { group: true, groupKey: GROUP }, after: unchanged };
+      const anyLive = statuses.some(live);
+      if (verb === "accept") {
+        if (!anyLive) return { status: 409, body: { outcome: "nothing-to-apply" }, after: unchanged };
+        if (inFlight) return { status: 409, body: { outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" }, after: unchanged };
+        if (statuses.includes("rejected")) return { status: 409, body: { outcome: "mixed", error: "a rejected row blocks the group" }, after: unchanged };
+        return { status: 200, body: { outcome: "applied" }, after: statuses.map((s) => (live(s) ? "applied" : s)) };
+      }
+      if (inFlight) return { status: 409, body: { outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" }, after: unchanged };
+      if (!anyLive) return { status: 409, body: { error: "group is no longer a draft" }, after: unchanged };
+      return { status: 200, body: { outcome: "rejected", rejected: statuses.filter(live).length }, after: statuses.map((s) => (live(s) ? "rejected" : s)) };
     }
+
+    const url = (verb: Verb) =>
+      verb === "accept"
+        ? `/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`
+        : verb === "dismiss"
+          ? `/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`
+          : `/api/wiki/proposals/r1/${verb === "approve-one" ? "approve" : "reject"}`;
+
+    for (const statuses of GROUPS) {
+      for (const inFlight of [false, true]) {
+        for (const verb of ["accept", "dismiss", "approve-one", "reject-one"] as const) {
+          test(`${statuses.join("+")} · ${inFlight ? "verb in flight" : "none in flight"} · ${verb}`, async () => {
+            const rows = [
+              { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: statuses[0] },
+              { ...((await lintRow("r2", PAGE_B, "prov")) as object), status: statuses[1] },
+            ];
+            const store = groupStore(rows);
+            registerWikiGardenerRoutes(app, deps(store.deps));
+            __setGroupVerbInFlightForTest("lintwiki", GROUP, inFlight);
+            try {
+              const res = await app.request(url(verb), JSON_POST);
+              const want = expected(statuses, inFlight, verb);
+              expect(res.status).toBe(want.status);
+              expect(await res.json()).toMatchObject(want.body);
+              expect(store.rows().map((r) => r.status)).toEqual(want.after);
+              if (want.status === 200) expect(store.rows().map((r) => r.status)).not.toContain("approved");
+              const wrote = (await Bun.file(path.join(root, PAGE_A)).text()).includes("series:");
+              expect(wrote).toBe(want.status === 200 && verb === "accept" && live(statuses[0]));
+            } finally {
+              __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+            }
+          });
+        }
+      }
+    }
+  });
+
+  describe("F35 — a failed Accept strands no row and the next verb completes", () => {
+    /** A group apply that throws on the second row, after the first row's page
+     *  write — through the real `applyWikiProposalGroup` on the real wiki. */
+    const throwOnSecondRow = (async (rows, applyDeps, opts) => {
+      let calls = 0;
+      return applyWikiProposalGroup(
+        rows,
+        {
+          ...applyDeps,
+          getWikiIndex: async () => {
+            // 1: the preflight, 2: row 1's own read, 3: row 2's.
+            if (++calls === 3) throw new Error("injected: index read failed on row 2");
+            return applyDeps.getWikiIndex();
+          },
+        },
+        opts,
+      );
+    }) as typeof applyWikiProposalGroup;
+
+    test("a throw after the first page write: the written row is `applied`, the unwritten one `draft`, and a second Accept finishes", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, applyProposalGroup: throwOnSecondRow }));
+      const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(first.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "draft"]);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+
+      const again = new Hono();
+      registerWikiGardenerRoutes(again, deps(store.deps));
+      const second = await again.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(second.status).toBe(200);
+      expect(await second.json()).toMatchObject({ outcome: "applied", applied: [PAGE_B], skipped: { applied: 1 } });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split("## [").length - 1).toBe(2);
+      expect(log.split(PAGE_A).length - 1).toBe(1);
+      expect(log.split(PAGE_B).length - 1).toBe(1);
+    });
+
+    test("a Dismiss after that failure cannot reject the edit that landed", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, applyProposalGroup: throwOnSecondRow }));
+      await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+    });
+
+    test("a throw between the claim and the re-read leaves no row `approved`", async () => {
+      const store = groupStore([
+        { ...((await lintRow("r1", PAGE_A, "prov")) as object), status: "approved" },
+        await lintRow("r2", PAGE_B, "prov"),
+      ]);
+      let reads = 0;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          listProposalsByGroup: async () => {
+            if (++reads === 2) throw new Error("injected: connection reset on the re-read");
+            return store.rows();
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+    });
+
+    test("terminal marks that throw: written rows stay `approved` (never `draft`), and the next Accept settles them", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let failMarks = true;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          markProposal: async (id: string, status: string) => {
+            if (failMarks) throw new Error("injected: connection reset");
+            return store.deps.markProposal(id, status);
+          },
+        }),
+      );
+      const first = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(first.status).toBe(500);
+      // Both pages landed; the marks could not be written, so the rows wait in
+      // `approved`, which the card offers verbs on and the next verb takes.
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+      failMarks = false;
+      const second = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(second.status).toBe(200);
+      expect(await second.json()).toMatchObject({ outcome: "applied", applied: [], noop: [PAGE_A, PAGE_B] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split("## [").length - 1).toBe(1);
+    });
+
+    test("rows a restart left `approved` over pages already written: Dismiss settles them `applied`, not `rejected`", async () => {
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+    });
+
+    test("Dismiss over a page a dead pass wrote and never committed: settled `applied`, logged and committed once", async () => {
+      const g = (...args: string[]) => runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+      await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(await res.json()).toMatchObject({ rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "rejected"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe(`[lint] fix: 1 page (${GROUP})`);
+      expect((await g("status", "--porcelain")).stdout).toBe("");
+    });
+
+    test("a second Accept while the first is in flight answers `mixed` and writes nothing twice", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inMark = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          markProposal: async (id: string, status: string) => {
+            entered();
+            await gate;
+            return store.deps.markProposal(id, status);
+          },
+        }),
+      );
+      const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      await inMark;
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+      for (const verb of ["approve", "reject"]) {
+        const second = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=lintwiki`, JSON_POST);
+        expect([verb, second.status]).toEqual([verb, 409]);
+        expect(await second.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      }
+      release();
+      expect((await first).status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      expect((await Bun.file(path.join(root, "log.md")).text()).split("## [").length - 1).toBe(1);
+    });
+  });
+
+  /**
+   * F35 fix round 1: Dismiss logs and commits a written page before it settles
+   * the row, inside the write section, and a group verb's claim holds across
+   * processes (the DB lease, shared here by two apps on one store).
+   */
+  describe("F35 — Dismiss settles only logged pages, and the claim holds across processes", () => {
+    const gitIn = (dir: string) => (...args: string[]) =>
+      runGit(dir, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+
+    /** A git wiki whose PAGE_A carries r1's draft, written and never committed. */
+    async function deadPassWiki() {
+      const g = gitIn(root);
+      await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      const r2 = await lintRow("r2", PAGE_B, "prov");
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      return { g, r1, r2 };
+    }
+
+    test("a reject that throws after a written row is settled: that page is already logged and committed", async () => {
+      const { g, r1, r2 } = await deadPassWiki();
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          rejectProposalGroup: async () => {
+            throw new Error("injected: connection reset on the reject");
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "draft"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toContain(`1 page: ${PAGE_A}`);
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe(`[lint] fix: 1 page (${GROUP})`);
+      expect((await g("status", "--porcelain", "--", PAGE_A)).stdout).toBe("");
+    });
+
+    test("a failure logging the written rows leaves them live, and the next Accept logs and commits them once", async () => {
+      // The real log path: an unreadable log.md is skipped, never overwritten,
+      // so the entry for the written page cannot be written.
+      await Bun.write(path.join(root, "log.md"), "# Log\n");
+      const { g, r1, r2 } = await deadPassWiki();
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      const logPath = path.join(root, "log.md");
+      await chmod(logPath, 0o000);
+      let res: Response;
+      try {
+        res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      } finally {
+        await chmod(logPath, 0o644);
+      }
+      // Never `applied` over a page nobody logged, and the unlogged written
+      // row is not rejected either: every row stays live.
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "draft"]);
+      expect(res.status).toBe(500);
+      expect(((await res.json()) as { error: string }).error).toContain("log.md");
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe("seed");
+
+      const again = new Hono();
+      registerWikiGardenerRoutes(again, deps(store.deps));
+      const next = await again.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(next.status).toBe(200);
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      const log = await Bun.file(path.join(root, "log.md")).text();
+      expect(log.split(PAGE_A).length - 1).toBe(1);
+      expect((await g("status", "--porcelain")).stdout).toBe("");
+    });
+
+    test("a writer queued while Dismiss reads cannot change the page before the row is settled", async () => {
+      const r1 = (await lintRow("r1", PAGE_A, "prov")) as { draft: string };
+      const r2 = await lintRow("r2", PAGE_B, "prov");
+      await Bun.write(path.join(root, PAGE_A), r1.draft);
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      const seenAtSettle: boolean[] = [];
+      const writers: Promise<unknown>[] = [];
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleProposalApplied: async (id: string) => {
+            // Another wiki writer (the sync loop's pull, a fact-check append)
+            // queues on this wiki between the read and the settle.
+            writers.push(runWikiWriteExclusive(root, () => Bun.write(path.join(root, PAGE_A), body("A, rewritten"))));
+            await Bun.sleep(50);
+            seenAtSettle.push((await Bun.file(path.join(root, PAGE_A)).text()) === r1.draft);
+            return store.deps.settleProposalApplied(id);
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(200);
+      expect(seenAtSettle).toEqual([true]);
+      await Promise.all(writers);
+    });
+
+    test("a Dismiss in another process while an Accept applies is refused, and no landed edit ends `rejected`", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inApply = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            entered();
+            await gate;
+            return applyWikiProposalGroup(rows, applyDeps, opts);
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      await inApply;
+      // The other process (`bun run dev:chat`) has its own in-flight set, which
+      // holds nothing for this group: only the shared database can tell it.
+      __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+      const other = new Hono();
+      registerWikiGardenerRoutes(other, deps(store.deps));
+      const second = await other.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      release();
+      const firstRes = await first;
+      expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      expect(second.status).toBe(409);
+      expect(await second.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      expect(firstRes.status).toBe(200);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+    });
+
+    /** An Accept gated just before `applyWikiProposalGroup`, so a test can
+     *  move the lease while it waits. */
+    function gatedAccept(store: ReturnType<typeof groupStore>) {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inApply = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            entered();
+            await gate;
+            return applyWikiProposalGroup(rows, applyDeps, opts);
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const first = app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      return { first, inApply, release };
+    }
+
+    test("an Accept whose lease lapsed before its write, and a Dismiss that took the group: no page written, no row `rejected` over a written page", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      const { first, inApply, release } = gatedAccept(store);
+      await inApply;
+      // The Accept's lease expires (its renewals stopped reaching the DB), and
+      // a Dismiss in another process claims the group and settles it.
+      store.leases.delete(`lintwiki\0${GROUP}`);
+      __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+      const other = new Hono();
+      registerWikiGardenerRoutes(other, deps(store.deps));
+      const dismissed = await other.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(dismissed.status).toBe(200);
+      expect(await dismissed.json()).toMatchObject({ outcome: "rejected", rejected: 2 });
+      release();
+      const res = await first;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(store.rows().map((r) => r.status)).toEqual(["rejected", "rejected"]);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toBe(body("A"));
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).toBe(body("B"));
+      expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+    });
+
+    test("an Accept whose lease token was swapped (renew answers false) writes nothing and moves no row", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      const { first, inApply, release } = gatedAccept(store);
+      await inApply;
+      // Another verb holds the group now: this Accept's token is gone.
+      store.leases.set(`lintwiki\0${GROUP}`, "other-process");
+      release();
+      const res = await first;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict" });
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toBe(body("A"));
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).toBe(body("B"));
+      expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+      // Its rows wait in `approved` for the holder: the revert is fenced too.
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "approved"]);
+      expect(store.marked).toEqual([]);
+      expect(store.reverted).toEqual([]);
+      expect(store.leases.get(`lintwiki\0${GROUP}`)).toBe("other-process");
+    });
+
+    test("a Dismiss whose lease token was swapped before its write section logs nothing and rejects nothing", async () => {
+      await Bun.write(path.join(root, "log.md"), "# Log\n");
+      const { g, r1, r2 } = await deadPassWiki();
+      const store = groupStore([{ ...r1, status: "approved" }, r2]);
+      let reads = 0;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          listProposalsByGroup: async () => {
+            // The re-read under the lease: another verb takes the group now.
+            if (++reads === 2) store.leases.set(`lintwiki\0${GROUP}`, "other-process");
+            return store.rows();
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict" });
+      expect(store.rows().map((r) => r.status)).toEqual(["approved", "draft"]);
+      expect(await Bun.file(path.join(root, "log.md")).text()).toBe("# Log\n");
+      expect((await g("log", "-1", "--format=%s")).stdout).toBe("seed");
+    });
+
+    test("an Accept whose terminal CAS another verb won reports the conflict, not `applied`", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            const result = await applyWikiProposalGroup(rows, applyDeps, opts);
+            // Another process, its lease long expired, dismissed r1 meanwhile.
+            store.setStatus("r1", "rejected");
+            return result;
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", lost: [PAGE_A], applied: [PAGE_A, PAGE_B] });
+      expect(store.rows().map((r) => r.status)).toEqual(["rejected", "applied"]);
+    });
+
+    test("a lease held elsewhere refuses both verbs before any row moves", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      store.leases.set(`lintwiki\0${GROUP}`, "other-process");
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      for (const verb of ["approve", "reject"]) {
+        const res = await app.request(`/api/wiki/proposals/group/${GROUP}/${verb}?wiki=lintwiki`, JSON_POST);
+        expect([verb, res.status]).toEqual([verb, 409]);
+        expect(await res.json()).toMatchObject({ outcome: "mixed", error: "another Accept or Dismiss of this group is in flight" });
+      }
+      expect(store.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toBe(body("A"));
+      // A refused verb leaves the other holder's lease alone; a finished one
+      // releases its own.
+      expect(store.leases.get(`lintwiki\0${GROUP}`)).toBe("other-process");
+      store.leases.clear();
+      expect((await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST)).status).toBe(200);
+      expect(store.leases.size).toBe(0);
+    });
+  });
+
+  /**
+   * F35 class check (round 3): the group verbs × the point the lease is found
+   * gone × `log.md` × a competitor, as enumerated in `src/gardener/CLAUDE.md`
+   * («The group verbs × lease × log table»). Cell ids (A1…, D1…) match it.
+   * Every cell ends with each written page logged once and committed once,
+   * now or after the next verb, which each test runs. The store's lease map
+   * stands in for the DB lease: deleting the key is the lease expiring with no
+   * competitor; setting another token is a competitor that claimed it.
+   */
+  describe("F35 class check — group verbs × lease × log", () => {
+    const g = (...args: string[]) =>
+      runGit(root, ["-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args]);
+    const ACCEPT = `/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`;
+    const DISMISS = `/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`;
+    const LEASE = `lintwiki\0${GROUP}`;
+    const logPath = () => path.join(root, "log.md");
+
+    /** A committed git wiki with a `# Log` and the group's two draft rows. */
+    async function gitWiki(): Promise<unknown[]> {
+      await Bun.write(logPath(), "# Log\n");
+      await g("init", "-q", "-b", "main");
+      // The verbs commit with the repo's own config: a runner has no global identity.
+      for (const kv of ["user.email=t@example.invalid", "user.name=t", "commit.gpgsign=false"]) await g("config", ...(kv.split("=") as [string, string]));
+      await g("config", "user.email", "t@example.invalid");
+      await g("config", "user.name", "t");
+      await g("add", "-A");
+      await g("commit", "-q", "-m", "seed");
+      return [await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")];
+    }
+    /** `log.md` lines naming `page` (one per entry: each entry names a page once). */
+    const entries = async (page: string) => (await Bun.file(logPath()).text()).split(page).length - 1;
+    /** Commits after the seed that touch `page`. */
+    const commits = async (page: string) =>
+      (await g("log", "--format=%s", "--", page)).stdout.split("\n").filter((l) => l && l !== "seed").length;
+    const clean = async () => (await g("status", "--porcelain")).stdout === "";
+    const statusesOf = (store: ReturnType<typeof groupStore>) => store.rows().map((r) => r.status);
+    const fresh = (store: ReturnType<typeof groupStore>, over: Record<string, unknown> = {}) => {
+      const other = new Hono();
+      registerWikiGardenerRoutes(other, deps({ ...store.deps, ...over }));
+      return other;
+    };
+    /** Which of the group's pages carry their draft right now. */
+    const wikiState = async (): Promise<"none" | "a" | "both"> => {
+      const a = (await Bun.file(path.join(root, PAGE_A)).text()).includes("series: prov");
+      const b = (await Bun.file(path.join(root, PAGE_B)).text()).includes("series: prov");
+      return a && b ? "both" : a ? "a" : "none";
+    };
+    /** The real group apply, with `hook` run once at the first lease check it
+     *  makes in wiki state `at`: "a" is between the two page writes, "both"
+     *  after the last one (the check right before the log entry). Keyed on the
+     *  wiki, not on a call count, so it fires at the same point on any build. */
+    const hookedApply = (at: "a" | "both", hook: () => Promise<void> | void) =>
+      (async (rows, applyDeps, opts) => {
+        let fired = false;
+        return applyWikiProposalGroup(rows, applyDeps, {
+          ...opts,
+          leaseHeld: async () => {
+            if (!fired && (await wikiState()) === at) {
+              fired = true;
+              await hook();
+            }
+            return opts!.leaseHeld!();
+          },
+        });
+      }) as typeof applyWikiProposalGroup;
+
+    // A2, A3 — a log entry Accept cannot write: unreadable (skipped, never
+    // overwritten) and unwritable (the append throws).
+    for (const [cell, mode] of [["A2 unreadable", 0o000], ["A3 unwritable (append throws)", 0o444]] as const) {
+      test(`${cell}: Accept marks no row applied over unlogged pages and commits nothing; the next Accept logs them once`, async () => {
+        const store = groupStore(await gitWiki());
+        registerWikiGardenerRoutes(app, deps(store.deps));
+        await chmod(logPath(), mode);
+        let res: Response;
+        try {
+          res = await app.request(ACCEPT, JSON_POST);
+        } finally {
+          await chmod(logPath(), 0o644);
+        }
+        // Never `applied` over an unlogged page, and nothing committed.
+        expect(statusesOf(store)).toEqual(["draft", "draft"]);
+        expect([await commits(PAGE_A), await commits(PAGE_B)]).toEqual([0, 0]);
+        expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+        expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+        expect(res.status).toBe(500);
+        expect(await res.json()).toMatchObject({ logFailed: true, unlogged: [PAGE_A, PAGE_B] });
+
+        const next = await fresh(store).request(ACCEPT, JSON_POST);
+        expect(next.status).toBe(200);
+        expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A, PAGE_B] });
+        expect(statusesOf(store)).toEqual(["applied", "applied"]);
+        expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+        expect(await clean()).toBe(true);
+      });
+    }
+
+    test("A4 lease gone before the claim: the fenced claim moves nothing and the Accept answers 409", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          approveProposalGroup: async (w: string, gk: string, lease?: { scope: string; groupKey: string; token: string }) => {
+            store.leases.delete(LEASE);
+            return store.deps.approveProposalGroup(w, gk, lease);
+          },
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(statusesOf(store)).toEqual(["draft", "draft"]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A5 lease gone before the claim over stranded `approved` rows: nothing written, rows left for the next verb", async () => {
+      const [r1, r2] = await gitWiki();
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, { ...(r2 as object), status: "approved" }]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          approveProposalGroup: async () => {
+            store.leases.delete(LEASE);
+            return [];
+          },
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect(await clean()).toBe(true);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(next.status).toBe(200);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("A7 lease gone between page writes, no competitor: nothing logged or committed, rows stay `approved`, the next Accept logs and commits each page once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("a", () => void store.leases.delete(LEASE)) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      // Written, not logged, not committed; the fenced revert and mark move nothing.
+      expect(await Bun.file(path.join(root, PAGE_A)).text()).toContain("series: prov");
+      expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
+      expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+      expect(await commits(PAGE_A)).toBe(0);
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A], unlogged: [PAGE_A] });
+
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(next.status).toBe(200);
+      expect(await next.json()).toMatchObject({ outcome: "applied", applied: [PAGE_B], recovered: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "applied"]);
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A8 lease gone between page writes and a Dismiss claims the group: the Dismiss logs and commits the written page once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("a", () => void store.leases.set(LEASE, "competitor")) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([0, 0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A], unlogged: [PAGE_A] });
+      // The competitor's lease lapses in turn; its Dismiss settles what was written.
+      store.leases.delete(LEASE);
+      const dismissed = await fresh(store).request(DISMISS, JSON_POST);
+      expect(dismissed.status).toBe(200);
+      expect(await dismissed.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A8 interleaved (the measured double log): a Dismiss in another process settles the page while the Accept is paused; the Accept then logs and commits nothing", async () => {
+      const store = groupStore(await gitWiki());
+      let dismissed: Response | null = null;
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: hookedApply("a", async () => {
+            // The Accept's lease expired; another process (its own write
+            // queue, its own in-flight set) dismisses the group now.
+            store.leases.delete(LEASE);
+            __resetWikiWriteQueueForTest();
+            __setGroupVerbInFlightForTest("lintwiki", GROUP, false);
+            dismissed = await fresh(store).request(DISMISS, JSON_POST);
+          }),
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(dismissed!.status).toBe(200);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      expect((await g("log", "--format=%s")).stdout.split("\n").filter((l) => l.startsWith("[lint]")).length).toBe(1);
+      expect(res.status).toBe(409);
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect(await clean()).toBe(true);
+    });
+
+    test("A9 lease gone after the last page write, at the log check: nothing logged or committed, the next Accept logs both pages once", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({ ...store.deps, applyProposalGroup: hookedApply("both", () => void store.leases.delete(LEASE)) }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(await Bun.file(logPath()).text()).toBe("# Log\n");
+      expect([await commits(PAGE_A), await commits(PAGE_B)]).toEqual([0, 0]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [PAGE_A, PAGE_B], unlogged: [PAGE_A, PAGE_B] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A, PAGE_B] });
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+    });
+
+    test("A10/A12 lease gone after the log entry, before the terminal marks: logged and committed once, 409 naming the lost rows; the next Accept settles without logging again", async () => {
+      const store = groupStore(await gitWiki());
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            const out = await applyWikiProposalGroup(rows, applyDeps, opts);
+            store.leases.delete(LEASE);
+            return out;
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const res = await app.request(ACCEPT, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", lost: [PAGE_A, PAGE_B] });
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", noop: [PAGE_A, PAGE_B], recovered: [] });
+      expect(statusesOf(store)).toEqual(["applied", "applied"]);
+      expect([await entries(PAGE_A), await entries(PAGE_B), await commits(PAGE_A), await commits(PAGE_B)]).toEqual([1, 1, 1, 1]);
+    });
+
+    test("a real renewal that answers false (a competitor took the expired lease) stops the renewals, and the Accept writes nothing", async () => {
+      const store = groupStore(await gitWiki());
+      let renewals = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inApply = new Promise<void>((r) => (entered = r));
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          groupLeaseRenewMs: 5,
+          renewGroupLease: async (w: string, gk: string, token: string) => {
+            renewals += 1;
+            return store.deps.renewGroupLease(w, gk, token);
+          },
+          applyProposalGroup: (async (rows, applyDeps, opts) => {
+            entered();
+            await gate;
+            return applyWikiProposalGroup(rows, applyDeps, opts);
+          }) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const first = app.request(ACCEPT, JSON_POST);
+      await inApply;
+      store.leases.set(LEASE, "competitor");
+      const before = renewals;
+      let after = -1;
+      try {
+        for (let i = 0; i < 100 && renewals === before; i++) await Bun.sleep(5);
+        expect(renewals).toBeGreaterThan(before);
+        // That renewal answered false: no further renewal runs.
+        after = renewals;
+        await Bun.sleep(40);
+      } finally {
+        release();
+      }
+      expect(renewals).toBe(after);
+      const res = await first;
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", applied: [] });
+      expect(await clean()).toBe(true);
+      expect(statusesOf(store)).toEqual(["approved", "approved"]);
+    });
+
+    test("D4 a log append that throws (log.md 0444): Dismiss settles and rejects nothing, commits nothing; the next Accept logs the page once", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(app, deps(store.deps));
+      await chmod(logPath(), 0o444);
+      let res: Response;
+      try {
+        res = await app.request(DISMISS, JSON_POST);
+      } finally {
+        await chmod(logPath(), 0o644);
+      }
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ logFailed: true });
+      expect(statusesOf(store)).toEqual(["approved", "draft"]);
+      expect(await commits(PAGE_A)).toBe(0);
+      const next = await fresh(store).request(ACCEPT, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "applied", recovered: [PAGE_A], applied: [PAGE_B] });
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("D7 lease gone after the log entry, before the settle CAS: logged and committed once, nothing settled, 409; the next Dismiss settles without logging again", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleProposalApplied: async (id: string, lease?: { scope: string; groupKey: string; token: string }) => {
+            store.leases.delete(LEASE);
+            return store.deps.settleProposalApplied(id, lease);
+          },
+        }),
+      );
+      const res = await app.request(DISMISS, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 0 });
+      expect(statusesOf(store)).toEqual(["approved", "draft"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(DISMISS, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "rejected", rejected: 1, alreadyWritten: [PAGE_A] });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+    });
+
+    test("D8 lease gone between the settle and the reject: 409 naming the settled page, never 200 with a live row", async () => {
+      const [r1, r2] = await gitWiki();
+      await Bun.write(path.join(root, PAGE_A), (r1 as { draft: string }).draft);
+      const store = groupStore([{ ...(r1 as object), status: "approved" }, r2]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          settleWrittenRows: (async (...args: Parameters<typeof settleWrittenGroupRows>) => {
+            const out = await settleWrittenGroupRows(...args);
+            store.leases.delete(LEASE);
+            return out;
+          }) as typeof settleWrittenGroupRows,
+        }),
+      );
+      const res = await app.request(DISMISS, JSON_POST);
+      expect(statusesOf(store)).toEqual(["applied", "draft"]);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 0, alreadyWritten: [PAGE_A] });
+      expect([await entries(PAGE_A), await commits(PAGE_A)]).toEqual([1, 1]);
+      const next = await fresh(store).request(DISMISS, JSON_POST);
+      expect(await next.json()).toMatchObject({ outcome: "rejected", rejected: 1 });
+      expect(statusesOf(store)).toEqual(["applied", "rejected"]);
+      expect(await entries(PAGE_A)).toBe(1);
+    });
   });
 
   test("a second Accept after a stop applies the rows the stop put back to DRAFT", async () => {
@@ -3201,6 +4127,36 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(actions.noop).toEqual([]);
   });
 
+  test("a failed write ends a lint row in `error` and a Stale check row back in `draft`; a pre-write refusal ends both in `error`", () => {
+    const applied = { outcome: "applied", writtenPath: PAGE_A } as const;
+    const decide = (kind: string, failed: object) => {
+      const rows = [
+        { id: "r1", targetPath: PAGE_A, kind },
+        { id: "r2", targetPath: PAGE_B, kind },
+      ] as unknown as Parameters<typeof groupApplyActions>[0];
+      const results = [
+        { id: "r1", targetPath: PAGE_A, outcome: applied },
+        { id: "r2", targetPath: PAGE_B, ...failed },
+      ];
+      return groupApplyActions(rows, { results, stoppedAt: results[1] } as unknown as Parameters<typeof groupApplyActions>[1]).actions;
+    };
+    const writeFailed = { outcome: { outcome: "error", reason: "write failed: EACCES" }, writeFailed: true };
+    const refused = { outcome: { outcome: "error", reason: `update target "${PAGE_B}" is not an indexed wiki page` } };
+    expect(decide("lint", writeFailed)).toEqual([
+      { id: "r1", status: "applied" },
+      { id: "r2", status: "error" },
+    ]);
+    expect(decide("stale-check", writeFailed)).toEqual([
+      { id: "r1", status: "applied" },
+      { id: "r2", status: "draft" },
+    ]);
+    // A deterministic refusal would stop every later Accept at this row again.
+    expect(decide("stale-check", refused)).toEqual([
+      { id: "r1", status: "applied" },
+      { id: "r2", status: "error" },
+    ]);
+  });
+
   test("group approve STOPS at a stale row, names it, and puts the untouched rows back to DRAFT", async () => {
     const stale = { ...((await lintRow("r2", PAGE_B, "prov")) as object), baseHash: "0".repeat(64) };
     await Bun.write(path.join(root, "plans/c.mdx"), body("C"));
@@ -3219,6 +4175,8 @@ describe("lint proposals — seeding and the group verbs", () => {
     // stale member stops the group with NOTHING written (finding 61).
     expect(payload.applied).toEqual([]);
     expect(payload.stoppedAt).toBe(PAGE_B);
+    // `notLanded` is a Stale check card's answer only.
+    expect(payload).not.toHaveProperty("notLanded");
     expect(store.marked).toEqual([["r2", "stale"]]);
     expect(await Bun.file(path.join(root, PAGE_A)).text()).not.toContain("series:");
     expect(await Bun.file(path.join(root, "plans/c.mdx")).text()).not.toContain("series:");
@@ -3677,5 +4635,522 @@ describe("POST /api/wiki/proposals/:id/redraft — a disabled gardener", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "the wiki gardener is disabled for this bot" });
     expect(fetches).toBe(0);
+  });
+});
+
+// ── Stale check cards (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps the text as written", () => {
+  const DAY = 86_400_000;
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  let verdicts = memoryStaleVerdictStore();
+  const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\n${extra}---\n\n${body}\n`;
+  const A_TEXT = page("A", "The pin in [[hub]] landed on 23.05.");
+  const B_TEXT = page("B", "Since [[hub]] moved on 2.06 the pin is draft.");
+
+  async function git(atMs: number, ...args: string[]): Promise<void> {
+    const date = new Date(atMs).toISOString();
+    const proc = Bun.spawn(["git", "-C", root, "-c", "user.email=f@example.com", "-c", "user.name=f", "-c", "commit.gpgsign=false", ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    });
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`);
+  }
+
+  /** The card's two rows as Send makes them, with a model verdict per page. */
+  async function card(): Promise<WikiProposal[]> {
+    const index = (await getWikiIndex({ root }))!;
+    const buckets = (await linkingBuckets(index, "hub.md"))!;
+    const hash = (await changedHashOf(index, "hub.md"))!;
+    const proposals = memoryStaleProposalStore();
+    for (const [rel, old, text] of [["notes/a.md", "landed on 23.05", "landed on 18.06"], ["notes/b.md", "the pin is draft", "the pin is shipped"]] as const) {
+      const l = buckets.linking.find((x) => x.relPath === rel)!;
+      await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: rel, keyHash: passageVerdictKey(index, "hub.md", hash, l), verdict: "stale", reason: "moved", edit: { old, new: text }, checkedBy: "model:e2e" });
+      const out = await sendStaleFix({ wiki: "stalegate", wikiDir: root, index, changed: "hub.md", edit: { kind: "passage", page: rel, link: "hub.md", old, text, variant: "new" }, store: proposals });
+      expect(out.outcome).toBe("sent");
+    }
+    return proposals.rows.filter((r) => r.status === "draft");
+  }
+
+  function store(initial: WikiProposal[]) {
+    let state = initial;
+    const set = (id: string, status: string) => (state = state.map((r) => (r.id === id ? ({ ...r, status } as WikiProposal) : r)));
+    return {
+      rows: () => state,
+      deps: {
+        getConsumed: async () => new Set<string>(),
+        getPending: async () => new Set<string>(),
+        getWikiGardenerWatcher: async () => null,
+        getSnapshot: async () => null,
+        setSnapshot: async () => {},
+        listProposals: async () => [],
+        getProposalById: async () => null,
+        approveProposal: async () => null,
+        deleteSourceProposalsForDoc: async () => ({ deleted: [], kept: [] }),
+        ...lintGroupStubs,
+        listProposalsByGroup: async () => state,
+        approveProposalGroup: async () => (state = state.map((r) => (r.status === "draft" ? ({ ...r, status: "approved" } as WikiProposal) : r))).filter((r) => r.status === "approved"),
+        rejectProposalGroup: async () => {
+          const taken = state.filter((r) => r.status === "draft").map((r) => ({ ...r, status: "rejected" }) as WikiProposal);
+          state = state.map((r) => (r.status === "draft" ? ({ ...r, status: "rejected" } as WikiProposal) : r));
+          return taken;
+        },
+        markProposal: async (id: string, status: string) => (set(id, status), true),
+        revertProposal: async (id: string) => (set(id, "draft"), { id } as never),
+      } as unknown as Parameters<typeof registerWikiGardenerRoutes>[1],
+    };
+  }
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-stale-gate-"));
+    const now = Date.now();
+    await git(now, "init", "-q", "-b", "main");
+    // The repo's own identity: Accept commits through `commitWikiChange`, which
+    // passes no `-c`, and a CI runner has no global one (the commit fails, the page stays dirty).
+    await git(now, "config", "user.email", "f@example.com");
+    await git(now, "config", "user.name", "f");
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "First."));
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT);
+    await Bun.write(path.join(root, "notes/b.md"), B_TEXT);
+    await git(now - 30 * DAY, "add", "-A");
+    await git(now - 30 * DAY, "commit", "-q", "-m", "seed");
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06."));
+    await git(now - DAY, "add", "-A");
+    await git(now - DAY, "commit", "-q", "-m", "hub moves");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `stalegate=${root}=stalegate`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    verdicts = memoryStaleVerdictStore();
+    __setStaleVerdictStoreForTest(verdicts);
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    __setStaleVerdictStoreForTest(null);
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("Accept writes both pages and a `fixed` verdict on each new passage", async () => {
+    const rows = await card();
+    expect(rows.map((r) => r.groupKey)).toEqual(["stale-check:hub.md:2", "stale-check:hub.md:2"]);
+    const s = store(rows);
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"], fixed: 2 });
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT.replace("landed on 23.05", "landed on 18.06"));
+    expect(await Bun.file(path.join(root, "notes/b.md")).text()).toBe(B_TEXT.replace("the pin is draft", "the pin is shipped"));
+    const log = await Bun.file(path.join(root, "log.md")).text();
+    expect(log.split("## [").length - 1).toBe(1);
+    expect(log).toContain("update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  // F35 class check, cells A11 and D9: a lease found gone at a verdict write is
+  // a lost lease like any other (R4) — no verdict, 409, never a silent skip.
+  test("A11 an Accept whose lease is gone at the verdict write writes no `fixed` verdict and answers 409", async () => {
+    const s = store(await card());
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      applyProposalGroup: (async (rows, d, opts) => {
+        const out = await applyWikiProposalGroup(rows, d, opts);
+        held = false;
+        return out;
+      }) as typeof applyWikiProposalGroup,
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "conflict", applied: ["notes/a.md", "notes/b.md"], unlogged: [] });
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed")).toEqual([]);
+  });
+
+  test("D9 a Dismiss whose lease is gone at the verdict write writes no «kept as written» verdict and answers 409", async () => {
+    const s = store(await card());
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      rejectProposalGroup: async (...args: unknown[]) => {
+        const out = await (s.deps!.rejectProposalGroup as (...a: unknown[]) => Promise<WikiProposal[]>)(...args);
+        held = false;
+        return out;
+      },
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 2, verdictsWritten: false });
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader")).toEqual([]);
+  });
+
+  /** One-row card for `changed` with `linking`'s edit, sent as the tab sends it. */
+  async function oneCard(changed: string, linking: string, old: string, text: string): Promise<WikiProposal[]> {
+    const index = (await getWikiIndex({ root }))!;
+    const l = (await linkingBuckets(index, changed))!.linking.find((x) => x.relPath === linking)!;
+    const hash = (await changedHashOf(index, changed))!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: linking, keyHash: passageVerdictKey(index, changed, hash, l), verdict: "stale", reason: "moved", edit: { old, new: text }, checkedBy: "model:e2e" });
+    const proposals = memoryStaleProposalStore();
+    const out = await sendStaleFix({ wiki: "stalegate", wikiDir: root, index, changed, edit: { kind: "passage", page: linking, link: changed, old, text, variant: "new" }, store: proposals });
+    expect(out.outcome).toBe("sent");
+    return proposals.rows.filter((r) => r.status === "draft");
+  }
+
+  /** The wiki routes beside the gate, for the Stale check's own counts. */
+  async function staleSummary(): Promise<Record<string, any>> {
+    return (await (await app.request("/api/wiki/stale?wiki=stalegate")).json()) as Record<string, any>;
+  }
+  const withWikiRoutes = () => {
+    __setStaleProposalStoreForTest(memoryStaleProposalStore());
+    registerWikiRoutes(app, { knowledgeApiUrl: "http://127.0.0.1:1" } as Parameters<typeof registerWikiRoutes>[1]);
+  };
+
+  test("an Accept's fix commit is not a page change: the wiki-wide total drops on a mutual link", async () => {
+    try {
+      await Bun.write(path.join(root, "pair/xpage.md"), page("X", "X first."));
+      await Bun.write(path.join(root, "pair/ypage.md"), page("Y", "Since [[xpage]] landed on 23.05 the pair is draft."));
+      await git(Date.now() - 30 * DAY, "add", "-A");
+      await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "pair seed");
+      await Bun.write(path.join(root, "pair/xpage.md"), page("X", "X moved on 18.06; [[ypage]] was updated on 2.06."));
+      await git(Date.now() - 5 * DAY, "commit", "-q", "-am", "x moves");
+      __resetWikiCacheForTest();
+      const s = store(await oneCard("pair/xpage.md", "pair/ypage.md", "the pair is draft", "the pair is shipped"));
+      registerWikiGardenerRoutes(app, s.deps);
+      withWikiRoutes();
+      expect((await staleSummary()).totals.toCheck).toBe(3);
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:pair/xpage.md:1")}/approve?wiki=stalegate`, JSON_POST);
+      expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["pair/ypage.md"], fixed: 1 });
+      const after = await staleSummary();
+      expect(after.totals.toCheck).toBe(2);
+      expect((after.pages as Record<string, any>[]).find((r) => r.relPath === "pair/ypage.md")).toBeUndefined();
+    } finally {
+      __setStaleProposalStoreForTest(null);
+    }
+  });
+
+  test("Accept refuses a row whose page has uncommitted edits: nothing written, the rows back to draft", async () => {
+    const dirty = A_TEXT.replace("---\n\n", "---\n\nA hand edit.\nAnother one.\n\n");
+    await Bun.write(path.join(root, "notes/a.md"), dirty);
+    __resetWikiCacheForTest();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "stopped", applied: [], stoppedAt: "notes/a.md", stoppedOutcome: "collision", error: "notes/a.md has uncommitted edits — commit them first" });
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(dirty);
+    expect(await Bun.file(path.join(root, "notes/b.md")).text()).toBe(B_TEXT);
+    expect(s.rows().map((r) => r.status)).toEqual(["draft", "draft"]);
+  });
+
+  /** A pre-commit hook that refuses every commit, so `commitWikiChange` fails. */
+  const failCommits = async () => {
+    const hook = path.join(root, ".git/hooks/pre-commit");
+    await Bun.write(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+  };
+
+  test("a stopped Accept writes `fixed` for the rows it applied, keeps the stopped row's edits on the card and names them", async () => {
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    // notes/b.md passes every pre-write check and then cannot be written.
+    await chmod(path.join(root, "notes/b.md"), 0o444);
+    try {
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({
+        outcome: "stopped",
+        applied: ["notes/a.md"],
+        stoppedAt: "notes/b.md",
+        stoppedOutcome: "error",
+        fixed: 1,
+        notLanded: [{ page: "notes/b.md", status: "draft", edits: [{ old: "the pin is draft", text: "the pin is shipped" }] }],
+      });
+    } finally {
+      await chmod(path.join(root, "notes/b.md"), 0o644);
+    }
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page)).toEqual(["notes/a.md"]);
+    // The stopped row is a draft again, its edits intact: the card can Accept it.
+    expect(s.rows().map((r) => [r.targetPath, r.status])).toEqual([["notes/a.md", "applied"], ["notes/b.md", "draft"]]);
+  });
+
+  test("an Accept whose commit fails still writes its `fixed` verdicts: the keys hash the content, not the commit", async () => {
+    await failCommits();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    const json = await res.json();
+    expect(json).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"], fixed: 2 });
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page).sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  test("a stopped Accept whose commit fails still writes `fixed` for the row it wrote", async () => {
+    await failCommits();
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    await chmod(path.join(root, "notes/b.md"), 0o444);
+    try {
+      const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+      expect(await res.json()).toMatchObject({ outcome: "stopped", applied: ["notes/a.md"], stoppedAt: "notes/b.md", fixed: 1 });
+    } finally {
+      await chmod(path.join(root, "notes/b.md"), 0o644);
+    }
+    expect([...verdicts.rows.values()].filter((r) => r.kind === "fixed").map((r) => r.page)).toEqual(["notes/a.md"]);
+  });
+
+  test("a linking page deleted after Send stops the Accept in `error`, and the next Accept applies the other row", async () => {
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    await rm(path.join(root, "notes/a.md"));
+    __resetWikiCacheForTest();
+    const url = `/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`;
+    const first = await app.request(url, JSON_POST);
+    expect(await first.json()).toMatchObject({
+      outcome: "stopped",
+      applied: [],
+      stoppedAt: "notes/a.md",
+      stoppedOutcome: "error",
+      notLanded: [{ page: "notes/a.md", status: "error" }, { page: "notes/b.md", status: "draft" }],
+    });
+    expect(s.rows().map((r) => [r.targetPath, r.status])).toEqual([["notes/a.md", "error"], ["notes/b.md", "draft"]]);
+
+    const second = await app.request(url, JSON_POST);
+    expect(await second.json()).toMatchObject({ outcome: "applied", applied: ["notes/b.md"], fixed: 1 });
+    expect(s.rows().map((r) => [r.targetPath, r.status])).toEqual([["notes/a.md", "error"], ["notes/b.md", "applied"]]);
+  });
+
+  test.each([["commits", false], ["fails its commit", true]] as const)("an Accept that %s carries the verdicts on a written page's own linking passages to its new content hash", async (_label, commitFails) => {
+    // notes/a.md is a changed page too (6 days), with notes/r.md To check on it.
+    await Bun.write(path.join(root, "notes/r.md"), page("R", "The note [[a]] said 23.05 on 1.05."));
+    // notes/b.md links notes/a.md on the very line the card rewrites.
+    await Bun.write(path.join(root, "notes/b.md"), B_TEXT.replace("draft.", "draft, as [[a]] said on 1.05."));
+    await git(Date.now() - 30 * DAY, "add", "-A");
+    await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "r");
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("23.05.", "23.05. See the log."));
+    await git(Date.now() - 6 * DAY, "commit", "-q", "-am", "a grows");
+    __resetWikiCacheForTest();
+    let index = (await getWikiIndex({ root }))!;
+    const r = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    expect(r.bucket).toBe("toCheck");
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/r.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, r), verdict: "stale", reason: "a moved", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    const b = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/b.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/b.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, b), verdict: "true", reason: "Marked still true by a reader", edit: null, checkedBy: "reader" });
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    if (commitFails) await failCommits();
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(await res.json()).toMatchObject({ outcome: "applied", applied: ["notes/a.md", "notes/b.md"] });
+    __resetWikiCacheForTest();
+    index = (await getWikiIndex({ root }))!;
+    const rNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    const key = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, rNow);
+    const row = (await verdicts.get("stalegate", "passage", [key])).get(key);
+    expect(row).toMatchObject({ verdict: "stale", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    // notes/b.md's passage on notes/a.md changed with the write: its row stays behind.
+    const bNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/b.md")!;
+    expect(bNow.passages.map((x) => x.text).join(" ")).toContain("shipped");
+    const bKey = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, bNow);
+    expect((await verdicts.get("stalegate", "passage", [bKey])).has(bKey)).toBe(false);
+  });
+
+  // F35 fix round 1 batch 2: a card a dead pass already wrote (rows left
+  // `approved`, no lease) still carries the linking verdicts of the pages it
+  // rewrote, on Accept and on Dismiss, whether the write is still uncommitted
+  // (the before-copy is HEAD's) or something committed it (an older commit's).
+  test.each([
+    ["approve", false],
+    ["approve", true],
+    ["reject", false],
+    ["reject", true],
+  ] as const)("%s over pages a dead pass wrote (committed: %p) carries the linking verdicts to the new content hash", async (verb, committed) => {
+    // notes/r.md links notes/a.md, which the card rewrites; its verdict is keyed on a's current hash.
+    await Bun.write(path.join(root, "notes/r.md"), page("R", "The note [[a]] said 23.05 on 1.05."));
+    await git(Date.now() - 30 * DAY, "add", "-A");
+    await git(Date.now() - 30 * DAY, "commit", "-q", "-m", "r");
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("23.05.", "23.05. See the log."));
+    await git(Date.now() - 6 * DAY, "commit", "-q", "-am", "a grows");
+    __resetWikiCacheForTest();
+    let index = (await getWikiIndex({ root }))!;
+    const r = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/r.md", keyHash: passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, r), verdict: "stale", reason: "a moved", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+    const rows = await card();
+    // The dead pass: both pages written, rows left `approved`.
+    for (const row of rows) await Bun.write(path.join(root, row.targetPath), row.draft);
+    if (committed) await git(Date.now() - DAY / 4, "commit", "-q", "-am", "[sweep] wiki");
+    const s = store(rows.map((row) => ({ ...row, status: "approved" }) as WikiProposal));
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      settleProposalApplied: async (id: string) => {
+        const before = s.rows().find((x) => x.id === id);
+        await s.deps!.markProposal(id, "applied");
+        return before ? ({ ...before, status: "applied" } as WikiProposal) : null;
+      },
+    } as unknown as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    __resetWikiCacheForTest();
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/${verb}?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(s.rows().map((x) => x.status)).toEqual(["applied", "applied"]);
+    __resetWikiCacheForTest();
+    index = (await getWikiIndex({ root }))!;
+    const rNow = (await linkingBuckets(index, "notes/a.md"))!.linking.find((x) => x.relPath === "notes/r.md")!;
+    const key = passageVerdictKey(index, "notes/a.md", (await changedHashOf(index, "notes/a.md"))!, rNow);
+    expect((await verdicts.get("stalegate", "passage", [key])).get(key)).toMatchObject({ verdict: "stale", edit: { old: "said 23.05", new: "said 18.06" }, checkedBy: "model:e2e" });
+  });
+
+  test("Dismiss turns the card's edits into reader «still true» rows, «kept as written», and writes no page", async () => {
+    const s = store(await card());
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
+    const passages = [...verdicts.rows.values()].filter((r) => r.kind === "passage");
+    expect(passages.map((r) => [r.page, r.verdict, r.checkedBy]).sort()).toEqual([["notes/a.md", "true", "reader"], ["notes/b.md", "true", "reader"]]);
+    expect(passages[0]!.reason).toContain("Kept as written");
+    expect(await Bun.file(path.join(root, "notes/a.md")).text()).toBe(A_TEXT);
+  });
+
+  // Fix round 1 batch 4, finding 1: «kept» lands only where the stored verdict
+  // still carries the card's edit, never on a key nobody judged.
+  test("Dismiss after the changed page moved again writes no «kept» row on the new keys", async () => {
+    const s = store(await card());
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06, then to 25.06."));
+    await git(Date.now() - DAY / 2, "commit", "-q", "-am", "hub moves again");
+    __resetWikiCacheForTest();
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual([]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 0, keptSkipped: 2 });
+  });
+
+  test("Dismiss after a linking passage changed skips that page and keeps the other", async () => {
+    const s = store(await card());
+    await Bun.write(path.join(root, "notes/a.md"), A_TEXT.replace("landed on 23.05.", "landed on 23.05, says the log."));
+    __resetWikiCacheForTest();
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual(["notes/b.md"]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 1, keptSkipped: 1 });
+  });
+
+  test("Dismiss skips a page whose verdict was re-judged with another edit since the Send", async () => {
+    const s = store(await card());
+    const index = (await getWikiIndex({ root }))!;
+    const l = (await linkingBuckets(index, "hub.md"))!.linking.find((x) => x.relPath === "notes/a.md")!;
+    await verdicts.upsert({ wiki: "stalegate", kind: "passage", page: "notes/a.md", keyHash: passageVerdictKey(index, "hub.md", (await changedHashOf(index, "hub.md"))!, l), verdict: "stale", reason: "moved twice", edit: { old: "The pin", new: "The lock" }, checkedBy: "model:e2e" });
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader").map((r) => r.page)).toEqual(["notes/b.md"]);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 1, keptSkipped: 1 });
+  });
+
+  test("Dismiss after a fix carried the verdicts to the changed page's new hash still keeps both", async () => {
+    const s = store(await card());
+    const before = await Bun.file(path.join(root, "hub.md")).text();
+    const snapshots = await snapshotPassageKeys((await getWikiIndex({ root }))!, [{ relPath: "hub.md", content: before }]);
+    await Bun.write(path.join(root, "hub.md"), page("Hub", "The pin moved to 18.06 (fixed wording)."));
+    await git(Date.now() - DAY / 2, "commit", "-q", "-am", "a Stale check fix on hub");
+    __resetWikiCacheForTest();
+    expect(await carryPassageVerdicts({ wiki: "stalegate", index: (await getWikiIndex({ root }))!, snapshots })).toBe(2);
+    registerWikiGardenerRoutes(app, s.deps);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(await res.json()).toEqual({ outcome: "rejected", rejected: 2, kept: 2, keptSkipped: 0 });
+  });
+});
+
+describe("runDrainUnderTrace", () => {
+  function recording() {
+    const finishes: Array<{ status: string; attrs?: Record<string, unknown> }> = [];
+    return {
+      finishes,
+      tracer: { traceId: "drain-trace", finish: (status: "ok" | "error" = "ok", attrs?: Record<string, unknown>) => void finishes.push({ status, attrs }) },
+    };
+  }
+
+  test("names the trace before the run starts, and stamps the root on success", async () => {
+    const { tracer, finishes } = recording();
+    const named: string[] = [];
+    let namedAtStart = -1;
+    await runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => {
+      namedAtStart = named.length;
+      return [];
+    });
+    expect(namedAtStart).toBe(1);
+    expect(named).toEqual(["drain-trace"]);
+    expect(finishes).toEqual([
+      { status: "ok", attrs: { offered: 3, drafted: 0, agentKind: "gardener_drain", agentName: "Backlog drain" } },
+    ]);
+  });
+
+  test("stamps the root on failure and rethrows", async () => {
+    const { tracer, finishes } = recording();
+    const named: string[] = [];
+    await expect(
+      runDrainUnderTrace(tracer, true, { onTraceId: (id) => void named.push(id) }, 3, async () => {
+        throw new Error("draft blew up");
+      }),
+    ).rejects.toThrow("draft blew up");
+    // A failed run's row still has to name its root, or the root lists it again.
+    expect(named).toEqual(["drain-trace"]);
+    expect(finishes).toEqual([
+      { status: "error", attrs: { error: "draft blew up", agentKind: "gardener_drain", agentName: "Backlog drain" } },
+    ]);
+  });
+
+  test("with tracing off it names no trace, since none was written", async () => {
+    const { tracer } = recording();
+    const named: string[] = [];
+    await runDrainUnderTrace(tracer, false, { onTraceId: (id) => void named.push(id) }, 3, async () => []);
+    expect(named).toEqual([]);
+  });
+});
+
+describe("drainGardenerRun", () => {
+  const ctx = (tracingEnabled: boolean) => ({
+    bot: { name: "testbot" } as BotConfig,
+    config: { tracingEnabled } as never,
+    apiUrl: "http://kb.test",
+    root: "/tmp/no-such-wiki",
+  });
+  const assembled = { batchKeys: ["c/a", "c/b"] } as never;
+  let finish: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    finish = spyOn(Tracer.prototype, "finish").mockImplementation(() => {});
+  });
+  afterEach(() => finish.mockRestore());
+
+  test("the run a drain starts goes through the trace seam, with its real inputs", async () => {
+    const named: string[] = [];
+    const seen: unknown[] = [];
+    const hooks = { onTraceId: (id: string) => void named.push(id) };
+    await drainGardenerRun(ctx(true), async (deps) => {
+      seen.push(deps.botName);
+      return [];
+    })(assembled, hooks);
+    expect(seen).toEqual(["testbot"]);
+    expect(named).toHaveLength(1);
+    expect(finish).toHaveBeenCalledWith("ok", {
+      offered: 2,
+      drafted: 0,
+      agentKind: "gardener_drain",
+      agentName: "Backlog drain",
+    });
+  });
+
+  test("tracing off names no trace", async () => {
+    const named: string[] = [];
+    await drainGardenerRun(ctx(false), async () => [])(assembled, { onTraceId: (id) => void named.push(id) });
+    expect(named).toEqual([]);
+  });
+
+  test("the backlog route hands its run to this seam", async () => {
+    const source = await Bun.file(new URL("./wiki-gardener-routes.ts", import.meta.url)).text();
+    expect(source).toContain("runGardener: drainGardenerRun({ bot, config, apiUrl: KNOWLEDGE_API_URL, root })");
   });
 });

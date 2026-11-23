@@ -373,6 +373,45 @@ describe("fix round 2: CaseBoard", () => {
   });
 });
 
+/** Anchors `l0`…`l8`, each list holding 10 aliases of the one before, padded
+ *  to 545 bytes: ~1.2·10^8 copies of the `l0` case when every alias is copied,
+ *  a few dozen nodes when each anchor is. */
+function aliasBombYaml(): string {
+  const lines = ["- &l0 {id: MEL-1, status: ok}"];
+  for (let i = 1; i < 9; i++) lines.push(`- &l${i} [${Array(10).fill(`*l${i - 1}`).join(",")}]`);
+  lines.push("- {id: MEL-2, status: wait, note: *l7}");
+  const y = lines.join("\n") + "\n";
+  return y + "#".padEnd(544 - y.length, "#") + "\n";
+}
+
+describe("fix round 2 (A2 #896): nested YAML aliases", () => {
+  test("a 545-byte file of 9 levels of 10 nested aliases parses in under 100 ms", () => {
+    const yaml = aliasBombYaml();
+    expect(yaml.length).toBe(545);
+    const t0 = performance.now();
+    const b = parseCaseBoard(yaml);
+    const ms = performance.now() - t0;
+    expect(b).toMatchObject({ ok: true, total: 2, skipped: 8 });
+    expect(ms).toBeLessThan(100);
+  });
+
+  test("a parse result that refers to itself still reads (each object is cleaned once)", () => {
+    const b = parseCaseBoard("x", () => {
+      const top: unknown[] = [{ id: "A\0B", status: "ok" }];
+      top.push(top);
+      return top;
+    });
+    expect(b).toMatchObject({ ok: true, total: 1, skipped: 1 });
+    if (b.ok) expect(b.cases[0]!.id).toBe("AB");
+  });
+
+  test("a __proto__ key stays an own field of the cleaned copy", () => {
+    const b = parseCaseBoard("- {id: A, __proto__: {status: ok}}\n");
+    expect(b).toMatchObject({ ok: true, total: 1 });
+    if (b.ok) expect(b.cases[0]!.status).toBe("unknown");
+  });
+});
+
 describe("compact line and labels (D42)", () => {
   test("kort: is read as text, a block scalar flattened to one line", () => {
     const b = parseCaseBoard("- id: A\n  status: ok\n  kort: |\n    Første linje\n    andre linje\n");

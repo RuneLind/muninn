@@ -5,17 +5,19 @@ import path from "node:path";
 import {
   applyWikiProposal,
   applyWikiProposalGroup,
+  GroupLogWriteError,
   insertLogEntry,
   reindexCollectionFor,
   draftTitle,
   commitMessageFor,
   logWriterFor,
+  groupCommitMessageFor,
   updateBaseDrift,
   type ApplyDeps,
 } from "./apply.ts";
 import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
 import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
-import { sha256 } from "./util.ts";
+import { sha256 } from "../utils/date-hash.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
 import type { WikiProposal } from "../db/wiki-proposals.ts";
 import { testTempDir } from "../test/temp-dir.ts";
@@ -968,11 +970,15 @@ describe("applyWikiProposalGroup", () => {
     await writeFile(logPath, original);
     await chmod(logPath, 0o200);
     try {
-      const res = await applyWikiProposalGroup(
-        [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))],
-        deps(),
-      );
-      expect(res.results.map((r) => r.outcome.outcome)).toEqual(["applied", "applied"]);
+      const seen: string[] = [];
+      // F35 R3: an entry that cannot be written throws, so the caller marks no
+      // row `applied` over the pages it would have named.
+      await expect(
+        applyWikiProposalGroup([lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))], deps(), {
+          onRowOutcome: (o) => seen.push(o.outcome.outcome),
+        }),
+      ).rejects.toBeInstanceOf(GroupLogWriteError);
+      expect(seen).toEqual(["applied", "applied"]);
     } finally {
       await chmod(logPath, 0o644);
     }
@@ -1112,6 +1118,25 @@ describe("applyWikiProposalGroup", () => {
     expect(commits[0]!.message).toContain("2 pages");
   });
 
+  test("marks `writeFailed` on a row whose write threw, and not on a pre-write refusal", async () => {
+    const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+    const failing = deps({
+      writeFile: async (absPath, content) => {
+        if (absPath.endsWith(PAGE_B)) throw new Error("EACCES");
+        await writeFile(absPath, content);
+      },
+    });
+    const thrown = await applyWikiProposalGroup(rows, failing);
+    expect(thrown.stoppedAt).toMatchObject({ id: "r2", outcome: { outcome: "error" }, writeFailed: true });
+
+    // A deleted page is refused by the pre-write checks: an `error` too, but no write ran.
+    await writeFile(path.join(wikiDir, PAGE_A), pageBody("A"));
+    await rm(path.join(wikiDir, PAGE_B));
+    const refused = await applyWikiProposalGroup(rows, deps());
+    expect(refused.stoppedAt).toMatchObject({ id: "r2", outcome: { outcome: "error" } });
+    expect(refused.stoppedAt).not.toHaveProperty("writeFailed");
+  });
+
   test("a NOOP row stages nothing, so the commit subject counts the pages it wrote", async () => {
     const commits: Array<{ paths: string[]; message: string }> = [];
     const rowA = lintRow("r1", PAGE_A, pageBody("A"));
@@ -1237,6 +1262,92 @@ describe("applyWikiProposalGroup", () => {
     expect(res.results[0]!.outcome.outcome).toBe("applied");
     expect(await readFile(path.join(wikiDir, "plans/c.mdx"), "utf8")).toBe(expected);
   });
+
+  // F35 (arch review 2026-11-16): a group Accept must stay safe to re-run, and a
+  // throw must not cost the pages written before it their log entry and commit.
+  describe("re-run and throw safety (F35)", () => {
+    const commitsInto = (commits: Array<{ paths: string[]; message: string }>) => async (paths: string[], message: string) => {
+      commits.push({ paths: [...paths].sort(), message });
+    };
+
+    test("a row that THROWS after an earlier row wrote: the written page is logged, committed and reported, then the throw goes on", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const reported: string[] = [];
+      let calls = 0;
+      const realIndex = () => buildWikiIndex(wikiDir);
+      const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+      // Call 1 is the preflight, call 2 row r1's own read, call 3 row r2's.
+      const failing = deps({
+        commit: commitsInto(commits),
+        getWikiIndex: async () => {
+          if (++calls === 3) throw new Error("index read blew up");
+          return realIndex();
+        },
+      });
+      const err = await applyWikiProposalGroup(rows, failing, { onRowOutcome: (o) => reported.push(`${o.id}:${o.outcome.outcome}`) }).catch((e) => e);
+
+      expect(String(err)).toContain("index read blew up");
+      expect(reported).toEqual(["r1:applied"]);
+      expect(await readFile(path.join(wikiDir, PAGE_A), "utf8")).toContain("series: prov");
+      expect(await readFile(path.join(wikiDir, PAGE_B), "utf8")).toBe(pageBody("B"));
+      const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+      expect(log).toContain(`1 page: ${PAGE_A}`);
+      expect(commits).toEqual([{ paths: [PAGE_A, "log.md"].sort(), message: "[lint] fix: 1 page (lint:series-unnamed:deadbeef1234)" }]);
+    });
+
+    test("a row whose own write LANDED before it threw counts as written", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const reported: string[] = [];
+      const rows = [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+      let reindexes = 0;
+      const failing = deps({
+        commit: commitsInto(commits),
+        // A synchronous throw from the reindex kick escapes `applyInner` after
+        // the page write, on the second row.
+        reindex: (() => {
+          if (++reindexes === 2) throw new Error("reindex kick threw");
+          return Promise.resolve();
+        }) as ApplyDeps["reindex"],
+      });
+      const err = await applyWikiProposalGroup(rows, failing, { onRowOutcome: (o) => reported.push(`${o.id}:${o.outcome.outcome}`) }).catch((e) => e);
+
+      expect(String(err)).toContain("reindex kick threw");
+      expect(reported).toEqual(["r1:applied", "r2:applied"]);
+      expect(await readFile(path.join(wikiDir, "log.md"), "utf8")).toContain(`2 pages: ${PAGE_A}, ${PAGE_B}`);
+      expect(commits).toHaveLength(1);
+      expect(commits[0]!.paths).toEqual([PAGE_A, PAGE_B, "log.md"].sort());
+    });
+
+    test("a re-run after a dead pass: the page that pass wrote and never committed is staged and logged ONCE, as `recovered`", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      const rowB = lintRow("r2", PAGE_B, pageBody("B"));
+      // The dead pass wrote A and died before its log entry and its commit.
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      const res = await applyWikiProposalGroup(
+        [rowA, rowB],
+        deps({ commit: commitsInto(commits), hasUncommittedChanges: async (rel) => rel === PAGE_A }),
+      );
+
+      expect(res.results[0]).toMatchObject({ id: "r1", outcome: { outcome: "applied", noop: true }, recovered: true });
+      expect(res.results[1]).not.toHaveProperty("recovered");
+      const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+      expect(log.split("## [").length - 1).toBe(1);
+      expect(log).toContain(`2 pages: ${PAGE_A}, ${PAGE_B}`);
+      expect(commits).toEqual([{ paths: [PAGE_A, PAGE_B, "log.md"].sort(), message: "[lint] fix: 2 pages (lint:series-unnamed:deadbeef1234)" }]);
+    });
+
+    test("a no-op page that is already committed is NOT recovered: no second log entry, nothing staged", async () => {
+      const commits: Array<{ paths: string[]; message: string }> = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      const res = await applyWikiProposalGroup([rowA], deps({ commit: commitsInto(commits), hasUncommittedChanges: async () => false }));
+
+      expect(res.results[0]).not.toHaveProperty("recovered");
+      expect(commits).toEqual([]);
+      expect(await Bun.file(path.join(wikiDir, "log.md")).exists()).toBe(false);
+    });
+  });
 });
 
 // Finding 63: the gate's listing and the apply step must agree on "this page
@@ -1254,5 +1365,102 @@ describe("updateBaseDrift", () => {
   });
   test("a row with no base hash cannot prove anything, so it is drift", () => {
     expect(updateBaseDrift(null, page)).toBe("target file changed since drafting");
+  });
+});
+
+// ── Stale check groups (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+describe("applyWikiProposalGroup — a Stale check card", () => {
+  let wikiDir: string;
+  const A = "notes/a.md";
+  const B = "notes/b.md";
+  // A dangling wikilink already on page A: a Stale check Accept must leave it.
+  const A_TEXT = "---\ntitle: A\n---\n\nThe pin in [[hub]] landed on 23.05.\n\nSee [[No Such Page]] too.\n";
+  const B_TEXT = "---\ntitle: B\n---\n\nSince [[hub]] moved on 2.06 the pin is draft.\n";
+  const HUB = "---\ntitle: Hub\n---\n\nThe hub.\n";
+
+  const editOf = (page: string, old: string, text: string) => ({ kind: "passage" as const, page, link: "hub.md", old, text, variant: "new" as const });
+  function staleRow(id: string, page: string, current: string, old: string, text: string): WikiProposal {
+    return makeProposal({
+      id,
+      wikiName: "w",
+      botName: "w",
+      kind: "stale-check",
+      mode: "update",
+      groupKey: "stale-check:hub.md:2",
+      topicKey: `stale-check:hub.md:${page}:x`,
+      targetPath: page,
+      baseHash: sha256(current),
+      draft: current.replace(old, text),
+      sourceDocs: [],
+      relatedPages: [],
+      staleMeta: { changed: "hub.md", edits: [editOf(page, old, text)], supersedes: "stale-check:hub.md:1" },
+    });
+  }
+
+  function deps(overrides: Partial<ApplyDeps> = {}): ApplyDeps {
+    return {
+      wikiDir,
+      now: () => Date.parse("2026-10-28T10:00:00Z"),
+      readFile: async (absPath) => {
+        try {
+          return await readFile(absPath, "utf8");
+        } catch {
+          return null;
+        }
+      },
+      writeFile: async (absPath, content) => {
+        await mkdir(path.dirname(absPath), { recursive: true });
+        await writeFile(absPath, content);
+      },
+      getWikiIndex: () => buildWikiIndex(wikiDir),
+      refreshIndex: async () => {},
+      reindex: async () => {},
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    wikiDir = await testTempDir(path.join(tmpdir(), "gardener-stale-"));
+    __resetWikiWriteQueueForTest();
+    await mkdir(path.join(wikiDir, "notes"), { recursive: true });
+    await writeFile(path.join(wikiDir, "hub.md"), HUB);
+    await writeFile(path.join(wikiDir, A), A_TEXT);
+    await writeFile(path.join(wikiDir, B), B_TEXT);
+  });
+  afterEach(async () => {
+    await rm(wikiDir, { recursive: true, force: true });
+  });
+
+  test("Accept writes both pages byte-exact, one log.md entry naming both under the changed page, one commit", async () => {
+    const commits: [string[], string][] = [];
+    const rows = [staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06"), staleRow("r2", B, B_TEXT, "the pin is draft", "the pin is shipped")];
+    const res = await applyWikiProposalGroup(rows, deps({ commit: async (paths, message) => void commits.push([paths, message]) }));
+    expect(res.stoppedAt).toBeUndefined();
+    // Mechanical: the pre-existing dangling [[No Such Page]] is untouched, and
+    // no trailing-newline normalisation or alias strip runs.
+    expect(await readFile(path.join(wikiDir, A), "utf8")).toBe(A_TEXT.replace("landed on 23.05", "landed on 18.06"));
+    expect(await readFile(path.join(wikiDir, B), "utf8")).toBe(B_TEXT.replace("the pin is draft", "the pin is shipped"));
+    const log = await readFile(path.join(wikiDir, "log.md"), "utf8");
+    expect(log.match(/^## \[/gm)).toHaveLength(1);
+    expect(log).toContain("## [2026-10-28] update | Stale check: hub.md\n- via stale-check, 2 pages: notes/a.md, notes/b.md");
+    expect(commits).toEqual([[[A, "log.md", B], "[stale-check] fix: 2 pages (stale-check:hub.md:2)"]]);
+  });
+
+  test("a row whose edits no longer follow from the page stops the group with nothing written", async () => {
+    // The CAS holds (same bytes) but the stored draft is not what the edit makes.
+    const bad = { ...staleRow("r2", B, B_TEXT, "the pin is draft", "the pin is shipped"), draft: B_TEXT.replace("the pin is draft", "something else") };
+    const res = await applyWikiProposalGroup([staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06"), bad], deps());
+    expect(res.stoppedAt?.id).toBe("r2");
+    expect(res.stoppedAt?.outcome).toMatchObject({ outcome: "stale", reason: expect.stringContaining("no longer place") });
+    expect(await readFile(path.join(wikiDir, A), "utf8")).toBe(A_TEXT);
+  });
+
+  test("commit subject, log writer and title by kind", () => {
+    const row = staleRow("r1", A, A_TEXT, "landed on 23.05", "landed on 18.06");
+    expect(commitMessageFor(row)).toBe("[stale-check] fix: notes/a.md");
+    expect(logWriterFor(row)).toBe("stale-check");
+    expect(draftTitle(row)).toBe("Stale check: hub.md");
+    expect(groupCommitMessageFor("stale-check:hub.md:2", 2, "stale-check")).toBe("[stale-check] fix: 2 pages (stale-check:hub.md:2)");
+    expect(groupCommitMessageFor("lint:x:1", 1)).toBe("[lint] fix: 1 page (lint:x:1)");
   });
 });

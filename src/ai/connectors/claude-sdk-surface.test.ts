@@ -28,7 +28,7 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   },
 }));
 
-const { driveBot, driveCapture } = await import("../../test/one-shot-drive.ts");
+const { driveBot, driveCapture, driveConfig } = await import("../../test/one-shot-drive.ts");
 const { toolSurfaceTestSeam } = await import("../tool-surface.ts");
 
 let root: string;
@@ -131,6 +131,50 @@ describe("claude-sdk options, driven from runCaptureOneShot", () => {
     expect((await ask(o, "WebFetch", { url: "https://x" })).behavior).toBe("allow");
     expect((await ask(o, "WebFetch", { url: "https://127.0.0.1:8443/page" })).behavior).toBe("deny");
     expect((await ask(o, "Read", { file_path: join(framesDir, "x.jpg") })).behavior).toBe("deny");
+  });
+
+  test("{ readSearch }: Read, Grep and Glob, the snapshots added, the handler and a PreToolUse hook running one check", async () => {
+    // A { readSearch } dir must sit directly under the snapshot root.
+    const snap = join(agentRoot, ".snapshots", "code-x");
+    mkdirSync(snap, { recursive: true });
+    await driveCapture(sdkBot(), { readSearch: [snap] });
+    const o = queryCalls[0]!.options;
+    expect(o.tools).toEqual(["Read", "Grep", "Glob"]);
+    expect(o.mcpServers).toEqual({});
+    expect(o.strictMcpConfig).toBe(true);
+    expect(o.settingSources).toEqual([]);
+    expect(o.cwd).toBe(join(agentRoot, ".fenced"));
+    expect(o.additionalDirectories).toEqual([snap]);
+    expect(o.permissionMode).toBe("default");
+    expect(o.settings).toEqual({ autoMemoryEnabled: false });
+    expect((await ask(o, "Grep", { pattern: "x", path: snap })).behavior).toBe("allow");
+    expect((await ask(o, "Glob", { pattern: "../*", path: snap })).behavior).toBe("deny");
+    expect((await ask(o, "Read", { file_path: join(botDir, "config.json") })).behavior).toBe("deny");
+    // The hook sees the calls default mode approves without asking the handler.
+    const matchers = (o.hooks as { PreToolUse: Array<{ matcher?: string; hooks: Array<(i: unknown, id: string, opts: unknown) => Promise<Record<string, unknown>>> }> }).PreToolUse;
+    expect(matchers).toHaveLength(1);
+    expect(matchers[0]!.matcher).toBeUndefined(); // every tool, not a name pattern
+    const hook = (tool: string, input: Record<string, unknown>) =>
+      matchers[0]!.hooks[0]!({ hook_event_name: "PreToolUse", tool_name: tool, tool_input: input, tool_use_id: "t" }, "t", { signal: new AbortController().signal });
+    expect(await hook("Glob", { pattern: "*.jpg", path: snap })).toEqual({});
+    expect(await hook("Glob", { pattern: "../*", path: snap })).toMatchObject({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" } });
+    expect(await hook("Grep", { pattern: "x" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+    expect(await hook("Bash", { command: "ls" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+  });
+
+  test("{ read } and { web } carry no hook (their fences are unchanged)", async () => {
+    await driveCapture(sdkBot(), { read: [framesDir] });
+    await driveCapture(sdkBot(), { web: true });
+    expect(queryCalls.map((c) => "hooks" in c.options)).toEqual([false, false]);
+  });
+
+  test("{ mcpTools } is refused before query(), by capability and by the connector itself", async () => {
+    await expect(driveCapture(sdkBot(), { mcpTools: { stub: ["record"] } })).rejects.toThrow(/cannot run a \{ mcpTools \}/);
+    const { executePrompt } = await import("./claude-sdk.ts");
+    await expect(
+      executePrompt("p", driveConfig, { ...sdkBot(), toolSurface: { mcpTools: { stub: ["record"] } } }),
+    ).rejects.toThrow(/claude-sdk: the \{ mcpTools \} tool surface is not supported/);
+    expect(queryCalls).toHaveLength(0);
   });
 
   test("a degraded agent home refuses a fenced run before query()", async () => {

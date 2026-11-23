@@ -1,13 +1,19 @@
 import type { Context, Hono } from "hono";
+import { jiraTrackers, readWikiFacts, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
-import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config } from "../../config.ts";
+import { resolveServingProfile, resolveWikiAnswerConfig, resolveWikiDefaultLens, wikiTakesAnswers, type Config, type WikiAnswerConfig } from "../../config.ts";
 import { viewerMayUseAnswers } from "./wiki-answers.ts";
 import { servesWikiReadSliceOnly, wikiToolsRegistered } from "../route-groups.ts";
 import { resolveReadRequest, resolveScopedPage, type ScopedPageLookup } from "./wiki-read-scope.ts";
-import { renderWikiPage } from "../views/wiki-page.ts";
+import { renderWikiPage, getWikiAssets, WIKI_ASSET_PREFIX } from "../views/wiki-page.ts";
+import { waitOwnerFrom } from "../../wiki/next-moves.ts";
 import { getWikiIndex, normalizeRelPath, parseFrontmatter, readWikiPage, resolveWikiRoot, stemKey, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { pageDecisionDataOf } from "../../wiki/decision-text.ts";
+import { parseXrefIds, type XrefAnswer } from "../../wiki/core/cross-ref.ts";
+import { displayTitleOf } from "../../wiki/core/wiki-filter.ts";
+import { pageRefTargets } from "../../wiki/ref-targets.ts";
 import { DECISION_CHAIN_LINES_MAX, lineageLine } from "../../format/decision-chain.ts";
 import { hasExcludedSegment } from "../../format/query-block.ts";
 import { compactIssues, trackerAdapter, type IssueRow, type TrackerConfig } from "../../wiki/trackers/index.ts";
@@ -27,7 +33,9 @@ import {
 } from "../views/components/wiki-atlas-semantic.ts";
 import { getLiveOrAppliedTopicKeysByWiki } from "../../db/wiki-proposals.ts";
 import { draftAndPersistSynthesis } from "../../gardener/synthesis-drafter.ts";
-import { questionRenderOptionsFor, readerPayload, renderWikiHtml } from "../../wiki/render.ts";
+import { questionRenderOptionsFor, readerPayload, renderWikiHtml, wikiPageAnchor } from "../../wiki/render.ts";
+import { escapeHtml } from "../../format/markdown-core.ts";
+import { wikiLinksAsText } from "../../wiki/decision-text.ts";
 import { loadPageFiles, resolveContainedFile } from "../../wiki/page-files.ts";
 import {
   listWikis,
@@ -48,14 +56,41 @@ import {
 import { registerWikiStampRoute } from "./wiki-stamp.ts";
 import { registerWikiFellesPublishRoute } from "./wiki-felles-publish.ts";
 import { registerWikiPlanCardRoute } from "./wiki-plan-card.ts";
+import { registerWikiDiscussHandoffRoute } from "./wiki-discuss-handoff.ts";
+import { registerWikiDiscussRoute } from "./wiki-discuss.ts";
+import { registerWikiDiscussApplyRoute } from "./wiki-discuss-apply.ts";
+import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
+import { egressRefusal, readonlyCandidateRoot } from "./wiki-egress.ts";
 import { agentLensFor, planCardConfigFromEnv } from "../../wiki/plan-card.ts";
 import { fellesPublishPayloadField } from "../../wiki/felles-publish.ts";
+import { workMapListingField } from "../../wiki/work-map/listing.ts";
 import { registerWikiSeriesRoutes } from "./wiki-series-routes.ts";
 import { registerWikiGraphRoute } from "./wiki-graph.ts";
 import { registerWikiBoardRoute } from "./wiki-board.ts";
+import { registerWikiWorkMapRoutes } from "./wiki-work-map.ts";
+import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
+import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
+import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
+import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
+import { registerChecksAnswerRoute } from "./checks-answer.ts";
+import { realBootLineDeps, registerWikiBootLineRoute } from "./wiki-boot-line.ts";
+import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
+import { realTriageStatusDeps, registerWikiDecisionTriageStatusRoutes } from "./wiki-decision-triage-status.ts";
+import { realTriageRunDeps, registerWikiDecisionTriageRunRoute } from "./wiki-decision-triage-run.ts";
 import { findRowsWikiName, findSelfWikiName, registerWikiFindEverywhereRoute } from "./wiki-find-everywhere.ts";
-import { isReadonlyWikiRoot, isWikiReadonly, wikiNoEgressReason } from "../../wiki/readonly.ts";
-import { movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../../wiki/readonly.ts";
+import { linkingBuckets, movedWith, parseStaleAsOf, staleNow, staleSummary, stalePageReport } from "../../wiki/stale.ts";
+import { placeStaleEdit } from "../../wiki/stale-fix.ts";
+import {
+  carryPassageVerdicts,
+  fixedLinkingPages,
+  resolveStaleFix,
+  snapshotPassageKeys,
+  writeFixedVerdicts,
+  type PassageKeySnapshot,
+  type StaleFixRequest,
+} from "../../wiki/stale-fix-verdicts.ts";
+import { heldBy, heldMessage, inReviewByChanged, sendStaleFix, staleProposalStore, type StaleInReview } from "../../gardener/stale-proposals.ts";
 import {
   hitConfirmations,
   hitKey,
@@ -141,7 +176,7 @@ import {
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { DEFAULT_ACTIVITY_WEIGHTS } from "../views/components/wiki-activity-rank.ts";
 import { DEFAULT_CULL_LABELS } from "../views/components/wiki-cull-view.ts";
-import { commitWikiChange } from "../../wiki/commit.ts";
+import { commitWikiChange, pageHasUncommittedChanges } from "../../wiki/commit.ts";
 import { sha256, todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { capabilitiesForConnectorType } from "../../ai/connector-capabilities.ts";
@@ -264,87 +299,6 @@ const log = getLog("dashboard", "wiki");
  *  as the FIRST statement of this file's model-spending write routes. */
 const readonlyRefusal = (c: Context) => sharedReadonlyRefusal(c, log);
 
-/**
- * The root a request would actually be SERVED from, for the read-only question —
- * or `null` when the request names no servable wiki at all.
- *
- * The distinction is the whole point. `resolveWikiRequest` answers
- * `entry: undefined` for TWO unrelated requests: the `WIKI_DIR` env-override
- * shape (no `?wiki=`/`?bot=` given), which the routes really do serve from
- * `resolveWikiRoot(undefined)` and which therefore MUST be guarded — and an
- * unknown name, which they serve not at all. Folding them together made a typo
- * inherit the env root's policy: `?wiki=typo` answered 403 "this wiki is
- * read-only" about a wiki nobody asked for, and `/wiki?wiki=typo` rendered the
- * banner and the disabled inputs to match. An unknown name keeps its own
- * preflight error, which every one of these routes already has.
- */
-function readonlyCandidateRoot(
-  entry: WikiRegistryEntry | undefined,
-  unknownWiki: boolean,
-): string | null {
-  if (entry) return entry.root;
-  return unknownWiki ? null : resolveWikiRoot(undefined);
-}
-
-/**
- * The PER-WIKI egress prologue: refuse, with a 403, every route that would spend
- * a model call (or reach the live web, or seed a chat thread) on a wiki whose
- * root is listed in `WIKI_READONLY_ROOTS`.
- *
- * **Why this is a separate guard from `readonlyRefusal`.** That one is
- * instance-wide and runs as a route's FIRST statement, before any wiki is
- * resolved — deliberately, so the refusal costs nothing. A per-wiki rule inverts
- * that ordering by construction: it cannot answer until the entry is known. So
- * it is a prologue placed immediately after `resolveWikiRequest` (or after the
- * shared target resolver, where one exists) and BEFORE bot resolution, the index
- * read, the DB thread, the `/agents` run registration and the one-shot.
- *
- * **Why registration alone is not safe.** Registering a root as a browsable wiki
- * buys three surfaces, not two: file writes (the three seams), local reads
- * (bounded by `DASHBOARD_HOST=127.0.0.1`) — and this set of `?wiki=`-steerable
- * routes, two of which reach the live web through the fact-check prompt's
- * WebFetch/search instructions. `DASHBOARD_HOST` does not bound that, and a
- * bot-less standalone wiki does NOT fail bot resolution: `resolveWikiSynthesisBot`
- * falls through to `resolveResearchBot` for any entry with no pin and
- * `source !== "bot"`, so every one of these routes resolves a bot and runs.
- *
- * Enforcement reads the ROOT, never `entry.readonly` — the registry flag is
- * presentation, and a stale memo must not be able to open the guard.
- *
- * **And it reads the root even when there is no ENTRY.** `resolveWikiRequest`
- * returns `entry: undefined` for the `WIKI_DIR` env-override shape (a bare
- * `/wiki` on an instance that sets the var), and those routes go on to serve
- * `resolveWikiRoot(undefined)` — so keying the refusal on the entry made the
- * guard fail OPEN on exactly the root an operator pointed the env var at. The
- * fallback resolves the same root the store would, through the same function.
- *
- * `optionalResponder` exists for `/api/wiki/digest`, whose refusal body is not
- * the shared `{error}` shape (the What's-new card reads `error` as "generation
- * FAILED — keep the old digest and offer a retry", and a policy refusal is not a
- * failure). It gets the resolved wiki label so its own body can name it, rather
- * than re-spelling the resolution and drifting from this one.
- */
-function egressRefusal(
-  c: Context,
-  entry: WikiRegistryEntry | undefined,
-  unknownWiki: boolean,
-  optionalResponder?: (wikiLabel: string, reason: string) => Response,
-) {
-  const root = readonlyCandidateRoot(entry, unknownWiki);
-  if (root === null || !isReadonlyWikiRoot(root)) return null;
-  const wiki = entry?.name ?? "";
-  log.info("Read-only wiki {wiki} refused {method} {path} (no model calls)", {
-    // Only the no-name shapes reach this label (a NAMED wiki either resolved to
-    // an entry or was refused nothing at all), and there are two of them: the
-    // env override, and an install with no registered wiki at all.
-    wiki: wiki || (process.env.WIKI_DIR?.trim() ? "(WIKI_DIR override)" : "(default root)"),
-    method: c.req.method,
-    path: new URL(c.req.url).pathname,
-  });
-  const reason = wikiNoEgressReason(wiki);
-  if (optionalResponder) return optionalResponder(wiki, reason);
-  return c.json({ error: reason, readonly: true }, 403);
-}
 
 /**
  * Resolve the page a request names — `relPath` FIRST, the stem `name` as the
@@ -1110,12 +1064,19 @@ export interface WikiPageListing extends WikiPageMeta {
   backlinkCount: number;
 }
 
+/** `movesWaiting` means something: `wikiName` takes answers and an owner is set,
+ *  both for this route and for the build that counted (`config.wikiAnswers` is
+ *  injectable, the index reads its own), so a lone owner can never paint a 0. */
+export function waitsCountedFor(wikiName: string | undefined, cfg: WikiAnswerConfig, index: Pick<WikiIndex, "waitOwnerSet">): boolean {
+  return !!index.waitOwnerSet && waitOwnerFrom(cfg) !== null && wikiTakesAnswers(wikiName, cfg);
+}
+
 /** Exported for `trackers/store-issues.test.ts`, which drives the real
  *  compaction rather than restating it. */
 export function toListing(
   index: WikiIndex,
   meta: WikiPageMeta,
-  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean; includeWork?: boolean } = {},
+  opts: { includeDesc?: boolean; includeProvenance?: boolean; includeCull?: boolean; includeWork?: boolean; includeWaits?: boolean } = {},
 ): WikiPageListing {
   // `desc` + `pubDate` are stripped by default: they are page-body fields no
   // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
@@ -1129,6 +1090,7 @@ export function toListing(
   //      same response, which are link-heavy pages' bulk. Strip.
   //   4. `/api/wiki/page`'s and `/api/wiki/related`'s `related` rows
   //      (`relatedRows`) — caller 3's shape plus `why`/`strength`/`signals`. Strip.
+  //      `movedWith` rows are this shape too, with `movedN`.
   // So a field stripped for payload size (e.g. `status_note`) also goes out of
   // reach of the reader, and a field opted IN for caller 2 must not be opted in
   // for callers 3 or 4, which would re-bloat exactly the pages this strip protects.
@@ -1182,6 +1144,13 @@ export function toListing(
   // any, read by the rail's ✋ row flag and "waiting on you" chip. The client,
   // not this function, hides those two on a shared instance (nais).
   //
+  // `movesWaiting` and `waitingSince` are the FIFTH opt-in, `includeWaits`, passed
+  // by caller 1 alone and never on the read slice. Stripping is the default
+  // because they cannot just be hidden client-side as `movesYou` is: the count
+  // applies the owner's group membership, so a pod reader comparing it with a
+  // page's `q-for` line learns the group, and membership never leaves the server
+  // (`lane-roles.ts`). The slice serves no work map, so it has no reader for them.
+  //
   // `work` (the page's session events, `work-focus.ts`) is the FOURTH opt-in,
   // `includeWork`, passed by callers 1 and 2: the rail scores from the listing
   // and the article header reads the open page's meta, while the outgoing,
@@ -1207,6 +1176,8 @@ export function toListing(
     related,
     relatedSkipped,
     relatedAmbiguous,
+    movesWaiting,
+    waitingSince,
     ...rest
   } = meta;
   void pubDate;
@@ -1232,6 +1203,7 @@ export function toListing(
       ? { ...(cullReason ? { cullReason } : {}), ...(supersededBy ? { supersededBy } : {}) }
       : {}),
     ...(opts.includeWork && work ? { work } : {}),
+    ...(opts.includeWaits ? { ...(movesWaiting ? { movesWaiting } : {}), ...(waitingSince ? { waitingSince } : {}) } : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1423,7 +1395,7 @@ export function registerWikiRoutes(
  *  stays an explicit legacy override with no wiki claimed in the picker.
  *
  *  The READ SLICE (`wiki-read` group): only what a reader needs to list and
- *  render a page — the page, the listing, one page, its provenance block,
+ *  render a page — the page and its hashed script and stylesheet, the listing, one page, its provenance block,
  *  explainer HTML and graph mode. No route here writes or spends a model call.
  *  Two make bounded GET fan-outs: `/api/wiki/page/provenance` asks huginn's
  *  jira-issues corpus about a page's `jira:` keys and claude-usage about its
@@ -1477,8 +1449,7 @@ export function registerWikiReadRoutes(
     return true;
   };
 
-  // gzip, because the page inlines the whole client bundle and CSS (~1.2 MB,
-  // ~0.29 MB gzipped) and nothing in front of muninn compresses it. Scoped to
+  // gzip, because nothing in front of muninn compresses the page. Scoped to
   // this route: the SSE and JSON routes beside it keep their framing. Called
   // from inside the one GET handler: a second handler or an `app.use` adds a
   // /wiki row that the route-table guards read as a separate route.
@@ -1574,6 +1545,33 @@ export function registerWikiReadRoutes(
     return c.res;
   });
 
+  // The reader's script and stylesheet at their content-hashed URLs
+  // (`getWikiAssets`): the page links them rather than inlining ~2 MB per load.
+  // A hash names one byte sequence, so a hit is immutable for a year (`private`:
+  // the route sits behind auth on the pod, so no shared cache should keep it).
+  // A stale hash of the same shape gets this build's asset, `no-store`: a page
+  // replayed by Back after a restart, or served by the other pod during a surge
+  // rollout, names a hash this process never built, and a 404 would leave it
+  // unstyled and dead. Any other name is a 404. Gzipped once per process.
+  app.get(`${WIKI_ASSET_PREFIX}:file`, async (c) => {
+    const { js, css } = await getWikiAssets();
+    const exact = c.req.path === js.path ? js : c.req.path === css.path ? css : null;
+    const shape = /^wiki\.[0-9a-f]{16}\.(js|css)$/.exec(c.req.param("file"));
+    const asset = exact ?? (shape ? (shape[1] === "js" ? js : css) : null);
+    if (!asset) {
+      c.header("Cache-Control", "no-store");
+      return c.text("Not found", 404);
+    }
+    c.header("Content-Type", asset.contentType);
+    c.header("Cache-Control", exact ? "private, max-age=31536000, immutable" : "no-store");
+    c.header("Vary", "Accept-Encoding");
+    if (acceptsGzip(c.req.header("Accept-Encoding"))) {
+      c.header("Content-Encoding", "gzip");
+      return c.body(asset.gzip as Uint8Array<ArrayBuffer>);
+    }
+    return c.body(asset.body);
+  });
+
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
   //
   // `no-store` is a correctness header, not a tuning knob. This listing is the ONLY
@@ -1599,7 +1597,7 @@ export function registerWikiReadRoutes(
       return c.json({ pages: [], scannedAt: null, error: "wiki directory not found" });
     }
     return c.json({
-      pages: index.pages.map((m) => toListing(index, m, { includeWork: true })),
+      pages: index.pages.map((m) => toListing(index, m, { includeWork: true, includeWaits: !readSliceOnly })),
       scannedAt: index.scannedAt,
       // The wiki's ordered type list + labels (built-in defaults merged with its
       // `.wiki-reader.json` customs). The client stores this and renders every
@@ -1658,9 +1656,19 @@ export function registerWikiReadRoutes(
       // The ⇪ Felles control's gate, present only on a wiki that offers it. The
       // route re-checks; this only decides whether the button renders.
       ...fellesPublishPayloadField(entry?.name, entry?.root),
+      // Whether the index's `movesWaiting` applies here. The index has no wiki
+      // name, so the wiki half of the gate sits where the name is known. Off the
+      // read slice with the fields it describes (`toListing`).
+      ...(readSliceOnly ? {} : { waitsCounted: waitsCountedFor(entry?.name, config.wikiAnswers ?? resolveWikiAnswerConfig(), index) }),
       // A bucket-mirrored root's health, present only while the mirror is not
       // up to date (finding 32): no object names, paths or error text.
       ...bucketMirrorPayloadField(resolveWikiRoot(root)),
+      // `{runAt}` only when the wiki has a readable `.work-map.json`, so the
+      // start view picks the Your work card over What's new without a second
+      // fetch. Absent on the read slice, which serves no work-map route, and
+      // without a registry entry (the `WIKI_DIR` override): the GET is keyed
+      // by wiki name, like ⇪ Felles above.
+      ...(readSliceOnly || !entry ? {} : await workMapListingField(resolveWikiRoot(entry.root))),
     });
   });
 
@@ -1686,6 +1694,42 @@ export function registerWikiReadRoutes(
     return r.ok ? r : { ok: false, res: c.json({ error: r.error }, r.status) };
   }
 
+  /** The page's article HTML with the page route's options, which
+   *  `GET /api/wiki/ref` shares: an anchor there is the one the reader shows. */
+  async function renderPageArticle(
+    entry: Extract<PageResolution, { ok: true }>["entry"],
+    index: WikiIndex,
+    meta: WikiPageMeta,
+    markdown: string,
+    answerable: boolean,
+    owner: string | null,
+    /** The live chips' pass: `GET /api/wiki/page` alone passes it. */
+    liveFacts?: LiveFactsInput,
+  ): Promise<string> {
+    // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
+    // a link opened on a non-default wiki lands on the DEFAULT one.
+    // `files`: the `<Query>` cards' csv/sql, read beside the page under the
+    // index root's containment check (`loadPageFiles`) before the sync render.
+    // `question`: a `<Question>` card's `questions_to:`, label language,
+    // whether this wiki takes answers (`WIKI_ANSWER_WIKIS`) and the owner a
+    // question nobody is named for goes to.
+    return renderWikiHtml(markdown, index.resolve, {
+      stripTitle: meta.title,
+      wiki: entry?.name,
+      files: await loadPageFiles(index.root, meta.relPath, markdown),
+      question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, owner),
+      idLabels: index.readerConfig?.idLabels,
+      language: index.readerConfig?.language,
+      // The decision chain view and the PR strip: the reader's page render only.
+      // `plan_status` as the index keeps it (comment-stripped).
+      views: true,
+      proposedPlan: meta.plan_status === "proposed",
+      // Number columns, verdict cells, the label grid: styled in the article only.
+      readerShapes: true,
+      ...(liveFacts ? { liveFacts } : {}),
+    });
+  }
+
   app.get("/api/wiki/page", async (c) => {
     const resolved = await resolvePageRequest(c);
     if (!resolved.ok) return resolved.res;
@@ -1698,6 +1742,35 @@ export function registerWikiReadRoutes(
     // whose zone admits the answer routes — role `user` only on nais, where
     // the read slice opens them. Elsewhere a flag would fire a 403 GET per card.
     const answersForViewer = answerable && viewerMayUseAnswers(c.get("role"), readSliceOnly);
+
+    // LIVE CHIPS (living facts PR 3b): only on a wiki with a readable
+    // `.wiki-facts.json`, and only after a mention that has an entry in it.
+    // `facts` carries the entries the page's chips read; absent with no chip.
+    // Never a failed page open: a throw in the chip render renders the page
+    // without chips and warns (on every open: nothing dedupes it). When the
+    // plain render throws too, the cause is no chip's: its error surfaces.
+    let liveFacts: LiveFactsPayload | undefined;
+    let html: string | undefined;
+    let chipError: unknown;
+    try {
+      const loadedFacts = await readWikiFacts(index.root);
+      if (loadedFacts) {
+        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, {
+          loaded: loadedFacts,
+          grammar: index.readerConfig?.prGrammar ?? null,
+          trackers: jiraTrackers(index.readerConfig?.trackers),
+          relPath: meta.relPath,
+          collect: (f) => (liveFacts = f),
+        });
+      }
+    } catch (err) {
+      // `html` is still unset: the render's return is the try's last step.
+      chipError = err;
+      liveFacts = undefined;
+    }
+    html ??= await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined);
+    if (chipError !== undefined)
+      log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])
@@ -1730,25 +1803,8 @@ export function registerWikiReadRoutes(
       ...(hasProvenance(meta) ? { provenancePending: true } : {}),
       // No network join, so the section renders with the page.
       ...issueRowsField(index, meta, () => ctxStampable(provenanceCtx, resolveWikiRoot(entry?.root))),
-      // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
-      // a link opened on a non-default wiki lands on the DEFAULT one.
-      // `files`: the `<Query>` cards' csv/sql, read beside the page under the
-      // index root's containment check (`loadPageFiles`) before the sync render.
-      // `question`: a `<Question>` card's `questions_to:`, label language,
-      // whether this wiki takes answers (`WIKI_ANSWER_WIKIS`) and the owner a
-      // question nobody is named for goes to.
-      html: renderWikiHtml(markdown, index.resolve, {
-        stripTitle: meta.title,
-        wiki: entry?.name,
-        files: await loadPageFiles(index.root, meta.relPath, markdown),
-        question: questionRenderOptionsFor(markdown, index.readerConfig, answerable, answerCfg.owner),
-        idLabels: index.readerConfig?.idLabels,
-        language: index.readerConfig?.language,
-        // The decision chain view and the PR strip: the reader's page render only.
-        // `plan_status` as the index keeps it (comment-stripped).
-        views: true,
-        proposedPlan: meta.plan_status === "proposed",
-      }),
+      html,
+      ...(liveFacts ? { facts: liveFacts } : {}),
       // The lens switch's inputs: language, id nouns, the page's default lens
       // (`WIKI_DEFAULT_LENS`, else the file's) and the Agent flag (D2, D24).
       // `roles`: the viewer's group keys (D30) — never a member — and the
@@ -1771,6 +1827,12 @@ export function registerWikiReadRoutes(
             hasPlanStatus: parseFrontmatter(markdown).plan_status !== undefined,
             admin: (c.get("role") ?? "admin") === "admin",
           }),
+        // Discuss P1: only where its route is registered, as D7 above.
+        tools,
+        // Discuss P3: the rules file is read only for an admin where the route is,
+        // and counts only when the discuss route would accept it (not a symlink,
+        // over the bound or unreadable: those it refuses with 422/503).
+        tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok",
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):
@@ -1866,6 +1928,29 @@ export function registerWikiReadRoutes(
       chains: analysis.chains.slice(0, DECISION_CHAIN_LINES_MAX).map(lineageLine),
       total: analysis.chains.length,
     });
+  });
+
+  // CROSS-PAGE IDS (living facts PR 4) — for `D9 i [[page]]` on another page:
+  // each asked id this page defines, with its kind, anchor and hover text
+  // (`pageRefTargets`). The page is rendered with the page route's own options
+  // (`renderPageArticle`), so an anchor is the one the reader shows, `-2`
+  // suffix included. Ids the page does not define are left out. Same
+  // resolution and 400/404/503 ladder as `/api/wiki/page`, so a page the
+  // viewer may not read answers nothing. A new route rather than an `?id=` on
+  // `/api/wiki/decision-chain`: two of the three kinds are not decisions.
+  app.get("/api/wiki/ref", async (c) => {
+    const resolved = await resolvePageRequest(c);
+    if (!resolved.ok) return resolved.res;
+    const { entry, index, meta } = resolved;
+    const ids = parseXrefIds(c.req.query("ids"));
+    if (ids.length === 0) return c.json({ error: "ids query param required" }, 400);
+    const markdown = await readWikiPage(index, meta);
+    if (markdown === null) return c.json({ error: "page file unreadable" }, 503);
+    const answerCfg = config.wikiAnswers ?? resolveWikiAnswerConfig();
+    const answerable = wikiTakesAnswers(entry?.name, answerCfg);
+    const html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null);
+    const answer: XrefAnswer = { title: displayTitleOf(meta), refs: pageRefTargets(html, markdown, ids) };
+    return c.json(answer);
   });
 
   // The provenance block for ONE page — who wrote it, which issue it serves,
@@ -2000,10 +2085,44 @@ export function registerWikiToolRoutes(
   // The Agent lens: runs plan-card on a plan page. Off unless PLAN_CARD_BIN is
   // set; dropped on nais with the group.
   registerWikiPlanCardRoute(app, config);
+  // Discuss's handoff (P1): the prompt «Ask Claude Code» copies. It returns an
+  // absolute path, so it is admin-only and dropped on nais with the group.
+  registerWikiDiscussHandoffRoute(app, config);
+  registerWikiDiscussRoute(app, config);
+  // Discuss P4: the agent's proposed edit, previewed and applied by turn id.
+  registerWikiDiscussApplyRoute(app, config, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
   // The series editor's one write, in the same group for the same reason.
   registerWikiSeriesRoutes(app);
   // The issue board's page, in the same group: it reads one wiki's index.
   registerWikiBoardRoute(app);
+  // The work map's read and its ↻ (`src/wiki/work-map/`): bound to a wiki
+  // root on this machine and to a model call, so dropped on nais.
+  registerWikiWorkMapRoutes(app, config);
+  // The decision inbox on the Your work card: bound to a wiki root on this machine.
+  registerWikiDecisionInboxRoute(app, config, undefined, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
+  // Done on a `you`-lane step: the same wikis and guards as the close above.
+  registerWikiStepDoneRoutes(app, config, {
+    readonlyRefusal,
+    egressRefusal: (c, entry) => egressRefusal(c, entry, false),
+  });
+  // The owner-step checks beside Done: read-only probes of this machine.
+  registerWikiStepChecksRoute(app, config);
+  // The other machine's step-checks route asks this one to answer probes for itself.
+  registerChecksAnswerRoute(app, config);
+  // The Your work card's boot line: the commit this process started from, and what moved in its checkout since.
+  registerWikiBootLineRoute(app, () => realBootLineDeps(config));
+  // The other machine's boot line asks this one for its own line (never relayed onward).
+  registerChecksBootLineRoute(app, config);
+  // The triage's status line and /models card: the nightly log on this machine.
+  registerWikiDecisionTriageStatusRoutes(app, () => realTriageStatusDeps(config));
+  // Run now beside that line: one model-off pass through the loop's own half.
+  registerWikiDecisionTriageRunRoute(app, () => realTriageRunDeps(config));
   // The find palette's Everywhere section: every registered wiki through three
   // legs. Same group: it reads every wiki's index on this machine.
   registerWikiFindEverywhereRoute(app, config);
@@ -2301,8 +2420,31 @@ export function registerWikiToolRoutes(
     if (!digest) return c.json({ digest: null });
     // Render the stored markdown bullets to reader HTML (wikilinks → in-reader
     // page anchors) at response time — cheap, and keeps the cached form plain.
+    // Batch mode: each sync's changed pages as reader links built from the
+    // page itself, so a title or file name holding `[`, `]` or `|` shows and
+    // links as written. A page gone from the index since shows as text. The
+    // sync's title reads its wikilinks as their text.
+    const syncs = digest.syncs?.map((s) => ({
+      date: s.date,
+      title: wikiLinksAsText(s.title),
+      count: s.pages?.length ?? null,
+      html: s.pages?.length
+        ? "<ul>" +
+          s.pages
+            .map((p) => {
+              const meta = index.resolveRelPath(p.relPath);
+              return "<li>" + (meta ? wikiPageAnchor(meta, p.title, entry.name) : escapeHtml(p.title)) + "</li>";
+            })
+            .join("") +
+          "</ul>"
+        : "",
+    }));
     return c.json({
-      digest: { ...digest, html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }) },
+      digest: {
+        ...digest,
+        html: renderWikiHtml(digest.bullets, index.resolve, { wiki: entry.name }),
+        ...(syncs ? { syncs } : {}),
+      },
     });
   });
 
@@ -2323,7 +2465,11 @@ export function registerWikiToolRoutes(
   // (`parseStaleAsOf`); `session` names an agent session in the warm work
   // memo and answers the pages it wrote. Spends and writes nothing: the hits
   // come off the cached index, the buckets read the linking pages from disk
-  // and are cached on that index. Tool half: `MUNINN_PROFILE=nais` drops it.
+  // and are cached on that index. `refresh=1` rebuilds the index first, so a
+  // report right after a git or editor write judges the new text (the CLI
+  // `scripts/wiki-stale.ts` always sends it; the reader never does). Tool
+  // half: `MUNINN_PROFILE=nais` drops it, so the read slice's refresh
+  // throttle does not apply.
   app.get("/api/wiki/stale", async (c) => {
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
@@ -2338,7 +2484,7 @@ export function registerWikiToolRoutes(
     const readonly = isWikiReadonly() ? "instance" : isReadonlyWikiRoot(entry.root) ? "root" : false;
     const asOfMs = parseStaleAsOf(c.req.query("asOf"));
     if (asOfMs === null) return c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms", readonly }, 400);
-    const index = await getWikiIndex({ root: entry.root });
+    const index = await getWikiIndex({ root: entry.root, refresh: c.req.query("refresh") === "1" });
     if (!index) return c.json({ error: "wiki directory not found", readonly }, 503);
     const base = { wiki: entry.name, readonly };
     const session = (c.req.query("session") ?? "").trim();
@@ -2398,14 +2544,69 @@ export function registerWikiToolRoutes(
         const hits = index.statusLineHits?.get(r.relPath) ?? [];
         return { ...r, hits: hits.length, staleLines: confirmations ? hits.filter((h) => isConfirmedStale(confirmations!.get(hitKey(r.relPath, h)))).length : 0 };
       });
+      // PR 3 (D29): a To-check page whose current passage carries a `fixed`
+      // row is counted out, as the page report counts it out. The `fixed`
+      // rows live in the verdict store: when it is down, a row's To check may
+      // still hold fixed pages, so the row says `fixed: "unavailable"` (its M
+      // an upper bound, shown as unknown) instead of passing as exact.
+      const fixedUnknown = new Set<string>();
+      let fixedPages: Set<string> | null = null;
+      if (confirmations) {
+        try {
+          fixedPages = (await staleVerdictStore().pages?.(entry.name, "fixed")) ?? new Set<string>();
+        } catch (err) {
+          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      if (!fixedPages) {
+        for (const r of pages) if (r.toCheck) fixedUnknown.add(r.relPath);
+      } else {
+        const fixedKeys = new Set([...fixedPages].map((p) => normalizeRelPath(p)));
+        for (const r of fixedKeys.size ? pages : []) {
+          if (!r.toCheck || !(index.backlinks.get(normalizeRelPath(r.relPath)) ?? []).some((k) => fixedKeys.has(k))) continue;
+          try {
+            const buckets = await linkingBuckets(index, r.relPath, { asOfMs });
+            if (!buckets) continue;
+            const fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: buckets.relPath, linking: buckets.linking, fixedPages });
+            r.toCheck = Math.max(0, r.toCheck - fixed.size);
+          } catch (err) {
+            fixedUnknown.add(r.relPath);
+            log.warn("Stale fixed verdicts unavailable for {page}: {error}", { page: r.relPath, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+      }
+      // PR 3 (D31): the fixes waiting in the Gardener, per changed page. A
+      // page with fixes in review is a row even when nothing else is.
+      const review = await inReviewFor(entry.name);
+      const rows: (typeof pages[number] & { inReview?: number; fixed?: "unavailable" })[] = pages;
+      for (const r of rows) if (fixedUnknown.has(r.relPath)) r.fixed = "unavailable";
+      if (review) {
+        for (const r of rows) {
+          const n = review.get(r.relPath)?.fixes;
+          if (n) r.inReview = n;
+        }
+        for (const [rel, rv] of review) {
+          if (rows.some((r) => r.relPath === rel)) continue;
+          const m = index.resolveRelPath(rel);
+          rows.push({ relPath: rel, title: m ? (m.displayTitle ?? m.title) : rel, staleLines: 0, toCheck: 0, changed: false, dirty: m?.gitDirty === true, hits: 0, inReview: rv.fixes });
+        }
+      }
       // The summary's order, on the confirmed count (`staleSummary` sorted on the free hits).
-      pages.sort((a, b) => b.staleLines + b.toCheck - (a.staleLines + a.toCheck) || (b.lastChangeMs ?? 0) - (a.lastChangeMs ?? 0) || a.relPath.localeCompare(b.relPath));
+      rows.sort((a, b) => b.staleLines + b.toCheck - (a.staleLines + a.toCheck) || (b.lastChangeMs ?? 0) - (a.lastChangeMs ?? 0) || a.relPath.localeCompare(b.relPath));
       return c.json({
         ...base,
         ...summary,
-        totals: { ...summary.totals, staleLines: pages.reduce((n, r) => n + r.staleLines, 0), hits: pages.reduce((n, r) => n + r.hits, 0) },
-        pages,
+        totals: {
+          ...summary.totals,
+          staleLines: rows.reduce((n, r) => n + r.staleLines, 0),
+          toCheck: rows.reduce((n, r) => n + r.toCheck, 0),
+          hits: rows.reduce((n, r) => n + r.hits, 0),
+          ...(review ? { inReview: rows.reduce((n, r) => n + (r.inReview ?? 0), 0) } : {}),
+        },
+        pages: rows,
         ...(confirmations ? {} : { verdicts: "unavailable" }),
+        ...(fixedUnknown.size ? { fixed: "unavailable" } : {}),
+        ...(review ? {} : { inReview: "unavailable" }),
       });
     }
     const meta = resolvePageRef(index, pageRef, pageRef);
@@ -2421,6 +2622,24 @@ export function registerWikiToolRoutes(
       log.warn("Stale verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
     }
     const hits = report.hits.map((h) => ({ ...h, confirmation: confirmations?.get(hitKey(meta.relPath, h)) ?? ("unconfirmed" as const) }));
+    // PR 3 (D29): a To-check page whose current passage carries a `fixed` row
+    // was fixed through the Stale check; it counts as Changed since.
+    // With the verdict store down the fixed set is unknown, so To check is an
+    // upper bound and the answer says `fixed: "unavailable"`, as the summary's rows do.
+    let fixed = new Set<string>();
+    let fixedUnknown = false;
+    if (report.buckets?.counts.toCheck) {
+      if (!confirmations) fixedUnknown = true;
+      else {
+        try {
+          fixed = await fixedLinkingPages({ wiki: entry.name, index, changed: report.buckets.relPath, linking: report.buckets.linking });
+        } catch (err) {
+          fixedUnknown = true;
+          log.warn("Stale fixed verdicts unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+    const review = (await inReviewFor(entry.name))?.get(meta.relPath);
     return c.json({
       ...base,
       ...report,
@@ -2429,20 +2648,39 @@ export function registerWikiToolRoutes(
       buckets: report.buckets
         ? {
             ...report.buckets,
+            counts: fixed.size
+              ? { ...report.buckets.counts, toCheck: report.buckets.counts.toCheck - fixed.size, changedSince: report.buckets.counts.changedSince + fixed.size }
+              : report.buckets.counts,
             linking: report.buckets.linking.map((l) => {
+              if (fixed.has(l.relPath)) return { ...l, bucket: "changedSince" as const, verdict: { verdict: "fixed" as const, reason: "Fixed through the Stale check", edit: null, checkedAt: 0, checkedBy: "reader" } };
               const v = verdictsByLinking.get(l.relPath);
               return v ? { ...l, verdict: v } : l;
             }),
           }
         : null,
+      ...(review ? { inReview: review } : {}),
       ...(confirmations ? {} : { verdicts: "unavailable" }),
+      ...(fixedUnknown ? { fixed: "unavailable" } : {}),
     });
   });
+
+  /** PR 3 (D31): the live Stale check proposals per changed page, or null
+   *  when the proposals cannot be read (the ⧗ states then show nothing). */
+  async function inReviewFor(wiki: string): Promise<Map<string, StaleInReview> | null> {
+    try {
+      return inReviewByChanged(await staleProposalStore().liveStaleCheck(wiki));
+    } catch (err) {
+      log.warn("Stale check proposals unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  }
 
   // THE STALE CHECK'S MODEL HALF (PR 2a, `src/wiki/stale-confirm.ts`).
   // Both refuse on a readonly instance (D25) and on a readonly root (the
   // egress guard, which reads the root), take JSON only and resolve the wiki
-  // like the GET above.
+  // like the GET above. `refresh` (body `true`/`"1"`, or `?refresh=1`)
+  // rebuilds the index first, as on the GET: Check's buckets then come off
+  // the text on disk, the text its passage key (`changedHashOf`) reads.
   const staleRequest = async (c: Context) => {
     const notJson = requireJsonRequest(c);
     if (notJson) return { refusal: notJson } as const;
@@ -2456,7 +2694,8 @@ export function registerWikiToolRoutes(
     if (egress) return { refusal: egress } as const;
     const asOfMs = parseStaleAsOf(str("asOf") || undefined);
     if (asOfMs === null) return { refusal: c.json({ error: "asOf must be a calendar day YYYY-MM-DD, an ISO instant with its zone, or 13-digit epoch ms" }, 400) } as const;
-    const index = await getWikiIndex({ root: entry.root });
+    const refresh = body.refresh === true || body.refresh === "1" || c.req.query("refresh") === "1";
+    const index = await getWikiIndex({ root: entry.root, refresh });
     if (!index) return { refusal: c.json({ error: "wiki directory not found" }, 503) } as const;
     const pageRef = str("page");
     if (!pageRef) return { refusal: c.json({ error: "page is required" }, 400) } as const;
@@ -2581,6 +2820,146 @@ export function registerWikiToolRoutes(
     }
     return c.json({ error: "kind must be status-line or passage" }, 400);
   });
+
+  // THE STALE CHECK'S FIX PATHS (PR 3, `src/wiki/stale-fix.ts`). Both name a
+  // drafted fix on the open page's STALE tab — `kind: "status-line"` by
+  // `target` (+ `line`), `kind: "passage"` by its To-check `linking` page,
+  // `variant` new or home, `old` as the tab showed it — and read the edit off
+  // the stored verdict, never off the body. Both refuse like Check and the
+  // verdict route (readonly instance, readonly root, not JSON, unknown wiki or
+  // page).
+  const fixRequestOf = (body: Record<string, unknown>, asOfMs: number | undefined): StaleFixRequest => ({
+    kind: typeof body.kind === "string" ? body.kind : "",
+    variant: typeof body.variant === "string" ? body.variant : "new",
+    ...(typeof body.target === "string" ? { target: body.target } : {}),
+    ...(Number.isFinite(Number(body.line)) && body.line !== undefined ? { line: Number(body.line) } : {}),
+    ...(typeof body.linking === "string" ? { linking: body.linking } : {}),
+    ...(typeof body.old === "string" ? { old: body.old } : {}),
+    ...(asOfMs !== undefined ? { asOfMs } : {}),
+  });
+
+  // Apply (D9): one page write through the per-wiki write queue
+  // (`writeWikiPage`): read, CAS on the page's bytes, place the edit again on
+  // those bytes (`placeStaleEdit` recomputes the windows), write, `log.md`;
+  // the index refresh and the commit tail outside the section. Then a `fixed`
+  // verdict on the new passage (D29).
+  app.post("/api/wiki/stale/apply", async (c) => {
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs } = r;
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const fix = await resolveStaleFix({ wiki: entry.name, index, anchor: meta, req: fixRequestOf(body, asOfMs) });
+    if (!fix.ok) return c.json({ error: fix.error }, fix.status);
+    const target = index.resolveRelPath(fix.edit.page);
+    if (!target) return c.json({ error: `no page ${fix.edit.page}` }, 404);
+    // A page a live Gardener card holds (a group, or an ungrouped update
+    // draft): a write here would stale that card.
+    try {
+      const held = heldBy(await staleProposalStore().liveHolders(entry.name), target.relPath);
+      if (held) return c.json({ error: heldMessage(held), held: true }, 409);
+    } catch (err) {
+      log.warn("Stale apply: Gardener cards unavailable: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "The Gardener's cards could not be read, so the page's claim is unknown." }, 503);
+    }
+    // The raw bytes, as the write seam reads them for its CAS.
+    const current = await defaultPageWriteIo(entry.root).readFile(path.join(entry.root, target.relPath));
+    if (current === null) return c.json({ error: `${target.relPath} cannot be read` }, 409);
+    const owningBot = entry.source === "bot" ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase()) : undefined;
+    const push = owningBot?.wikiAutoCommit?.push ?? true;
+    // The written page's linking passages' keys under its current hash, so its
+    // verdicts follow it to the new hash (a fix is not a substantive edit).
+    let snapshots: PassageKeySnapshot[] = [];
+    try {
+      snapshots = await snapshotPassageKeys(index, [{ relPath: target.relPath, content: current }]);
+    } catch (err) {
+      log.warn("Stale apply: passage keys not read for {page}: {error}", { page: target.relPath, error: err instanceof Error ? err.message : String(err) });
+    }
+    let refusal: string | null = null;
+    let dirty: string | null = null;
+    let line = 0;
+    const result = await writeWikiPage({
+      wikiDir: entry.root,
+      relPath: target.relPath,
+      baseHash: sha256(current),
+      staleReason: "The page changed while the fix was applied. Reload and try again.",
+      collections: entry.collections ?? [],
+      logKind: "stale-check",
+      logTitle: target.title ?? target.relPath,
+      logLine: () => `line ${line}, stale after [[${fix.edit.link.replace(/\.mdx?$/i, "")}]], fixed via the wiki reader's Stale check`,
+      commitMessage: `[stale-check] apply: ${target.relPath}`,
+      now: () => Date.now(),
+      // The fix commit is not a page change, so it must not carry a hand edit:
+      // a page with uncommitted changes is refused, under the section.
+      proceed: async () => {
+        const has = await pageHasUncommittedChanges(entry.root, target.relPath);
+        if (has === false) return true;
+        dirty = has === null ? `${target.relPath}: git status failed, so its uncommitted edits are unknown` : `${target.relPath} has uncommitted edits — commit them first`;
+        return false;
+      },
+      transform: (raw) => {
+        const placed = placeStaleEdit(raw, fix.edit, index);
+        if (!placed.ok) {
+          refusal = placed.reason;
+          return null;
+        }
+        line = placed.line;
+        return placed.content;
+      },
+      ...defaultPageWriteIo(entry.root),
+      reindex: async (collection) => {
+        await postCollectionUpdate(config.knowledgeApiUrl, collection);
+      },
+      commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
+    });
+    if (result.outcome === "forbidden") return c.json({ error: result.reason, readonly: true }, 403);
+    if (result.outcome === "stale") return c.json({ error: result.reason, stale: true }, 409);
+    if (result.outcome === "locked") return c.json({ error: result.reason, locked: true }, 409);
+    if (dirty) return c.json({ error: dirty, dirty: true }, 409);
+    if (refusal) return c.json({ error: refusal, refused: true }, 409);
+    if (result.outcome !== "written") return c.json({ error: result.outcome === "error" ? result.reason : "nothing was written" }, 500);
+    let fixedRows = 0;
+    try {
+      // Rebuilt AFTER the commit tail: the write's own refresh ran while the
+      // page was still uncommitted, which reads it as changed by its mtime.
+      const fresh = await getWikiIndex({ root: entry.root, refresh: true });
+      if (fresh) {
+        fixedRows = await writeFixedVerdicts({ wiki: entry.name, index: fresh, edits: [fix.edit] });
+        await carryPassageVerdicts({ wiki: entry.name, index: fresh, snapshots });
+      }
+    } catch (err) {
+      log.warn("Stale apply: the fixed verdict was not written for {page}: {error}", { page: target.relPath, error: err instanceof Error ? err.message : String(err) });
+    }
+    return c.json({ ok: true, page: target.relPath, line, fixed: fixedRows, committed: result.commit?.committed ?? false });
+  });
+
+  // Send to Gardener (D20): a Stale check proposal group for the open page,
+  // never an edit to an open one (`sendStaleFix`).
+  app.post("/api/wiki/stale/send", async (c) => {
+    const r = await staleRequest(c);
+    if ("refusal" in r) return r.refusal;
+    const { entry, index, meta, asOfMs } = r;
+    // The gate lists a wiki's proposals only where it has a bot or search
+    // collections (`isGardenerWiki`); a card sent elsewhere would be unreachable.
+    if (entry.source !== "bot" && !(entry.collections && entry.collections.length > 0)) {
+      return c.json({ error: "This wiki has no Gardener review page (no bot and no search collections). Apply the fix instead." }, 409);
+    }
+    const body = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+    const fix = await resolveStaleFix({ wiki: entry.name, index, anchor: meta, req: fixRequestOf(body, asOfMs) });
+    if (!fix.ok) return c.json({ error: fix.error }, fix.status);
+    try {
+      const out = await sendStaleFix({ wiki: entry.name, wikiDir: entry.root, index, changed: meta.relPath, edit: fix.edit });
+      if (out.outcome === "refused") return c.json({ error: out.error }, out.status);
+      return c.json({ ok: true, ...out });
+    } catch (err) {
+      log.warn("Stale send failed for {page}: {error}", { page: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "The fix could not be sent to the Gardener. The server log has the details." }, 503);
+    }
+  });
+
+  // The status date check (`src/wiki/status-date-check.ts`): one page's
+  // `status_date` against the newest merge among its `prs:`, read from the PR
+  // states the work map card's check cached. It asks GitHub nothing.
+  registerWikiClaimCheckRoute(app, config);
 
   app.get("/api/wiki/index-coverage", async (c) => {
     const nullCoverage = (extra: Partial<IndexCoverageResponse> & { error?: string }) =>
@@ -5309,4 +5688,28 @@ export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
     });
   }
   return edits;
+}
+
+/**
+ * Whether `Accept-Encoding` (RFC 9110 §12.5.3) admits gzip. The most specific
+ * name listed decides, by its best weight: `gzip`, else `x-gzip` (its alias,
+ * §8.4.1.3), else `*`; the order of entries never matters. A missing q is 1; else the
+ * first q's weight is `Number()` of its value (`0x1`, `1e0`, `2` count as
+ * positive); a non-finite one (NaN, Infinity), or a q with no `=` or more than
+ * one, is 0. Space around `=` is tolerated (the grammar allows none), so a
+ * malformed `q = 0` still refuses.
+ */
+export function acceptsGzip(header: string | undefined): boolean {
+  const best = new Map<string, number>();
+  for (const part of (header ?? "").split(",")) {
+    const [name, ...params] = part.split(";").map((x) => x.trim().toLowerCase());
+    const q = params.map((p) => p.split("=")).find((kv) => kv[0]!.trim() === "q");
+    const w = q === undefined ? 1 : q.length === 2 ? Number(q[1]) : NaN;
+    best.set(name!, Math.max(best.get(name!) ?? 0, Number.isFinite(w) ? w : 0));
+  }
+  for (const name of ["gzip", "x-gzip", "*"]) {
+    const w = best.get(name);
+    if (w !== undefined) return w > 0;
+  }
+  return false;
 }

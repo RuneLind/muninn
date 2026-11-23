@@ -1123,6 +1123,12 @@ export const spec = {
                     description:
                       "The summary kind this capture writes, from `GET /api/youtube/options`. Absent is `standard`; present but blank, non-string, or unoffered is 400 `bad_kind` — never a silent standard capture. It decides the prompt's structure, the model (`deep` runs the opus constant) and whether the 8k capture thinking cap applies.",
                   },
+                  connector_id: {
+                    type: "string",
+                    format: "uuid",
+                    description:
+                      "A named connector (a `connectors` row, listed by `GET /api/youtube/options`) to run the capture on instead of `SUMMARIZER_BOT`'s own connector and model; its set fields win, the rest fall back to the bot. Absent or null is the bot as configured. Present but not a non-blank string, or naming no row, is 400 `bad_connector`; a failed lookup is 503 `connector_lookup_failed`. `kind` and `frames` are checked against the PICKED connector. When the row names a model, `deep` keeps that model and only raises the thinking budget.",
+                  },
                 },
                 required: ["url", "video_id"],
               },
@@ -1161,7 +1167,7 @@ export const spec = {
         tags: ["YouTube"],
         summary: "Capture options this instance offers",
         description:
-          "The summary kinds `POST /api/youtube/summarize` accepts on this instance, and whether it can read slides at all — one resolution, so the extension popup's picker and the POST's 400 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot. `frames.supported` mirrors that bot's `supportsExtraDirs`. Read-only, with the same CORS disposition the POST applies (the caller is a Chrome extension whose Muninn URL is user-editable past the manifest's localhost grant), and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker.",
+          "The summary kinds `POST /api/youtube/summarize` accepts on this instance, and whether it can read slides at all — one resolution, so the extension popup's picker and the POST's 400 cannot disagree. The kinds are `SUMMARIZER_BOT`'s resolved preset set narrowed to those whose model AND thinking budget its connector can honour, so `deep` is absent on a `copilot-sdk` bot. `frames.supported` mirrors that bot's `supportsExtraDirs`. Read-only, with the same CORS disposition the POST applies (the caller is a Chrome extension whose Muninn URL is user-editable past the manifest's localhost grant), and a CORS-simple request, so no preflight is registered. No summarizer bot at all is 500 `no_bot`, not an empty picker. `connectors` lists every named connector with the kinds and `frames.supported` it would get, so the popup's connector picker can switch without a second request; it is absent when there are none or the listing fails.",
         operationId: "getYoutubeOptions",
         responses: {
           "200": {
@@ -1185,6 +1191,30 @@ export const spec = {
                     frames: {
                       type: "object",
                       properties: { supported: { type: "boolean" } },
+                    },
+                    connectors: {
+                      type: "object",
+                      properties: {
+                        default_label: { type: "string" },
+                        options: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              id: { type: "string", format: "uuid" },
+                              label: { type: "string" },
+                              kinds: {
+                                type: "array",
+                                items: {
+                                  type: "object",
+                                  properties: { id: { type: "string" }, label: { type: "string" } },
+                                },
+                              },
+                              frames: { type: "object", properties: { supported: { type: "boolean" } } },
+                            },
+                          },
+                        },
+                      },
                     },
                   },
                 },

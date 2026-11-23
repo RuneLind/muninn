@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 import type { LintMeta } from "../gardener/lint-markers.ts";
+import type { StaleFixEdit } from "../wiki/stale-fix.ts";
 import {
   recordSourceDraftAttemptIn,
   type RecordSourceDraftAttemptParams,
@@ -63,9 +64,25 @@ export interface WikiProposalRelatedPage {
  * `lint` is the odd one out: it is not a DRAFTED page but a mechanical edit the
  * wiki linter computed (`src/gardener/lint-proposals.ts`) — always `update`
  * mode, always `source_docs: []`, never cataloged and never wired, because it IS
- * the wire. It is also the only kind whose rows come in GROUPS (`group_key`).
+ * the wire. Its rows come in GROUPS (`group_key`).
+ *
+ * `stale-check` is the Stale check's fix (plan muninn-wiki-drift-check, PR 3,
+ * `src/gardener/stale-proposals.ts`): drafted edits the reader sent from the
+ * STALE tab, one row per page they write, grouped per changed page. Mechanical
+ * like `lint` — never cataloged, never wired, no containment — but its own
+ * kind and group scheme (D9, D19).
  */
-export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis" | "lint";
+export type WikiProposalKind = "concept" | "entity" | "source" | "synthesis" | "lint" | "stale-check";
+
+/** `stale-check` rows only (`stale_meta`, migration 086): the changed page the
+ *  card is about, the edits this row's draft applies (each re-applied to the
+ *  page's live bytes when a later Send redrafts the group, D20), and the group
+ *  this one replaced. */
+export interface StaleCheckMeta {
+  changed: string;
+  edits: StaleFixEdit[];
+  supersedes?: string | null;
+}
 export type WikiProposalMode = "create" | "update";
 export type WikiProposalStatus =
   | "draft"
@@ -97,6 +114,8 @@ export interface WikiProposal {
    *  against. NULL on every other kind, and on lint rows written before
    *  migration 078 — both readers degrade, see `src/gardener/lint-markers.ts`. */
   lintMeta: LintMeta | null;
+  /** `stale-check` rows only; NULL (or absent) on every other kind. */
+  staleMeta?: StaleCheckMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -121,6 +140,8 @@ export interface InsertWikiProposalParams {
   groupKey?: string | null;
   /** See {@link WikiProposal.lintMeta}; omit for every kind but `lint`. */
   lintMeta?: LintMeta | null;
+  /** See {@link WikiProposal.staleMeta}; omit for every kind but `stale-check`. */
+  staleMeta?: StaleCheckMeta | null;
   kind: WikiProposalKind;
   mode: WikiProposalMode;
   targetPath: string;
@@ -152,13 +173,14 @@ async function insertWikiProposalWith(
 ): Promise<WikiProposal | null> {
   const [row] = await sql`
     INSERT INTO wiki_proposals (
-      bot_name, wiki_name, topic_key, group_key, lint_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
+      bot_name, wiki_name, topic_key, group_key, lint_meta, stale_meta, kind, mode, target_path, base_hash, draft, source_docs, rationale, contained_links, related_pages, status
     ) VALUES (
       ${params.botName},
       ${params.wikiName ?? null},
       ${params.topicKey},
       ${params.groupKey ?? null},
       ${params.lintMeta ? sql.json(params.lintMeta as any) : null},
+      ${params.staleMeta ? sql.json(params.staleMeta as any) : null},
       ${params.kind},
       ${params.mode},
       ${params.targetPath},
@@ -334,11 +356,11 @@ export async function rejectWikiProposal(id: string): Promise<WikiProposal | nul
  * apply step wrote the file successfully. Only an `approved` row (the one this
  * process just claimed) can flip, so a stray double-apply is a no-op.
  */
-export async function markWikiProposalApplied(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalApplied(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -349,11 +371,11 @@ export async function markWikiProposalApplied(id: string): Promise<WikiProposal 
  * (update-mode hash mismatch, or a create-mode path that now exists), so nothing
  * was written and the topic becomes eligible again on the next weekly run.
  */
-export async function markWikiProposalStale(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalStale(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -371,22 +393,22 @@ export async function markWikiProposalStale(id: string): Promise<WikiProposal | 
  * verb; flipping it to `error` burns a perfectly good draft on a policy answer.
  * `approve` never sets `resolved_at`, so there is nothing to clear here.
  */
-export async function revertWikiProposalToDraft(id: string): Promise<WikiProposal | null> {
+export async function revertWikiProposalToDraft(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'draft'
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
 }
 
 /** CAS `approved → error` (+ resolved_at) — the apply step failed unexpectedly. */
-export async function markWikiProposalError(id: string): Promise<WikiProposal | null> {
+export async function markWikiProposalError(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
   const sql = getDb();
   const [row] = await sql`
     UPDATE wiki_proposals SET status = 'error', resolved_at = now()
-    WHERE id = ${id} AND status = 'approved'
+    WHERE id = ${id} AND status = 'approved' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return row ? mapRow(row) : null;
@@ -652,33 +674,147 @@ export async function listWikiProposalsByGroup(
 export async function approveWikiProposalGroup(
   wikiName: string,
   groupKey: string,
+  lease?: GroupLeaseRef,
 ): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposals SET status = 'approved'
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
+      AND group_key = ${groupKey} AND status = 'draft' ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return rows.map(mapRow);
 }
 
-/** CAS every `draft` row of a group to `rejected` (+ resolved_at). The rejected
- *  rows are what makes the group's key a SKIP LIST: `lint-proposals.ts` refuses
- *  to re-propose a group any row of which exists in any status, so a dismissal
- *  is remembered by leaving these rows in place. */
+/** CAS every live (`draft` or `approved`) row of a group to `rejected`
+ *  (+ resolved_at), except `exceptIds`. The rejected rows are what makes the
+ *  group's key a SKIP LIST: `lint-proposals.ts` refuses to re-propose a group
+ *  any row of which exists in any status, so a dismissal is remembered by
+ *  leaving these rows in place.
+ *
+ *  `approved` is taken too (F35, arch review 2026-11-16): the route calls this
+ *  only while it holds the group's lease ({@link claimWikiProposalGroupLease}),
+ *  so an `approved` row there is one a failed or restarted Accept stranded, and
+ *  a Dismiss that skipped it left the group wedged as `approved` + `rejected`. */
 export async function rejectWikiProposalGroup(
   wikiName: string,
   groupKey: string,
+  exceptIds: readonly string[] = [],
+  lease?: GroupLeaseRef,
 ): Promise<WikiProposal[]> {
   const sql = getDb();
   const rows = await sql`
     UPDATE wiki_proposals SET status = 'rejected', resolved_at = now()
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
+      AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+      AND NOT (id = ANY(${exceptIds as string[]}::uuid[])) ${leaseFence(sql, lease)}
     RETURNING *
   `;
   return rows.map(mapRow);
+}
+
+/** CAS a live (`draft` or `approved`) row to `applied` (+ resolved_at): a group
+ *  row whose page already carries its draft when the reviewer dismisses the
+ *  group (an earlier Accept wrote it). Rejecting it would record a dismissal of
+ *  an edit that is on the page. */
+export async function settleWikiProposalApplied(id: string, lease?: GroupLeaseRef): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'applied', resolved_at = now()
+    WHERE id = ${id} AND status IN ('draft', 'approved') ${leaseFence(sql, lease)}
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
+/** How long a group verb's lease lives without a renewal, and how often a
+ *  running verb renews it. A verb that dies leaves its rows stranded for at
+ *  most the TTL. */
+export const GROUP_LEASE_TTL_MS = 120_000;
+export const GROUP_LEASE_RENEW_MS = 30_000;
+
+/**
+ * Claim a group for one Accept or Dismiss, across processes (F35, migration
+ * 092). ONE statement: insert the lease, or take one whose `expires_at` has
+ * passed. Returns the token, or null when another verb holds a live lease.
+ * `scope` is the `COALESCE(wiki_name, bot_name)` the group verbs filter on.
+ */
+export async function claimWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  verb: "accept" | "dismiss" | "self-heal",
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<string | null> {
+  const sql = getDb();
+  const token = crypto.randomUUID();
+  const [row] = await sql`
+    INSERT INTO wiki_proposal_group_leases (scope, group_key, token, verb, expires_at)
+    VALUES (${scope}, ${groupKey}, ${token}, ${verb}, now() + ${ttlMs} * interval '1 millisecond')
+    ON CONFLICT (scope, group_key) DO UPDATE
+      SET token = EXCLUDED.token, verb = EXCLUDED.verb, expires_at = EXCLUDED.expires_at
+      WHERE wiki_proposal_group_leases.expires_at <= now()
+    RETURNING token
+  `;
+  return row ? (row.token as string) : null;
+}
+
+/** Push a held lease's expiry out by the TTL. False when the token no longer
+ *  holds a LIVE lease: another verb took it, or it expired. An expired lease
+ *  is never revived, so a lease found gone stays gone (the F35 state table
+ *  relies on it: a verb that saw it lost cannot have it back mid-run). */
+export async function renewWikiProposalGroupLease(
+  scope: string,
+  groupKey: string,
+  token: string,
+  ttlMs: number = GROUP_LEASE_TTL_MS,
+): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE wiki_proposal_group_leases SET expires_at = now() + ${ttlMs} * interval '1 millisecond'
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token} AND expires_at > now()
+    RETURNING 1
+  `;
+  return rows.length > 0;
+}
+
+/** A held group lease, as the fenced writes take it (F35 fix round 2). */
+export interface GroupLeaseRef {
+  scope: string;
+  groupKey: string;
+  token: string;
+}
+
+/** The `AND EXISTS (…)` clause that fences a row CAS on a live lease: the
+ *  statement moves nothing unless `lease.token` still holds the group and its
+ *  `expires_at` has not passed, checked in the same statement as the CAS. No
+ *  lease ⇒ an empty fragment (the single-row verbs). */
+function leaseFence(sql: Sql, lease: GroupLeaseRef | undefined) {
+  return lease
+    ? sql`AND EXISTS (
+        SELECT 1 FROM wiki_proposal_group_leases
+        WHERE scope = ${lease.scope} AND group_key = ${lease.groupKey} AND token = ${lease.token} AND expires_at > now()
+      )`
+    : sql``;
+}
+
+/** Does `token` still hold a live lease on the group? The check a lease holder
+ *  runs before a write that is not a row CAS (a page, `log.md`, a verdict). */
+export async function wikiProposalGroupLeaseHeld(scope: string, groupKey: string, token: string): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT 1 FROM wiki_proposal_group_leases
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token} AND expires_at > now()
+  `;
+  return rows.length > 0;
+}
+
+/** Drop a lease this token holds; a lease another verb took is left alone. */
+export async function releaseWikiProposalGroupLease(scope: string, groupKey: string, token: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    DELETE FROM wiki_proposal_group_leases
+    WHERE scope = ${scope} AND group_key = ${groupKey} AND token = ${token}
+  `;
 }
 
 /** One lint row, reduced to what the seeder decides with: which group it is in,
@@ -687,10 +823,15 @@ export interface LintGroupRow {
   groupKey: string;
   targetPath: string;
   status: WikiProposalStatus;
+  /** The row's kind. The seeder's self-heal and blocked keys read `lint` rows
+   *  only; its page claims read every kind (D19), so a lint run never retires a
+   *  Stale check card and skips a page one holds. Absent reads as `lint`. */
+  kind?: WikiProposalKind;
 }
 
 /**
- * Every lint row this wiki holds, in every status — the seeder's whole input for
+ * Every GROUPED row this wiki holds (lint and Stale check), in every status,
+ * with its kind — the seeder's whole input for
  * "what may I propose".
  *
  * It returns ROWS rather than a set of keys because the seeder now asks three
@@ -706,24 +847,57 @@ export interface LintGroupRow {
  *  - **which PAGES are claimed** — the `target_path` of every live row. One page
  *    may be in one live group at a time, or applying either group stales the
  *    other forever;
- *  - **which live DRAFT groups no longer match a finding** — the self-heal's
- *    input (see `seedLintProposals`).
+ *  - **which live groups no longer match a finding** — the self-heal's input
+ *    (see `seedLintProposals`).
  */
 export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGroupRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT group_key, target_path, status FROM wiki_proposals
+    SELECT group_key, target_path, status, kind FROM wiki_proposals
     WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL
   `;
   return rows.map((r) => ({
     groupKey: r.group_key as string,
     targetPath: r.target_path as string,
     status: r.status as WikiProposalStatus,
+    kind: r.kind as WikiProposalKind,
   }));
 }
 
+export type InsertLintGroupOutcome =
+  | { outcome: "inserted"; inserted: number }
+  /** A live grouped row committed on a target page since the seeder's read. Nothing was written. */
+  | { outcome: "held"; targetPath: string; groupKey: string };
+
 /**
- * Retire every `draft` row of one lint group — the self-heal's write.
+ * The lint seeder's insert of ONE finding's rows: one transaction under the
+ * page-claims lock (`lockWikiPageClaims`, the lock Send's supersede takes). It
+ * re-checks lint's own claim rule — any live GROUPED row on a target page,
+ * the rule `seedLintProposals` read before it built the rows — and inserts
+ * nothing when one holds a page, so a Send that committed after the seeder's
+ * read cannot end with two live groups on one page. A row whose topic key is
+ * already live is skipped as before (`ON CONFLICT DO NOTHING`).
+ */
+export async function insertLintGroupRows(wikiName: string, rows: readonly InsertWikiProposalParams[]): Promise<InsertLintGroupOutcome> {
+  if (!rows.length) return { outcome: "inserted", inserted: 0 };
+  return getDb().begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    await lockWikiPageClaims(tx, wikiName);
+    const [held] = await tx`
+      SELECT group_key, target_path FROM wiki_proposals
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND group_key IS NOT NULL
+        AND status IN ('draft', 'approved') AND target_path = ANY(${rows.map((r) => r.targetPath)}::text[])
+      LIMIT 1
+    `;
+    if (held) return { outcome: "held" as const, targetPath: held.target_path as string, groupKey: held.group_key as string };
+    let inserted = 0;
+    for (const r of rows) if (await insertWikiProposalWith(tx, r)) inserted += 1;
+    return { outcome: "inserted" as const, inserted };
+  });
+}
+
+/**
+ * Retire the live rows of one lint group — the self-heal's write.
  *
  * `stale` rather than `rejected`: the reviewer said nothing, the FINDING changed
  * shape under the card (the cluster grew a member after a sibling fix applied),
@@ -731,18 +905,176 @@ export async function listLintGroupRowsByWiki(wikiName: string): Promise<LintGro
  * describes the wiki". A `rejected` row would silence the successor group too,
  * since a dismissal is by group key and the key is what moved.
  *
- * `approved` rows are left alone: they are mid-apply, and the apply's own
- * terminal CAS owns them.
+ * Without `leaseToken` only `draft` rows are retired. With it, `approved` rows
+ * are retired too, and only while that token still holds a live lease on the
+ * group ({@link claimWikiProposalGroupLease}): with no verb holding the group,
+ * an `approved` row is one a failed or restarted Accept stranded (F35), not one
+ * an apply is writing. The token check keeps the statement off a group a verb
+ * claimed after the self-heal's lease ran out.
  */
-export async function markLintGroupStale(wikiName: string, groupKey: string): Promise<number> {
+export async function markLintGroupStale(wikiName: string, groupKey: string, leaseToken?: string): Promise<number> {
+  const sql = getDb();
+  const rows = leaseToken
+    ? await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status IN ('draft', 'approved')
+        ${leaseFence(sql, { scope: wikiName, groupKey, token: leaseToken })}
+      RETURNING id
+    `
+    : await sql`
+      UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
+      WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
+        AND group_key = ${groupKey} AND status = 'draft'
+      RETURNING id
+    `;
+  return rows.length;
+}
+
+// ── Stale check proposals (kind `stale-check`, PR 3 of muninn-wiki-drift-check) ──
+
+/** Every `stale-check` row about one changed page, in every status, oldest
+ *  first. Send reads the live group off it, and the group number. */
+export async function listStaleCheckRowsByChanged(wikiName: string, changed: string): Promise<WikiProposal[]> {
+  const rows = await getDb()`
+    SELECT * FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND kind = 'stale-check' AND stale_meta->>'changed' = ${changed}
+    ORDER BY created_at ASC, target_path ASC
+  `;
+  return rows.map(mapRow);
+}
+
+/** Every live (`draft`/`approved`) `stale-check` row of a wiki: the ⧗ «in
+ *  review» states read them (D31). */
+export async function listLiveStaleCheckRows(wikiName: string): Promise<WikiProposal[]> {
+  const rows = await getDb()`
+    SELECT * FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND kind = 'stale-check' AND status IN ('draft', 'approved')
+    ORDER BY created_at ASC, target_path ASC
+  `;
+  return rows.map(mapRow);
+}
+
+/**
+ * One live row that holds its page for Send and Apply: a grouped row of any
+ * kind (lint, Stale check), or an ungrouped `update` row (a wiki-gardener
+ * concept/entity update, a consolidation update). A write to the page would
+ * stale either one, and a second live row on it would race its CAS. Ungrouped
+ * `create` rows hold nothing: they name a page that does not exist yet.
+ */
+export interface LivePageHolder {
+  id: string;
+  /** Null for an ungrouped `update` row. */
+  groupKey: string | null;
+  topicKey: string;
+  targetPath: string;
+  kind: WikiProposalKind;
+  status: WikiProposalStatus;
+}
+
+function mapHolder(r: Record<string, unknown>): LivePageHolder {
+  return {
+    id: r.id as string,
+    groupKey: (r.group_key as string | null) ?? null,
+    topicKey: r.topic_key as string,
+    targetPath: r.target_path as string,
+    kind: r.kind as WikiProposalKind,
+    status: r.status as WikiProposalStatus,
+  };
+}
+
+/** Every live page holder of a wiki: the page claim Send and Apply read. The
+ *  lint seeder reads its own claims (`listLintGroupRowsByWiki`, grouped rows only). */
+export async function listLivePageHolders(wikiName: string): Promise<LivePageHolder[]> {
   const sql = getDb();
   const rows = await sql`
-    UPDATE wiki_proposals SET status = 'stale', resolved_at = now()
-    WHERE COALESCE(wiki_name, bot_name) = ${wikiName}
-      AND group_key = ${groupKey} AND status = 'draft'
-    RETURNING id
+    SELECT id, group_key, topic_key, target_path, kind, status FROM wiki_proposals
+    WHERE COALESCE(wiki_name, bot_name) = ${wikiName} AND status IN ('draft', 'approved') AND (group_key IS NOT NULL OR mode = 'update')
   `;
-  return rows.length;
+  return rows.map(mapHolder);
+}
+
+/**
+ * The per-wiki lock the two writers that put grouped rows on pages take inside
+ * their transaction: Send's supersede and the lint seeder's insert. Each
+ * re-checks the page claims under it, so neither can insert over a row the
+ * other committed after its first read. Transaction-scoped: released at
+ * commit, never held across a model or network call.
+ */
+async function lockWikiPageClaims(tx: Sql, wikiName: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(hashtext(${"wiki-page-claims:" + wikiName}))`;
+}
+
+/** The group number in a `stale-check:<changed>:<n>` key, or 0. */
+export function staleCheckGroupNumber(groupKey: string | null | undefined): number {
+  const m = /:(\d+)$/.exec(groupKey ?? "");
+  return m ? Number(m[1]) : 0;
+}
+
+export type SupersedeStaleCheckOutcome =
+  | { outcome: "sent"; groupKey: string; inserted: WikiProposal[]; retired: number }
+  /** The live group is not the one the redraft read: another Send or an
+   *  Accept moved it. Nothing was written. */
+  | { outcome: "conflict"; reason: string }
+  /** A page another live holder ({@link LivePageHolder}) holds. Nothing was written. */
+  | { outcome: "held"; targetPath: string; groupKey: string | null; topicKey: string; kind: WikiProposalKind };
+
+/**
+ * D20, in ONE transaction: retire the live group n (status `stale`, D28) and
+ * insert group n+1 with `rows`. Send never edits an open group.
+ *
+ * Serialized per wiki on the page-claims lock ({@link lockWikiPageClaims}), so
+ * two Sends cannot both mint group n+1 and a lint seed cannot insert on a page
+ * between this check and the commit. Inside it: the live rows for `changed`
+ * must be exactly `expectedLiveIds`, all `draft` (`conflict` otherwise), and no
+ * target page may be held by a live page holder outside that set (`held`). `n` is one past the
+ * highest group number ever used for `changed`, whatever its status, so a key
+ * never names two groups.
+ */
+export async function supersedeStaleCheckGroup(params: {
+  wikiName: string;
+  changed: string;
+  expectedLiveIds: readonly string[];
+  rows: readonly Omit<InsertWikiProposalParams, "groupKey">[];
+}): Promise<SupersedeStaleCheckOutcome> {
+  const sql = getDb();
+  return sql.begin(async (_tx) => {
+    const tx = _tx as unknown as Sql;
+    await lockWikiPageClaims(tx, params.wikiName);
+    const mine = await tx`
+      SELECT id, group_key, status FROM wiki_proposals
+      WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} AND kind = 'stale-check' AND stale_meta->>'changed' = ${params.changed}
+      FOR UPDATE
+    `;
+    const live = mine.filter((r) => r.status === "draft" || r.status === "approved");
+    const expected = new Set(params.expectedLiveIds);
+    if (live.length !== expected.size || live.some((r) => !expected.has(r.id as string) || r.status !== "draft")) {
+      return { outcome: "conflict" as const, reason: "the Stale check card for this page changed meanwhile; reload and send again" };
+    }
+    const targets = params.rows.map((r) => r.targetPath);
+    if (targets.length) {
+      const holders = await tx`
+        SELECT id, group_key, topic_key, target_path, kind, status FROM wiki_proposals
+        WHERE COALESCE(wiki_name, bot_name) = ${params.wikiName} -- the LivePageHolder predicate, as listLivePageHolders reads it
+          AND status IN ('draft', 'approved') AND (group_key IS NOT NULL OR mode = 'update')
+          AND target_path = ANY(${targets as string[]}::text[])
+      `;
+      const held = holders.map(mapHolder).find((h) => !expected.has(h.id));
+      if (held) return { outcome: "held" as const, targetPath: held.targetPath, groupKey: held.groupKey, topicKey: held.topicKey, kind: held.kind };
+    }
+    const n = Math.max(0, ...mine.map((r) => staleCheckGroupNumber(r.group_key as string))) + 1;
+    const groupKey = `stale-check:${params.changed}:${n}`;
+    const retired = live.length
+      ? await tx`UPDATE wiki_proposals SET status = 'stale', resolved_at = now() WHERE id = ANY(${[...expected]}::uuid[]) AND status = 'draft' RETURNING id`
+      : [];
+    const inserted: WikiProposal[] = [];
+    for (const r of params.rows) {
+      const row = await insertWikiProposalWith(tx, { ...r, groupKey });
+      if (!row) throw new Error(`stale-check insert collided on ${r.topicKey}`);
+      inserted.push(row);
+    }
+    return { outcome: "sent" as const, groupKey, inserted, retired: retired.length };
+  });
 }
 
 function mapRow(r: Record<string, any>): WikiProposal {
@@ -753,6 +1085,7 @@ function mapRow(r: Record<string, any>): WikiProposal {
     topicKey: r.topic_key,
     groupKey: r.group_key ?? null,
     lintMeta: (r.lint_meta ?? null) as LintMeta | null,
+    staleMeta: r.stale_meta && typeof r.stale_meta.changed === "string" && Array.isArray(r.stale_meta.edits) ? (r.stale_meta as StaleCheckMeta) : null,
     kind: r.kind as WikiProposalKind,
     mode: r.mode as WikiProposalMode,
     targetPath: r.target_path,

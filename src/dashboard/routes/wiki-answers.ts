@@ -297,7 +297,7 @@ function versionView(v: WikiAnswerVersion): AnswerVersionView {
 /** The session's author, or the owner with auth off, or null when auth is off
  *  and no owner is configured. The owner is read in the target format, so
  *  `Rune Lind (X111111)` stores the name and keeps the ident for `asked`. */
-function authorFor(c: Context, owner: string | null): WikiAnswerAuthor | null {
+export function answerAuthorFor(c: Context, owner: string | null): WikiAnswerAuthor | null {
   const identity = sessionIdentity(c);
   if (identity) {
     return { userId: identity.userId, oid: identity.oid, navIdent: identity.navIdent, name: identity.displayName };
@@ -312,7 +312,7 @@ function isMine(c: Context, a: { author: WikiAnswerAuthor }): boolean {
   return identity === null || (a.author.userId !== null && a.author.userId === identity.userId);
 }
 
-const err = (c: Context, status: 400 | 403 | 404 | 409 | 422 | 503, code: string, error: string) =>
+const err = (c: Context, status: 400 | 403 | 404 | 409 | 422 | 429 | 503, code: string, error: string) =>
   c.json({ error, code }, status);
 
 /** A NUL (Postgres refuses it in text) or an unpaired surrogate (stored as
@@ -410,6 +410,13 @@ const questionChangedOf = (q: CurrentQuestion | undefined, storedHash: string): 
  *  PR 5 opens the answer routes to role `user`, and the export must not follow. */
 const isAdminViewer = (c: Context) => (sessionRole(c) ?? "admin") === "admin";
 
+/** F51: the most versions one answer takes from a role user. 50 versions of
+ *  an 8,000-character body is 400k characters, far past a real back-and-forth. */
+export const ANSWER_VERSION_CAP = 50;
+/** F51: saves (new answers and edits) one role user may send per window. Each
+ *  is a row and a scanner run; 20 in 10 minutes is above a reader's pace. */
+export const ANSWER_SAVE_RATE = { max: 20, windowMs: 10 * 60_000 };
+
 /** The largest `version` the column holds (Postgres `int4`). */
 const VERSION_MAX = 2_147_483_647;
 
@@ -455,7 +462,28 @@ export function registerWikiAnswerRoutes(
   config: Config,
   store: WikiAnswerStore = defaultStore,
   exportStore: WikiAnswerExportStore = defaultExportStore,
+  opts: { now?: () => number } = {},
 ): void {
+  const now = opts.now ?? Date.now;
+  /** A role user's recent save times by user id, for {@link ANSWER_SAVE_RATE}.
+   *  In memory: a restart forgets it, which costs at most one window. */
+  const recentSaves = new Map<string, number[]>();
+  /** True when a role user is under the rate; the save is then counted. */
+  const takeSaveSlot = (userId: string): boolean => {
+    const t = now();
+    const kept = (recentSaves.get(userId) ?? []).filter((at) => t - at < ANSWER_SAVE_RATE.windowMs);
+    if (kept.length >= ANSWER_SAVE_RATE.max) {
+      recentSaves.set(userId, kept);
+      return false;
+    }
+    kept.push(t);
+    recentSaves.set(userId, kept);
+    // Keeps the map to the users who saved within the last window.
+    if (recentSaves.size > 1000) {
+      for (const [k, v] of recentSaves) if (v.every((at) => t - at >= ANSWER_SAVE_RATE.windowMs)) recentSaves.delete(k);
+    }
+    return true;
+  };
   const profile = config.profile ?? resolveServingProfile();
   const readSliceOnly = servesWikiReadSliceOnly(profile);
   const answerConfig = () => config.wikiAnswers ?? resolveWikiAnswerConfig();
@@ -537,6 +565,9 @@ export function registerWikiAnswerRoutes(
     if (b.answerId !== undefined && typeof b.answerId !== "string") return err(c, 400, "bad_request", "answerId must be a string");
     if (b.carriedFrom !== undefined && typeof b.carriedFrom !== "string") return err(c, 400, "bad_request", "carriedFrom must be a string");
     if (b.carryToken !== undefined && typeof b.carryToken !== "string") return err(c, 400, "bad_request", "carryToken must be a string");
+    if (b.questionHash !== undefined && typeof b.questionHash !== "string") {
+      return err(c, 400, "bad_request", "questionHash must be a string");
+    }
     if (b.answerId !== undefined && b.carriedFrom !== undefined) {
       return err(c, 400, "bad_request", "carriedFrom belongs to a new answer, not an edit");
     }
@@ -565,7 +596,7 @@ export function registerWikiAnswerRoutes(
     if (!page.entry || !wikiTakesAnswers(page.entry.name, cfg)) {
       return err(c, 403, "not_answerable", `wiki "${wiki}" does not take answers (WIKI_ANSWER_WIKIS)`);
     }
-    const author = authorFor(c, cfg.owner);
+    const author = answerAuthorFor(c, cfg.owner);
     if (!author) {
       return err(c, 503, "owner_unset", "WIKI_ANSWER_OWNER is not set: with auth off an answer has no author");
     }
@@ -580,6 +611,14 @@ export function registerWikiAnswerRoutes(
     }
     const state = parsed.states.get(questionId) ?? { kind: "open" as const };
     if (state.kind !== "open") return err(c, 409, "question_closed", `question ${questionId} is ${state.kind}`);
+    // F49: the card sends the hash of the wording it rendered; a page rewritten
+    // since (same id, same labels) must not take "A" meant for the old text.
+    // The stored hash is still computed here, never the body's. A POST without
+    // one (a tab from before this field, another client) saves as before.
+    const questionHash = sha256(question.hashInput);
+    if (typeof b.questionHash === "string" && b.questionHash !== questionHash) {
+      return err(c, 409, "question_changed", `question ${questionId} was changed since this page loaded: reload the page`);
+    }
 
     // The card offers "Not sure yet" only beside parsed choices, so a question
     // with none takes no choice. A page that declares a choice spelled like the
@@ -617,6 +656,9 @@ export function registerWikiAnswerRoutes(
         // which is what closes the race with a concurrent redact.
         if (latest.redactedAt !== null) return answerRedacted(c);
         if (baseVersion !== latest.version) return versionConflict(c);
+        if (!isAdminViewer(c) && latest.version >= ANSWER_VERSION_CAP) {
+          return err(c, 422, "version_cap", `this answer has ${ANSWER_VERSION_CAP} versions, the most it takes`);
+        }
         // Exactly base + 1: a writer that read the same base and got there first
         // holds this (answer_id, version), and the primary key refuses the second.
         id = answerId;
@@ -660,6 +702,13 @@ export function registerWikiAnswerRoutes(
       return c.json({ error: "answer not saved", code: "store_failed" }, 500);
     }
 
+    // F51: a role user's save rate, counted where a save starts to spend (the
+    // scanner, then the row). Admins, and the owner with auth off, are exempt.
+    if (!isAdminViewer(c) && author.userId !== null && !takeSaveSlot(author.userId)) {
+      const minutes = ANSWER_SAVE_RATE.windowMs / 60_000;
+      return err(c, 429, "rate_limited", `more than ${ANSWER_SAVE_RATE.max} saves in ${minutes} minutes: wait a few minutes and save again`);
+    }
+
     // D16: the body is scanned before it is stored — after every refusal that
     // does not depend on the text, so a flagged edit that would be refused
     // anyway says why (not the author, unknown, redacted, stale). `choice` is
@@ -697,7 +746,7 @@ export function registerWikiAnswerRoutes(
         author,
         choice,
         body,
-        questionHash: sha256(question.hashInput),
+        questionHash,
         besideLive,
       });
       return c.json({ answerId: saved.answerId, questionId, ...versionView(saved), mine: true }, version === 1 ? 201 : 200);

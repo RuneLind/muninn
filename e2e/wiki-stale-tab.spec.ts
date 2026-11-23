@@ -76,7 +76,7 @@ const MODEL_ANSWER = '{"verdict":"stale","reason":"E2E: the pin moved on","edit"
 const LEAVE_ROUTES = ["ask", "graph", "fail"] as const;
 /** How a page left behind answers late (R2B4 1a): an error payload, a rejected
  *  fetch, a page after all, and an explainer's error payload, rejected fetch
- *  and page after all (each one of `loadExplainer`'s two `pageViewSeq` guards). */
+ *  and page after all (each one of `loadExplainer`'s two `viewIsLive(view)` guards). */
 const LATE_KINDS = ["error", "abort", "load", "explainer", "explainer-abort", "explainer-load"] as const;
 /** Every way to change what the article pane shows, but a failed load (R2B4 1b). */
 const VIEW_ROUTES = ["ask", "graph", "start", "explainer", "page"] as const;
@@ -535,7 +535,8 @@ test("Check says when it stopped at its call limit and how many pages remain (A1
     probe.remove();
     return c;
   });
-  expect(await p.locator("[data-stale-cap]").evaluate((el) => getComputedStyle(el).color)).toBe(tokenColor);
+  // Retrying: the tab re-renders after the stream ends, and a detached node reads color "".
+  await expect(p.locator("[data-stale-cap]")).toHaveCSS("color", tokenColor);
   await expect(p.locator("#wikiStaleCheckBtn")).toHaveText("Check 1 page");
   await expect(p.locator("#wikiStaleProgress")).toHaveText("10 of 11 checked");
 });
@@ -795,7 +796,8 @@ test("an older report that answers late does not replace a newer one (R2B4 1)", 
   const gate = new Promise<void>((r) => (release = r));
   let gets = 0;
   await p.route(
-    (u) => u.pathname === "/api/wiki/stale",
+    // The page report only: the wiki-wide summary (PR 2b) is another GET here.
+    (u) => u.pathname === "/api/wiki/stale" && u.searchParams.has("page"),
     async (r) => {
       if (++gets > 1) return r.continue();
       const res = await r.fetch();
@@ -840,7 +842,8 @@ test("the reloaded report clears a failed Check row only where a reader gave the
     },
   );
   await p.route(
-    (u) => u.pathname === "/api/wiki/stale",
+    // The page report only: the wiki-wide summary (PR 2b) is another GET here.
+    (u) => u.pathname === "/api/wiki/stale" && u.searchParams.has("page"),
     async (r) => {
       const res = await r.fetch();
       if (!checked) return r.fulfill({ response: res });

@@ -17,7 +17,7 @@ import {
   type CorrectableClaim,
   type FindingLineShape,
 } from "../gardener/factcheck-carry.ts";
-import { todayOslo } from "../gardener/util.ts";
+import { todayOslo } from "../utils/date-hash.ts";
 import { getSummarySource, isSafeDocId } from "./sources.ts";
 import { sourceKindNoun } from "./source-noun.ts";
 

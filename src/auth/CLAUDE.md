@@ -135,13 +135,14 @@ request's jar with no expiry — precisely what `session.ts` exists to prevent.
 The cookie is a signed `{userId, expiry}`, not the secret. Rotating
 `MUNINN_LOCAL_TOKEN` invalidates every session.
 
-**A note for PR C, with its scope stated honestly:** `SameSite=Lax` blocks the
+**What `SameSite=Lax` covers:** it blocks the
 cross-site *POST* half of the CSRF surface **for requests arriving through the
 proxy** — so a CSRF test written against a proxied POST is green whether or not
-PR C's origin check exists. Two halves it does not cover: the side-effecting
+the origin check exists. Two halves it does not cover: the side-effecting
 top-level **GET** (`GET /chat/pending/:threadId`, `GET /api/research/ask`), and
 **anything at all from a browser on the muninn host**, which the loopback bypass
-authenticates before the cookie is read. PR C's tests belong on those.
+authenticates before the cookie is read. The origin check's tests target those
+(*Why the tests are where they are*, below).
 
 ## Roles
 
@@ -352,10 +353,20 @@ alias), the research synthesis GET, the wiki ask/digest/explain/fact-check
 model-and-egress GETs and their `/api/summaries/factcheck` twin, the provenance, graph and find-everywhere amplifiers, the
 search/similarity/embedding amplifiers (`/api/search/search`, `/api/memsearch`,
 the `*/similar` proxies, `/api/graph/{similarity,author}`, same-story, the
-atlas), the MCP-status probe and the two WS upgrade paths. A second list,
+atlas), the spawning wiki reads (plan-card, the work map's GitHub check, the
+decision inbox, felles-status, and `/api/wiki/step-checks`, whose probes spawn
+git and run one network `ls-remote` per named repo, only on a wiki in Done's
+triage scope and never on a `WIKI_READONLY_ROOTS` root, plus its peer half
+`/api/checks/answer`, the same probes run for the other machine, and
+`/api/wiki/boot-line`, git in muninn's own checkout on every read and one
+`ls-remote` per 30 s, plus its peer half `/api/checks/boot-line`, this
+machine's own line read for the other machine's card and never relayed; all
+four are admin-only under `MUNINN_AUTH` by default-deny, being in no zone
+list), the MCP-status probe and
+the two WS upgrade paths. A second list,
 `REFRESH_SIDE_EFFECTING_GETS`, holds the GETs whose plain read stays open but
-whose `?refresh=1` forces a rebuild — `/api/wiki/pages` and
-`/api/wiki/index-coverage` (a full index build with its git reads),
+whose `?refresh=1` forces a rebuild — `/api/wiki/pages`,
+`/api/wiki/index-coverage` and `/api/wiki/stale` (a full index build with its git reads),
 `/api/wiki/ingest-backlog` and `/api/summaries/stats` (an uncached recompute
 over every summary collection); those count as side-effecting only when a
 `refresh` value is `"1"`, HEAD included. `/api/wiki/page` reads no `refresh`
@@ -812,13 +823,22 @@ three predicates, **one breaker**:
 | `/chat/ws` | cached `provider === "entra"` | a `close` event carries a CODE and nothing else |
 | `EventSource` | cached `provider === "entra"` | it exposes neither status nor body, so it cannot go through a fetch wrapper at all |
 
-**`provider === null` is two states and neither reloads.** It is "auth is off"
-AND "`/chat/me` has not answered yet", so on `ws`/`sse` the verdict there is
-`ignore` — the silent reconnect those instances had before this module existed.
-Banner'ing instead told readers of an auth-OFF instance, which has no sessions,
-that their session had expired on any permanent stream failure. ⚠️ The provider
-is cached ONCE, at init: a tab whose `/chat/me` failed both attempts keeps
-`null` for its whole lifetime, so it never reloads and never banners.
+**`provider === null` means auth is off, and it never reloads.** On `ws`/`sse`
+the verdict there is `ignore` — the silent reconnect those instances had before
+this module existed. Banner'ing instead told readers of an auth-OFF instance,
+which has no sessions, that their session had expired on any permanent stream
+failure. The page render writes in the session's provider, so it is known even
+when `/chat/me` fails at load. `/chat/me` is asked at init and not again, so such
+a tab keeps no identity until a reload. What it shows, on `entra`:
+
+- `/chat/me` answers a 401 whose body is not JSON, and the socket is refused: its
+  probe gets a 401 too, which spends the one reload and then banners.
+- That 401 with a socket that opens: the banner shows, and the next 2xx takes it
+  down, because only `http` was latched. Nothing is left on screen.
+- `/chat/me` keeps failing any other way (a 403, a 5xx, a transport failure, a 200
+  that is not JSON): no expiry banner. A 200 that is not JSON brings the amber
+  stall bar once the socket's ladder is spent.
+- `/chat/me` fails at load, and a later probe gets a 401: the reload as above.
 
 **A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
@@ -881,7 +901,7 @@ latch set *after* init lived for the life of the tab. Measured on a `local`
 instance, where the verdict is a banner and there is no reload to re-run init:
 ONE transient `/chat/events` failure killed the stream permanently and left
 "your session expired" over a session that was fine, where the pre-latch page
-recovered in 3 s. There are three releases now, and the two added are driven by
+recovered in 3 s. There are four releases now, and the ones added are driven by
 evidence rather than by a timer:
 
 | release | latch | banner |
@@ -889,7 +909,7 @@ evidence rather than by a timer:
 | a successful `/chat/me` (`__muninnClearAuthReloadStamp`, init) | cleared | left |
 | `reconnectChatSse()` → `__muninnAuthReleaseLatch('sse')` | cleared | left — a request is not an outcome |
 | the stream/socket OPENS → `__muninnAuthChannelRecovered(channel)` | cleared | removed, **but only once NO channel is still latched** |
-| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched | cleared | same rule |
+| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched and only from a request started after the latch | cleared | same rule |
 
 That third condition is the non-obvious half: the banner is one page-level bar
 shared by three channels, so an SSE recovery clearing it while a 4401'd socket
@@ -901,8 +921,9 @@ reconnect, neither of which a `fetch` can produce. A latched `http` therefore
 pinned the shared banner up for the life of the tab — and blocked every OTHER
 channel's recovery from taking it down, since that clear requires nothing to be
 latched. A 2xx is the http channel's own open evidence, and it is consulted only
-while `http` is latched: on an ordinary page every response would otherwise be a
-second, decision-free door onto removing someone else's banner.
+while `http` is latched, and only from a request started after the latch: on an
+ordinary page every response would otherwise be a second, decision-free door onto
+removing someone else's banner, and an older response says nothing about now.
 
 **Accepted, not fixed: a FLAPPING stream on an `entra` instance.** The releases
 are evidence-driven, so open → error → open → error re-enters the rule every
@@ -1003,8 +1024,10 @@ is the one surface the user zone is written around.
    dashboard routes the composed chat page fetches. All but the two
    `/api/search/` reads were already owner-guarded, so this is enumeration
    rather than new protection. **Plus, under `MUNINN_PROFILE=nais` only, the
-   wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki` and
-   `/api/wiki/{pages,page,page/provenance,related,decision-chain,html,graph}`, GET/HEAD only),
+   wiki read slice** (`WIKI_READ_SLICE_PATHS`: `/wiki`, the page's hashed
+   script and stylesheet `/wiki/assets/:file` — a one-segment pattern, never a
+   prefix — and
+   `/api/wiki/{pages,page,page/provenance,related,decision-chain,ref,html,graph}`, GET/HEAD only),
    plus the slice's one write: GET/HEAD and POST on the exact path
    `/api/wiki/answers` (`WIKI_READ_SLICE_METHOD_ENTRIES` — rows of `{methods,
    path}`, the deny list's shape read the other way; answer cards PR 5). The
@@ -1154,9 +1177,8 @@ operator auditing themselves on their own feed.
   are in the user zone (the chat page fetches them) but take ANY collection name,
   so role `user` reads every huginn collection's document bodies — internal
   Confluence included — not just the selected bot's `wikiCollections`. The user
-  zone is wider than the chat-page fetch it was derived from. This is a
-  pre-existing exposure, not a regression vs `main`, and v1 is dev-only /
-  chat-only; scoping these two routes to the caller's bot is a follow-up.
+  zone is wider than the chat-page fetch it was derived from, and the exposure
+  predates the zone model; scoping these two routes to the caller's bot is a follow-up.
 - **`GET /chat/bots` (user zone) discloses filesystem layout and the prompt
   corpus.** It returns each bot's absolute server `dir` path and full prompt
   bodies, so any colleague on `entra` reads muninn's directory layout and every

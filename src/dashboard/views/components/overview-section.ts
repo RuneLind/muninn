@@ -6,8 +6,7 @@
  *     RIGHT = a single Activity column (the former bottom drawer, folded in here
  *     with inline All/Chat/System/Errors filter chips)
  *   - a slimmed 7-day usage chart (SVG bars + one total-token line, theme-aware
- *     via CSS classes — SVG presentation attrs never resolve var()), with the
- *     full 4-series Chart.js breakdown behind a toggle.
+ *     via CSS classes), with the full 4-series Chart.js breakdown behind a toggle.
  *
  * The tile / chip builders come from the shared globals `tileHtml`, `kindChip`
  * (summary-tiles.ts / status-chips.ts). The live data is wired in connection.ts:
@@ -113,8 +112,7 @@ export function overviewSectionStyles(): string {
     .uchart-slim { padding: 14px 16px 8px; }
     .uchart-plot { position: relative; height: 150px; }
     .uchart-plot svg { width: 100%; height: 100%; display: block; }
-    /* fill/stroke set here (CSS) — they resolve var(); as SVG presentation attrs
-       they would NOT (the #316 lesson), hence classes not fill=/stroke=. */
+    /* fill/stroke set here in CSS, the house style, not as fill=/stroke= attributes. */
     .uchart-bar  { fill: var(--accent); opacity: 0.55; }
     .uchart-line { fill: none; stroke: var(--status-success); stroke-width: 2; }
     .uchart-area { fill: var(--status-success); opacity: 0.09; }
