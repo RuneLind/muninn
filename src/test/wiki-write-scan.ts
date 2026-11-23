@@ -31,10 +31,25 @@
  *
  * NOT proven: that a listed site runs inside `runWikiWriteExclusive` (`src/wiki/queue.ts`).
  * A site on the list was reviewed, not verified to be queued; the count only stops an
- * unreviewed new write from landing. Not seen: a write done for this code by a helper
- * outside the scanned files, a write through a file handle from `open()`, a `Bun.file`
- * held in a variable before `.write()`, and module or property access built to avoid the
- * names (a key in a variable on a non-fs object, `createRequire`, `Reflect.get`).
+ * unreviewed new write from landing, and a write swapped for another in one file keeps
+ * its count. Nothing compares the list with the base branch: a raised count is caught in
+ * review, not by a ratchet.
+ *
+ * Not seen:
+ * - a write done for this code by a helper outside the scanned files, or by a subprocess
+ *   (`git` through `runGit`, `Bun.spawn`);
+ * - a write through a file handle from `open()`, and a `Bun.file` held in a variable
+ *   before `.write()`;
+ * - `Bun` used as a value or behind a cast (`const B = Bun`, `globalThis["Bun"]`,
+ *   `(Bun as any).write`), `import.meta.require("bun")`, and a module specifier that is
+ *   not a plain string literal (held in a variable, parenthesized or cast);
+ * - an fs namespace re-exported (`export { fs }`) or imported as `{ default as fs }`;
+ * - property access built to avoid the names (a key in a variable on a non-fs object,
+ *   `createRequire`, `Reflect.get`).
+ *
+ * Counted although no write: names are matched by spelling, not by scope, so a parameter
+ * or local that shadows an imported write name, the shell's `$`, `file` or a `bun` alias
+ * counts, and so does a type-only re-export of a binding from `"bun"` (`export type { $ }`).
  */
 import ts from "typescript";
 import { sourceFiles } from "./layers.ts";
