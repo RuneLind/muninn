@@ -228,4 +228,21 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
     expect(r.body).toEqual({ outcome: "applied", writtenPath: SEED, commitReason: "not-default-branch", uncommitted: true });
     expect(r.rowStatus).toBe("applied");
   });
+
+  // `git status` never lists an ignored file, so a dirtiness check reads an
+  // ignored page as committed. It is not: the answer must keep the warning.
+  test("a no-op over a git-IGNORED page on a feature branch is still `uncommitted`", async () => {
+    const SECRET = "concepts/Secret.md";
+    await Bun.write(path.join(gitRoot, ".gitignore"), `${SECRET}\n`);
+    await git("add", ".gitignore");
+    await git("commit", "-q", "-m", "ignore the secret page");
+    await git("checkout", "-q", "-b", "feature");
+    const draft = page("Secret").replace("Body.", "Body, revised.");
+    await Bun.write(path.join(gitRoot, SECRET), draft);
+    __resetWikiCacheForTest();
+    const r = await approve({ topicKey: "secret-update", mode: "update", targetPath: SECRET, baseHash: sha256(page("Secret")), draft });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: SECRET, commitReason: "not-default-branch", uncommitted: true });
+    expect(r.rowStatus).toBe("applied");
+  });
 });
