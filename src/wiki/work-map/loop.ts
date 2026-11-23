@@ -39,6 +39,7 @@ import {
   type WorkMapRunDeps,
   type WorkMapRunResult,
 } from "./run.ts";
+import { warnForeignWorkMaps, workMapIsTracked, type ForeignMapDeps } from "./foreign-map.ts";
 import { fileStateStore, WORK_MAP_MODEL_FAILURES_PER_DAY, type WorkMapState } from "./state.ts";
 
 const log = getLog("wiki", "work-map");
@@ -143,6 +144,9 @@ export interface WorkMapLoopDeps {
   isReadonlyRoot?: (root: string) => boolean;
   /** The decision triage's half of a check; absent, it stays off. */
   triage?: TriageLoopDeps;
+  /** The second-organizer check, asked once per covered wiki at start
+   *  (`foreign-map.ts`); absent, no check. */
+  foreignMap?: ForeignMapDeps;
 }
 
 /** The run deps a real instance uses, from its config. */
@@ -195,6 +199,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
     triage: triageLoopDepsFor(config) ?? undefined,
+    foreignMap: { isTracked: workMapIsTracked, readText: runDeps.readText, readState: (wiki) => runDeps.state.read(wiki) },
   };
 }
 
@@ -236,6 +241,8 @@ export function startWorkMapLoop(
   for (const { wiki, reason } of coverage.skipped) log.warn("Work map: {wiki}: {reason} — skipped", { wiki, reason });
   const wikis = coverage.covered;
   if (wikis.length === 0) return off("WORK_MAP_WIKIS names no wiki the work map can cover");
+  // Started and not awaited, outside any write section; each wiki on its own, and it never rejects.
+  if (deps.foreignMap) void warnForeignWorkMaps(wikis, deps.registry(), deps.foreignMap).catch(() => {});
 
   armWorkMapRuns();
   stopped = false;

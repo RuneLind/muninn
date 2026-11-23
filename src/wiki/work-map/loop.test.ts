@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { triagePassHeld, tryHoldTriagePass, type TriageLoopDeps } from "../decision-triage/loop-deps.ts";
+import { fixtureThemeMap } from "../../test/theme-map-fixture.ts";
+import { FOREIGN_MAP_WARNING, type ForeignMapDeps } from "./foreign-map.ts";
 import type { WorkMapRunResult } from "./run.ts";
 import type { WorkMapState } from "./state.ts";
 import {
@@ -424,6 +426,71 @@ describe("gates", () => {
     const { deps } = harness();
     expect(startWorkMapLoop({ ...config, workMapWikis: ["ro", "nope"] }, { deps })).toEqual([]);
     expect(startWorkMapLoop({ ...config, workMapWikis: ["ro", "MIMIR"] }, { deps })).toEqual(["mimir"]);
+  });
+});
+
+describe("the second-organizer check at start", () => {
+  let records: LogRecord[];
+  beforeEach(async () => {
+    records = [];
+    await configure({
+      sinks: { mem: (r) => void records.push(r) },
+      loggers: [{ category: "muninn", lowestLevel: "info", sinks: ["mem"] }, { category: ["logtape", "meta"], lowestLevel: "fatal", sinks: [] }],
+    });
+  });
+  afterEach(() => reset());
+  const warned = () => records.filter((r) => r.level === "warning" && r.rawMessage === FOREIGN_MAP_WARNING);
+
+  /** A foreign map on every tracked root; `asked` counts git checks. */
+  function foreign(over: Partial<ForeignMapDeps> = {}) {
+    const asked: string[] = [];
+    const deps: ForeignMapDeps = {
+      isTracked: async (root) => (asked.push(root), true),
+      readText: async () => JSON.stringify(fixtureThemeMap({ wiki: "mimir", runAtMs: 1 })),
+      readState: async () => null,
+      ...over,
+    };
+    return { asked, deps };
+  }
+
+  test("once per start, for the covered wiki only, in the loop's category with {wiki} alone; nothing at ticks", async () => {
+    const h = harness();
+    const f = foreign();
+    expect(startWorkMapLoop({ ...config, workMapWikis: ["mimir", "ro"] }, { deps: { ...h.deps, foreignMap: f.deps } })).toEqual(["mimir"]);
+    await Bun.sleep(5);
+    expect(f.asked).toEqual(["/w/mimir"]);
+    expect(warned()).toHaveLength(1);
+    expect(warned()[0]!.properties).toEqual({ wiki: "mimir" });
+    expect(warned()[0]!.category).toEqual(["muninn", "wiki", "work-map"]);
+    // A second start while running adds nothing; 30 ticks add nothing.
+    expect(startWorkMapLoop(config, { deps: { ...h.deps, foreignMap: f.deps } })).toEqual([]);
+    await h.advance(30 * WORK_MAP_TICK_MS);
+    expect(f.asked).toHaveLength(1);
+    expect(warned()).toHaveLength(1);
+  });
+
+  test("a throwing or hung check neither rejects nor delays start; the loop still ticks", async () => {
+    const h = harness();
+    const thrown = foreign({
+      isTracked: () => {
+        throw new Error("git gone");
+      },
+    });
+    expect(startWorkMapLoop(config, { deps: { ...h.deps, foreignMap: thrown.deps } })).toEqual(["mimir"]);
+    await stopWorkMapLoop(10);
+    const hung = foreign({ isTracked: () => new Promise(() => {}) });
+    expect(startWorkMapLoop(config, { deps: { ...h.deps, foreignMap: hung.deps } })).toEqual(["mimir"]);
+    await h.advance(WORK_MAP_TICK_MS);
+    expect(h.runs).toHaveLength(1);
+    expect(warned()).toEqual([]);
+  });
+
+  test("a loop that does not start checks nothing", () => {
+    const h = harness();
+    const f = foreign();
+    expect(startWorkMapLoop({ ...config, workMapWikis: ["ro"] }, { deps: { ...h.deps, foreignMap: f.deps } })).toEqual([]);
+    expect(startWorkMapLoop({ ...config, schedulerEnabled: false }, { deps: { ...h.deps, foreignMap: f.deps } })).toEqual([]);
+    expect(f.asked).toEqual([]);
   });
 });
 
