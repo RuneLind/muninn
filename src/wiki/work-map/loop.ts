@@ -40,6 +40,7 @@ import {
   type WorkMapRunResult,
 } from "./run.ts";
 import { fileStateStore, WORK_MAP_MODEL_FAILURES_PER_DAY, type WorkMapState } from "./state.ts";
+import { warnTrackedWorkMaps, workMapIsTracked } from "./tracked-map.ts";
 
 const log = getLog("wiki", "work-map");
 
@@ -143,6 +144,9 @@ export interface WorkMapLoopDeps {
   isReadonlyRoot?: (root: string) => boolean;
   /** The decision triage's half of a check; absent, it stays off. */
   triage?: TriageLoopDeps;
+  /** Does git track the wiki's `.work-map.json`? Asked once per covered wiki at
+   *  start (`tracked-map.ts`); absent, no check. */
+  isMapTracked?: (root: string) => Promise<boolean>;
 }
 
 /** The run deps a real instance uses, from its config. */
@@ -195,6 +199,7 @@ function realLoopDeps(config: Config): WorkMapLoopDeps {
     run: (wiki, signal) => startWorkMapRun(wiki, runDeps, signal).promise,
     registry: getWikiRegistry,
     triage: triageLoopDepsFor(config) ?? undefined,
+    isMapTracked: workMapIsTracked,
   };
 }
 
@@ -236,6 +241,8 @@ export function startWorkMapLoop(
   for (const { wiki, reason } of coverage.skipped) log.warn("Work map: {wiki}: {reason} — skipped", { wiki, reason });
   const wikis = coverage.covered;
   if (wikis.length === 0) return off("WORK_MAP_WIKIS names no wiki the work map can cover");
+  // Started and not awaited, outside any write section; it never throws.
+  if (deps.isMapTracked) void warnTrackedWorkMaps(wikis, deps.registry(), deps.isMapTracked);
 
   armWorkMapRuns();
   stopped = false;

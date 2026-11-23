@@ -427,6 +427,40 @@ describe("gates", () => {
   });
 });
 
+describe("the tracked map check at start", () => {
+  let records: LogRecord[];
+  beforeEach(async () => {
+    records = [];
+    await configure({
+      sinks: { mem: (r) => void records.push(r) },
+      loggers: [{ category: "muninn", lowestLevel: "info", sinks: ["mem"] }, { category: ["logtape", "meta"], lowestLevel: "fatal", sinks: [] }],
+    });
+  });
+  afterEach(() => reset());
+  const warned = () => records.filter((r) => r.level === "warning" && r.message.join("").includes(".work-map.json is tracked"));
+
+  test("organizing a wiki whose map is tracked: one warning, for that wiki only", async () => {
+    const { deps } = harness();
+    const asked: string[] = [];
+    startWorkMapLoop({ ...config, workMapWikis: ["mimir", "ro"] }, { deps: { ...deps, isMapTracked: async (root) => (asked.push(root), true) } });
+    await Bun.sleep(1);
+    expect(asked).toEqual(["/w/mimir"]);
+    expect(warned().map((r) => r.properties.wiki)).toEqual(["mimir"]);
+  });
+
+  test("an untracked map, a loop that does not start, a check that throws: no warning", async () => {
+    const { deps } = harness();
+    startWorkMapLoop(config, { deps: { ...deps, isMapTracked: async () => false } });
+    await stopWorkMapLoop(10);
+    const asked: string[] = [];
+    expect(startWorkMapLoop({ ...config, workMapWikis: [] }, { deps: { ...deps, isMapTracked: async (r) => (asked.push(r), true) } })).toEqual([]);
+    startWorkMapLoop(config, { deps: { ...deps, isMapTracked: () => Promise.reject(new Error("git gone")) } });
+    await Bun.sleep(1);
+    expect(asked).toEqual([]);
+    expect(warned()).toEqual([]);
+  });
+});
+
 describe("workMapDue", () => {
   test("not before the day's hour; not within 20 h of a success", () => {
     const before = Date.parse("2026-10-20T02:30:00Z"); // 04:30 Oslo
