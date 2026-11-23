@@ -13,9 +13,10 @@ import {
   logWriterFor,
   groupCommitMessageFor,
   updateBaseDrift,
+  settleWrittenGroupRows,
   type ApplyDeps,
 } from "./apply.ts";
-import { commitWikiChange, __resetForTest as resetCommitQueue } from "../wiki/commit.ts";
+import { commitWikiChange, __resetForTest as resetCommitQueue, type CommitWikiResult } from "../wiki/commit.ts";
 import { runWikiWriteExclusive, __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import { sha256 } from "../utils/date-hash.ts";
 import { buildWikiIndex } from "../wiki/store.ts";
@@ -1346,6 +1347,110 @@ describe("applyWikiProposalGroup", () => {
       expect(res.results[0]).not.toHaveProperty("recovered");
       expect(commits).toEqual([]);
       expect(await Bun.file(path.join(wikiDir, "log.md")).exists()).toBe(false);
+    });
+  });
+
+  // The commit's result reaches the caller, so a route can say the page is
+  // written and logged but not committed.
+  describe("the commit result is reported (onCommit)", () => {
+    const rows = () => [lintRow("r1", PAGE_A, pageBody("A")), lintRow("r2", PAGE_B, pageBody("B"))];
+
+    test("a group apply reports the commit seam's result", async () => {
+      const seen: CommitWikiResult[] = [];
+      await applyWikiProposalGroup(rows(), deps({ commit: async () => ({ committed: false, reason: "error" }) }), {
+        onCommit: (r) => seen.push(r),
+      });
+      expect(seen).toEqual([{ committed: false, reason: "error" }]);
+    });
+
+    test("a group apply whose commit THROWS reports `error`", async () => {
+      const seen: CommitWikiResult[] = [];
+      await applyWikiProposalGroup(
+        rows(),
+        deps({
+          commit: async () => {
+            throw new Error("index.lock exists");
+          },
+        }),
+        { onCommit: (r) => seen.push(r) },
+      );
+      expect(seen).toEqual([{ committed: false, reason: "error" }]);
+    });
+
+    test("a group apply that staged nothing reports nothing", async () => {
+      const seen: CommitWikiResult[] = [];
+      let calls = 0;
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      await applyWikiProposalGroup(
+        [rowA],
+        deps({
+          commit: async () => {
+            calls++;
+            return { committed: false, reason: "error" };
+          },
+          hasUncommittedChanges: async () => false,
+        }),
+        { onCommit: (r) => seen.push(r) },
+      );
+      expect(calls).toBe(0);
+      expect(seen).toEqual([]);
+    });
+
+    test("a commit seam that reports nothing (void) adds nothing", async () => {
+      const seen: CommitWikiResult[] = [];
+      await applyWikiProposalGroup(rows(), deps({ commit: async () => {} }), { onCommit: (r) => seen.push(r) });
+      expect(seen).toEqual([]);
+    });
+
+    test("a group settle reports the commit of the pages it logged", async () => {
+      const seen: CommitWikiResult[] = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      const settled = await settleWrittenGroupRows(
+        [rowA],
+        deps({ commit: async () => ({ committed: false, reason: "not-default-branch" }), hasUncommittedChanges: async () => true }),
+        async () => true,
+        { onCommit: (r) => seen.push(r) },
+      );
+      expect(settled.map((r) => r.id)).toEqual(["r1"]);
+      expect(seen).toEqual([{ committed: false, reason: "not-default-branch" }]);
+    });
+
+    test("a group settle with nothing to log commits nothing and reports nothing", async () => {
+      const seen: CommitWikiResult[] = [];
+      const rowA = lintRow("r1", PAGE_A, pageBody("A"));
+      await writeFile(path.join(wikiDir, PAGE_A), rowA.draft);
+      await settleWrittenGroupRows(
+        [rowA],
+        deps({ commit: async () => ({ committed: false, reason: "error" }), hasUncommittedChanges: async () => false }),
+        async () => true,
+        { onCommit: (r) => seen.push(r) },
+      );
+      expect(seen).toEqual([]);
+    });
+
+    test("a single apply reports the commit seam's result", async () => {
+      const seen: CommitWikiResult[] = [];
+      const res = await applyWikiProposal(makeProposal(), deps({ commit: async () => ({ committed: false, reason: "nothing-to-commit" }) }), {
+        onCommit: (r) => seen.push(r),
+      });
+      expect(res.outcome).toBe("applied");
+      expect(seen).toEqual([{ committed: false, reason: "nothing-to-commit" }]);
+    });
+
+    test("a single apply whose commit THROWS reports `error`", async () => {
+      const seen: CommitWikiResult[] = [];
+      await applyWikiProposal(
+        makeProposal(),
+        deps({
+          commit: async () => {
+            throw new Error("no git identity");
+          },
+        }),
+        { onCommit: (r) => seen.push(r) },
+      );
+      expect(seen).toEqual([{ committed: false, reason: "error" }]);
     });
   });
 });

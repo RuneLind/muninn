@@ -5,6 +5,7 @@
  * scope, so nothing in it can be unit-tested; the `wiki-gardener-strip.ts` /
  * `-sources.ts` / `-wiring.ts` split is the same rule. Pure and DOM-free.
  */
+import { uncommittedNote } from "./wiki-gardener-batch.ts";
 
 /**
  * `2 applied · 1 stale` — the chip's TEXT.
@@ -115,10 +116,13 @@ export function groupStopNote(
     applied?: string[];
     error?: string;
     notLanded?: { page: string; status: string; edits: unknown[] }[];
+    uncommitted?: boolean;
   },
   httpStatus: number,
 ): string {
-  if (data.outcome !== "stopped") return data.error || "Failed (" + httpStatus + ")";
+  const uncommitted = uncommittedNote(data);
+  const tail = uncommitted ? ". " + uncommitted : "";
+  if (data.outcome !== "stopped") return (data.error || "Failed (" + httpStatus + ")") + tail;
   const applied = data.applied || [];
   const notLanded = data.notLanded || [];
   return (
@@ -127,6 +131,7 @@ export function groupStopNote(
     (data.error ? ": " + data.error : "") +
     (notLanded.length
       ? ". Not written: " + notLanded.map((n) => n.page + " (" + n.edits.length + " edit(s), " + n.status + ")").join(", ")
-      : "")
+      : "") +
+    tail
   );
 }

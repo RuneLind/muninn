@@ -132,13 +132,35 @@ export function pageTargets(cards: readonly BatchCard[]): PageTargets {
  * row terminal, so the batch stops rather than risk burning the section; some
  * 500s are one card's own (an unindexed target, path confinement), which costs
  * one more click. A 409 or a `stale` outcome is that card's own, and the batch
- * moves on.
+ * moves on. An answer with `uncommitted: true` stops it too: a commit that
+ * fails (no identity, a hook, a lock, a branch) fails for every later card.
  */
-export function batchStopReason(r: { status: number; outcome: string; error: string }): string | null {
+export function batchStopReason(r: { status: number; outcome: string; error: string; uncommitted?: boolean }): string | null {
   if (r.status === 0 || r.status === 403 || r.status >= 500 || r.outcome === "error") {
     return r.error || `HTTP ${r.status}`;
   }
+  if (r.uncommitted === true) return "the commit did not land";
   return null;
+}
+
+/** The card's warning when the page was written and logged but its commit did
+ *  not land, worded like Done's and Close's. */
+export const UNCOMMITTED_NOTE =
+  "Written and logged, but the commit failed: the page has uncommitted edits, so commit it by hand.";
+
+/** {@link UNCOMMITTED_NOTE} for an answer carrying `uncommitted: true`, else
+ *  null: `nothing-to-commit` and `not-a-repo` show nothing. */
+export function uncommittedNote(data: { commitReason?: unknown; uncommitted?: unknown }): string | null {
+  return data.uncommitted === true ? UNCOMMITTED_NOTE : null;
+}
+
+/** A card's note for one verb's answer: `base` (the error, or another note the
+ *  caller has) with the uncommitted warning after it; null leaves the note as
+ *  is. The single click, the batch and the group card all compose through it. */
+export function answerCardNote(base: string | null, data: { commitReason?: unknown; uncommitted?: unknown }): string | null {
+  const warning = uncommittedNote(data);
+  if (base && warning) return base + ". " + warning;
+  return base ?? warning;
 }
 
 /** The ids a batch takes, in list order, and the skipped count per reason. */

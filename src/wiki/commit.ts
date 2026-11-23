@@ -92,6 +92,17 @@ export interface CommitWikiResult {
   reason?: "not-a-repo" | "not-default-branch" | "nothing-to-commit" | "error";
 }
 
+/** Done's shape for an answer sent after a commit that did not land: `{}` when
+ *  it landed or none was attempted (`undefined`). `uncommitted` marks the two
+ *  reasons that leave the written page with edits no commit holds. */
+export function commitFailureFields(
+  result: CommitWikiResult | undefined,
+): { commitReason?: NonNullable<CommitWikiResult["reason"]>; uncommitted?: boolean } {
+  if (!result || result.committed) return {};
+  const commitReason = result.reason ?? "error";
+  return { commitReason, uncommitted: commitReason === "error" || commitReason === "not-default-branch" };
+}
+
 /** Result of one git invocation. */
 interface GitResult {
   code: number;

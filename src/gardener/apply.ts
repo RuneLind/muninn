@@ -35,6 +35,7 @@ import { parseFrontmatter, wikiPageStem } from "../wiki/store.ts";
 import { findStemTwin, stemCollisionMessage } from "./source-drafter.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
+import type { CommitWikiResult } from "../wiki/commit.ts";
 import {
   isReadonlyWikiRoot,
   isWikiReadonly,
@@ -107,9 +108,10 @@ export interface ApplyDeps {
   /**
    * Commit the just-written wiki files into their git repo (the page + log.md +
    * wired index/backlinks). Optional — absent in tests that don't exercise the
-   * commit seam. Wired to `commitWikiChange` at the route; never throws.
+   * commit seam. Wired to `commitWikiChange` at the route; never throws. A
+   * `void` result (a test fake) means "not reported" and reaches no caller.
    */
-  commit?: (paths: string[], message: string) => Promise<unknown>;
+  commit?: (paths: string[], message: string) => Promise<CommitWikiResult | void>;
   /**
    * Per-wiki cataloging policy — which page kinds get an index.md catalog line
    * (`buildIndexEntry`). Absent ⇒ the default `["concept"]` (today's behavior).
@@ -131,10 +133,12 @@ export interface ApplyDeps {
    */
   isReadonlyRoot?: (root: string) => boolean;
   /**
-   * Does the page have uncommitted changes? Read for `stale-check` rows only,
-   * inside the write section: their fix commit is not a page change, so a
-   * dirty page is refused (`collision`, back to draft) rather than having a
-   * hand edit committed under it. Absent ⇒ no check (tests without git).
+   * Does the page have uncommitted changes? Read in two places. For a
+   * `stale-check` row, inside the write section: its fix commit is not a page
+   * change, so a dirty page is refused (`collision`, back to draft) rather than
+   * having a hand edit committed under it. And before a group verb's write
+   * section (`uncommittedDraftPages`), to find the pages an earlier pass wrote
+   * and never committed. Absent ⇒ no check (tests without git).
    */
   hasUncommittedChanges?: (relPath: string) => Promise<boolean | null>;
 }
@@ -223,18 +227,26 @@ async function commitApply(
   proposal: WikiProposal,
   deps: ApplyDeps,
   modified: Set<string>,
-): Promise<void> {
-  if (!deps.commit) return;
-  const paths = commitPaths(proposal, modified);
+): Promise<CommitWikiResult | undefined> {
+  return runCommit(deps, commitPaths(proposal, modified), commitMessageFor(proposal), proposal.targetPath);
+}
+
+/** Run the commit seam and return what it reported: undefined when no commit
+ *  was attempted or the seam reports nothing, `error` when it threw. */
+async function runCommit(deps: ApplyDeps, paths: readonly string[], message: string, what: string): Promise<CommitWikiResult | undefined> {
+  if (!deps.commit || paths.length === 0) return undefined;
   try {
-    await deps.commit(paths, commitMessageFor(proposal));
+    return (await deps.commit([...paths], message)) ?? undefined;
   } catch (err) {
-    log.warn("Wiki-gardener apply: commit failed for {path}: {error}", {
-      path: proposal.targetPath,
-      error: errMsg(err),
-    });
+    log.warn("Wiki-gardener: commit failed for {what}: {error}", { what, error: errMsg(err) });
+    return { committed: false, reason: "error" };
   }
 }
+
+/** The caller's seam for the commit result: called once, only when a commit was
+ *  attempted, so an answer can say the pages are written and logged but not
+ *  committed. */
+export type OnCommit = (result: CommitWikiResult) => void;
 
 /** The files one apply touched: the page, the wiki-global `log.md`, and whatever
  *  the wire stage modified. Deduped, and the ONE spelling both the single-row
@@ -374,6 +386,7 @@ function withTrailingNewline(text: string): string {
 export async function applyWikiProposal(
   proposal: WikiProposal,
   deps: ApplyDeps,
+  opts: { onCommit?: OnCommit } = {},
 ): Promise<ApplyOutcome> {
   // Readonly instance, then per-WIKI read-only root: refuse before the queue is
   // even entered. A refusal, not an error — the route answers 403 and leaves the
@@ -382,13 +395,16 @@ export async function applyWikiProposal(
   if (refusal) return refusal;
 
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
-  const tail: { commit?: () => Promise<void> } = {};
+  const tail: { commit?: () => Promise<CommitWikiResult | undefined> } = {};
   const outcome = await runWikiWriteExclusive(deps.wikiDir, () =>
     applyInner(proposal, deps, (commit) => {
       tail.commit = commit;
     }),
   );
-  if (tail.commit) await tail.commit();
+  if (tail.commit) {
+    const committed = await tail.commit();
+    if (committed) opts.onCommit?.(committed);
+  }
   return outcome;
 }
 
@@ -429,6 +445,8 @@ export interface GroupApplyOptions {
    *  entry; a false answer throws {@link GroupLeaseLostError} with no further
    *  page written, nothing logged and nothing committed. Absent ⇒ never asked. */
   leaseHeld?: () => Promise<boolean>;
+  /** Called with the group commit's result, when one was attempted. */
+  onCommit?: OnCommit;
 }
 
 /** A group verb found its lease gone (it expired, and another verb may have
@@ -474,16 +492,19 @@ async function logGroupPages(
   if (!(await writeGroupLogEntry(rows, deps))) throw new GroupLogWriteError(groupKey);
 }
 
-/** Commit a group's paths outside the write section; non-fatal. */
-async function commitGroupTail(paths: readonly string[], deps: ApplyDeps, groupKey: string, kind: WikiProposal["kind"] | undefined): Promise<void> {
-  if (!deps.commit || paths.length === 0) return;
+/** Commit a group's paths outside the write section. A failure never undoes
+ *  the write; its result goes to `onCommit` so the answer can report it. */
+async function commitGroupTail(
+  paths: readonly string[],
+  deps: ApplyDeps,
+  groupKey: string,
+  kind: WikiProposal["kind"] | undefined,
+  onCommit: OnCommit | undefined,
+): Promise<void> {
   const unique = [...new Set(paths)];
   const pages = unique.filter((p) => p !== WIKI_LOG_FILE).length;
-  try {
-    await deps.commit(unique, groupCommitMessageFor(groupKey, pages, kind));
-  } catch (err) {
-    log.warn("Wiki-gardener group: commit failed for {group}: {error}", { group: groupKey, error: errMsg(err) });
-  }
+  const result = await runCommit(deps, unique, groupCommitMessageFor(groupKey, pages, kind), groupKey);
+  if (result) onCommit?.(result);
 }
 
 /**
@@ -628,7 +649,7 @@ export async function applyWikiProposalGroup(
       return out;
     });
   } finally {
-    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind);
+    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind, opts.onCommit);
   }
 }
 
@@ -654,7 +675,7 @@ export async function settleWrittenGroupRows(
   rows: readonly WikiProposal[],
   deps: ApplyDeps,
   settle: (row: WikiProposal) => Promise<boolean>,
-  opts: { leaseHeld?: () => Promise<boolean> } = {},
+  opts: { leaseHeld?: () => Promise<boolean>; onCommit?: OnCommit } = {},
 ): Promise<WikiProposal[]> {
   if (rows.length === 0 || readonlyRefusalFor(deps, rows[0]!.targetPath)) return [];
   const groupKey = rows[0]?.groupKey ?? "(no group)";
@@ -678,7 +699,7 @@ export async function settleWrittenGroupRows(
       return settled;
     });
   } finally {
-    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind);
+    await commitGroupTail(tail.paths, deps, groupKey, rows[0]?.kind, opts.onCommit);
   }
 }
 
@@ -792,7 +813,7 @@ function readonlyRefusalFor(deps: ApplyDeps, forPath: string): ApplyOutcome | nu
  *  and runs the closure; a GROUP apply collects the paths of every row and makes
  *  ONE commit out of them instead of N — a twelve-member series otherwise lands
  *  as twelve commits whose only difference is which frontmatter line moved. */
-type DeferCommit = (commit: () => Promise<void>, paths: string[]) => void;
+type DeferCommit = (commit: () => Promise<CommitWikiResult | undefined>, paths: string[]) => void;
 
 /** Per-apply switches the GROUP path sets and the single-row path does not. */
 interface ApplyInnerOptions {

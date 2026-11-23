@@ -3,6 +3,7 @@ import { rm, mkdir, writeFile, chmod, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  commitFailureFields,
   commitWikiChange,
   listDirtyEntries,
   listWikiSubtreeDirty,
@@ -17,6 +18,17 @@ import { existsSync } from "node:fs";
 import { isWikiWriteArtifact, WIKI_LOCK_BASENAME } from "./lockfile.ts";
 import { workMapTmpPath } from "./work-map/write.ts";
 import { testTempDir } from "../test/temp-dir.ts";
+
+describe("commitFailureFields (Done's shape)", () => {
+  test("a failed commit with no reason counts as `error`, so it is uncommitted", () => {
+    expect(commitFailureFields({ committed: false })).toEqual({ commitReason: "error", uncommitted: true });
+  });
+
+  test("a landed commit, or none attempted, adds nothing", () => {
+    expect(commitFailureFields({ committed: true })).toEqual({});
+    expect(commitFailureFields(undefined)).toEqual({});
+  });
+});
 
 /**
  * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test

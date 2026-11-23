@@ -24,6 +24,7 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { UNCOMMITTED_NOTE } from "../src/dashboard/views/components/wiki-gardener-batch.ts";
 
 const PORT = e2ePort("gardener-batch");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -522,4 +523,109 @@ test("a wiki with no life/ rows hides the section chips and calls its one sectio
   // And on the bot with a life domain they show.
   await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
   await expect(page.locator('#gardFilters .gard-filter[data-section="life"]')).toBeVisible();
+});
+
+// PR #897: an answer saying the page is written and logged but its commit did
+// not land. The real route runs; its answer is extended with Done's shape
+// (this wiki is not a git repo, so the real answer says `not-a-repo`).
+const uncommittedAnswer = (ids_: () => string[], extra: (id: string) => Record<string, unknown> | null) =>
+  async (route: import("@playwright/test").Route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4]!;
+    const over = extra(id);
+    ids_().push(id);
+    if (!over) return route.continue();
+    if (over.__status) {
+      const { __status, ...body } = over;
+      return route.fulfill({ status: __status as number, contentType: "application/json", body: JSON.stringify(body) });
+    }
+    const res = await route.fetch();
+    const body = { ...(await res.json()), ...over };
+    await route.fulfill({ response: res, body: JSON.stringify(body) });
+  };
+const FAILED_COMMIT = { commitReason: "error", uncommitted: true };
+
+test("a single Approve whose commit did not land warns on its card, through a re-render", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("uc1", "Uncommitted Single", "claude-code");
+  const posts: string[] = [];
+  await page.route("**/api/wiki/proposals/*/approve*", uncommittedAnswer(() => posts, () => FAILED_COMMIT));
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  const card = page.locator(`.gard-card[data-id="${ids.uc1}"]`);
+  await card.locator('[data-action="approve"]').click();
+  await expect.poll(() => statusOf("uc1")).toBe("applied");
+  await expect(card.locator(".gard-outcome")).toHaveText(UNCOMMITTED_NOTE);
+  await expect(card.locator(".gard-outcome")).toHaveClass(/\berr\b/);
+  // Another render of the list keeps the note: it lives in `cardNotes`, not on the element.
+  await page.locator('#gardFilters .gard-filter[data-status="applied"]').click();
+  await expect(card.locator(".gard-outcome")).toHaveText(UNCOMMITTED_NOTE);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a batch card answering 409 with an uncommitted commit shows both, stops the batch and counts as failed", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("ub1", "Uncommitted Batch One", "claude-code");
+  await seedDraft("ub2", "Uncommitted Batch Two", "claude-code");
+  const posts: string[] = [];
+  await page.route(
+    "**/api/wiki/proposals/*/approve*",
+    uncommittedAnswer(() => posts, () => ({ __status: 409, error: "proposal state changed during apply", ...FAILED_COMMIT })),
+  );
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "ai").locator(".gard-batch-note");
+  await expect(note).toContainText("Stopped after an error (the commit did not land): 0 of 2 approved · 1 failed");
+  expect(posts).toHaveLength(1);
+  await expect(page.locator(`.gard-card[data-id="${posts[0]}"] .gard-outcome`)).toHaveText(`proposal state changed during apply. ${UNCOMMITTED_NOTE}`);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a batch card applied with an uncommitted commit warns, stops the batch and is not failed", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("ua1", "Uncommitted Applied One", "claude-code");
+  await seedDraft("ua2", "Uncommitted Applied Two", "claude-code");
+  const posts: string[] = [];
+  await page.route("**/api/wiki/proposals/*/approve*", uncommittedAnswer(() => posts, () => FAILED_COMMIT));
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "ai").locator(".gard-batch-note");
+  await expect(note).toContainText("Stopped after an error (the commit did not land): 1 of 2 approved");
+  await expect(note).not.toContainText("failed");
+  expect(posts).toHaveLength(1);
+  await expect(page.locator(`.gard-card[data-id="${posts[0]}"] .gard-outcome`)).toHaveText(UNCOMMITTED_NOTE);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a batch over a wiki outside git (`not-a-repo`) shows no warning and goes on", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("un1", "Not A Repo One", "claude-code");
+  await seedDraft("un2", "Not A Repo Two", "claude-code");
+  const answers: Record<string, unknown>[] = [];
+  await page.route("**/api/wiki/proposals/*/approve*", async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    answers.push(body);
+    await route.fulfill({ response: res, body: JSON.stringify(body) });
+  });
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  const note = head(page, "ai").locator(".gard-batch-note");
+  await expect(note).toContainText("2 of 2 approved", { timeout: 30_000 });
+  await expect(note).not.toContainText("Stopped");
+  // The real answer: Done's shape with nothing uncommitted.
+  expect(answers.map((a) => [a.commitReason, a.uncommitted])).toEqual([["not-a-repo", false], ["not-a-repo", false]]);
+  for (const key of ["un1", "un2"]) await expect(page.locator(`.gard-card[data-id="${ids[key]}"] .gard-outcome`)).toHaveCount(0);
+  await page.unroute("**/api/wiki/proposals/*/approve*");
+});
+
+test("a batch card answered `stale` is noted `Not applied` and counted as failed", async ({ page }) => {
+  await sql!`UPDATE wiki_proposals SET status = 'rejected', resolved_at = now() WHERE bot_name = ${BOT} AND status = 'draft'`;
+  await seedDraft("us1", "Stale Answer", "claude-code");
+  await page.route("**/api/wiki/proposals/*/approve*", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ outcome: "stale", reason: "target file changed since drafting" }) }),
+  );
+  await page.goto(`${BASE}/wiki/gardener?bot=${BOT}`);
+  await head(page, "ai").locator('[data-batch-action="approve"]').click();
+  await expect(head(page, "ai").locator(".gard-batch-note")).toContainText("0 of 1 approved · 1 failed");
+  await expect(page.locator(`.gard-card[data-id="${ids.us1}"] .gard-outcome`)).toHaveText("Not applied: stale");
+  await page.unroute("**/api/wiki/proposals/*/approve*");
 });
