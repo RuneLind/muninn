@@ -2,20 +2,23 @@
  * `GET /api/wiki/proposals` against the REAL test database and a temp wiki:
  * an update row whose page changed since drafting carries `drifted`, so the gate
  * says so before the reviewer clicks Approve (architecture review 2026-10,
- * finding 63), and a page that already IS its draft is not flagged. Its own `bun test` link in the `test` and `test:db` chains.
+ * finding 63), and a page that already IS its draft is not flagged. Also the
+ * single-row approve over a real git wiki: a commit that did not land is
+ * reported in Done's shape. Its own `bun test` link in the `test` and `test:db` chains.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { chmod, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { setupTestDb } from "../../test/setup-db.ts";
-import { insertWikiProposal } from "../../db/wiki-proposals.ts";
+import { getWikiProposalById, insertWikiProposal } from "../../db/wiki-proposals.ts";
+import { runGit } from "../../wiki/commit.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { sha256 } from "../../gardener/util.ts";
-import { registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
+import { DEFAULT_BACKLOG_ROUTE_DEPS, registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 
 setupTestDb();
@@ -88,5 +91,89 @@ describe("GET /api/wiki/proposals — base-hash drift", () => {
     expect(byPath.get(RAW)?.drifted).toBe("target file changed since drafting");
     // The diff is still shown, against the page as it is now.
     expect(byPath.get(EDITED)?.diff?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", () => {
+  const GIT_WIKI = "commitwiki";
+  const TARGET = "concepts/Commit Probe.md";
+  let gitRoot: string;
+
+  const git = async (...args: string[]) => {
+    const r = await runGit(gitRoot, args);
+    if (r.code !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  };
+
+  beforeEach(async () => {
+    gitRoot = await testTempDir(path.join(tmpdir(), "wiki-approve-commit-"));
+    await git("init", "-q", "-b", "main");
+    // Local config only: the commit seam runs a plain `git commit`.
+    await git("config", "user.email", "t@example.invalid");
+    await git("config", "user.name", "t");
+    await git("config", "commit.gpgsign", "false");
+    await git("config", "core.hooksPath", path.join(gitRoot, ".git", "hooks"));
+    await Bun.write(path.join(gitRoot, "concepts", "Seed.md"), page("Seed"));
+    await git("add", "-A");
+    await git("commit", "-q", "-m", "init");
+    // No collections: the apply reindexes nothing.
+    __setWikiRegistryForTest([
+      { name: WIKI, root, source: "extra", collections: ["driftwiki"] },
+      { name: GIT_WIKI, root: gitRoot, source: "extra", collections: [] },
+    ]);
+    __resetWikiCacheForTest();
+  });
+
+  afterEach(async () => {
+    __setWikiRegistryForTest([{ name: WIKI, root, source: "extra", collections: ["driftwiki"] }]);
+    __resetWikiCacheForTest();
+    await rm(gitRoot, { recursive: true, force: true });
+  });
+
+  async function approve(): Promise<{ status: number; body: Record<string, unknown>; rowStatus: string | undefined }> {
+    const p = await insertWikiProposal({
+      botName: "jarvis",
+      wikiName: GIT_WIKI,
+      topicKey: "commit-probe",
+      kind: "concept",
+      mode: "create",
+      targetPath: TARGET,
+      draft: "---\ntitle: Commit Probe\ntype: concept\n---\n\n# Commit Probe\n\nSynthesized fixture body.\n",
+      sourceDocs: [],
+    });
+    if (!p) throw new Error("fixture proposal not inserted");
+    const app = new Hono();
+    registerWikiGardenerRoutes(app, DEFAULT_BACKLOG_ROUTE_DEPS);
+    const res = await app.request(`/api/wiki/proposals/${p.id}/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, unknown>, rowStatus: (await getWikiProposalById(p.id))?.status };
+  }
+
+  test("a commit that landed: the answer is unchanged, no commit field", async () => {
+    const r = await approve();
+    expect(r.status).toBe(200);
+    expect(Object.keys(r.body).sort()).toEqual(["outcome", "writtenPath"]);
+    expect(r.rowStatus).toBe("applied");
+  });
+
+  test("a rejecting hook: `commitReason: error`, `uncommitted: true`, the row still `applied`", async () => {
+    const hook = path.join(gitRoot, ".git", "hooks", "pre-commit");
+    await Bun.write(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const r = await approve();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: TARGET, commitReason: "error", uncommitted: true });
+    expect(r.rowStatus).toBe("applied");
+    expect(await Bun.file(path.join(gitRoot, TARGET)).exists()).toBe(true);
+  });
+
+  test("a non-default branch: `uncommitted: true`, the row still `applied`", async () => {
+    await git("checkout", "-q", "-b", "feature");
+    const r = await approve();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: TARGET, commitReason: "not-default-branch", uncommitted: true });
+    expect(r.rowStatus).toBe("applied");
   });
 });

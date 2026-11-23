@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { groupAcceptCount, isLiveGroupStatus, groupStatusSummary, groupChipTone, groupDriftNote, groupKindTag, groupNumber, groupStopNote, kindMatches } from "./wiki-gardener-group.ts";
+import { UNCOMMITTED_NOTE } from "./wiki-gardener-batch.ts";
 import { renderWikiGardenerPage } from "../wiki-gardener-page.ts";
 import { themeTokenStyles } from "../shared-styles.ts";
 
@@ -173,6 +174,15 @@ describe("groupStopNote", () => {
     expect(groupStopNote({ ...stopped, applied: [], notLanded: [] }, 409)).toBe("Stopped at notes/b.md (error): write failed: EACCES");
     expect(groupStopNote({ outcome: "mixed", error: "an approved or rejected row blocks the group" }, 409)).toBe("an approved or rejected row blocks the group");
     expect(groupStopNote({}, 500)).toBe("Failed (500)");
+  });
+
+  test("a failed answer sent after a commit that did not land says the pages need a commit by hand", () => {
+    expect(groupStopNote({ ...stopped, uncommitted: true }, 409)).toBe(
+      "Stopped at notes/b.md (error) — 1 page(s) already written: write failed: EACCES. " + UNCOMMITTED_NOTE,
+    );
+    expect(groupStopNote({ outcome: "conflict", error: "lost", uncommitted: true }, 409)).toBe("lost. " + UNCOMMITTED_NOTE);
+    // nothing-to-commit / not-a-repo add nothing.
+    expect(groupStopNote({ ...stopped, uncommitted: false }, 409)).toBe(groupStopNote(stopped, 409));
   });
 });
 

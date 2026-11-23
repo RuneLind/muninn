@@ -3160,6 +3160,89 @@ describe("lint proposals — seeding and the group verbs", () => {
     expect(await Bun.file(path.join(root, PAGE_B)).text()).not.toContain("series:");
   });
 
+  // A commit that did not land is reported in Done's shape; the rows settle
+  // exactly as they do after a commit that landed.
+  describe("a group verb reports a commit that did not land", () => {
+    type Commit = { committed: boolean; reason?: "not-a-repo" | "not-default-branch" | "nothing-to-commit" | "error" };
+    const CASES: Array<[string, Commit, Record<string, unknown>]> = [
+      ["error", { committed: false, reason: "error" }, { commitReason: "error", uncommitted: true }],
+      ["not-default-branch", { committed: false, reason: "not-default-branch" }, { commitReason: "not-default-branch", uncommitted: true }],
+      ["nothing-to-commit", { committed: false, reason: "nothing-to-commit" }, { commitReason: "nothing-to-commit", uncommitted: false }],
+      ["committed", { committed: true }, {}],
+    ];
+    const withCommit = (result: Commit) => ({
+      applyProposalGroup: ((rows, d, opts) => applyWikiProposalGroup(rows, { ...d, commit: async () => result }, opts)) as typeof applyWikiProposalGroup,
+      settleWrittenRows: ((rows, d, settle, opts) =>
+        settleWrittenGroupRows(rows, { ...d, commit: async () => result, hasUncommittedChanges: async () => true }, settle, opts)) as typeof settleWrittenGroupRows,
+    });
+
+    for (const [name, result, fields] of CASES) {
+      test(`Accept, commit ${name}: 200 carries ${JSON.stringify(fields)}, rows applied`, async () => {
+        const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+        registerWikiGardenerRoutes(app, deps({ ...store.deps, ...withCommit(result) }));
+        const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+        expect(res.status).toBe(200);
+        const payload = (await res.json()) as Record<string, unknown>;
+        expect(Object.keys(payload).sort()).toEqual(["applied", "noop", "outcome", "recovered", "skipped", ...Object.keys(fields)].sort());
+        expect(payload).toMatchObject({ outcome: "applied", applied: [PAGE_A, PAGE_B], ...fields });
+        expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      });
+
+      test(`Dismiss, commit ${name}: 200 carries ${JSON.stringify(fields)}, written rows applied`, async () => {
+        const rows = [await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")];
+        // An earlier Accept wrote both pages and never committed them.
+        for (const r of rows as Array<{ targetPath: string; draft: string }>) await Bun.write(path.join(root, r.targetPath), r.draft);
+        const store = groupStore(rows);
+        registerWikiGardenerRoutes(app, deps({ ...store.deps, ...withCommit(result) }));
+        const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+        expect(res.status).toBe(200);
+        const payload = (await res.json()) as Record<string, unknown>;
+        expect(Object.keys(payload).sort()).toEqual(["alreadyWritten", "outcome", "rejected", ...Object.keys(fields)].sort());
+        expect(payload).toMatchObject({ outcome: "rejected", rejected: 0, alreadyWritten: [PAGE_A, PAGE_B], ...fields });
+        expect(store.rows().map((r) => r.status)).toEqual(["applied", "applied"]);
+      });
+    }
+
+    test("a STOPPED Accept whose written page's commit failed says so on the 409", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          applyProposalGroup: ((rows, d, opts) =>
+            applyWikiProposalGroup(
+              rows,
+              {
+                ...d,
+                commit: async () => ({ committed: false, reason: "error" }),
+                writeFile: async (abs, content) => {
+                  if (abs.endsWith(PAGE_B)) throw new Error("disk full");
+                  await Bun.write(abs, content);
+                },
+              },
+              opts,
+            )) as typeof applyWikiProposalGroup,
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "stopped", applied: [PAGE_A], stoppedAt: PAGE_B, commitReason: "error", uncommitted: true });
+    });
+
+    test("an Accept refused before any write attempted no commit and adds no field", async () => {
+      // B edited after seeding: the preflight stops the group with nothing written.
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      await Bun.write(path.join(root, PAGE_B), body("B") + "\nEdited.\n");
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, ...withCommit({ committed: false, reason: "error" }) }));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      const payload = (await res.json()) as Record<string, unknown>;
+      expect(payload.outcome).toBe("stopped");
+      expect(payload).not.toHaveProperty("commitReason");
+      expect(payload).not.toHaveProperty("uncommitted");
+    });
+  });
+
   /**
    * F35 (arch review 2026-11-16) — the whole state space of a two-row group:
    * the rows' statuses × whether an Accept/Dismiss of the group is in flight in

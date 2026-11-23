@@ -84,7 +84,7 @@ describe("batchHeadHtml", () => {
 });
 
 // Fix round 1 batch 1 (review findings 1, 5).
-import { batchStopReason } from "./wiki-gardener-batch.ts";
+import { batchStopReason, uncommittedNote } from "./wiki-gardener-batch.ts";
 
 describe("planBatch — a page another row already wrote", () => {
   test("a create draft whose page an applied row wrote is left out", () => {
@@ -119,6 +119,26 @@ describe("batchStopReason", () => {
     expect(batchStopReason({ status: 409, outcome: "", error: "collision" })).toBeNull();
     expect(batchStopReason({ status: 200, outcome: "stale", error: "" })).toBeNull();
     expect(batchStopReason({ status: 200, outcome: "applied", error: "" })).toBeNull();
+  });
+
+  test("an applied card whose commit did not land stops the batch: every later card shares the fault", () => {
+    expect(batchStopReason({ status: 200, outcome: "applied", error: "", uncommitted: true })).toContain("commit");
+    // A commit that had nothing to do, or a wiki outside git, stops nothing.
+    expect(batchStopReason({ status: 200, outcome: "applied", error: "", uncommitted: false })).toBeNull();
+  });
+});
+
+describe("uncommittedNote", () => {
+  test("says the page is written and logged but needs a commit by hand", () => {
+    const note = uncommittedNote({ uncommitted: true });
+    expect(note).toContain("written and logged");
+    expect(note).toContain("commit it by hand");
+  });
+
+  test("nothing-to-commit, not-a-repo and a landed commit show nothing", () => {
+    expect(uncommittedNote({ commitReason: "nothing-to-commit", uncommitted: false })).toBeNull();
+    expect(uncommittedNote({ commitReason: "not-a-repo", uncommitted: false })).toBeNull();
+    expect(uncommittedNote({})).toBeNull();
   });
 });
 
