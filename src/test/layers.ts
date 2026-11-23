@@ -38,6 +38,23 @@ export const LAYER_MAP: readonly (readonly [prefix: string, layer: Layer])[] = [
   ["src/web/", "render"], // web-format.ts: markdown to HTML for chat and wiki alike
 
   ["src/wiki/", "wiki-core"],
+  // Leaf modules of the two agent directories below that wiki-core files import (lint, store,
+  // step-checks, discuss-agent, status-date-check): they call no model and stay here.
+  ["src/wiki/decision-triage/git.ts", "wiki-core"],
+  ["src/wiki/decision-triage/schema.ts", "wiki-core"],
+  ["src/wiki/work-map/gh-check.ts", "wiki-core"],
+  ["src/wiki/work-map/ids.ts", "wiki-core"],
+  ["src/wiki/work-map/kind.ts", "wiki-core"],
+  ["src/wiki/work-map/schema.ts", "wiki-core"],
+
+  // The model-calling wiki agents (review 2026-11, F43): connector, Haiku or fenced one-shot
+  // callers. Still the knowledge side for scripts/boundary-crossing.ts, which reads src/wiki/ by path.
+  ["src/wiki/decision-triage/", "features"],
+  ["src/wiki/digest.ts", "features"],
+  ["src/wiki/integrate-oneshot.ts", "features"],
+  ["src/wiki/stale-confirm.ts", "features"],
+  ["src/wiki/stale-fix-verdicts.ts", "features"], // imports stale-confirm's verdict keys; only routes import it
+  ["src/wiki/work-map/", "features"],
 
   ["src/ai/", "features"],
   ["src/anthropic/", "features"],
