@@ -38,8 +38,8 @@ export const LAYER_MAP: readonly (readonly [prefix: string, layer: Layer])[] = [
   ["src/web/", "render"], // web-format.ts: markdown to HTML for chat and wiki alike
 
   ["src/wiki/", "wiki-core"],
-  // Leaf modules of the two agent directories below that wiki-core files import (lint, store,
-  // step-checks, discuss-agent, status-date-check): they call no model and stay here.
+  // Files of the two agent directories below that call no model and that wiki-core files import
+  // (lint, store, step-checks, discuss-agent, status-date-check; schema.ts through git.ts): they stay here.
   ["src/wiki/decision-triage/git.ts", "wiki-core"],
   ["src/wiki/decision-triage/schema.ts", "wiki-core"],
   ["src/wiki/work-map/gh-check.ts", "wiki-core"],
