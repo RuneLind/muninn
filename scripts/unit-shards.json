@@ -180,7 +180,8 @@
       "src/vimeo/media.test.ts",
       "src/test/temp-dir-guard.test.ts",
       "src/test/spawn-group.test.ts",
-      "src/test/temp-dir.test.ts"
+      "src/test/temp-dir.test.ts",
+      "src/test/wiki-write-guard.test.ts"
     ],
     "unit-3": [
       "scripts/wiki-work-replay.test.ts",

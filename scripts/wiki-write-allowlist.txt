@@ -1,0 +1,18 @@
+# Raw filesystem writes allowed today in wiki-side code (src/test/wiki-write-scan.ts), as <path> <count>, keyed per file.
+# A removed write lowers its count, and a line at zero is removed. A raised count or a new line is a reviewed exception the PR body explains:
+# a write under a wiki root runs inside runWikiWriteExclusive (src/wiki/queue.ts); any other target says what it is.
+# A listed site was reviewed, not verified to be queued.
+src/dashboard/routes/wiki-discuss-apply.ts 1
+src/dashboard/routes/wiki-gardener-routes.ts 1
+src/gardener/lint-proposals.ts 1
+src/plans/write.ts 2
+src/wiki/bucket-mirror.ts 15
+src/wiki/decision-triage/log.ts 2
+src/wiki/decision-triage/test-repo.ts 4
+src/wiki/find-log.ts 2
+src/wiki/lockfile.ts 3
+src/wiki/page-write.ts 1
+src/wiki/step-checks/probes.ts 2
+src/wiki/work-map/dry-run.ts 4
+src/wiki/work-map/state.ts 3
+src/wiki/work-map/write.ts 3
