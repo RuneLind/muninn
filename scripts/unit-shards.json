@@ -130,6 +130,7 @@
       "src/vimeo/metadata.test.ts",
       "src/vimeo/whisper.test.ts",
       "src/startup/adapter-audit.test.ts",
+      "src/startup/uncaught-backstop.test.ts",
       "src/voice/tts.test.ts",
       "src/ai/connector.test.ts",
       "src/ai/connectors/copilot-mcp.test.ts",

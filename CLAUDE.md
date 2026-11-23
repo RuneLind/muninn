@@ -152,6 +152,7 @@ Two traps regardless of how the page is driven:
 - AI connectors: `resolveConnector(botConfig)` returns the appropriate executor (`claude-cli`, `copilot-sdk`, `openai-compat`, or `claude-sdk`). All callers use this instead of importing executors directly. Connectors conform to the `AiConnector` type signature. Per-connector mechanics: `src/ai/CLAUDE.md`.
 - MCP tool tracking: tool calls extracted from stream events (stream-json for CLI, session events for SDK), per-tool timing, displayed as child spans in traces waterfall
 - Scheduled tasks: cron-style (hour/minute/days) or interval-style (every N ms), timezone-aware
+- Background loops: a new or reworked interval loop uses `createLoop` (`src/utils/loop.ts`): single-flight, a final `stop()` that aborts the run and waits for it, last-run state, unref'd timers. A restart is a new handle passed the old one as `after`. The two retention loops use it; the other seven are still hand-rolled
 - Watchers: interval-based background monitors (email, calendar, etc.) with dedup via `lastNotifiedIds`
 - Watcher email checking: Haiku spawned in muninn's agent home on the `gmail-read` tool surface — the bot's Gmail server only, the three Gmail reads allowed, `dontAsk`, the known write tools disallowed; every other `spawnHaiku` is tool-less — see the `MUNINN_AGENT_CWD` row
 - Quiet hours: per-user, timezone-aware, overnight ranges supported (e.g. 22-08)

@@ -6,6 +6,7 @@ import { harvestSearchSignals } from "../db/search-signals.ts";
 import { cleanupOldStaleVerdicts, STALE_VERDICT_RETENTION_DAYS } from "../db/wiki-stale-verdicts.ts";
 import { BatchedDeleteError } from "../db/batched-delete.ts";
 import { getLog } from "../logging.ts";
+import { createLoop, settleWithin, type LoopHandle, type LoopState } from "../utils/loop.ts";
 
 const log = getLog("scheduler", "retention");
 
@@ -102,58 +103,41 @@ export function retentionCleanupBootLine(config: RetentionCleanupConfig): string
   );
 }
 
-let first: ReturnType<typeof setTimeout> | null = null;
-let timer: ReturnType<typeof setInterval> | null = null;
-/** The run in flight, if any: a tick that finds one skips, and stop waits for it. */
-let running: Promise<unknown> | null = null;
-/** The current start's stop flag, read between steps and between delete
- *  batches. One object per start, so a later start cannot un-stop a run the
- *  previous stop flagged and could not wait out. */
-let current: { stopping: boolean } = { stopping: false };
+/** The current handle; a stopped one stays here so the next start runs after it. */
+let loop: LoopHandle | null = null;
 
 /** Start the hourly cleanup (idempotent). Process-wide and on every profile:
  *  the per-bot scheduler tick runs only for a bot with a Telegram token, which
  *  a nais pod does not have. Off with SCHEDULER_ENABLED=false, which the e2e
- *  shared server sets so its seed trace survives. `opts` is for tests. */
+ *  shared server sets so its seed trace survives. One run at a time, across a
+ *  restart too (`createLoop`). `opts` is for tests. */
 export function startRetentionCleanup(
   config: RetentionCleanupConfig,
   opts: { deps?: RetentionCleanupDeps; firstDelayMs?: number; intervalMs?: number } = {},
 ): boolean {
-  if (first || timer) return true;
+  if (loop && !loop.state().stopped) return true;
   if (!config.schedulerEnabled) return false;
-  const run = (current = { stopping: false });
-  const tick = () => {
-    if (running) {
-      // Each statement is bounded in Postgres, so a run still here an hour on is
-      // stuck outside it (a half-open TCP connection, say): this line is the signal.
-      log.warn("Retention cleanup skipped: the previous run is still in flight");
-      return;
-    }
-    running = runRetentionCleanup(config, opts.deps, () => run.stopping).finally(() => {
-      running = null;
-    });
-  };
-  first = setTimeout(tick, opts.firstDelayMs ?? RETENTION_CLEANUP_FIRST_DELAY_MS);
-  timer = setInterval(tick, opts.intervalMs ?? RETENTION_CLEANUP_INTERVAL_MS);
-  first.unref?.();
-  timer.unref?.();
+  loop = createLoop({
+    name: "Retention cleanup",
+    intervalMs: opts.intervalMs ?? RETENTION_CLEANUP_INTERVAL_MS,
+    firstDelayMs: opts.firstDelayMs ?? RETENTION_CLEANUP_FIRST_DELAY_MS,
+    log,
+    after: loop,
+    // Each statement is bounded in Postgres, so a run still here an hour on is
+    // stuck outside it (a half-open TCP connection, say): this line is the signal.
+    onSkip: () => log.warn("Retention cleanup skipped: the previous run is still in flight"),
+    run: (signal) => runRetentionCleanup(config, opts.deps, () => signal.aborted),
+  });
+  loop.start();
   return true;
 }
+
+/** The current handle's state (last run, in flight, stopped); null before the first start. */
+export const retentionCleanupState = (): LoopState | null => loop?.state() ?? null;
 
 /** Stop the timers and flag a run in flight to stop at its next batch, then wait
  *  (bounded) for it, so shutdown closes the pool after it rather than under it. */
 export async function stopRetentionCleanup(waitMs = RETENTION_CLEANUP_STOP_WAIT_MS): Promise<void> {
-  if (first) clearTimeout(first);
-  if (timer) clearInterval(timer);
-  first = timer = null;
-  current.stopping = true;
-  const inFlight = running;
-  if (!inFlight) return;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = await Promise.race([
-    inFlight.then(() => false),
-    new Promise<boolean>((r) => (timeout = setTimeout(() => r(true), waitMs))),
-  ]);
-  clearTimeout(timeout);
-  if (timedOut) log.warn("Shutdown: timed out waiting for the retention cleanup");
+  if (!loop) return;
+  if (!(await settleWithin(loop.stop(), waitMs))) log.warn("Shutdown: timed out waiting for the retention cleanup");
 }

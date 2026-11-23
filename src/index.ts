@@ -29,6 +29,7 @@ import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup }
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
 import { startWorkMapLoop, stopWorkMapLoop } from "./wiki/work-map/loop.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
+import { installUncaughtBackstop } from "./startup/uncaught-backstop.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
@@ -113,6 +114,10 @@ process.on("unhandledRejection", (reason) => {
     reason: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
   });
 });
+// Its sibling for synchronous throws (a timer, an event or abort listener): the
+// same keep-running policy once boot is complete (the module's last statement),
+// and exit 1 before that, so a boot that throws still stops the process.
+const uncaughtBackstop = installUncaughtBackstop(log);
 
 // Surface any MCP adapter processes that survived `predev: cleanup:kill`. Stale
 // adapters captured a different HUGINN_TRACE_* env at module-load and silently
@@ -638,3 +643,6 @@ async function shutdown() {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// Boot is complete: from here an uncaught throw is logged and survived.
+uncaughtBackstop.markBooted();
