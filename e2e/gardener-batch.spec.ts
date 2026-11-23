@@ -526,8 +526,9 @@ test("a wiki with no life/ rows hides the section chips and calls its one sectio
 });
 
 // PR #897: an answer saying the page is written and logged but its commit did
-// not land. The real route runs; its answer is extended with Done's shape
-// (this wiki is not a git repo, so the real answer says `not-a-repo`).
+// not land. With `__status` the answer is fully mocked and the server is never
+// called; otherwise the real route runs and its answer is extended with Done's
+// shape (this wiki is not a git repo, so the real answer says `not-a-repo`).
 const uncommittedAnswer = (ids_: () => string[], extra: (id: string) => Record<string, unknown> | null) =>
   async (route: import("@playwright/test").Route) => {
     const id = new URL(route.request().url()).pathname.split("/")[4]!;

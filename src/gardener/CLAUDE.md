@@ -466,7 +466,10 @@ single-row approve send after a commit was attempted carries Done's shape
 (`commitFailureFields`, `src/wiki/commit.ts`: `commitReason`, and
 `uncommitted: true` for `error`/`not-default-branch`), the card warns that the
 page needs a commit by hand, and a batch stops on it. The rows stay `applied`.
-The self-heal has no answer and logs it at `error`. Residuals: the check is not atomic with the append, so a lease that
+The self-heal has no answer and logs it at `error`. Known limitation, kept on
+purpose: a clean no-op re-approve on a non-default branch still warns. A
+dirtiness check for it (#897, fix round 1) read a git-ignored page as committed
+(`git status` never lists one) and was removed. Residuals: the check is not atomic with the append, so a lease that
 expires in that gap (its renewals failing for 90 s) lets one entry land, and
 the competitor may log the page again; a commit that fails after the entry
 leaves a logged, uncommitted page the next verb logs a second time; a dead
