@@ -154,6 +154,13 @@ export function uncommittedNote(data: { commitReason?: unknown; uncommitted?: un
   return data.uncommitted === true ? UNCOMMITTED_NOTE : null;
 }
 
+/** A card's note for one verb's answer: `base` (the error, or another note the
+ *  caller has) with the uncommitted warning after it; null leaves the note as
+ *  is. The single click, the batch and the group card all compose through it. */
+export function answerCardNote(base: string | null, data: { commitReason?: unknown; uncommitted?: unknown }): string | null {
+  return base ?? uncommittedNote(data);
+}
+
 /** The ids a batch takes, in list order, and the skipped count per reason. */
 export function planBatch(
   cards: readonly BatchCard[],

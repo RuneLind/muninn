@@ -129,7 +129,9 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
     await rm(gitRoot, { recursive: true, force: true });
   });
 
-  async function approve(): Promise<{ status: number; body: Record<string, unknown>; rowStatus: string | undefined }> {
+  async function approve(
+    over: Partial<Parameters<typeof insertWikiProposal>[0]> = {},
+  ): Promise<{ status: number; body: Record<string, unknown>; rowStatus: string | undefined }> {
     const p = await insertWikiProposal({
       botName: "jarvis",
       wikiName: GIT_WIKI,
@@ -139,6 +141,7 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
       targetPath: TARGET,
       draft: "---\ntitle: Commit Probe\ntype: concept\n---\n\n# Commit Probe\n\nSynthesized fixture body.\n",
       sourceDocs: [],
+      ...over,
     });
     if (!p) throw new Error("fixture proposal not inserted");
     const app = new Hono();
@@ -174,6 +177,32 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
     const r = await approve();
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ outcome: "applied", writtenPath: TARGET, commitReason: "not-default-branch", uncommitted: true });
+    expect(r.rowStatus).toBe("applied");
+  });
+
+  // A no-op approve (the page already IS its draft) still runs the commit
+  // tail, which answers `not-default-branch` before it looks at what is staged.
+  const SEED = "concepts/Seed.md";
+  const seedDraft = page("Seed").replace("Body.", "Body, revised.");
+  const noopRow = { topicKey: "seed-update", mode: "update" as const, targetPath: SEED, baseHash: sha256(page("Seed")), draft: seedDraft };
+
+  test("a no-op over a COMMITTED page on a feature branch is not `uncommitted`", async () => {
+    await Bun.write(path.join(gitRoot, SEED), seedDraft);
+    await git("commit", "-q", "-am", "the draft landed earlier");
+    await git("checkout", "-q", "-b", "feature");
+    const r = await approve(noopRow);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: SEED, commitReason: "nothing-to-commit", uncommitted: false });
+    expect(r.rowStatus).toBe("applied");
+    expect((await runGit(gitRoot, ["status", "--porcelain"])).stdout).toBe("");
+  });
+
+  test("a no-op over an UNCOMMITTED page on a feature branch is still `uncommitted`", async () => {
+    await git("checkout", "-q", "-b", "feature");
+    await Bun.write(path.join(gitRoot, SEED), seedDraft);
+    const r = await approve(noopRow);
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: SEED, commitReason: "not-default-branch", uncommitted: true });
     expect(r.rowStatus).toBe("applied");
   });
 });

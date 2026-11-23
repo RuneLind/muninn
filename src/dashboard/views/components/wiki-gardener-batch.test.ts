@@ -84,7 +84,7 @@ describe("batchHeadHtml", () => {
 });
 
 // Fix round 1 batch 1 (review findings 1, 5).
-import { batchStopReason, uncommittedNote } from "./wiki-gardener-batch.ts";
+import { answerCardNote, batchStopReason, UNCOMMITTED_NOTE, uncommittedNote } from "./wiki-gardener-batch.ts";
 
 describe("planBatch — a page another row already wrote", () => {
   test("a create draft whose page an applied row wrote is left out", () => {
@@ -139,6 +139,32 @@ describe("uncommittedNote", () => {
     expect(uncommittedNote({ commitReason: "nothing-to-commit", uncommitted: false })).toBeNull();
     expect(uncommittedNote({ commitReason: "not-a-repo", uncommitted: false })).toBeNull();
     expect(uncommittedNote({})).toBeNull();
+  });
+});
+
+// One composition for every card: a single click, a batch and a group card
+// must say the same thing for the same answer.
+describe("answerCardNote", () => {
+  const ERR = "proposal state changed during apply";
+
+  test("ok + uncommitted: the warning", () => {
+    expect(answerCardNote(null, { commitReason: "error", uncommitted: true })).toBe(UNCOMMITTED_NOTE);
+  });
+
+  test("non-ok + uncommitted: the error text, then the warning", () => {
+    expect(answerCardNote(ERR, { commitReason: "error", uncommitted: true })).toBe(ERR + ". " + UNCOMMITTED_NOTE);
+  });
+
+  test("no flag: no note on ok, the error alone on non-ok", () => {
+    expect(answerCardNote(null, {})).toBeNull();
+    expect(answerCardNote(ERR, {})).toBe(ERR);
+  });
+
+  test("nothing-to-commit and not-a-repo add no warning", () => {
+    for (const commitReason of ["nothing-to-commit", "not-a-repo"]) {
+      expect(answerCardNote(null, { commitReason, uncommitted: false })).toBeNull();
+      expect(answerCardNote(ERR, { commitReason, uncommitted: false })).toBe(ERR);
+    }
   });
 });
 
