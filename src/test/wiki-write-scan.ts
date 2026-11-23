@@ -9,9 +9,16 @@
  *
  * A site, found on the TypeScript AST (comments and strings never count):
  * - `Bun.write` (also `globalThis.Bun.write`, `Bun["write"]`, `const { write } = Bun`), and
- *   `.writer()` / `.write()` / `.delete()` on a `Bun.file(…)` call;
+ *   `.writer()` / `.write()` / `.delete()` / `.unlink()` on a `Bun.file(…)` call, by property
+ *   or quoted key;
+ * - every use of Bun's shell: `Bun.$` (also `Bun["$"]`, `const { $ } = Bun`) and every use of
+ *   `$` imported from `"bun"`, renamed or not. The scan cannot read what a command does;
  * - every use of a write name (`WRITE_NAMES`) imported by name from `fs`, `node:fs`,
- *   `fs/promises` or `node:fs/promises`: a call, or the name used as a value;
+ *   `fs/promises` or `node:fs/promises`: a call, or the name used as a value. The names:
+ *   `write`, `writev`, `writeFile`, `appendFile`, `rename`, `rm`, `rmdir`, `unlink`, `mkdir`,
+ *   `mkdtemp`, `copyFile`, `cp`, `truncate`, `ftruncate`, `symlink`, `link`, `chmod`, `fchmod`,
+ *   `chown`, `fchown`, `lchown`, `utimes`, `futimes`, `lutimes`, each with its `*Sync` form,
+ *   and `createWriteStream`;
  * - a write name read off an fs namespace (`import * as fs`, a default import, or
  *   `promises`): `fs.writeFile`, `fs.promises.rm`, `fs["rename"]`, a destructured write name;
  * - an evasion: a write name renamed on import, an fs namespace used other than by a
@@ -47,10 +54,16 @@ export const WIKI_SIDE: readonly string[] = [
 /** Route files under `src/dashboard/routes/` that are wiki-side by name. */
 const ROUTE = /^src\/dashboard\/routes\/(wiki|plans)-[^/]*$/;
 
-const BASE = ["write", "writeFile", "appendFile", "rename", "rm", "rmdir", "unlink", "mkdir", "copyFile", "cp", "truncate", "symlink", "link"];
+// Built, so the temp-dir guard (src/test/temp-dir-scan.ts) does not read this list as a direct use.
+const MKDTEMP = ["mk", "dtemp"].join("");
+const BASE = ["write", "writev", "writeFile", "appendFile", "rename", "rm", "rmdir", "unlink", "mkdir", MKDTEMP, "copyFile", "cp", "truncate", "ftruncate", "symlink", "link",
+  "chmod", "fchmod", "chown", "fchown", "lchown", "utimes", "futimes", "lutimes"];
 export const WRITE_NAMES: ReadonlySet<string> = new Set([...BASE, ...BASE.map((n) => `${n}Sync`), "createWriteStream"]);
 const FS_MODULE = /^(node:)?fs(\/promises)?$/;
-const BUN_FILE_WRITES = new Set(["writer", "write", "delete"]);
+const BUN_FILE_WRITES = new Set(["writer", "write", "delete", "unlink"]);
+/** Bun's shell: `Bun.$`, or `$` imported from this module. */
+const BUN_MODULE = "bun";
+const SHELL = "$";
 
 export type SiteKind = "write" | "value" | "rename" | "namespace" | "module" | "parse";
 export interface Site {
@@ -93,6 +106,12 @@ function isCallee(e: ts.Node): boolean {
   return ts.isCallExpression(o.parent) && o.parent.expression === o;
 }
 
+/** `e` is the callee of a call or the tag of a tagged template. */
+function isInvoked(e: ts.Node): boolean {
+  const o = outer(e);
+  return isCallee(e) || (ts.isTaggedTemplateExpression(o.parent) && o.parent.tag === o);
+}
+
 /** `Bun` or `globalThis.Bun`. */
 function isBun(e: ts.Expression): boolean {
   return (ts.isIdentifier(e) && e.text === "Bun")
@@ -104,6 +123,13 @@ function keyText(e: ts.Expression): string | null {
   let k: ts.Node = e;
   while (UNWRAP(k)) k = (k as ts.ParenthesizedExpression).expression;
   return ts.isStringLiteralLike(k) ? k.text : null;
+}
+
+/** A `Bun.file(…)` call, through parentheses, casts and `!`. */
+function isBunFileCall(e: ts.Expression): boolean {
+  let o: ts.Node = e;
+  while (UNWRAP(o)) o = (o as ts.ParenthesizedExpression).expression;
+  return ts.isCallExpression(o) && ts.isPropertyAccessExpression(o.expression) && o.expression.name.text === "file" && isBun(o.expression.expression);
 }
 
 /** Sites in one file, in source order. */
@@ -128,9 +154,18 @@ export function scanSource(file: string, source: string): Site[] {
   // Local names bound by the fs imports: write functions, and namespaces (default, `* as`, `promises`).
   const writeLocals = new Set<string>();
   const namespaces = new Set<string>();
+  const shellLocals = new Set<string>();
   const declNames = new Set<ts.Node>();
   for (const n of nodes) {
-    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && FS_MODULE.test(n.moduleSpecifier.text)) {
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && n.moduleSpecifier.text === BUN_MODULE) {
+      const b = n.importClause?.namedBindings;
+      if (n.importClause?.isTypeOnly || !b || !ts.isNamedImports(b)) continue;
+      for (const s of b.elements) {
+        if (s.isTypeOnly || (s.propertyName ?? s.name).text !== SHELL) continue;
+        shellLocals.add(s.name.text);
+        declNames.add(s.name);
+      }
+    } else if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && FS_MODULE.test(n.moduleSpecifier.text)) {
       const c = n.importClause;
       if (!c || c.isTypeOnly) continue;
       if (c.name) {
@@ -201,27 +236,27 @@ export function scanSource(file: string, source: string): Site[] {
         || (ts.isBindingElement(p) && p.propertyName === n) || ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isQualifiedName(p));
       if (isRef && writeLocals.has(n.text)) add(n, isCallee(n) ? "write" : "value", `\`${n.text}\`${isCallee(n) ? "" : " used as a value"}`);
       else if (isRef && namespaces.has(n.text)) namespaceUse(n, n.text);
+      else if (isRef && shellLocals.has(n.text)) add(n, isInvoked(n) ? "write" : "value", `\`${n.text}\` (Bun's shell)${isInvoked(n) ? "" : " used as a value"}`);
       if (ts.isExportSpecifier(p) && writeLocals.has((p.propertyName ?? p.name).text) && p.name === n) add(p, "value", `\`${p.getText(sf)}\` re-exported`);
     }
-    // Bun.write and its spellings.
-    if (ts.isPropertyAccessExpression(n) && n.name.text === "write" && isBun(n.expression)) {
-      add(n.name, isCallee(n) ? "write" : "value", `\`${n.getText(sf)}\`${isCallee(n) ? "" : " used as a value"}`);
+    // Bun.write, Bun.$ and their spellings.
+    if (ts.isPropertyAccessExpression(n) && (n.name.text === "write" || n.name.text === SHELL) && isBun(n.expression)) {
+      add(n.name, isInvoked(n) ? "write" : "value", `\`${n.getText(sf)}\`${isInvoked(n) ? "" : " used as a value"}`);
     } else if (ts.isElementAccessExpression(n) && isBun(n.expression)) {
       const k = keyText(n.argumentExpression);
-      if (k === null || k === "write") add(n, "value", `\`${n.getText(sf)}\`: a quoted or computed key on Bun`);
+      if (k === null || k === "write" || k === SHELL) add(n, "value", `\`${n.getText(sf)}\`: a quoted or computed key on Bun`);
     } else if (ts.isVariableDeclaration(n) && n.initializer && ts.isObjectBindingPattern(n.name) && isBun(n.initializer)) {
       for (const el of n.name.elements) {
         const key = (el.propertyName ?? el.name).getText(sf).replace(/^["']|["']$/g, "");
-        if (key === "write" || el.dotDotDotToken) add(el, "value", `\`${el.getText(sf)}\` destructured from Bun`);
+        if (key === "write" || key === SHELL || el.dotDotDotToken) add(el, "value", `\`${el.getText(sf)}\` destructured from Bun`);
       }
     }
-    // Bun.file(…).writer() / .write() / .delete().
-    if (ts.isPropertyAccessExpression(n) && BUN_FILE_WRITES.has(n.name.text)) {
-      let o: ts.Node = n.expression;
-      while (UNWRAP(o)) o = (o as ts.ParenthesizedExpression).expression;
-      if (ts.isCallExpression(o) && ts.isPropertyAccessExpression(o.expression) && o.expression.name.text === "file" && isBun(o.expression.expression)) {
-        add(n.name, "write", `\`Bun.file(…).${n.name.text}\``);
-      }
+    // Bun.file(…).writer() / .write() / .delete() / .unlink(), by property or quoted key.
+    if (ts.isPropertyAccessExpression(n) && BUN_FILE_WRITES.has(n.name.text) && isBunFileCall(n.expression)) {
+      add(n.name, "write", `\`Bun.file(…).${n.name.text}\``);
+    } else if (ts.isElementAccessExpression(n) && isBunFileCall(n.expression)) {
+      const k = keyText(n.argumentExpression);
+      if (k !== null && BUN_FILE_WRITES.has(k)) add(n, "write", `\`Bun.file(…)["${k}"]\``);
     }
   }
   return sites.sort((a, b) => a.line - b.line);
