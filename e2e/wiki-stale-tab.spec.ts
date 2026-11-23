@@ -39,7 +39,10 @@
  * outside the server.
  *
  * Ports from `e2e/ports.ts`; `e2eEnv()` blanks the platform tokens and the
- * instance-profile flags; the bot lives under a temp `MUNINN_BOTS_DIR`.
+ * instance-profile flags; the bot lives under a temp `MUNINN_BOTS_DIR`. A CLI
+ * the server spawns gets a temp `CLAUDE_CONFIG_DIR` and `MUNINN_AGENT_CWD`:
+ * without them its transcripts land in the developer's real
+ * `~/.claude/projects`, where claude-usage bills the fake's `claude-haiku-e2e`.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -87,6 +90,7 @@ const page = (title: string, body: string, extra = "") => `---\ntitle: ${title}\
 let root = "";
 let roRoot = "";
 let botsRoot = "";
+let claudeHome = "";
 let server: ChildProcess | undefined;
 let roServer: ChildProcess | undefined;
 let fake: Server | undefined;
@@ -144,6 +148,8 @@ function boot(port: number, extra: Record<string, string>): ChildProcess {
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
       MUNINN_BOTS_DIR: botsRoot,
+      CLAUDE_CONFIG_DIR: path.join(claudeHome, "config"),
+      MUNINN_AGENT_CWD: path.join(claudeHome, "agent-cwd"),
       WIKI_EXTRA: `${WIKI}=${root}=${WIKI}=${BOT},${RO_WIKI}=${roRoot}=${RO_WIKI}=${BOT}`,
       ANTHROPIC_API_KEY: "e2e-dummy-key",
       CLAUDE_CODE_OAUTH_TOKEN: "",
@@ -169,6 +175,7 @@ async function waitUp(base: string): Promise<void> {
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-stale-"));
   botsRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-stale-bots-"));
+  claudeHome = await mkdtemp(path.join(tmpdir(), "muninn-e2e-stale-claude-"));
   await mkdir(path.join(botsRoot, BOT), { recursive: true });
   await writeFile(path.join(botsRoot, BOT, "CLAUDE.md"), "# e2e stale bot\n");
   await writeFile(path.join(botsRoot, BOT, "config.json"), JSON.stringify({ connector: "claude-cli", haikuBackend: "anthropic" }));
@@ -292,6 +299,7 @@ test.afterAll(async () => {
   await rm(root, { recursive: true, force: true });
   if (roRoot) await rm(roRoot, { recursive: true, force: true });
   await rm(botsRoot, { recursive: true, force: true });
+  if (claudeHome) await rm(claudeHome, { recursive: true, force: true });
 });
 
 async function openHub(p: Page, base = BASE, wiki = WIKI): Promise<void> {
