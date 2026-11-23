@@ -10,15 +10,20 @@
  * A site, found on the TypeScript AST (comments and strings never count):
  * - `Bun.write` (also `globalThis.Bun.write`, `Bun["write"]`, `const { write } = Bun`), and
  *   `.writer()` / `.write()` / `.delete()` / `.unlink()` on a `Bun.file(…)` call, by property
- *   or quoted key;
- * - every use of Bun's shell: `Bun.$` (also `Bun["$"]`, `const { $ } = Bun`) and every use of
- *   `$` imported from `"bun"`, renamed or not. The scan cannot read what a command does;
+ *   or quoted key, and a computed key on one;
+ * - every use of Bun's shell: `Bun.$` (also `Bun["$"]`, `const { $ } = Bun`). The scan cannot
+ *   read what a command does;
+ * - every reference to the `"bun"` module that brings in a value: an import with a default,
+ *   namespace or named value binding, `export … from`, `import()`, `require`, `import = require`
+ *   (type-only forms are not). Its bindings are then read like `Bun`: a default or namespace
+ *   binding as `Bun` itself, a named `$` or `write` counted per use, renamed or not, and a named
+ *   `file` as `Bun.file`;
  * - every use of a write name (`WRITE_NAMES`) imported by name from `fs`, `node:fs`,
  *   `fs/promises` or `node:fs/promises`: a call, or the name used as a value. The names:
  *   `write`, `writev`, `writeFile`, `appendFile`, `rename`, `rm`, `rmdir`, `unlink`, `mkdir`,
  *   `mkdtemp`, `copyFile`, `cp`, `truncate`, `ftruncate`, `symlink`, `link`, `chmod`, `fchmod`,
- *   `chown`, `fchown`, `lchown`, `utimes`, `futimes`, `lutimes`, each with its `*Sync` form,
- *   and `createWriteStream`;
+ *   `lchmod`, `chown`, `fchown`, `lchown`, `utimes`, `futimes`, `lutimes`, each with its `*Sync`
+ *   form, and `createWriteStream`;
  * - a write name read off an fs namespace (`import * as fs`, a default import, or
  *   `promises`): `fs.writeFile`, `fs.promises.rm`, `fs["rename"]`, a destructured write name;
  * - an evasion: a write name renamed on import, an fs namespace used other than by a
@@ -57,13 +62,16 @@ const ROUTE = /^src\/dashboard\/routes\/(wiki|plans)-[^/]*$/;
 // Built, so the temp-dir guard (src/test/temp-dir-scan.ts) does not read this list as a direct use.
 const MKDTEMP = ["mk", "dtemp"].join("");
 const BASE = ["write", "writev", "writeFile", "appendFile", "rename", "rm", "rmdir", "unlink", "mkdir", MKDTEMP, "copyFile", "cp", "truncate", "ftruncate", "symlink", "link",
-  "chmod", "fchmod", "chown", "fchown", "lchown", "utimes", "futimes", "lutimes"];
+  "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown", "utimes", "futimes", "lutimes"];
 export const WRITE_NAMES: ReadonlySet<string> = new Set([...BASE, ...BASE.map((n) => `${n}Sync`), "createWriteStream"]);
 const FS_MODULE = /^(node:)?fs(\/promises)?$/;
 const BUN_FILE_WRITES = new Set(["writer", "write", "delete", "unlink"]);
-/** Bun's shell: `Bun.$`, or `$` imported from this module. */
+/** The module whose default export is `Bun`; any value reference to it is a site. */
 const BUN_MODULE = "bun";
+/** Bun's shell: `Bun.$`, or `$` imported from `BUN_MODULE`. */
 const SHELL = "$";
+/** Named bindings from `BUN_MODULE` the scan follows: counted per use (`$`, `write`), or read as `Bun.file`. */
+const BUN_FOLLOWED = new Set([SHELL, "write", "file"]);
 
 export type SiteKind = "write" | "value" | "rename" | "namespace" | "module" | "parse";
 export interface Site {
@@ -112,12 +120,6 @@ function isInvoked(e: ts.Node): boolean {
   return isCallee(e) || (ts.isTaggedTemplateExpression(o.parent) && o.parent.tag === o);
 }
 
-/** `Bun` or `globalThis.Bun`. */
-function isBun(e: ts.Expression): boolean {
-  return (ts.isIdentifier(e) && e.text === "Bun")
-    || (ts.isPropertyAccessExpression(e) && e.name.text === "Bun" && ts.isIdentifier(e.expression) && e.expression.text === "globalThis");
-}
-
 /** The text of a string-literal key, or null for any other expression. */
 function keyText(e: ts.Expression): string | null {
   let k: ts.Node = e;
@@ -125,11 +127,18 @@ function keyText(e: ts.Expression): string | null {
   return ts.isStringLiteralLike(k) ? k.text : null;
 }
 
-/** A `Bun.file(…)` call, through parentheses, casts and `!`. */
-function isBunFileCall(e: ts.Expression): boolean {
-  let o: ts.Node = e;
-  while (UNWRAP(o)) o = (o as ts.ParenthesizedExpression).expression;
-  return ts.isCallExpression(o) && ts.isPropertyAccessExpression(o.expression) && o.expression.name.text === "file" && isBun(o.expression.expression);
+/** An import declaration of `BUN_MODULE` that binds a value: a default, a namespace or a named value. */
+function bunValueImport(n: ts.ImportDeclaration): boolean {
+  const c = n.importClause;
+  if (!c || c.isTypeOnly) return false;
+  const b = c.namedBindings;
+  return !!c.name || (!!b && (ts.isNamespaceImport(b) || b.elements.some((s) => !s.isTypeOnly)));
+}
+
+/** `export … from` `BUN_MODULE` that exports a value: `export *`, `export * as`, or a named value. */
+function bunValueExport(n: ts.ExportDeclaration): boolean {
+  const c = n.exportClause;
+  return !n.isTypeOnly && (!c || ts.isNamespaceExport(c) || c.elements.some((s) => !s.isTypeOnly));
 }
 
 /** Sites in one file, in source order. */
@@ -154,17 +163,28 @@ export function scanSource(file: string, source: string): Site[] {
   // Local names bound by the fs imports: write functions, and namespaces (default, `* as`, `promises`).
   const writeLocals = new Set<string>();
   const namespaces = new Set<string>();
-  const shellLocals = new Set<string>();
+  // Locals bound from "bun": aliases of `Bun` (default, namespace, `import = require`), and followed names by local.
+  const bunAliases = new Set<string>();
+  const bunLocals = new Map<string, string>();
   const declNames = new Set<ts.Node>();
   for (const n of nodes) {
     if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && n.moduleSpecifier.text === BUN_MODULE) {
-      const b = n.importClause?.namedBindings;
-      if (n.importClause?.isTypeOnly || !b || !ts.isNamedImports(b)) continue;
-      for (const s of b.elements) {
-        if (s.isTypeOnly || (s.propertyName ?? s.name).text !== SHELL) continue;
-        shellLocals.add(s.name.text);
-        declNames.add(s.name);
+      if (!bunValueImport(n)) continue;
+      add(n, "module", `an import from "${BUN_MODULE}"`);
+      const c = n.importClause!;
+      if (c.name) bunAliases.add(c.name.text);
+      const b = c.namedBindings;
+      if (b && ts.isNamespaceImport(b)) bunAliases.add(b.name.text);
+      else if (b) {
+        for (const s of b.elements) {
+          const imported = (s.propertyName ?? s.name).text;
+          if (s.isTypeOnly || !BUN_FOLLOWED.has(imported)) continue;
+          bunLocals.set(s.name.text, imported);
+          declNames.add(s.name);
+        }
       }
+    } else if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && n.moduleSpecifier.text === BUN_MODULE) {
+      if (bunValueExport(n)) add(n, "module", `a re-export from "${BUN_MODULE}"`);
     } else if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && FS_MODULE.test(n.moduleSpecifier.text)) {
       const c = n.importClause;
       if (!c || c.isTypeOnly) continue;
@@ -193,11 +213,30 @@ export function scanSource(file: string, source: string): Site[] {
     } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
       const e = n.moduleReference.expression;
       if (ts.isStringLiteral(e) && FS_MODULE.test(e.text)) add(n, "module", `\`import … = require("${e.text}")\``);
-    } else if (ts.isCallExpression(n) && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]) && FS_MODULE.test(n.arguments[0].text)
+      else if (ts.isStringLiteral(e) && e.text === BUN_MODULE && !n.isTypeOnly) {
+        add(n, "module", `\`import … = require("${e.text}")\``);
+        bunAliases.add(n.name.text);
+      }
+    } else if (ts.isCallExpression(n) && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0])
+      && (FS_MODULE.test(n.arguments[0].text) || n.arguments[0].text === BUN_MODULE)
       && ((ts.isIdentifier(n.expression) && n.expression.text === "require") || n.expression.kind === ts.SyntaxKind.ImportKeyword)) {
-      add(n, "module", `\`${n.expression.getText(sf)}("${n.arguments[0].text}")\`: the scan follows fs only through static imports`);
+      add(n, "module", `\`${n.expression.getText(sf)}("${n.arguments[0].text}")\`: the scan follows a module only through static imports`);
     }
   }
+
+  /** `Bun`, `globalThis.Bun`, or a default/namespace binding of "bun". */
+  const isBun = (e: ts.Expression): boolean =>
+    (ts.isIdentifier(e) && (e.text === "Bun" || bunAliases.has(e.text)))
+    || (ts.isPropertyAccessExpression(e) && e.name.text === "Bun" && ts.isIdentifier(e.expression) && e.expression.text === "globalThis");
+
+  /** A `Bun.file(…)` call (or `file(…)` imported from "bun"), through parentheses, casts and `!`. */
+  const isBunFileCall = (e: ts.Expression): boolean => {
+    let o: ts.Node = e;
+    while (UNWRAP(o)) o = (o as ts.ParenthesizedExpression).expression;
+    if (!ts.isCallExpression(o)) return false;
+    const f = o.expression;
+    return (ts.isPropertyAccessExpression(f) && f.name.text === "file" && isBun(f.expression)) || (ts.isIdentifier(f) && bunLocals.get(f.text) === "file");
+  };
 
   /** A read off an fs namespace node `ns` (an identifier, or `ns.promises`). */
   const namespaceUse = (ns: ts.Node, label: string): void => {
@@ -236,8 +275,15 @@ export function scanSource(file: string, source: string): Site[] {
         || (ts.isBindingElement(p) && p.propertyName === n) || ts.isImportSpecifier(p) || ts.isExportSpecifier(p) || ts.isQualifiedName(p));
       if (isRef && writeLocals.has(n.text)) add(n, isCallee(n) ? "write" : "value", `\`${n.text}\`${isCallee(n) ? "" : " used as a value"}`);
       else if (isRef && namespaces.has(n.text)) namespaceUse(n, n.text);
-      else if (isRef && shellLocals.has(n.text)) add(n, isInvoked(n) ? "write" : "value", `\`${n.text}\` (Bun's shell)${isInvoked(n) ? "" : " used as a value"}`);
-      if (ts.isExportSpecifier(p) && writeLocals.has((p.propertyName ?? p.name).text) && p.name === n) add(p, "value", `\`${p.getText(sf)}\` re-exported`);
+      else if (isRef && (bunLocals.get(n.text) === SHELL || bunLocals.get(n.text) === "write")) {
+        add(n, isInvoked(n) ? "write" : "value", `\`${n.text}\` (\`Bun.${bunLocals.get(n.text)}\` from "${BUN_MODULE}")${isInvoked(n) ? "" : " used as a value"}`);
+      }
+      if (ts.isExportSpecifier(p) && p.name === n) {
+        const local = (p.propertyName ?? p.name).text;
+        // A local re-export (no `from`): `export … from` is a module site of its own.
+        const isLocal = !(p.parent.parent as ts.ExportDeclaration).moduleSpecifier;
+        if (writeLocals.has(local) || (isLocal && bunLocals.has(local))) add(p, "value", `\`${p.getText(sf)}\` re-exported`);
+      }
     }
     // Bun.write, Bun.$ and their spellings.
     if (ts.isPropertyAccessExpression(n) && (n.name.text === "write" || n.name.text === SHELL) && isBun(n.expression)) {
@@ -256,7 +302,8 @@ export function scanSource(file: string, source: string): Site[] {
       add(n.name, "write", `\`Bun.file(…).${n.name.text}\``);
     } else if (ts.isElementAccessExpression(n) && isBunFileCall(n.expression)) {
       const k = keyText(n.argumentExpression);
-      if (k !== null && BUN_FILE_WRITES.has(k)) add(n, "write", `\`Bun.file(…)["${k}"]\``);
+      if (k === null) add(n, "value", `\`${n.getText(sf)}\`: a computed key on \`Bun.file(…)\``);
+      else if (BUN_FILE_WRITES.has(k)) add(n, "write", `\`Bun.file(…)["${k}"]\``);
     }
   }
   return sites.sort((a, b) => a.line - b.line);
