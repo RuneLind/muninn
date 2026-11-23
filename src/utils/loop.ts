@@ -48,8 +48,10 @@ export interface LoopOptions {
   /** Names the loop in the failure line, e.g. "Retention cleanup". */
   name: string;
   intervalMs: number;
-  /** Delay before the first run; defaults to `intervalMs`. The interval starts
-   *  at `start()`, beside it, not after the first run. */
+  /** Delay before the first run. When given, its timer and the interval both
+   *  start at `start()`: the interval does not wait for the first run. When
+   *  omitted, no first timer is armed and the first run is the first interval
+   *  tick (a timer at `intervalMs` beside it would fire twice at that boundary). */
   firstDelayMs?: number;
   /** One run. Its rejection (or synchronous throw) is caught, logged at error and
    *  recorded; `signal` aborts when the handle is stopped. */
@@ -57,7 +59,8 @@ export interface LoopOptions {
   log: Logger;
   /** Called for a tick skipped because a run is still in flight. */
   onSkip?: () => void;
-  /** An older (stopped) handle of the same loop: no run starts while its run is in flight. */
+  /** An older (stopped) handle of the same loop: no run starts while its run is in
+   *  flight. The reference is dropped once that handle's chain has settled. */
   after?: LoopHandle | null;
   timers?: LoopTimers;
   now?: () => number;
@@ -78,11 +81,22 @@ export interface LoopHandle {
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-export function createLoop(opts: LoopOptions): LoopHandle {
+// JSC keeps a function's `arguments` reachable from its closures (a heap
+// snapshot showed the handle's scope -> Arguments -> options -> after), so the
+// predecessor must not arrive as an argument of the function that builds the
+// closures: it comes in a box that is emptied at once, and `options` (which
+// holds it) stays in `createLoop`, which makes no closures.
+export function createLoop(options: LoopOptions): LoopHandle {
+  const { after, ...opts } = options;
+  return loop(opts, { after: after ?? null });
+}
+
+function loop(opts: Omit<LoopOptions, "after">, box: { after: LoopHandle | null }): LoopHandle {
   const timers = opts.timers ?? realTimers;
   const now = opts.now ?? Date.now;
   const controller = new AbortController();
-  let after = opts.after ?? null;
+  let after = box.after;
+  box.after = null;
   let first: unknown = null;
   let interval: unknown = null;
   let started = false;
@@ -94,6 +108,18 @@ export function createLoop(opts: LoopOptions): LoopHandle {
     if (after && !after.busy()) after = null; // settled for good: drop the reference
     return after !== null;
   };
+  // Drop the predecessor once its chain has settled, without waiting for a tick
+  // or a busy() call: a handle stopped before its first tick would otherwise
+  // keep every older handle reachable. A rejection is swallowed (never unhandled).
+  if (after) {
+    const pred = after;
+    pred.settled().then(
+      () => {
+        if (after === pred && !pred.busy()) after = null;
+      },
+      () => {},
+    );
+  }
 
   // `now`, `log` and `onSkip` are the caller's: a throw from one must not escape a
   // timer callback, leave `inFlight` set, or reject `stop()`. A throwing clock
@@ -146,7 +172,7 @@ export function createLoop(opts: LoopOptions): LoopHandle {
     start() {
       if (started || stopped) return;
       started = true;
-      first = timers.setTimeout(tick, opts.firstDelayMs ?? opts.intervalMs);
+      if (opts.firstDelayMs !== undefined) first = timers.setTimeout(tick, opts.firstDelayMs);
       interval = timers.setInterval(tick, opts.intervalMs);
       unref(first);
       unref(interval);
