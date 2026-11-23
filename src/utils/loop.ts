@@ -95,13 +95,28 @@ export function createLoop(opts: LoopOptions): LoopHandle {
     return after !== null;
   };
 
+  // `now`, `log` and `onSkip` are the caller's: a throw from one must not escape a
+  // timer callback, leave `inFlight` set, or reject `stop()`. A throwing clock
+  // falls back to Date.now().
+  const clock = () => {
+    try {
+      return now();
+    } catch {
+      return Date.now();
+    }
+  };
+
   const tick = () => {
     if (stopped) return;
     if (inFlight || afterBusy()) {
-      opts.onSkip?.();
+      try {
+        opts.onSkip?.();
+      } catch {
+        // the skip hook's failure is not the loop's
+      }
       return;
     }
-    const record: LoopRunState = { startedAt: now(), finishedAt: null, ok: null, error: null };
+    const record: LoopRunState = { startedAt: clock(), finishedAt: null, ok: null, error: null };
     lastRun = record;
     // The async wrapper turns a synchronous throw in `run` into a rejection.
     inFlight = (async () => opts.run(controller.signal))()
@@ -112,11 +127,15 @@ export function createLoop(opts: LoopOptions): LoopHandle {
         (err) => {
           record.ok = false;
           record.error = errText(err);
-          opts.log.error("{loop} failed: {error}", { loop: opts.name, error: record.error });
+          try {
+            opts.log.error("{loop} failed: {error}", { loop: opts.name, error: record.error });
+          } catch {
+            // a broken sink: the failure is still recorded in `lastRun`
+          }
         },
       )
       .finally(() => {
-        record.finishedAt = now();
+        record.finishedAt = clock();
         inFlight = null;
       });
   };
