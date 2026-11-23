@@ -1439,6 +1439,28 @@ describe("applyWikiProposalGroup", () => {
       expect(seen).toEqual([{ committed: false, reason: "nothing-to-commit" }]);
     });
 
+    // `not-default-branch` is answered before the helper looks at what is
+    // staged: only paths known to be clean turn it into `nothing-to-commit`.
+    const branchSkip = async (dirty?: (rel: string) => Promise<boolean | null>) => {
+      const seen: CommitWikiResult[] = [];
+      await applyWikiProposal(
+        makeProposal(),
+        deps({ commit: async () => ({ committed: false, reason: "not-default-branch" }), ...(dirty ? { hasUncommittedChanges: dirty } : {}) }),
+        { onCommit: (r) => seen.push(r) },
+      );
+      return seen;
+    };
+
+    test("not-default-branch over paths all known clean reports nothing-to-commit", async () => {
+      expect(await branchSkip(async () => false)).toEqual([{ committed: false, reason: "nothing-to-commit" }]);
+    });
+
+    test("not-default-branch stays when a path is dirty, its status unknown, or there is no seam", async () => {
+      expect(await branchSkip(async (rel) => rel === "log.md")).toEqual([{ committed: false, reason: "not-default-branch" }]);
+      expect(await branchSkip(async (rel) => (rel === "log.md" ? null : false))).toEqual([{ committed: false, reason: "not-default-branch" }]);
+      expect(await branchSkip()).toEqual([{ committed: false, reason: "not-default-branch" }]);
+    });
+
     test("a single apply whose commit THROWS reports `error`", async () => {
       const seen: CommitWikiResult[] = [];
       await applyWikiProposal(

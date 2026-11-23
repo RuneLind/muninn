@@ -48,7 +48,7 @@ import {
   sectionCounts,
   sectionLabel,
   sectionOf,
-  UNCOMMITTED_NOTE,
+  answerCardNote,
   uncommittedNote,
   type BatchProgress,
   type BatchSection,
@@ -572,8 +572,8 @@ async function act(id: string, action: CardAction): Promise<void> {
   actsInFlight.set(id, action);
   paintCardState(id);
   const r = await postAction(id, action).finally(() => actsInFlight.delete(id));
-  if (!r.ok) cardNotes.set(id, { text: r.uncommitted ? r.error + ". " + UNCOMMITTED_NOTE : r.error, kind: "err" });
-  else if (r.uncommitted) cardNotes.set(id, { text: UNCOMMITTED_NOTE, kind: "err" });
+  const note = answerCardNote(r.ok ? null : r.error, r);
+  if (note) cardNotes.set(id, { text: note, kind: "err" });
   // Re-render so the status chip, the filters and the card's lock reflect the outcome.
   render();
   // A draft that just got applied/rejected changes "drafts awaiting review".
@@ -640,15 +640,10 @@ async function runBatch(section: BatchSection, verb: BatchVerb): Promise<void> {
       const r = await postAction(id, verb);
       const settled = verb === "approve" ? "applied" : "rejected";
       const halt = batchStopReason(r);
-      if (!r.ok) {
-        prog.failed++;
-        cardNotes.set(id, { text: r.error, kind: "err" });
-      } else if (r.outcome !== settled) {
-        prog.failed++;
-        cardNotes.set(id, { text: `Not ${settled}: ${r.outcome || "unknown outcome"}`, kind: "err" });
-      } else if (r.uncommitted) {
-        cardNotes.set(id, { text: UNCOMMITTED_NOTE, kind: "err" });
-      }
+      const failure = !r.ok ? r.error : r.outcome !== settled ? `Not ${settled}: ${r.outcome || "unknown outcome"}` : null;
+      if (failure) prog.failed++;
+      const note = answerCardNote(failure, r);
+      if (note) cardNotes.set(id, { text: note, kind: "err" });
       batchQueued.delete(id);
       prog.done++;
       if (halt) {
@@ -758,13 +753,9 @@ async function actOnGroup(
         p.resolvedAt = null; // server time unknown; see postAction
       }
     });
-    const uncommitted = uncommittedNote(data);
-    const noopNote = action === "approve" && (data.noop?.length || 0) > 0 ? data.noop.length + " page(s) already carried the edit" : "";
-    if (uncommitted) {
-      groupOutcomes.set(groupKey, { text: noopNote ? noopNote + ". " + uncommitted : uncommitted, kind: "err" });
-    } else if (noopNote) {
-      groupOutcomes.set(groupKey, { text: noopNote, kind: "ok" });
-    }
+    const noopNote = action === "approve" && (data.noop?.length || 0) > 0 ? data.noop.length + " page(s) already carried the edit" : null;
+    const note = answerCardNote(noopNote, data);
+    if (note) groupOutcomes.set(groupKey, { text: note, kind: uncommittedNote(data) ? "err" : "ok" });
     render();
     rerenderStrip();
     // An applied fix changes what the linter finds — a named series stops being

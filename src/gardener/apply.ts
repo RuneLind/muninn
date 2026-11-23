@@ -393,17 +393,29 @@ export async function applyWikiProposal(
   if (refusal) return refusal;
 
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
-  const tail: { commit?: () => Promise<CommitWikiResult | undefined> } = {};
+  const tail: { commit?: () => Promise<CommitWikiResult | undefined>; paths: string[] } = { paths: [] };
   const outcome = await runWikiWriteExclusive(deps.wikiDir, () =>
-    applyInner(proposal, deps, (commit) => {
+    applyInner(proposal, deps, (commit, paths) => {
       tail.commit = commit;
+      tail.paths = paths;
     }),
   );
   if (tail.commit) {
     const committed = await tail.commit();
-    if (committed) opts.onCommit?.(committed);
+    if (committed) opts.onCommit?.(await cleanBranchSkip(committed, tail.paths, deps));
   }
   return outcome;
+}
+
+/** The commit helper answers `not-default-branch` before it looks at what is
+ *  staged, so a no-op re-run over committed pages would read as uncommitted.
+ *  Outside the write section: when every path is known clean, it had nothing
+ *  to commit. An absent seam or an unknown status keeps the branch answer. */
+async function cleanBranchSkip(result: CommitWikiResult, paths: readonly string[], deps: ApplyDeps): Promise<CommitWikiResult> {
+  if (result.reason !== "not-default-branch" || !deps.hasUncommittedChanges) return result;
+  const dirty = deps.hasUncommittedChanges;
+  const states = await Promise.all(paths.map((p) => dirty(p).catch(() => null)));
+  return states.every((s) => s === false) ? { committed: false, reason: "nothing-to-commit" } : result;
 }
 
 /** One row's result inside a group apply. */

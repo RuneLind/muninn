@@ -158,7 +158,9 @@ export function uncommittedNote(data: { commitReason?: unknown; uncommitted?: un
  *  caller has) with the uncommitted warning after it; null leaves the note as
  *  is. The single click, the batch and the group card all compose through it. */
 export function answerCardNote(base: string | null, data: { commitReason?: unknown; uncommitted?: unknown }): string | null {
-  return base ?? uncommittedNote(data);
+  const warning = uncommittedNote(data);
+  if (base && warning) return base + ". " + warning;
+  return base ?? warning;
 }
 
 /** The ids a batch takes, in list order, and the skipped count per reason. */
