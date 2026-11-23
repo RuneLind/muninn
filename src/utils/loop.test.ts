@@ -670,6 +670,71 @@ describe("createLoop: a throwing caller callback", () => {
     expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
   });
 
+  test("a run rejecting with a value String() cannot convert: recorded as failed, logged, not wedged, stop and settled resolve", async () => {
+    const records = await capture();
+    const e = escapes();
+    const unconvertible: [string, unknown][] = [
+      ["a null-prototype object", Object.create(null)],
+      [
+        "an object whose toString throws",
+        {
+          toString() {
+            throw new Error("no text");
+          },
+        },
+      ],
+    ];
+    for (const [label, value] of unconvertible) {
+      const before = records.filter((r) => r.level === "error").length;
+      const t = fakeTimers();
+      const g = gated();
+      let runs = 0;
+      const loop = createLoop({
+        name: "L",
+        intervalMs: 1000,
+        log,
+        timers: t.timers,
+        run: async () => {
+          if (++runs === 1) await g.gate;
+        },
+      });
+      loop.start();
+      t.fireFirst();
+      const stop = loop.stop();
+      g.fail(value);
+      expect(await outcome(stop), label).toBe("resolved");
+      expect(await outcome(loop.settled()), label).toBe("resolved");
+      expect(loop.state().lastRun?.ok, label).toBe(false);
+      expect(typeof loop.state().lastRun?.error, label).toBe("string");
+      expect(loop.state().running, label).toBe(false);
+      expect(records.filter((r) => r.level === "error").length, label).toBe(before + 1);
+
+      // The same rejection on a loop that keeps running: the next tick still runs.
+      const t2 = fakeTimers();
+      let runs2 = 0;
+      const live = createLoop({
+        name: "L",
+        intervalMs: 1000,
+        log,
+        timers: t2.timers,
+        run: async () => {
+          if (++runs2 === 1) throw value;
+        },
+      });
+      live.start();
+      t2.fireFirst();
+      await flush();
+      expect(live.state().lastRun?.ok, label).toBe(false);
+      t2.fireInterval();
+      await flush();
+      expect(runs2, label).toBe(2);
+      expect(live.state().lastRun?.ok, label).toBe(true);
+      expect(await outcome(live.stop()), label).toBe("resolved");
+    }
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
   test("onSkip throwing: no throw from the skipped tick, the next tick runs, stop resolves", async () => {
     const e = escapes();
     const t = fakeTimers();
