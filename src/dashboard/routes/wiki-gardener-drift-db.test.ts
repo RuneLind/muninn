@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
 import { setupTestDb } from "../../test/setup-db.ts";
-import { getWikiProposalById, insertWikiProposal } from "../../db/wiki-proposals.ts";
+import { approveWikiProposal, getWikiProposalById, insertWikiProposal } from "../../db/wiki-proposals.ts";
+import { getDb } from "../../db/client.ts";
 import { runGit } from "../../wiki/commit.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
@@ -131,6 +132,7 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
 
   async function approve(
     over: Partial<Parameters<typeof insertWikiProposal>[0]> = {},
+    routeDeps: Partial<typeof DEFAULT_BACKLOG_ROUTE_DEPS> = {},
   ): Promise<{ status: number; body: Record<string, unknown>; rowStatus: string | undefined }> {
     const p = await insertWikiProposal({
       botName: "jarvis",
@@ -145,7 +147,7 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
     });
     if (!p) throw new Error("fixture proposal not inserted");
     const app = new Hono();
-    registerWikiGardenerRoutes(app, DEFAULT_BACKLOG_ROUTE_DEPS);
+    registerWikiGardenerRoutes(app, { ...DEFAULT_BACKLOG_ROUTE_DEPS, ...routeDeps });
     const res = await app.request(`/api/wiki/proposals/${p.id}/approve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -170,6 +172,27 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
     expect(r.body).toEqual({ outcome: "applied", writtenPath: TARGET, commitReason: "error", uncommitted: true });
     expect(r.rowStatus).toBe("applied");
     expect(await Bun.file(path.join(gitRoot, TARGET)).exists()).toBe(true);
+  });
+
+  test("a rejecting hook and a row moved during the apply: the 409 carries the commit fields", async () => {
+    const hook = path.join(gitRoot, ".git", "hooks", "pre-commit");
+    await Bun.write(hook, "#!/bin/sh\nexit 1\n");
+    await chmod(hook, 0o755);
+    const r = await approve(
+      {},
+      {
+        // Another verb rejects the row right after this request claims it, so
+        // the terminal approved→applied CAS loses.
+        approveProposal: async (id) => {
+          const claimed = await approveWikiProposal(id);
+          await getDb()`UPDATE wiki_proposals SET status = 'rejected' WHERE id = ${id}`;
+          return claimed;
+        },
+      },
+    );
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ error: "proposal state changed during apply", commitReason: "error", uncommitted: true });
+    expect(r.rowStatus).toBe("rejected");
   });
 
   test("a non-default branch: `uncommitted: true`, the row still `applied`", async () => {

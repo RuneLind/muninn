@@ -3241,6 +3241,65 @@ describe("lint proposals — seeding and the group verbs", () => {
       expect(payload).not.toHaveProperty("commitReason");
       expect(payload).not.toHaveProperty("uncommitted");
     });
+
+    // The failure answers each verb sends after its commit tail ran.
+    const FAILED = { commitReason: "error", uncommitted: true };
+    const failing = withCommit({ committed: false, reason: "error" });
+
+    test("Accept whose terminal mark is lost: the 409 `conflict` with `lost` carries the fields", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, ...failing, markProposal: async () => false }));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", lost: [PAGE_A, PAGE_B], ...FAILED });
+    });
+
+    test("Accept whose terminal mark throws: the 500 carries the fields", async () => {
+      const store = groupStore([await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")]);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          ...failing,
+          markProposal: async () => {
+            throw new Error("connection reset");
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/approve?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "group apply failed: connection reset", ...FAILED });
+    });
+
+    test("Dismiss whose reject moves nothing after the settle: the 409 `conflict` carries the fields", async () => {
+      const rows = [await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")];
+      // r1's page carries its draft, uncommitted: the settle logs and commits it.
+      await Bun.write(path.join(root, PAGE_A), (rows[0] as { draft: string }).draft);
+      const store = groupStore(rows);
+      registerWikiGardenerRoutes(app, deps({ ...store.deps, ...failing, rejectProposalGroup: async () => [] }));
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 0, alreadyWritten: [PAGE_A], ...FAILED });
+    });
+
+    test("Dismiss whose reject throws after the settle: the 500 carries the fields", async () => {
+      const rows = [await lintRow("r1", PAGE_A, "prov"), await lintRow("r2", PAGE_B, "prov")];
+      await Bun.write(path.join(root, PAGE_A), (rows[0] as { draft: string }).draft);
+      const store = groupStore(rows);
+      registerWikiGardenerRoutes(
+        app,
+        deps({
+          ...store.deps,
+          ...failing,
+          rejectProposalGroup: async () => {
+            throw new Error("connection reset");
+          },
+        }),
+      );
+      const res = await app.request(`/api/wiki/proposals/group/${GROUP}/reject?wiki=lintwiki`, JSON_POST);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ error: "group dismiss failed: connection reset", ...FAILED });
+    });
   });
 
   /**
@@ -4873,6 +4932,60 @@ describe("Stale check cards — Accept writes `fixed` verdicts, Dismiss keeps th
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ outcome: "conflict", rejected: 2, verdictsWritten: false });
     expect([...verdicts.rows.values()].filter((r) => r.checkedBy === "reader")).toEqual([]);
+  });
+
+  // A11 and D9 after a commit that did not land: the lease is lost AFTER the
+  // commit tail ran, so the 409 says the pages are not committed.
+  const failedCommit = async () => ({ committed: false as const, reason: "error" as const });
+
+  test("A11 after a failed commit: the lost-lease 409 carries the commit fields", async () => {
+    const s = store(await card());
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      applyProposalGroup: (async (rows, d, opts) => {
+        const out = await applyWikiProposalGroup(rows, { ...d, commit: failedCommit }, opts);
+        held = false;
+        return out;
+      }) as typeof applyWikiProposalGroup,
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/approve?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ outcome: "conflict", applied: ["notes/a.md", "notes/b.md"], commitReason: "error", uncommitted: true });
+  });
+
+  test("D9 after a failed settle commit: the lost-lease 409 carries the commit fields", async () => {
+    const rows = await card();
+    // An earlier Accept wrote notes/a.md and never committed it: the settle logs and commits it.
+    const a = rows.find((r) => r.targetPath === "notes/a.md")!;
+    await Bun.write(path.join(root, a.targetPath), a.draft);
+    const s = store(rows);
+    let held = true;
+    registerWikiGardenerRoutes(app, {
+      ...s.deps,
+      groupLeaseHeld: async () => held,
+      settleProposalApplied: async (id: string) => {
+        s.rows().forEach((r) => r.id === id && (r.status = "applied"));
+        return { id } as never;
+      },
+      settleWrittenRows: ((r, d, settle, opts) => settleWrittenGroupRows(r, { ...d, commit: failedCommit }, settle, opts)) as typeof settleWrittenGroupRows,
+      rejectProposalGroup: async (...args: unknown[]) => {
+        const out = await (s.deps!.rejectProposalGroup as (...a: unknown[]) => Promise<WikiProposal[]>)(...args);
+        held = false;
+        return out;
+      },
+    } as Parameters<typeof registerWikiGardenerRoutes>[1]);
+    const res = await app.request(`/api/wiki/proposals/group/${encodeURIComponent("stale-check:hub.md:2")}/reject?wiki=stalegate`, JSON_POST);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      outcome: "conflict",
+      rejected: 1,
+      alreadyWritten: ["notes/a.md"],
+      verdictsWritten: false,
+      commitReason: "error",
+      uncommitted: true,
+    });
   });
 
   /** One-row card for `changed` with `linking`'s edit, sent as the tab sends it. */
