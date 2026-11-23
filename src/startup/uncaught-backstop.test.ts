@@ -198,6 +198,20 @@ describe("src/index.ts: backstop wiring (parsed source)", () => {
     expect(last && ts.isExpressionStatement(last) && callName(last.expression) === "markBooted", "markBooted() is the callback's last statement").toBe(true);
   });
 
+  test("the scheduler-start timer cannot return before markBooted()", async () => {
+    // An early return would leave the instance in boot mode for good, where any
+    // uncaught throw exits the process. Nested functions' returns are their own.
+    const sf = await parseIndex();
+    const timer = schedulerTimer(sf);
+    expect(timer, "a top-level setTimeout whose callback calls startScheduler").not.toBeNull();
+    const call = markBootedCalls(timer!.cb)[0];
+    expect(call, "the callback calls markBooted()").toBeDefined();
+    const early = descendants(timer!.cb.body, false)
+      .filter((d) => ts.isReturnStatement(d) && d.getStart(sf) < call!.getStart(sf))
+      .map((d) => `line ${sf.getLineAndCharacterOfPosition(d.getStart(sf)).line + 1}: ${d.getText(sf)}`);
+    expect(early, "return statements before markBooted()").toEqual([]);
+  });
+
   test("installs the backstop after the unhandledRejection handler and before the first top-level await after it", async () => {
     const sf = await parseIndex();
     const stmts = [...sf.statements];
