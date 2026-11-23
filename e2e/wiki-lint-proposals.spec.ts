@@ -35,6 +35,8 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { createHash } from "node:crypto";
+import { UNCOMMITTED_NOTE } from "../src/dashboard/views/components/wiki-gardener-batch.ts";
 
 const PORT = e2ePort("wiki-lint-proposals");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -509,5 +511,34 @@ test.describe("wiki lint fixes", () => {
 
     await expect(card.locator(".gard-outcome")).toContainText("already carried the edit");
     await expect(card.locator('[data-group-action="approve"]')).toHaveCount(0);
+  });
+
+  /**
+   * PR #897: an Accept whose pages are written and logged but whose commit did
+   * not land. The real route applies the group; its answer is extended with
+   * Done's shape (this wiki is not a git repo, so the real one says
+   * `not-a-repo`). The card says so as a warning, never as an ok note.
+   */
+  test("an Accept whose commit did not land warns on the group card", async ({ page }) => {
+    const current = await read(PROV_HEAD);
+    const key = "lint:e2e-uncommitted:000000000001";
+    await sql!`
+      INSERT INTO wiki_proposals (bot_name, wiki_name, topic_key, group_key, kind, mode, target_path, base_hash, draft, source_docs, status)
+      VALUES (${WIKI}, ${WIKI}, ${`${key}:${PROV_HEAD}`}, ${key}, 'lint', 'update', ${PROV_HEAD},
+              ${createHash("sha256").update(current).digest("hex")}, ${current + "\nProbe line.\n"}, '[]'::jsonb, 'draft')`;
+    await page.route("**/api/wiki/proposals/group/*/approve*", async (route) => {
+      const res = await route.fetch();
+      const body = { ...(await res.json()), commitReason: "error", uncommitted: true };
+      await route.fulfill({ response: res, body: JSON.stringify(body) });
+    });
+    await page.goto(`${BASE}/wiki/gardener?wiki=${WIKI}`);
+    const card = page.locator(`.gard-card[data-group="${key}"]`);
+    await card.locator('[data-group-action="approve"]').click();
+    await expect(card.locator(".gard-badge.chip-applied")).toHaveCount(1);
+    await expect(card.locator(".gard-outcome")).toHaveText(UNCOMMITTED_NOTE);
+    await expect(card.locator(".gard-outcome")).toHaveClass(/\berr\b/);
+    await expect(card.locator(".gard-outcome")).not.toHaveClass(/\bok\b/);
+    expect(await read(PROV_HEAD)).toContain("Probe line.");
+    await page.unroute("**/api/wiki/proposals/group/*/approve*");
   });
 });

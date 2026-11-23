@@ -160,14 +160,6 @@ describe("answerCardNote", () => {
     expect(answerCardNote(ERR, {})).toBe(ERR);
   });
 
-  // The browser file reads `window` at load, so its three callers (single
-  // click, batch, group card) are pinned by source: each must compose here.
-  test("the single click, the batch and the group card all compose through it", async () => {
-    const src = await Bun.file(new URL("./wiki-gardener-browser.ts", import.meta.url)).text();
-    const calls = [...src.matchAll(/const note = answerCardNote\((r\.ok \? null : r\.error, r|failure, r|noopNote, data)\);\n\s*if \(note\) (cardNotes|groupOutcomes)\.set\(/g)].map((m) => m[1]);
-    expect(calls).toEqual(["r.ok ? null : r.error, r", "failure, r", "noopNote, data"]);
-  });
-
   test("nothing-to-commit and not-a-repo add no warning", () => {
     for (const commitReason of ["nothing-to-commit", "not-a-repo"]) {
       expect(answerCardNote(null, { commitReason, uncommitted: false })).toBeNull();
