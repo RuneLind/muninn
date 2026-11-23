@@ -299,6 +299,218 @@ describe("createLoop", () => {
   });
 });
 
+/**
+ * The caller's own callbacks (`now`, `log`, `onSkip`) throwing. Each case asserts
+ * the handle is not wedged (the next tick runs), `stop()` resolves, and nothing
+ * escapes: the fake timers call the tick synchronously, so a throw that would be
+ * an uncaught exception in a real timer callback is a throw from `fire*()` here.
+ * An unhandled rejection is caught by bun's test runner itself, which fails the
+ * test whatever process listeners exist (it does not dispatch to them); the
+ * counters are kept for a runtime that does.
+ */
+describe("createLoop: a throwing caller callback", () => {
+  const escapes = () => {
+    const seen = { uncaught: 0, unhandled: 0 };
+    const onUncaught = () => void seen.uncaught++;
+    const onUnhandled = () => void seen.unhandled++;
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUnhandled);
+    return {
+      seen,
+      /** Wait long enough for a late rejection to surface, then detach. */
+      async done() {
+        for (let i = 0; i < 5; i++) await flush();
+        await new Promise((r) => setTimeout(r, 20));
+        process.off("uncaughtException", onUncaught);
+        process.off("unhandledRejection", onUnhandled);
+      },
+    };
+  };
+
+  /** "resolved", "rejected", or "pending" after a bounded wait. */
+  const outcome = async (p: Promise<unknown>) =>
+    Promise.race([
+      p.then(
+        () => "resolved",
+        () => "rejected",
+      ),
+      new Promise<string>((r) => setTimeout(() => r("pending"), 50)),
+    ]);
+
+  const throwingLog = () => {
+    const l = Object.create(log) as typeof log;
+    l.error = (() => {
+      throw new Error("sink down");
+    }) as typeof log.error;
+    return l;
+  };
+
+  test("now() throwing when a tick starts: no throw from the tick, the next tick runs, stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    let calls = 0;
+    let runs = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log,
+      timers: t.timers,
+      now: () => {
+        if (++calls === 1) throw new Error("clock");
+        return calls;
+      },
+      run: async () => void runs++,
+    });
+    loop.start();
+    expect(() => t.fireFirst()).not.toThrow();
+    await flush();
+    t.fireInterval();
+    await flush();
+    expect(runs).toBeGreaterThanOrEqual(1);
+    expect(loop.state().running).toBe(false);
+    expect(await outcome(loop.stop())).toBe("resolved");
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
+  test("now() throwing when a failed run finishes: the run is recorded as failed, not wedged, stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    const g = gated();
+    let calls = 0;
+    let runs = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log,
+      timers: t.timers,
+      now: () => {
+        if (++calls === 2) throw new Error("clock");
+        return calls;
+      },
+      run: async () => {
+        if (++runs === 1) await g.gate;
+      },
+    });
+    loop.start();
+    t.fireFirst();
+    g.fail(new Error("boom"));
+    await flush();
+    expect(loop.state().running).toBe(false);
+    expect(loop.busy()).toBe(false);
+    expect(loop.state().lastRun?.ok).toBe(false);
+    expect(loop.state().lastRun?.error).toBe("boom");
+    t.fireInterval();
+    await flush();
+    expect(runs).toBe(2);
+    expect(await outcome(loop.stop())).toBe("resolved");
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
+  test("now() throwing when a run finishes while stop() waits: stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    const g = gated();
+    let calls = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log,
+      timers: t.timers,
+      now: () => {
+        if (++calls === 2) throw new Error("clock");
+        return calls;
+      },
+      run: () => g.gate,
+    });
+    loop.start();
+    t.fireFirst();
+    const stop = loop.stop();
+    g.release();
+    expect(await outcome(stop)).toBe("resolved");
+    expect(await outcome(loop.settled())).toBe("resolved");
+    expect(loop.state().running).toBe(false);
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
+  test("log.error throwing for a failed run: recorded as failed, not wedged, a waiting stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    const g = gated();
+    let runs = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log: throwingLog(),
+      timers: t.timers,
+      run: async () => {
+        if (++runs === 1) await g.gate;
+      },
+    });
+    loop.start();
+    t.fireFirst();
+    g.fail(new Error("boom"));
+    await flush();
+    expect(loop.state().running).toBe(false);
+    expect(loop.state().lastRun?.ok).toBe(false);
+    expect(loop.state().lastRun?.error).toBe("boom");
+    expect(loop.state().lastRun?.finishedAt).not.toBeNull();
+    t.fireInterval();
+    await flush();
+    expect(runs).toBe(2);
+    expect(await outcome(loop.stop())).toBe("resolved");
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
+  test("log.error throwing while stop() waits on the failing run: stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    const g = gated();
+    const loop = createLoop({ name: "L", intervalMs: 1000, log: throwingLog(), timers: t.timers, run: () => g.gate });
+    loop.start();
+    t.fireFirst();
+    const stop = loop.stop();
+    g.fail(new Error("boom"));
+    expect(await outcome(stop)).toBe("resolved");
+    expect(loop.state().lastRun?.ok).toBe(false);
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+
+  test("onSkip throwing: no throw from the skipped tick, the next tick runs, stop resolves", async () => {
+    const e = escapes();
+    const t = fakeTimers();
+    const g = gated();
+    let runs = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log,
+      timers: t.timers,
+      onSkip: () => {
+        throw new Error("skip hook");
+      },
+      run: async () => {
+        if (++runs === 1) await g.gate;
+      },
+    });
+    loop.start();
+    t.fireFirst();
+    expect(() => t.fireInterval()).not.toThrow();
+    g.release();
+    await flush();
+    t.fireInterval();
+    await flush();
+    expect(runs).toBe(2);
+    expect(await outcome(loop.stop())).toBe("resolved");
+    await e.done();
+    expect(e.seen).toEqual({ uncaught: 0, unhandled: 0 });
+  });
+});
+
 describe("settleWithin", () => {
   test("true when the promise settles in time (a rejection included), false after the bound", async () => {
     expect(await settleWithin(Promise.resolve(), 50)).toBe(true);
