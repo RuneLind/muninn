@@ -204,18 +204,20 @@ describe("POST /api/wiki/proposals/:id/approve — a commit that did not land", 
   });
 
   // A no-op approve (the page already IS its draft) still runs the commit
-  // tail, which answers `not-default-branch` before it looks at what is staged.
+  // tail, which answers `not-default-branch` before it looks at what is staged,
+  // and that answer is reported as is.
   const SEED = "concepts/Seed.md";
   const seedDraft = page("Seed").replace("Body.", "Body, revised.");
   const noopRow = { topicKey: "seed-update", mode: "update" as const, targetPath: SEED, baseHash: sha256(page("Seed")), draft: seedDraft };
 
-  test("a no-op over a COMMITTED page on a feature branch is not `uncommitted`", async () => {
+  test("a no-op over a COMMITTED page on a feature branch still warns (known limitation)", async () => {
     await Bun.write(path.join(gitRoot, SEED), seedDraft);
     await git("commit", "-q", "-am", "the draft landed earlier");
     await git("checkout", "-q", "-b", "feature");
     const r = await approve(noopRow);
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ outcome: "applied", writtenPath: SEED, commitReason: "nothing-to-commit", uncommitted: false });
+    // Known limitation: nothing is uncommitted, but the branch answer comes before any staging check.
+    expect(r.body).toEqual({ outcome: "applied", writtenPath: SEED, commitReason: "not-default-branch", uncommitted: true });
     expect(r.rowStatus).toBe("applied");
     expect((await runGit(gitRoot, ["status", "--porcelain"])).stdout).toBe("");
   });

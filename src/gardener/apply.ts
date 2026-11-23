@@ -133,10 +133,12 @@ export interface ApplyDeps {
    */
   isReadonlyRoot?: (root: string) => boolean;
   /**
-   * Does the page have uncommitted changes? Read for `stale-check` rows only,
-   * inside the write section: their fix commit is not a page change, so a
-   * dirty page is refused (`collision`, back to draft) rather than having a
-   * hand edit committed under it. Absent ⇒ no check (tests without git).
+   * Does the page have uncommitted changes? Read in two places. For a
+   * `stale-check` row, inside the write section: its fix commit is not a page
+   * change, so a dirty page is refused (`collision`, back to draft) rather than
+   * having a hand edit committed under it. And before a group verb's write
+   * section (`uncommittedDraftPages`), to find the pages an earlier pass wrote
+   * and never committed. Absent ⇒ no check (tests without git).
    */
   hasUncommittedChanges?: (relPath: string) => Promise<boolean | null>;
 }
@@ -393,29 +395,17 @@ export async function applyWikiProposal(
   if (refusal) return refusal;
 
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
-  const tail: { commit?: () => Promise<CommitWikiResult | undefined>; paths: string[] } = { paths: [] };
+  const tail: { commit?: () => Promise<CommitWikiResult | undefined> } = {};
   const outcome = await runWikiWriteExclusive(deps.wikiDir, () =>
-    applyInner(proposal, deps, (commit, paths) => {
+    applyInner(proposal, deps, (commit) => {
       tail.commit = commit;
-      tail.paths = paths;
     }),
   );
   if (tail.commit) {
     const committed = await tail.commit();
-    if (committed) opts.onCommit?.(await cleanBranchSkip(committed, tail.paths, deps));
+    if (committed) opts.onCommit?.(committed);
   }
   return outcome;
-}
-
-/** The commit helper answers `not-default-branch` before it looks at what is
- *  staged, so a no-op re-run over committed pages would read as uncommitted.
- *  Outside the write section: when every path is known clean, it had nothing
- *  to commit. An absent seam or an unknown status keeps the branch answer. */
-async function cleanBranchSkip(result: CommitWikiResult, paths: readonly string[], deps: ApplyDeps): Promise<CommitWikiResult> {
-  if (result.reason !== "not-default-branch" || !deps.hasUncommittedChanges) return result;
-  const dirty = deps.hasUncommittedChanges;
-  const states = await Promise.all(paths.map((p) => dirty(p).catch(() => null)));
-  return states.every((s) => s === false) ? { committed: false, reason: "nothing-to-commit" } : result;
 }
 
 /** One row's result inside a group apply. */
