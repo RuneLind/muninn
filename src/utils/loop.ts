@@ -79,7 +79,15 @@ export interface LoopHandle {
   settled(): Promise<void>;
 }
 
-const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+// A rejection value String() cannot convert (a null-prototype object, a throwing
+// toString) must not throw out of the failure handler and reject `stop()`.
+const errText = (err: unknown) => {
+  try {
+    return err instanceof Error ? err.message : String(err);
+  } catch {
+    return "(unprintable error)";
+  }
+};
 
 // JSC keeps a function's `arguments` reachable from its closures (a heap
 // snapshot showed the handle's scope -> Arguments -> options -> after), so the
