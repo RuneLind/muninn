@@ -408,6 +408,9 @@ describe("createLoop: first-run timing on a fake clock", () => {
 });
 
 describe("createLoop: stop and the predecessor chain", () => {
+  /** Keeps the newest handle reachable through the garbage-collection test's polling. */
+  const gcHold: unknown[] = [];
+
   test("a second stop() while a run is in flight also waits for that run", async () => {
     const t = fakeTimers();
     const g = gated();
@@ -475,14 +478,21 @@ describe("createLoop: stop and the predecessor chain", () => {
       return { newest: prev!, refs };
     };
     const { newest, refs } = build();
+    // The hold is what lets a leak show: with `newest` collectable, a leaking
+    // chain is collected whole and passes. It is released only after the polling.
+    gcHold.push(newest);
     // No busy() call before the check: busy() drops a settled `after` itself,
     // which would hide the leak this test is about.
     await newest.settled();
     let alive = refs.length;
-    for (let i = 0; i < 50 && alive > 0; i++) {
-      await flush();
-      Bun.gc(true);
-      alive = refs.filter((r) => r.deref() !== undefined).length;
+    try {
+      for (let i = 0; i < 50 && alive > 0; i++) {
+        await flush();
+        Bun.gc(true);
+        alive = refs.filter((r) => r.deref() !== undefined).length;
+      }
+    } finally {
+      gcHold.length = 0;
     }
     expect(alive, "older handles still reachable from the newest").toBe(0);
     expect(newest.state().stopped).toBe(true);
