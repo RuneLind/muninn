@@ -5,6 +5,7 @@ import {
   type WikiAnswerRetentionWindows,
 } from "../db/wiki-answers.ts";
 import { getLog } from "../logging.ts";
+import { createLoop, settleWithin, type LoopHandle } from "../utils/loop.ts";
 
 const log = getLog("wiki", "answer-retention");
 
@@ -59,56 +60,35 @@ export function answerRetentionBootLines(r: WikiAnswerRetention): { info: string
   return { info, warnings };
 }
 
-let first: ReturnType<typeof setTimeout> | null = null;
-let timer: ReturnType<typeof setInterval> | null = null;
-/** The sweep in flight, if any: a tick that finds one skips, and stop waits for it. */
-let running: Promise<unknown> | null = null;
-/** Set by stop: the sweep in flight ends at its next answer. */
-let stopping = false;
+/** The current handle; a stopped one stays here so the next start runs after it. */
+let loop: LoopHandle | null = null;
 
 /** Start the hourly sweep (idempotent). Starts nothing when both windows are
  *  unset — the laptop default, so the owner's own answers stay. Its own timer,
  *  not the scheduler tick: that tick runs only for a bot with a Telegram token,
- *  which a nais pod does not have. `opts` is for tests. */
+ *  which a nais pod does not have. One sweep at a time, across a restart too, and
+ *  a restart never un-stops a sweep still in flight (`createLoop`). `opts` is for tests. */
 export function startAnswerRetentionSweep(
   windows: WikiAnswerRetentionWindows,
   opts: { sweep?: typeof sweepWikiAnswerRetention; firstDelayMs?: number; intervalMs?: number } = {},
 ): boolean {
-  if (first || timer) return true;
+  if (loop && !loop.state().stopped) return true;
   if (windows.exportedDays == null && windows.unexportedDays == null) return false;
-  stopping = false;
-  const tick = () => {
-    // One sweep at a time: a sweep slower than the interval must not overlap itself.
-    if (running) return;
-    running = runAnswerRetentionSweep(windows, opts.sweep, () => stopping)
-      .catch((err) => {
-        log.warn("Answer retention sweep failed: {error}", { error: err instanceof Error ? err.message : String(err) });
-      })
-      .finally(() => {
-        running = null;
-      });
-  };
-  first = setTimeout(tick, opts.firstDelayMs ?? ANSWER_RETENTION_FIRST_DELAY_MS);
-  timer = setInterval(tick, opts.intervalMs ?? ANSWER_RETENTION_INTERVAL_MS);
-  first.unref?.();
-  timer.unref?.();
+  loop = createLoop({
+    name: "Answer retention sweep",
+    intervalMs: opts.intervalMs ?? ANSWER_RETENTION_INTERVAL_MS,
+    firstDelayMs: opts.firstDelayMs ?? ANSWER_RETENTION_FIRST_DELAY_MS,
+    log,
+    after: loop,
+    run: (signal) => runAnswerRetentionSweep(windows, opts.sweep, () => signal.aborted),
+  });
+  loop.start();
   return true;
 }
 
-/** Stop the timers, then wait (bounded) for a sweep in flight, so shutdown can
- *  close the pool after it rather than under it. */
+/** Stop the timers and end a sweep in flight at its next answer, then wait
+ *  (bounded) for it, so shutdown can close the pool after it rather than under it. */
 export async function stopAnswerRetentionSweep(waitMs = ANSWER_RETENTION_STOP_WAIT_MS): Promise<void> {
-  if (first) clearTimeout(first);
-  if (timer) clearInterval(timer);
-  first = timer = null;
-  stopping = true;
-  const inFlight = running;
-  if (!inFlight) return;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = await Promise.race([
-    inFlight.then(() => false),
-    new Promise<boolean>((r) => (timeout = setTimeout(() => r(true), waitMs))),
-  ]);
-  clearTimeout(timeout);
-  if (timedOut) log.warn("Shutdown: timed out waiting for the answer retention sweep");
+  if (!loop) return;
+  if (!(await settleWithin(loop.stop(), waitMs))) log.warn("Shutdown: timed out waiting for the answer retention sweep");
 }

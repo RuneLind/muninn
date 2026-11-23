@@ -29,6 +29,7 @@ import { retentionCleanupBootLine, startRetentionCleanup, stopRetentionCleanup }
 import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confirm.ts";
 import { startWorkMapLoop, stopWorkMapLoop } from "./wiki/work-map/loop.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
+import { installUncaughtBackstop } from "./startup/uncaught-backstop.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
@@ -113,6 +114,10 @@ process.on("unhandledRejection", (reason) => {
     reason: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason),
   });
 });
+// Its sibling for synchronous throws (a timer, an event or abort listener): the
+// same keep-running policy once boot is complete (the end of the scheduler-start timer),
+// and exit 1 before that, so a boot that throws still stops the process.
+const uncaughtBackstop = installUncaughtBackstop(log);
 
 // Surface any MCP adapter processes that survived `predev: cleanup:kill`. Stale
 // adapters captured a different HUGINN_TRACE_* env at module-load and silently
@@ -583,6 +588,10 @@ for (const botConfig of botConfigs) {
 
 // Start per-bot schedulers after bots are connected (10s delay for stability)
 // Scheduler uses Telegram API — only start for bots with Telegram tokens
+// This timer is armed on every boot and is the last boot step: a throw in it
+// exits 1 so the supervisor restarts muninn, rather than leaving it up with no
+// scheduler. Boot is complete at its end, the only `markBooted()` (pinned by
+// `src/startup/uncaught-backstop.test.ts`).
 setTimeout(() => {
   for (const botCfg of botConfigs) {
     if (!botCfg.telegramBotToken) continue;
@@ -592,6 +601,8 @@ setTimeout(() => {
       startScheduler(telegramBot.api, config, botCfg);
     }
   }
+  // From here an uncaught throw is logged and survived.
+  uncaughtBackstop.markBooted();
 }, 10_000);
 
 // Graceful shutdown

@@ -113,6 +113,56 @@ describe("answer retention sweep wrapper", () => {
     }
   });
 
+  test("a start after a stop that timed out does not revive the sweep in flight", async () => {
+    let shouldStop: (() => boolean) | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sweep = async (_w: unknown, _now?: number, hooks?: { shouldStop?: () => boolean }) => {
+      shouldStop = hooks?.shouldStop;
+      await gate;
+      return ZERO;
+    };
+    startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopAnswerRetentionSweep(10); // times out: the sweep is still at its gate
+      expect(shouldStop!()).toBe(true);
+      // A restart in the same process, before the stopped sweep has settled.
+      startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep: async () => ZERO, firstDelayMs: 60_000, intervalMs: 60_000 });
+      expect(shouldStop!(), "the stopped sweep must stay stopped").toBe(true);
+    } finally {
+      release();
+      await Bun.sleep(10);
+    }
+  });
+
+  test("a start after a stop that timed out starts no sweep while the stopped one is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sweep = async () => {
+      await gate;
+      return ZERO;
+    };
+    let restarted = 0;
+    const second = async () => {
+      restarted++;
+      return ZERO;
+    };
+    startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopAnswerRetentionSweep(10);
+      startAnswerRetentionSweep({ exportedDays: 30, unexportedDays: null }, { sweep: second, firstDelayMs: 0, intervalMs: 10 });
+      await Bun.sleep(50);
+      expect(restarted, "no second sweep may overlap the stopped one").toBe(0);
+      release();
+      await Bun.sleep(40);
+      expect(restarted, "once the stopped sweep settles, the new one runs").toBeGreaterThan(0);
+    } finally {
+      release();
+    }
+  });
+
   test("the default stop bound is at most 10 s", () => {
     expect(ANSWER_RETENTION_STOP_WAIT_MS).toBeLessThanOrEqual(10_000);
     expect(ANSWER_RETENTION_STOP_WAIT_MS).toBeGreaterThan(0);
