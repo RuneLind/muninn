@@ -326,6 +326,31 @@ describe("startRetentionCleanup", () => {
     expect(calls, "the old run must stay stopped").toEqual(["harvestSearchSignals"]);
   });
 
+  test("a start after a stop that timed out starts no cleanup while the stopped one is in flight, then runs once it has finished", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { deps } = recordingDeps({
+      harvestSearchSignals: async () => {
+        await gate;
+        return 0;
+      },
+    });
+    const second = recordingDeps();
+    startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });
+    try {
+      await Bun.sleep(30);
+      await stopRetentionCleanup(10); // times out: the harvest is still at its gate
+      startRetentionCleanup(CONFIG, { deps: second.deps, firstDelayMs: 0, intervalMs: 10 });
+      await Bun.sleep(50);
+      expect(second.calls, "no second cleanup may overlap the stopped one").toEqual([]);
+      release();
+      await Bun.sleep(40);
+      expect(second.calls, "once the stopped cleanup finishes, the new one runs").toContain("harvestSearchSignals");
+    } finally {
+      release();
+    }
+  });
+
   test("a later start after a stop runs again (the stop flag resets)", async () => {
     const { deps } = recordingDeps();
     startRetentionCleanup(CONFIG, { deps, firstDelayMs: 0, intervalMs: 60_000 });

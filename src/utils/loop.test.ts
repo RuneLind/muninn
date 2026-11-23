@@ -424,6 +424,36 @@ describe("createLoop: stop and the predecessor chain", () => {
     expect(done).toEqual({ first: true, second: true });
   });
 
+  test("the predecessor chain is followed past one level: a run in flight two handles back still holds the newest", async () => {
+    const g = gated();
+    const tA = fakeTimers();
+    const a = createLoop({ name: "L", intervalMs: 1000, log, timers: tA.timers, run: () => g.gate });
+    a.start();
+    tA.fireFirst();
+    void a.stop(); // A's run stays at its gate
+    // B never runs: started and stopped while A's run is in flight. Nothing here
+    // calls B.busy() or ticks B, so B still holds its reference to A.
+    const b = createLoop({ name: "L", intervalMs: 1000, log, timers: fakeTimers().timers, after: a, run: async () => {} });
+    b.start();
+    void b.stop();
+    const tC = fakeTimers();
+    let runs = 0;
+    let skips = 0;
+    const c = createLoop({ name: "L", intervalMs: 1000, log, timers: tC.timers, after: b, onSkip: () => skips++, run: async () => void runs++ });
+    c.start();
+    tC.fireFirst();
+    await flush();
+    expect({ runs, skips }, "C must skip while A's run is in flight").toEqual({ runs: 0, skips: 1 });
+    expect(c.busy()).toBe(true);
+    g.release();
+    await a.settled();
+    await flush();
+    tC.fireInterval();
+    await flush();
+    expect({ runs, skips }, "once A's run has settled, C runs").toEqual({ runs: 1, skips: 1 });
+    await c.stop();
+  });
+
   /**
    * A chain of stopped handles, none ever ticked, only the newest kept. Each
    * older handle must become collectable once it has settled. Observed through
@@ -676,5 +706,31 @@ describe("settleWithin", () => {
     expect(await settleWithin(Promise.resolve(), 50)).toBe(true);
     expect(await settleWithin(Promise.reject(new Error("x")), 50)).toBe(true);
     expect(await settleWithin(new Promise(() => {}), 5)).toBe(false);
+  });
+
+  test("a promise that settles first clears the bound's timer", async () => {
+    // Spies on the globals settleWithin calls, restored in `finally`.
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    const armed: unknown[] = [];
+    const cleared: unknown[] = [];
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      const h = realSet(fn, ms);
+      armed.push(h);
+      return h;
+    }) as typeof setTimeout;
+    globalThis.clearTimeout = ((h: Parameters<typeof clearTimeout>[0]) => {
+      cleared.push(h);
+      realClear(h);
+    }) as typeof clearTimeout;
+    try {
+      expect(await settleWithin(Promise.resolve(), 60_000)).toBe(true);
+    } finally {
+      globalThis.setTimeout = realSet;
+      globalThis.clearTimeout = realClear;
+    }
+    expect(armed.length).toBe(1);
+    expect(cleared).toContain(armed[0]);
+    realClear(armed[0] as ReturnType<typeof setTimeout>); // leave no live 60 s timer behind under a mutant
   });
 });
