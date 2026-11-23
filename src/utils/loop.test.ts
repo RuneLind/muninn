@@ -12,14 +12,16 @@ afterEach(async () => {
 
 const log = getLogger(["muninn", "test", "loop"]);
 
+/** Delay-blind fake timers: each `fire*()` calls the armed callbacks by hand. */
 function fakeTimers() {
   const timeouts = new Map<number, () => void>();
   const intervals = new Map<number, () => void>();
   let id = 0;
+  let timeoutArmed = false;
   const unrefed: number[] = [];
   const handle = (n: number) => ({ n, unref: () => unrefed.push(n) });
   const timers: LoopTimers = {
-    setTimeout: (fn, _ms) => (timeouts.set(++id, fn), handle(id)),
+    setTimeout: (fn, _ms) => ((timeoutArmed = true), timeouts.set(++id, fn), handle(id)),
     clearTimeout: (h) => timeouts.delete((h as { n: number }).n),
     setInterval: (fn, _ms) => (intervals.set(++id, fn), handle(id)),
     clearInterval: (h) => intervals.delete((h as { n: number }).n),
@@ -27,8 +29,14 @@ function fakeTimers() {
   return {
     timers,
     unrefed,
-    /** Fire the first-run timeout (once, like a real one). */
+    /** Fire the first-run trigger: the first-delay timeout (once, like a real
+     *  one), or, for a loop that armed none (no `firstDelayMs`), the first
+     *  interval tick. */
     fireFirst() {
+      if (!timeoutArmed) {
+        for (const fn of intervals.values()) fn();
+        return;
+      }
       for (const [k, fn] of timeouts) {
         timeouts.delete(k);
         fn();
@@ -50,6 +58,41 @@ function gated() {
 
 /** Let pending microtasks (a run's settle handlers) drain. */
 const flush = () => new Promise<void>((r) => setImmediate(r));
+
+/**
+ * Delay-aware fake timers on a fake clock. `advanceTo(t)` fires every timer due
+ * by `t` in due order (ties in arming order, as a real event loop does), and
+ * drains microtasks between two callbacks, as real timers do.
+ */
+function clockTimers() {
+  let clock = 0;
+  let seq = 0;
+  const pending = new Map<number, { due: number; every: number | null; fn: () => void }>();
+  const timers: LoopTimers = {
+    setTimeout: (fn, ms) => (pending.set(++seq, { due: clock + ms, every: null, fn }), seq),
+    clearTimeout: (h) => void pending.delete(h as number),
+    setInterval: (fn, ms) => (pending.set(++seq, { due: clock + ms, every: ms, fn }), seq),
+    clearInterval: (h) => void pending.delete(h as number),
+  };
+  return {
+    timers,
+    armed: () => pending.size,
+    async advanceTo(t: number) {
+      for (;;) {
+        let next: [number, { due: number; every: number | null; fn: () => void }] | null = null;
+        for (const e of pending) if (e[1].due <= t && (!next || e[1].due < next[1].due)) next = e;
+        if (!next) break;
+        const [id, timer] = next;
+        clock = timer.due;
+        if (timer.every === null) pending.delete(id);
+        else timer.due += timer.every;
+        timer.fn();
+        await flush();
+      }
+      clock = t;
+    },
+  };
+}
 
 async function capture(): Promise<LogRecord[]> {
   const records: LogRecord[] = [];
@@ -296,6 +339,123 @@ describe("createLoop", () => {
     expect(loop.state().lastRun?.ok).toBe(true);
     expect(loop.state().lastRun!.finishedAt).toBeGreaterThanOrEqual(s.lastRun!.startedAt);
     await loop.stop();
+  });
+});
+
+describe("createLoop: first-run timing on a fake clock", () => {
+  test("without firstDelayMs, an instant run executes once at the first boundary, not twice", async () => {
+    const c = clockTimers();
+    let runs = 0;
+    let skips = 0;
+    const loop = createLoop({ name: "L", intervalMs: 1000, log, timers: c.timers, onSkip: () => skips++, run: async () => void runs++ });
+    loop.start();
+    const armedAtStart = c.armed();
+    await c.advanceTo(999);
+    expect(runs).toBe(0);
+    await c.advanceTo(1000);
+    expect({ runs, skips }).toEqual({ runs: 1, skips: 0 });
+    await c.advanceTo(2000);
+    expect({ runs, skips }).toEqual({ runs: 2, skips: 0 });
+    expect(armedAtStart, "only the interval is armed").toBe(1);
+    await loop.stop();
+  });
+
+  test("without firstDelayMs, a run still in flight at the first boundary draws no skip there", async () => {
+    const c = clockTimers();
+    const g = gated();
+    let runs = 0;
+    let skips = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      log,
+      timers: c.timers,
+      onSkip: () => skips++,
+      run: async () => {
+        runs++;
+        await g.gate;
+      },
+    });
+    loop.start();
+    await c.advanceTo(1000);
+    expect({ runs, skips }).toEqual({ runs: 1, skips: 0 });
+    g.release();
+    await loop.stop();
+  });
+
+  test("with firstDelayMs, both timers are armed at start and the interval does not wait for the first run", async () => {
+    const c = clockTimers();
+    const startedAt: number[] = [];
+    let ms = 0;
+    const loop = createLoop({
+      name: "L",
+      intervalMs: 1000,
+      firstDelayMs: 10,
+      log,
+      timers: c.timers,
+      now: () => ms,
+      run: async () => void startedAt.push(ms),
+    });
+    loop.start();
+    expect(c.armed()).toBe(2);
+    ms = 10;
+    await c.advanceTo(10);
+    ms = 1000;
+    await c.advanceTo(1000);
+    expect(startedAt).toEqual([10, 1000]);
+    await loop.stop();
+  });
+});
+
+describe("createLoop: stop and the predecessor chain", () => {
+  test("a second stop() while a run is in flight also waits for that run", async () => {
+    const t = fakeTimers();
+    const g = gated();
+    const loop = createLoop({ name: "L", intervalMs: 1000, firstDelayMs: 10, log, timers: t.timers, run: () => g.gate });
+    loop.start();
+    t.fireFirst();
+    const done = { first: false, second: false };
+    const first = loop.stop().then(() => (done.first = true));
+    const second = loop.stop().then(() => (done.second = true));
+    for (let i = 0; i < 3; i++) await flush();
+    expect(done, "neither stop resolves before the run settles").toEqual({ first: false, second: false });
+    g.release();
+    await Promise.all([first, second]);
+    expect(done).toEqual({ first: true, second: true });
+  });
+
+  /**
+   * A chain of stopped handles, none ever ticked, only the newest kept. Each
+   * older handle must become collectable once it has settled. Observed through
+   * `WeakRef` after `Bun.gc(true)`, polled with a bound: a reachable handle
+   * keeps its `deref()` for every poll, so a leak fails deterministically; a
+   * collected one can only be observed as collected, so the green is real.
+   */
+  test("a stopped handle that never ticked releases its settled predecessors", async () => {
+    const build = () => {
+      const refs: WeakRef<object>[] = [];
+      let prev: ReturnType<typeof createLoop> | null = null;
+      for (let i = 0; i < 3; i++) {
+        const h = createLoop({ name: "L", intervalMs: 1000, firstDelayMs: 10, log, timers: fakeTimers().timers, after: prev, run: async () => {} });
+        h.start();
+        void h.stop();
+        if (prev) refs.push(new WeakRef(prev));
+        prev = h;
+      }
+      return { newest: prev!, refs };
+    };
+    const { newest, refs } = build();
+    // No busy() call before the check: busy() drops a settled `after` itself,
+    // which would hide the leak this test is about.
+    await newest.settled();
+    let alive = refs.length;
+    for (let i = 0; i < 50 && alive > 0; i++) {
+      await flush();
+      Bun.gc(true);
+      alive = refs.filter((r) => r.deref() !== undefined).length;
+    }
+    expect(alive, "older handles still reachable from the newest").toBe(0);
+    expect(newest.state().stopped).toBe(true);
   });
 });
 
