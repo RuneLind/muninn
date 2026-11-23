@@ -17,6 +17,10 @@ describe("classifyFile", () => {
       "db/migrations/090-wiki-proposals.sql",
     ]) expect([f, classifyFile(f)]).toEqual([f, "knowledge"]);
   });
+  test("the features-layer wiki agents stay knowledge by path (F43): src/wiki/ is read by directory, not by layer", () => {
+    for (const f of ["src/wiki/work-map/run.ts", "src/wiki/decision-triage/run.ts", "src/wiki/digest.ts", "src/wiki/stale-confirm.ts"])
+      expect([f, classifyFile(f)]).toEqual([f, "knowledge"]);
+  });
   test("other: chat, ai, auth, non-wiki dashboard and watcher files", () => {
     for (const f of ["src/ai/executor.ts", "src/chat/routes.ts", "src/auth/origin.ts", "src/dashboard/views/agents-page.ts", "src/watchers/email.ts", "e2e/chat.spec.ts", "db/init.sql"])
       expect([f, classifyFile(f)]).toEqual([f, "other"]);
@@ -67,6 +71,7 @@ describe("classifyFile", () => {
       { from: `${C}h.ts`, to: "src/wiki/store.ts" },
       { from: `${C}wiki-browser.ts`, to: `${C}i.ts` },
       { from: `${C}i.test.ts`, to: `${C}i.ts` },
+      { from: `${C}j.ts`, to: "src/wiki/digest.ts" },
     ]);
     test("a test file importing it does not count as an importer", () => expect(classifyFile(`${C}i.ts`, graph)).toBe("knowledge"));
     test("a name-only knowledge file outside the components is no evidence", () => expect(classifyFile(`${C}f.ts`, graph)).toBe("other"));
@@ -75,6 +80,7 @@ describe("classifyFile", () => {
       expect(classifyFile(`${C}h.ts`, graph)).toBe("knowledge");
     });
     test("imports a knowledge module: knowledge", () => expect(classifyFile(`${C}a.ts`, graph)).toBe("knowledge"));
+    test("imports a features-layer wiki agent: knowledge", () => expect(classifyFile(`${C}j.ts`, graph)).toBe("knowledge"));
     test("imports only render: other", () => expect(classifyFile(`${C}b.ts`, graph)).toBe("other"));
     test("every importer is knowledge: knowledge", () => expect(classifyFile(`${C}c.ts`, graph)).toBe("knowledge"));
     test("one importer is not: other", () => expect(classifyFile(`${C}d.ts`, graph)).toBe("other"));

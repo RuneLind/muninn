@@ -24,7 +24,8 @@ export type CommitClass = "knowledge" | "other" | "crossing" | "neutral";
 const KNOWLEDGE_NAME =
   /wiki|summar|(^|\/)sum-|(^|\/)plans?[-./]|gardener|walkthrough|factcheck|(^|\/)share[-./]|frames|graph|youtube|vimeo|tiktok|x-article|(^|\/)article[-./]|anthropic|(^|\/)component-reference|decision|work-map|theme-map|stale-proposal|diagram|oppfolging|find-links/;
 
-const KNOWLEDGE_DIR = /^src\/(gardener|plans|summaries|share|youtube|vimeo|tiktok|x-article|article|anthropic|video)\//;
+/** `wiki` by path: the model-calling wiki agents sit in the features layer (F43) and stay knowledge. */
+const KNOWLEDGE_DIR = /^src\/(wiki|gardener|plans|summaries|share|youtube|vimeo|tiktok|x-article|article|anthropic|video)\//;
 
 /** First match wins. */
 export const SIDE_RULES: readonly (readonly [test: (f: string) => boolean, side: Side, why: string])[] = [
