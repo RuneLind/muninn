@@ -5,7 +5,7 @@ import {
   type WikiAnswerRetentionWindows,
 } from "../db/wiki-answers.ts";
 import { getLog } from "../logging.ts";
-import { createLoop, settleWithin, type LoopHandle, type LoopState } from "../utils/loop.ts";
+import { createLoop, settleWithin, type LoopHandle } from "../utils/loop.ts";
 
 const log = getLog("wiki", "answer-retention");
 
@@ -85,9 +85,6 @@ export function startAnswerRetentionSweep(
   loop.start();
   return true;
 }
-
-/** The current handle's state (last run, in flight, stopped); null before the first start. */
-export const answerRetentionSweepState = (): LoopState | null => loop?.state() ?? null;
 
 /** Stop the timers and end a sweep in flight at its next answer, then wait
  *  (bounded) for it, so shutdown can close the pool after it rather than under it. */

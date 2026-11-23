@@ -6,7 +6,7 @@ import { harvestSearchSignals } from "../db/search-signals.ts";
 import { cleanupOldStaleVerdicts, STALE_VERDICT_RETENTION_DAYS } from "../db/wiki-stale-verdicts.ts";
 import { BatchedDeleteError } from "../db/batched-delete.ts";
 import { getLog } from "../logging.ts";
-import { createLoop, settleWithin, type LoopHandle, type LoopState } from "../utils/loop.ts";
+import { createLoop, settleWithin, type LoopHandle } from "../utils/loop.ts";
 
 const log = getLog("scheduler", "retention");
 
@@ -131,9 +131,6 @@ export function startRetentionCleanup(
   loop.start();
   return true;
 }
-
-/** The current handle's state (last run, in flight, stopped); null before the first start. */
-export const retentionCleanupState = (): LoopState | null => loop?.state() ?? null;
 
 /** Stop the timers and flag a run in flight to stop at its next batch, then wait
  *  (bounded) for it, so shutdown closes the pool after it rather than under it. */

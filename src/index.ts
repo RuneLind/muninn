@@ -115,7 +115,7 @@ process.on("unhandledRejection", (reason) => {
   });
 });
 // Its sibling for synchronous throws (a timer, an event or abort listener): the
-// same keep-running policy once boot is complete (the module's last statement),
+// same keep-running policy once boot is complete (the end of the scheduler-start timer),
 // and exit 1 before that, so a boot that throws still stops the process.
 const uncaughtBackstop = installUncaughtBackstop(log);
 
@@ -588,6 +588,10 @@ for (const botConfig of botConfigs) {
 
 // Start per-bot schedulers after bots are connected (10s delay for stability)
 // Scheduler uses Telegram API — only start for bots with Telegram tokens
+// This timer is armed on every boot and is the last boot step: a throw in it
+// exits 1 so the supervisor restarts muninn, rather than leaving it up with no
+// scheduler. Boot is complete at its end, the only `markBooted()` (pinned by
+// `src/startup/uncaught-backstop.test.ts`).
 setTimeout(() => {
   for (const botCfg of botConfigs) {
     if (!botCfg.telegramBotToken) continue;
@@ -597,6 +601,8 @@ setTimeout(() => {
       startScheduler(telegramBot.api, config, botCfg);
     }
   }
+  // From here an uncaught throw is logged and survived.
+  uncaughtBackstop.markBooted();
 }, 10_000);
 
 // Graceful shutdown
@@ -643,6 +649,3 @@ async function shutdown() {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-
-// Boot is complete: from here an uncaught throw is logged and survived.
-uncaughtBackstop.markBooted();
