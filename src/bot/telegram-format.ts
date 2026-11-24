@@ -23,6 +23,7 @@ import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRender
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
+import { splitMessage } from "../utils/split-message.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
@@ -289,6 +290,23 @@ function renderInline(text: string): string {
   });
 
   return result;
+}
+
+/** Telegram's sendMessage cap; a longer text is refused with 400 "message is too long". */
+export const TELEGRAM_MAX_MESSAGE = 4096;
+
+/**
+ * Markdown → Telegram HTML messages, each at most `max` chars. Splits the MARKDOWN
+ * at line breaks and renders each part, so a cut never lands inside a tag; a part
+ * whose HTML outgrows `max` (link hrefs) is re-split at a smaller budget.
+ */
+export function formatTelegramHtmlChunks(markdown: string, max = TELEGRAM_MAX_MESSAGE): string[] {
+  for (let budget = max; budget >= 200; budget = Math.floor(budget * 0.8)) {
+    const parts = splitMessage(markdown, budget).map(formatTelegramHtml).filter((p) => p.trim());
+    if (parts.every((p) => p.length <= max)) return parts;
+  }
+  // Pathological (one unsplittable link-dense run): cut the HTML itself.
+  return splitMessage(formatTelegramHtml(markdown), max);
 }
 
 /**

@@ -28,7 +28,7 @@ import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../schedule
 import { loadConfig } from "../config.ts";
 import { saveMessage } from "../db/messages.ts";
 import { getActiveThreadId } from "../db/threads.ts";
-import { formatTelegramHtml, stripHtml } from "../bot/telegram-format.ts";
+import { formatTelegramHtmlChunks, stripHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { getSlackApp } from "../slack/registry.ts";
 import { makePostToChannel } from "../slack/cache.ts";
@@ -648,15 +648,17 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         } else {
           // Send to Telegram (fall back to plain text if HTML is rejected)
           agentStatus.set("sending_telegram", watcher.name);
-          const html = formatTelegramHtml(markdown);
-          try {
-            await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
-          } catch (sendErr) {
-            if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
-              log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
-              await api.sendMessage(watcher.userId, stripHtml(html));
-            } else {
-              throw sendErr;
+          // Split: a weekly X digest outgrew Telegram's 4096-char cap (2026-11-24).
+          for (const html of formatTelegramHtmlChunks(markdown)) {
+            try {
+              await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
+            } catch (sendErr) {
+              if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
+                log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
+                await api.sendMessage(watcher.userId, stripHtml(html));
+              } else {
+                throw sendErr;
+              }
             }
           }
 

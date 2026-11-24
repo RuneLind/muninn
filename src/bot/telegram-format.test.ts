@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { formatTelegramHtml } from "./telegram-format.ts";
+import { formatTelegramHtml, formatTelegramHtmlChunks, TELEGRAM_MAX_MESSAGE } from "./telegram-format.ts";
 
 test("converts markdown headings to bold", () => {
   expect(formatTelegramHtml("## Summary")).toBe("<b>Summary</b>");
@@ -259,4 +259,35 @@ test("Embed: a bad height is an invalid embed, the src is not blamed", () => {
 
 test("F29: a marker word between a link and a code span forges no placeholder", () => {
   expect(formatTelegramHtml("[l](https://x.com)INLINE0`c`")).toBe('<a href="https://x.com">l</a>INLINE0<code>c</code>');
+});
+
+// A weekly X digest (~4.2k chars of link bullets) was refused whole by Telegram
+// with 400 "message is too long" (2026-11-24); the watcher runner now sends chunks.
+const digestBullet = (i: number) =>
+  `- [@author${i}](https://x.com/author${i}/status/${1_000_000_000 + i}) — a sentence about item ${i} long enough to matter.`;
+const longDigest = `𝕏 **X Weekly Digest**\n**Themes of the Week**\n${Array.from({ length: 60 }, (_, i) => digestBullet(i)).join("\n")}`;
+
+test("formatTelegramHtmlChunks: a short message is one chunk, same HTML", () => {
+  const md = "**Top Picks**\n- [@a](https://x.com/a) — hi";
+  expect(formatTelegramHtmlChunks(md)).toEqual([formatTelegramHtml(md)]);
+});
+
+test("formatTelegramHtmlChunks: an over-cap digest splits under the cap without cutting a tag", () => {
+  expect(formatTelegramHtml(longDigest).length).toBeGreaterThan(TELEGRAM_MAX_MESSAGE);
+  const chunks = formatTelegramHtmlChunks(longDigest);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) {
+    expect(c.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
+    expect(c.match(/<a /g)?.length ?? 0).toBe(c.match(/<\/a>/g)?.length ?? 0);
+  }
+  // Every bullet survives, in order, exactly once.
+  const joined = chunks.join("\n");
+  for (let i = 0; i < 60; i++) expect(joined.split(`>@author${i}</a>`).length).toBe(2);
+  expect(joined.indexOf(">@author0<")).toBeLessThan(joined.indexOf(">@author59<"));
+});
+
+test("formatTelegramHtmlChunks: HTML that outgrows its markdown part is re-split", () => {
+  // Markdown parts fit a 1000 budget, but the rendered href doubles each link.
+  const chunks = formatTelegramHtmlChunks(longDigest, 1000);
+  for (const c of chunks) expect(c.length).toBeLessThanOrEqual(1000);
 });
