@@ -291,3 +291,28 @@ test("formatTelegramHtmlChunks: HTML that outgrows its markdown part is re-split
   const chunks = formatTelegramHtmlChunks(longDigest, 1000);
   for (const c of chunks) expect(c.length).toBeLessThanOrEqual(1000);
 });
+
+test("formatTelegramHtmlChunks: a fence cut across parts is closed and reopened, code stays escaped", () => {
+  const md = "Intro\n```html\n" + Array.from({ length: 30 }, (_, i) => `<b>bold ${i} <i>open`).join("\n") + "\n```\nOutro";
+  const chunks = formatTelegramHtmlChunks(md, 300);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) {
+    expect(c.length).toBeLessThanOrEqual(300);
+    expect(c).not.toContain("```");
+    expect(c).toContain("<pre>");
+    expect(c.match(/<pre>/g)!.length).toBe(c.match(/<\/pre>/g)?.length ?? 0);
+    expect(c).not.toMatch(/<b>|<i>/); // the code's tags stay &lt;-escaped
+  }
+  for (let i = 0; i < 30; i++) expect(chunks.join("\n").split(`bold ${i} `).length).toBe(2);
+});
+
+test("formatTelegramHtmlChunks: one over-budget line never cuts a link or bold span", () => {
+  const md = Array.from({ length: 40 }, (_, i) => `**bold ${i} words** [link label ${i}](https://x.com/a/${i})`).join(" ");
+  const chunks = formatTelegramHtmlChunks(md, 300);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) {
+    expect(c).not.toMatch(/\]\(|\[link|\*\*/);
+    expect(c.match(/<a /g)?.length ?? 0).toBe(c.match(/<\/a>/g)?.length ?? 0);
+  }
+  for (let i = 0; i < 40; i++) expect(chunks.join(" ")).toContain(`<a href="https://x.com/a/${i}">link label ${i}</a>`);
+});

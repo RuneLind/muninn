@@ -13,6 +13,7 @@ import {
   resolvedLeadText,
   laneFromAttrs,
   laneLeadText,
+  markdownCodeRegions,
 } from "../format/markdown-ast.ts";
 import type { ChecklistChild, ChecklistRow } from "../format/markdown-ast.ts";
 import { tldrFallbackLabel } from "../format/genre-lists.ts";
@@ -296,17 +297,72 @@ function renderInline(text: string): string {
 export const TELEGRAM_MAX_MESSAGE = 4096;
 
 /**
- * Markdown → Telegram HTML messages, each at most `max` chars. Splits the MARKDOWN
- * at line breaks and renders each part, so a cut never lands inside a tag; a part
- * whose HTML outgrows `max` (link hrefs) is re-split at a smaller budget.
+ * Markdown → Telegram HTML messages, each at most `max` chars. Packs whole markdown
+ * lines into parts (see {@link packMarkdown}) and renders each, so a cut never lands
+ * inside a tag; a part whose HTML outgrows `max` (link hrefs) is re-packed smaller.
  */
 export function formatTelegramHtmlChunks(markdown: string, max = TELEGRAM_MAX_MESSAGE): string[] {
-  for (let budget = max; budget >= 200; budget = Math.floor(budget * 0.8)) {
-    const parts = splitMessage(markdown, budget).map(formatTelegramHtml).filter((p) => p.trim());
+  for (let budget = max; ; budget = Math.floor(budget * 0.8)) {
+    const parts = packMarkdown(markdown, budget).map(formatTelegramHtml).filter((p) => p.trim());
     if (parts.every((p) => p.length <= max)) return parts;
+    // Last resort, not reached in practice: cut the oversized HTML itself.
+    if (budget < 64) return parts.flatMap((p) => (p.length <= max ? [p] : splitMessage(p, max)));
   }
-  // Pathological (one unsplittable link-dense run): cut the HTML itself.
-  return splitMessage(formatTelegramHtml(markdown), max);
+}
+
+/** Spans a long line is never cut inside: a link, a bold run, a code span. */
+const UNCUTTABLE = /\[[^\]\n]*\]\([^)\s]*\)|\*\*[^*\n]+\*\*|`[^`\n]+`/g;
+
+/**
+ * Markdown → parts of at most `budget` chars, cut only between lines. A cut inside
+ * a fenced block closes the fence and reopens it in the next part; a line longer
+ * than the budget is cut at a space outside {@link UNCUTTABLE}. Indentation is kept.
+ */
+function packMarkdown(markdown: string, budget: number): string[] {
+  const fences = markdownCodeRegions(markdown).flatMap((r) => {
+    const end = markdown.indexOf("\n", r.start);
+    const opener = markdown.slice(r.start, end < 0 ? markdown.length : end);
+    const run = /^\s*(`{3,}|~{3,})/.exec(opener)?.[1];
+    return run ? [{ ...r, opener, closer: run }] : [];
+  });
+  const parts: string[] = [];
+  let cur: string[] = [];
+  let len = 0;
+  let offset = 0;
+  for (const line of markdown.split("\n")) {
+    const fence = fences.find((f) => f.start < offset && offset <= f.end);
+    const reserve = fence ? fence.closer.length + 1 : 0;
+    const room = Math.max(1, budget - reserve - (fence ? fence.opener.length + 1 : 0));
+    for (const piece of cutLongLine(line, room)) {
+      if (cur.length > 0 && len + 1 + piece.length + reserve > budget) {
+        parts.push(fence ? `${cur.join("\n")}\n${fence.closer}` : cur.join("\n"));
+        cur = fence ? [fence.opener] : [];
+        len = fence ? fence.opener.length : 0;
+      }
+      len += (cur.length > 0 ? 1 : 0) + piece.length;
+      cur.push(piece);
+    }
+    offset += line.length + 1;
+  }
+  if (cur.length > 0) parts.push(cur.join("\n"));
+  return parts;
+}
+
+function cutLongLine(line: string, budget: number): string[] {
+  const pieces: string[] = [];
+  let rest = line;
+  while (rest.length > budget) {
+    const spans = [...rest.matchAll(UNCUTTABLE)].map((m) => [m.index, m.index + m[0].length] as const);
+    let cut = -1;
+    for (let i = rest.lastIndexOf(" ", budget); i > 0; i = rest.lastIndexOf(" ", i - 1)) {
+      if (!spans.some(([s, e]) => i > s && i < e)) { cut = i; break; }
+    }
+    if (cut <= 0) cut = budget; // no safe space: one unbroken run longer than the budget
+    pieces.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^ /, "");
+  }
+  pieces.push(rest);
+  return pieces;
 }
 
 /**
