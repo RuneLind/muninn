@@ -373,3 +373,47 @@ test("formatTelegramHtmlChunks: chunks carry exactly the whole render's text, wi
     expect(words(visible(chunks.join("\n")))).toBe(words(visible(formatTelegramHtml(md))));
   }
 });
+
+// --- fix round 2 batch 1 ---
+
+test("formatTelegramHtmlChunks: one 120k-char tag-dense line chunks in linear time", () => {
+  const md = "**a** ".repeat(20_000);
+  const t0 = performance.now();
+  const chunks = formatTelegramHtmlChunks(md);
+  expect(performance.now() - t0).toBeLessThan(1500); // was 12.7 s: every cut re-measured from offset 0
+  for (const c of chunks) expect(visible(c).length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
+});
+
+test("formatTelegramHtmlChunks: a plain-text hard cut never splits a surrogate pair", () => {
+  const chunks = formatTelegramHtmlChunks("a" + "😀".repeat(3000));
+  expect(chunks.length).toBeGreaterThan(1);
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  for (const c of chunks) expect(c).not.toMatch(lone);
+});
+
+test("formatTelegramHtmlChunks: a long line with no space outside a tag goes as capped plain text", () => {
+  const md = "**" + "word ".repeat(2000).trim() + "**"; // every space sits inside <b>
+  const chunks = formatTelegramHtmlChunks(md, 300);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) expect(visible(c).length).toBeLessThanOrEqual(300);
+  expect(words(visible(chunks.join(" ")))).toBe(words(visible(formatTelegramHtml(md))));
+});
+
+test("formatTelegramHtmlChunks: a code line longer than the cap is cut and stays in <pre>", () => {
+  const chunks = formatTelegramHtmlChunks("```\n" + "x".repeat(700) + "\n```", 300);
+  expect(chunks.length).toBeGreaterThan(2);
+  for (const c of chunks) {
+    expect(visible(c).length).toBeLessThanOrEqual(300);
+    expect(c.startsWith("<pre>")).toBe(true);
+  }
+});
+
+test("formatTelegramHtmlChunks: no chunk is blank or starts or ends with whitespace", () => {
+  const md = Array.from({ length: 40 }, (_, i) => `Paragraph ${i} has a few words in it.\n\n\n`).join("");
+  const chunks = formatTelegramHtmlChunks(md, 200);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) {
+    expect(c.length).toBeGreaterThan(0);
+    expect(c).toBe(c.trim());
+  }
+});

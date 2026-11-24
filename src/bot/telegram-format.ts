@@ -333,13 +333,23 @@ function cutUnit(unit: string, max: number): string[] {
     return pack(lines, max).map((b) => `${open}${b}${close}`);
   }
   const { spaces } = tagWalk(unit);
+  // vis[k]: visible chars before spaces[k], summed segment by segment so the whole
+  // walk stays linear (re-measuring each slice from 0 took 12.7 s on a 120k line).
+  const vis: number[] = [];
+  let acc = 0;
+  for (const [k, sp] of spaces.entries()) vis.push((acc += visibleLength(unit.slice(k > 0 ? spaces[k - 1] : 0, sp))));
+  const total = visibleLength(unit);
   const pieces: string[] = [];
   let start = 0;
-  while (visibleLength(unit.slice(start)) > max) {
-    const fit = spaces.filter((sp) => sp > start && visibleLength(unit.slice(start, sp)) <= max).at(-1);
-    if (fit === undefined) return [...pieces, ...plainPieces(unit.slice(start), max)];
-    pieces.push(unit.slice(start, fit));
-    start = fit + 1;
+  let startVis = 0;
+  let k = 0;
+  while (total - startVis > max) {
+    let fit = -1;
+    for (; k < spaces.length && vis[k]! - startVis <= max; k++) if (spaces[k]! > start) fit = k;
+    if (fit < 0) return [...pieces, ...plainPieces(unit.slice(start), max)];
+    pieces.push(unit.slice(start, spaces[fit]));
+    start = spaces[fit]! + 1;
+    startVis = vis[fit]! + 1; // the space the cut drops
   }
   return [...pieces, unit.slice(start)];
 }
@@ -347,14 +357,19 @@ function cutUnit(unit: string, max: number): string[] {
 /** Join pieces with newlines into messages of at most `max` visible chars. */
 function pack(pieces: string[], max: number): string[] {
   const out: string[] = [];
-  let cur: string | undefined;
+  let cur: string[] = [];
+  let curVis = 0; // pieces are whole units, so visible length adds across the joins
   for (const piece of pieces) {
-    if (cur !== undefined && visibleLength(`${cur}\n${piece}`) > max) {
-      out.push(cur);
-      cur = piece;
-    } else cur = cur === undefined ? piece : `${cur}\n${piece}`;
+    const v = visibleLength(piece);
+    if (cur.length > 0 && curVis + 1 + v > max) {
+      out.push(cur.join("\n"));
+      cur = [];
+      curVis = 0;
+    }
+    curVis += (cur.length > 0 ? 1 : 0) + v;
+    cur.push(piece);
   }
-  if (cur !== undefined) out.push(cur);
+  if (cur.length > 0) out.push(cur.join("\n"));
   return out;
 }
 
@@ -367,11 +382,14 @@ function pack(pieces: string[], max: number): string[] {
 export function formatTelegramHtmlChunks(markdown: string, max = TELEGRAM_MAX_MESSAGE): string[] {
   const units: string[] = [];
   let open: string[] = [];
+  let depth = 0;
   for (const line of formatTelegramHtml(markdown).split("\n")) {
     open.push(line);
-    if (tagWalk(open.join("\n")).depth <= 0) {
+    depth += tagWalk(line).depth;
+    if (depth <= 0) {
       units.push(open.join("\n"));
       open = [];
+      depth = 0;
     }
   }
   if (open.length > 0) units.push(open.join("\n"));

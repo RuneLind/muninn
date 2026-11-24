@@ -20,6 +20,8 @@ export function splitMessage(text: string, maxLength: number): string[] {
     }
     if (splitIndex === -1 || splitIndex < maxLength / 2) {
       splitIndex = maxLength;
+      // Never cut between a surrogate pair: half an emoji is not valid text.
+      if (/[\uD800-\uDBFF]/.test(remaining[splitIndex - 1] ?? "")) splitIndex--;
     }
 
     chunks.push(remaining.slice(0, splitIndex));
