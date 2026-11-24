@@ -295,7 +295,8 @@ function renderInline(text: string): string {
 /** Telegram's sendMessage cap; a longer text is refused with 400 "message is too long". */
 export const TELEGRAM_MAX_MESSAGE = 4096;
 
-/** A tag Telegram parses; anything else is text to it (and is rejected unescaped). */
+/** The tags formatTelegramHtml emits. Telegram parses a few more (strong, em, ins, del,
+ *  strike, span) that this renderer never writes. */
 const TG_TAG = /<\/?(?:b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)\b[^>]*>/gi;
 
 /** The length Telegram's cap counts: the text after tags and entities are parsed. */
@@ -334,7 +335,8 @@ function cutUnit(unit: string, max: number): string[] {
   }
   const { spaces } = tagWalk(unit);
   // vis[k]: visible chars before spaces[k], summed segment by segment so the whole
-  // walk stays linear (re-measuring each slice from 0 took 12.7 s on a 120k line).
+  // walk stays linear (re-measuring from the cut to every later space took 12.7 s
+  // on a 120k line).
   const vis: number[] = [];
   let acc = 0;
   for (const [k, sp] of spaces.entries()) vis.push((acc += visibleLength(unit.slice(k > 0 ? spaces[k - 1] : 0, sp))));
@@ -358,7 +360,7 @@ function cutUnit(unit: string, max: number): string[] {
 function pack(pieces: string[], max: number): string[] {
   const out: string[] = [];
   let cur: string[] = [];
-  let curVis = 0; // pieces are whole units, so visible length adds across the joins
+  let curVis = 0; // pieces are whole units: on well-formed HTML no tag spans a join
   for (const piece of pieces) {
     const v = visibleLength(piece);
     if (cur.length > 0 && curVis + 1 + v > max) {
