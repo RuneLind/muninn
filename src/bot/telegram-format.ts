@@ -23,6 +23,7 @@ import { nestedChildren, ordinals, renderBlocks, textListItems, type BlockRender
 import { parseEmbedAttrs } from "../format/embed.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 import { blockFileLine, parseQueryAttrs, queryLead, queryResultLine, renderCodeSpans } from "../format/query-block.ts";
+import { splitMessage } from "../utils/split-message.ts";
 
 /**
  * Converts Claude's markdown output to Telegram-safe HTML.
@@ -289,6 +290,112 @@ function renderInline(text: string): string {
   });
 
   return result;
+}
+
+/** Telegram's sendMessage cap; a longer text is refused with 400 "message is too long". */
+export const TELEGRAM_MAX_MESSAGE = 4096;
+
+/** The tags formatTelegramHtml emits. Telegram parses a few more (strong, em, ins, del,
+ *  strike, span) that this renderer never writes. */
+const TG_TAG = /<\/?(?:b|i|u|s|code|pre|a|tg-spoiler|tg-emoji|blockquote)\b[^>]*>/gi;
+
+/** The length Telegram's cap counts: the text after tags and entities are parsed. */
+function visibleLength(html: string): number {
+  return html.replace(TG_TAG, "").replace(/&(?:#\d+|#x[\da-f]+|[a-z]+);/gi, "x").length;
+}
+
+/** Tag depth after `html`, and the depth-0 space offsets where a cut closes nothing. */
+function tagWalk(html: string): { depth: number; spaces: number[] } {
+  const spaces: number[] = [];
+  let depth = 0;
+  let at = 0;
+  const text = (end: number) => {
+    for (let i = html.indexOf(" ", at); i >= 0 && i < end && depth === 0; i = html.indexOf(" ", i + 1)) spaces.push(i);
+  };
+  for (const m of html.matchAll(TG_TAG)) {
+    text(m.index);
+    depth += m[0][1] === "/" ? -1 : 1;
+    at = m.index + m[0].length;
+  }
+  text(html.length);
+  return { depth, spaces };
+}
+
+const plainPieces = (html: string, max: number) => splitMessage(stripHtml(html), max).map(escapeHtml);
+
+/** One unit over `max`: a code block is re-wrapped per run of lines; anything else is
+ *  cut at depth-0 spaces; with no such space it goes as escaped plain text. */
+function cutUnit(unit: string, max: number): string[] {
+  if (visibleLength(unit) <= max) return [unit];
+  const pre = /^(<pre>(?:<code[^>]*>)?)([^<]*)((?:<\/code>)?<\/pre>)$/.exec(unit);
+  if (pre) {
+    const [, open, body, close] = pre;
+    const lines = body!.split("\n").flatMap((l) => (visibleLength(l) > max ? plainPieces(l, max) : [l]));
+    return pack(lines, max).map((b) => `${open}${b}${close}`);
+  }
+  const { spaces } = tagWalk(unit);
+  // vis[k]: visible chars before spaces[k], summed segment by segment so the whole
+  // walk stays linear (re-measuring from the cut to every later space took 12.7 s
+  // on a 120k line).
+  const vis: number[] = [];
+  let acc = 0;
+  for (const [k, sp] of spaces.entries()) vis.push((acc += visibleLength(unit.slice(k > 0 ? spaces[k - 1] : 0, sp))));
+  const total = visibleLength(unit);
+  const pieces: string[] = [];
+  let start = 0;
+  let startVis = 0;
+  let k = 0;
+  while (total - startVis > max) {
+    let fit = -1;
+    for (; k < spaces.length && vis[k]! - startVis <= max; k++) if (spaces[k]! > start) fit = k;
+    if (fit < 0) return [...pieces, ...plainPieces(unit.slice(start), max)];
+    pieces.push(unit.slice(start, spaces[fit]));
+    start = spaces[fit]! + 1;
+    startVis = vis[fit]! + 1; // the space the cut drops
+  }
+  return [...pieces, unit.slice(start)];
+}
+
+/** Join pieces with newlines into messages of at most `max` visible chars. */
+function pack(pieces: string[], max: number): string[] {
+  const out: string[] = [];
+  let cur: string[] = [];
+  let curVis = 0; // pieces are whole units: on well-formed HTML no tag spans a join
+  for (const piece of pieces) {
+    const v = visibleLength(piece);
+    if (cur.length > 0 && curVis + 1 + v > max) {
+      out.push(cur.join("\n"));
+      cur = [];
+      curVis = 0;
+    }
+    curVis += (cur.length > 0 ? 1 : 0) + v;
+    cur.push(piece);
+  }
+  if (cur.length > 0) out.push(cur.join("\n"));
+  return out;
+}
+
+/**
+ * Markdown → Telegram HTML messages of at most `max` visible chars (the text Telegram
+ * counts; hrefs and tags do not). Splits the RENDERED html between lines where every
+ * tag is closed, so no cut opens a span or a `<pre>`, and no second markdown parser
+ * can disagree with the renderer about where a construct ends.
+ */
+export function formatTelegramHtmlChunks(markdown: string, max = TELEGRAM_MAX_MESSAGE): string[] {
+  const units: string[] = [];
+  let open: string[] = [];
+  let depth = 0;
+  for (const line of formatTelegramHtml(markdown).split("\n")) {
+    open.push(line);
+    depth += tagWalk(line).depth;
+    if (depth <= 0) {
+      units.push(open.join("\n"));
+      open = [];
+      depth = 0;
+    }
+  }
+  if (open.length > 0) units.push(open.join("\n"));
+  return pack(units.flatMap((u) => cutUnit(u, max)), max).map((c) => c.trim()).filter(Boolean);
 }
 
 /**

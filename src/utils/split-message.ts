@@ -3,6 +3,8 @@
  * trying to break at newlines or spaces for readability.
  */
 export function splitMessage(text: string, maxLength: number): string[] {
+  // A cap below 1 cuts nothing off and would loop forever.
+  if (!(maxLength >= 1)) throw new RangeError(`splitMessage: maxLength must be at least 1, got ${maxLength}`);
   const chunks: string[] = [];
   let remaining = text;
 
@@ -20,6 +22,9 @@ export function splitMessage(text: string, maxLength: number): string[] {
     }
     if (splitIndex === -1 || splitIndex < maxLength / 2) {
       splitIndex = maxLength;
+      // Never cut between a surrogate pair: half an emoji is not valid text. At a
+      // cap of 1 the pair cannot fit whole, and stepping back to 0 would never end.
+      if (splitIndex > 1 && /[\uD800-\uDBFF]/.test(remaining[splitIndex - 1] ?? "")) splitIndex--;
     }
 
     chunks.push(remaining.slice(0, splitIndex));
