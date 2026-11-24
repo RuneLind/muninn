@@ -490,6 +490,42 @@ export function watcherConnectorInfo(
   }
 }
 
+/**
+ * Send an alert as one or more Telegram messages (a weekly X digest outgrew the
+ * 4096-char cap, 2026-11-24), each falling back to plain text if its HTML is
+ * rejected. A failure on the FIRST message throws: nothing arrived, so the run's
+ * catch retries cleanly. A later failure is logged and ends the send without
+ * throwing, so the alert counts as delivered and no retry repeats what arrived.
+ */
+export async function sendAlertToTelegram(
+  api: Pick<Api, "sendMessage">,
+  chatId: string,
+  markdown: string,
+  ctx: { botName: string; name: string },
+): Promise<void> {
+  const send = async (html: string) => {
+    try {
+      await api.sendMessage(chatId, html, { parse_mode: "HTML" });
+    } catch (sendErr) {
+      if (!(sendErr instanceof Error && sendErr.message.includes("can't parse entities"))) throw sendErr;
+      log.warn("Telegram rejected HTML, falling back to plain text", ctx);
+      await api.sendMessage(chatId, stripHtml(html));
+    }
+  };
+  const chunks = formatTelegramHtmlChunks(markdown);
+  for (const [i, html] of chunks.entries()) {
+    try {
+      await send(html);
+    } catch (err) {
+      if (i === 0) throw err;
+      log.error("Watcher \"{name}\" alert cut short: message {part} of {parts} failed, the rest not sent: {error}", {
+        ...ctx, part: i + 1, parts: chunks.length, error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+  }
+}
+
 export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?: TraceContext, prefetchedDue?: Watcher[]): Promise<void> {
   const tag = botConfig.name;
   // Fallback model for the wiki-gardener's bot-connector draft (mirrors every
@@ -646,21 +682,8 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
           // stays auditable. The user sees it in-thread, not as an overnight ping.
           log.info("Watcher \"{name}\" ran during quiet hours — user-facing alert send suppressed, sweep logged", { botName: tag, name: watcher.name });
         } else {
-          // Send to Telegram (fall back to plain text if HTML is rejected)
           agentStatus.set("sending_telegram", watcher.name);
-          // Split: a weekly X digest outgrew Telegram's 4096-char cap (2026-11-24).
-          for (const html of formatTelegramHtmlChunks(markdown)) {
-            try {
-              await api.sendMessage(watcher.userId, html, { parse_mode: "HTML" });
-            } catch (sendErr) {
-              if (sendErr instanceof Error && sendErr.message.includes("can't parse entities")) {
-                log.warn("Telegram rejected HTML, falling back to plain text", { botName: tag, name: watcher.name });
-                await api.sendMessage(watcher.userId, stripHtml(html));
-              } else {
-                throw sendErr;
-              }
-            }
-          }
+          await sendAlertToTelegram(api, watcher.userId, markdown, { botName: tag, name: watcher.name });
 
           // Send to Slack channels if configured (slackBot overrides which bot's Slack connection to use)
           const slackConfig = watcher.config as { slackChannels?: string[]; slackBot?: string };

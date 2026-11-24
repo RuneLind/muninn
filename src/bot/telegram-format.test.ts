@@ -261,11 +261,21 @@ test("F29: a marker word between a link and a code span forges no placeholder", 
   expect(formatTelegramHtml("[l](https://x.com)INLINE0`c`")).toBe('<a href="https://x.com">l</a>INLINE0<code>c</code>');
 });
 
-// A weekly X digest (~4.2k chars of link bullets) was refused whole by Telegram
+
+/** Text Telegram counts: tags removed, entities as one char. */
+const visible = (html: string) =>
+  html.replace(/<\/?(b|i|u|s|code|pre|a|tg-spoiler|blockquote)\b[^>]*>/gi, "").replace(/&(#\d+|#x[\da-f]+|[a-z]+);/gi, "x");
+const tagsBalanced = (html: string) =>
+  ["b", "i", "s", "u", "code", "pre", "a", "blockquote"].every(
+    (t) => (html.match(new RegExp(`<${t}[\\s>]`, "g"))?.length ?? 0) === (html.match(new RegExp(`</${t}>`, "g"))?.length ?? 0),
+  );
+const words = (s: string) => s.replace(/\s+/g, " ").trim();
+
+// A weekly X digest (over 4096 chars of visible text) was refused whole by Telegram
 // with 400 "message is too long" (2026-11-24); the watcher runner now sends chunks.
 const digestBullet = (i: number) =>
   `- [@author${i}](https://x.com/author${i}/status/${1_000_000_000 + i}) — a sentence about item ${i} long enough to matter.`;
-const longDigest = `𝕏 **X Weekly Digest**\n**Themes of the Week**\n${Array.from({ length: 60 }, (_, i) => digestBullet(i)).join("\n")}`;
+const longDigest = `𝕏 **X Weekly Digest**\n**Themes of the Week**\n${Array.from({ length: 80 }, (_, i) => digestBullet(i)).join("\n")}`;
 
 test("formatTelegramHtmlChunks: a short message is one chunk, same HTML", () => {
   const md = "**Top Picks**\n- [@a](https://x.com/a) — hi";
@@ -273,23 +283,23 @@ test("formatTelegramHtmlChunks: a short message is one chunk, same HTML", () => 
 });
 
 test("formatTelegramHtmlChunks: an over-cap digest splits under the cap without cutting a tag", () => {
-  expect(formatTelegramHtml(longDigest).length).toBeGreaterThan(TELEGRAM_MAX_MESSAGE);
+  expect(visible(formatTelegramHtml(longDigest)).length).toBeGreaterThan(TELEGRAM_MAX_MESSAGE);
   const chunks = formatTelegramHtmlChunks(longDigest);
   expect(chunks.length).toBeGreaterThan(1);
   for (const c of chunks) {
-    expect(c.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
+    expect(visible(c).length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
     expect(c.match(/<a /g)?.length ?? 0).toBe(c.match(/<\/a>/g)?.length ?? 0);
   }
   // Every bullet survives, in order, exactly once.
   const joined = chunks.join("\n");
-  for (let i = 0; i < 60; i++) expect(joined.split(`>@author${i}</a>`).length).toBe(2);
-  expect(joined.indexOf(">@author0<")).toBeLessThan(joined.indexOf(">@author59<"));
+  for (let i = 0; i < 80; i++) expect(joined.split(`>@author${i}</a>`).length).toBe(2);
+  expect(joined.indexOf(">@author0<")).toBeLessThan(joined.indexOf(">@author79<"));
 });
 
-test("formatTelegramHtmlChunks: HTML that outgrows its markdown part is re-split", () => {
-  // Markdown parts fit a 1000 budget, but the rendered href doubles each link.
+test("formatTelegramHtmlChunks: a small cap holds on visible text", () => {
   const chunks = formatTelegramHtmlChunks(longDigest, 1000);
-  for (const c of chunks) expect(c.length).toBeLessThanOrEqual(1000);
+  expect(chunks.length).toBeGreaterThan(4);
+  for (const c of chunks) expect(visible(c).length).toBeLessThanOrEqual(1000);
 });
 
 test("formatTelegramHtmlChunks: a fence cut across parts is closed and reopened, code stays escaped", () => {
@@ -297,7 +307,7 @@ test("formatTelegramHtmlChunks: a fence cut across parts is closed and reopened,
   const chunks = formatTelegramHtmlChunks(md, 300);
   expect(chunks.length).toBeGreaterThan(1);
   for (const c of chunks) {
-    expect(c.length).toBeLessThanOrEqual(300);
+    expect(visible(c).length).toBeLessThanOrEqual(300);
     expect(c).not.toContain("```");
     expect(c).toContain("<pre>");
     expect(c.match(/<pre>/g)!.length).toBe(c.match(/<\/pre>/g)?.length ?? 0);
@@ -315,4 +325,51 @@ test("formatTelegramHtmlChunks: one over-budget line never cuts a link or bold s
     expect(c.match(/<a /g)?.length ?? 0).toBe(c.match(/<\/a>/g)?.length ?? 0);
   }
   for (let i = 0; i < 40; i++) expect(chunks.join(" ")).toContain(`<a href="https://x.com/a/${i}">link label ${i}</a>`);
+});
+
+
+test("formatTelegramHtmlChunks: HTML over the cap but visible text under it stays one message", () => {
+  // Telegram's 4096 counts text after entity parsing; hrefs do not count.
+  const md = Array.from({ length: 30 }, (_, i) => `- [@a${i}](https://x.com/some/long/path/status/${10 ** 15 + i}) — note ${i}`).join("\n");
+  const html = formatTelegramHtml(md);
+  expect(html.length).toBeGreaterThan(1000);
+  expect(visible(html).length).toBeLessThan(1000);
+  expect(formatTelegramHtmlChunks(md, 1000)).toEqual([html]);
+});
+
+test("formatTelegramHtmlChunks: a nested child after a cut keeps its rendered ◦ marker", () => {
+  const md = "- parent\n" + Array.from({ length: 20 }, (_, i) => `  - child ${i} with some words`).join("\n");
+  const chunks = formatTelegramHtmlChunks(md, 300);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (let i = 0; i < 20; i++) expect(chunks.join("\n")).toContain(`◦ child ${i} with`);
+});
+
+test("formatTelegramHtmlChunks: italic, underscore and strike spans on one long line are never cut", () => {
+  const md = Array.from({ length: 30 }, (_, i) => `*italic ${i} words here* _under ${i} words_ ~~strike ${i} words~~ **bold *mixed ${i}* run** plain`).join(" ");
+  const chunks = formatTelegramHtmlChunks(md, 300);
+  expect(chunks.length).toBeGreaterThan(1);
+  for (const c of chunks) {
+    expect(c).not.toMatch(/\*|~~|(^|\s)_/);
+    expect(tagsBalanced(c)).toBe(true);
+  }
+});
+
+test("formatTelegramHtmlChunks: chunks carry exactly the whole render's text, within the cap, tags balanced", () => {
+  const code = (n: number) => Array.from({ length: n }, (_, i) => `const v${i} = a < b && c;`).join("\n");
+  const cases = [
+    "~~~py\n" + code(30) + "\n~~~\nafter", // tilde fence: prose to this renderer
+    "```foo``` is inline code\n" + Array.from({ length: 30 }, (_, i) => `line ${i} of prose here`).join("\n"),
+    "    ```\n" + code(30) + "\n    ```", // 4-space indent: not a fence here
+    "```ts\n" + code(10) + "\n```js\n" + code(10) + "\n```\ntail", // a closer with an info string
+    "```" + "x".repeat(400) + "\nabc def\n```", // an opener longer than the cap
+    "Intro\n```html\n" + Array.from({ length: 30 }, (_, i) => `<b>bold ${i} <i>open`).join("\n") + "\n```\nOutro",
+  ];
+  for (const md of cases) {
+    const chunks = formatTelegramHtmlChunks(md, 300);
+    for (const c of chunks) {
+      expect(visible(c).length).toBeLessThanOrEqual(300);
+      expect(tagsBalanced(c)).toBe(true);
+    }
+    expect(words(visible(chunks.join("\n")))).toBe(words(visible(formatTelegramHtml(md))));
+  }
 });

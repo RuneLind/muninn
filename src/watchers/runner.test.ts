@@ -963,3 +963,56 @@ describe("shouldSkipWikiDraftingRun", () => {
     }
   });
 });
+
+// An alert over Telegram's 4096-char cap goes out as several messages (#902), so a
+// send can fail part-way. Dynamic import: the helper is what this block pins.
+describe("sendAlertToTelegram", () => {
+  const md = "𝕏 **X Weekly Digest**\n" + Array.from({ length: 250 }, (_, i) => `- item ${i}: a line of digest text that takes up some room`).join("\n");
+  const ctx = { botName: "jarvis", name: "X Weekly Digest" };
+  const fakeApi = (fail: (call: number, opts: unknown) => Error | undefined) => {
+    const calls: { text: string; opts: unknown }[] = [];
+    const api = {
+      sendMessage: async (_chat: string, text: string, opts?: unknown) => {
+        const err = fail(calls.length + 1, opts);
+        calls.push({ text, opts });
+        if (err) throw err;
+        return {};
+      },
+    };
+    return { api: api as never, calls };
+  };
+
+  test("sends every chunk, in order, as HTML", async () => {
+    const { sendAlertToTelegram } = await import("./runner.ts");
+    const { api, calls } = fakeApi(() => undefined);
+    await sendAlertToTelegram(api, "u1", md, ctx);
+    expect(calls.length).toBeGreaterThan(2); // so the stop-after-failure case has a third to skip
+    expect(calls.every((c) => (c.opts as { parse_mode?: string })?.parse_mode === "HTML")).toBe(true);
+    expect(calls[0]!.text).toContain("item 0:");
+    expect(calls.at(-1)!.text).toContain("item 249:");
+  });
+
+  test("a failure after the first message stops the send without throwing, so a retry never repeats what arrived", async () => {
+    const { sendAlertToTelegram } = await import("./runner.ts");
+    const { api, calls } = fakeApi((n) => (n === 2 ? new Error("Call to 'sendMessage' failed! (429: Too Many Requests: retry after 3)") : undefined));
+    await sendAlertToTelegram(api, "u1", md, ctx);
+    expect(calls.length).toBe(2);
+  });
+
+  test("a failure on the first message throws: nothing arrived, so the run retries cleanly", async () => {
+    const { sendAlertToTelegram } = await import("./runner.ts");
+    const { api, calls } = fakeApi(() => new Error("Network request for 'sendMessage' failed!"));
+    await expect(sendAlertToTelegram(api, "u1", md, ctx)).rejects.toThrow("Network request");
+    expect(calls.length).toBe(1);
+  });
+
+  test("a chunk Telegram cannot parse is re-sent as plain text, and the rest still go", async () => {
+    const { sendAlertToTelegram } = await import("./runner.ts");
+    const { api, calls } = fakeApi((n, opts) =>
+      n === 1 && (opts as { parse_mode?: string })?.parse_mode === "HTML" ? new Error("Bad Request: can't parse entities") : undefined);
+    await sendAlertToTelegram(api, "u1", md, ctx);
+    expect(calls[1]!.opts).toBeUndefined();
+    expect(calls[1]!.text).toContain("item 0:");
+    expect(calls.length).toBeGreaterThan(2);
+  });
+});
