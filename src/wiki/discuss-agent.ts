@@ -11,7 +11,6 @@
  */
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
-import { Lexer, Tokenizer, getDefaults } from "marked";
 import { findRepo, type GitRun, originBasename } from "./decision-triage/git.ts";
 import type { ContextPack } from "./discuss-pack.ts";
 import { clampLine, passageWhere } from "./discuss-prompt.ts";
@@ -81,101 +80,57 @@ export function wikiAgentRulesRefusal(rules: RulesRead): { status: 422 | 503; bo
 /** A turn's mode: Explore answers; Edit may propose an edit to the page. */
 export type DiscussMode = "explore" | "edit";
 
-/** The line under a rules file's heading that marks its edit section. */
-export const DISCUSS_EDIT_SECTION_MARKER = "<!-- discuss:edit -->";
+/** The line that opens a rules file's Edit-only part (D8). */
+export const DISCUSS_EDIT_START_MARKER = "<!-- discuss:edit -->";
+/** The line that closes a rules file's Edit-only part (D8). */
+export const DISCUSS_EDIT_END_MARKER = "<!-- /discuss:edit -->";
 
 /**
- * marked's block tokenizer, recording where each top-level heading and marker
- * starts. At the top level the lexer hands a tokenizer the input from the
- * current block on, so `src.length` gives the block's offset exactly; summing
- * the tokens' raws would not (a link definition leaves no token, and indented
- * code after a paragraph is merged into it with an added newline). Block quotes
- * and lists are the only block tokenizers that lex nested blocks; what they
- * hold is not top level.
- */
-class RulesBlockTokenizer extends Tokenizer {
-  readonly found: { rest: number; depth: number | null }[] = [];
-  private nested = 0;
-  private top(src: string, depth: number | null): void {
-    if (this.nested === 0) this.found.push({ rest: src.length, depth });
-  }
-  override heading(src: string) {
-    const t = super.heading(src);
-    if (t) this.top(src, t.depth);
-    return t;
-  }
-  override lheading(src: string) {
-    const t = super.lheading(src);
-    if (t) this.top(src, t.depth);
-    return t;
-  }
-  override html(src: string) {
-    const t = super.html(src);
-    if (t && t.raw.trim() === DISCUSS_EDIT_SECTION_MARKER) this.top(src, null);
-    return t;
-  }
-  override blockquote(src: string) {
-    this.nested++;
-    try {
-      return super.blockquote(src);
-    } finally {
-      this.nested--;
-    }
-  }
-  override list(src: string) {
-    this.nested++;
-    try {
-      return super.list(src);
-    } finally {
-      this.nested--;
-    }
-  }
-}
-
-/**
- * The rules a turn gets for its mode. The file's block structure is CommonMark's,
- * read by marked's lexer: its top-level headings (ATX and Setext) and its
- * top-level HTML blocks; fenced code (backticks or tildes, any info string, an
- * unclosed fence running to the end) and indented code are opaque.
+ * The rules a turn gets for its mode, by a plain line scan (D8). A marker line
+ * is one whose text, trimmed of leading and trailing whitespace, is exactly
+ * {@link DISCUSS_EDIT_START_MARKER} or {@link DISCUSS_EDIT_END_MARKER}. There is
+ * no markdown reading: a marker line inside a code fence, a list or a quote
+ * counts like any other.
  *
- * A marker is a top-level HTML block that is exactly
- * {@link DISCUSS_EDIT_SECTION_MARKER}; one inside code, a list or a block quote
- * is not a marker and is sent as written. A marker belongs to the nearest
- * heading above it; that heading's section runs from the heading through the
- * line before the next heading of the same or a higher level, and goes only to
- * Edit turns. A section that would cover every heading of the file (its
- * heading is the first and nothing after it is of the same or a higher level)
- * is the whole rules file, whatever its level: it marks nothing, the file is
- * sent whole and `warn` hears of it once. A marker above every heading marks
- * nothing. No marker line is ever sent; a file with no marker is sent unchanged
- * in both modes.
+ * - No marker line: the text unchanged in both modes.
+ * - Well-formed (marker lines alternate start, end, …, ending on an end):
+ *   Explore drops every line from each start through its end; Edit drops only
+ *   the marker lines. The result is the CR/CRLF-normalised text; lines are
+ *   removed whole, nothing else is trimmed or collapsed.
+ * - Anything else: the text unchanged in both modes, marker lines included,
+ *   and `warn` called once with the first faulty marker's line.
  */
 export function rulesForMode(rules: string, mode: DiscussMode, warn?: (msg: string) => void): string {
-  const text = rules.replace(/\r\n?/g, "\n");
-  const lines = text.split("\n");
-  const tokenizer = new RulesBlockTokenizer();
-  new Lexer({ ...getDefaults(), tokenizer }).lex(text);
-  const lineAt = (rest: number) => text.slice(0, text.length - rest).split("\n").length - 1;
-  const headings = tokenizer.found.flatMap(({ rest, depth }) => (depth === null ? [] : [{ line: lineAt(rest), depth }]));
-  const markers = tokenizer.found.flatMap(({ rest, depth }) => (depth === null ? [lineAt(rest)] : []));
-  if (markers.length === 0) return rules;
-  const drop = new Set(markers);
-  let warned = false;
-  for (const markerAt of markers) {
-    const h = headings.findLastIndex((x) => x.line < markerAt);
-    if (h < 0) continue;
-    const { line: start, depth } = headings[h]!;
-    const next = headings.findIndex((x, i) => i > h && x.depth <= depth);
-    if (h === 0 && next < 0) {
-      if (!warned) warn?.(`${DISCUSS_EDIT_SECTION_MARKER} sits under the rules file's first heading, whose section is the whole file: ignored`);
-      warned = true;
-      continue;
-    }
-    if (mode === "edit") continue;
-    const end = next < 0 ? lines.length : headings[next]!.line;
-    for (let i = start; i < end; i++) drop.add(i);
+  const lines = rules.replace(/\r\n?/g, "\n").split("\n");
+  const kinds = lines.map((l) => {
+    const t = l.trim();
+    return t === DISCUSS_EDIT_START_MARKER ? "start" : t === DISCUSS_EDIT_END_MARKER ? "end" : null;
+  });
+  let open = -1;
+  let fault: string | null = null;
+  let markers = 0;
+  for (let i = 0; i < kinds.length && fault === null; i++) {
+    const k = kinds[i];
+    if (k === null) continue;
+    markers++;
+    if (k === "start" && open >= 0) fault = `a second ${DISCUSS_EDIT_START_MARKER} at line ${i + 1} before the one at line ${open + 1} is closed`;
+    else if (k === "end" && open < 0) fault = `${DISCUSS_EDIT_END_MARKER} at line ${i + 1} has no ${DISCUSS_EDIT_START_MARKER} before it`;
+    else open = k === "start" ? i : -1;
   }
-  return lines.filter((_, i) => !drop.has(i)).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (fault === null && open >= 0) fault = `${DISCUSS_EDIT_START_MARKER} at line ${open + 1} has no ${DISCUSS_EDIT_END_MARKER} after it`;
+  if (markers === 0) return rules;
+  if (fault !== null) {
+    warn?.(`the rules file's Edit-only markers do not pair up (${fault}): sent whole in both modes`);
+    return rules;
+  }
+  const out: string[] = [];
+  let inside = false;
+  for (let i = 0; i < lines.length; i++) {
+    const k = kinds[i];
+    if (k !== null) inside = k === "start";
+    else if (mode === "edit" || !inside) out.push(lines[i]!);
+  }
+  return out.join("\n");
 }
 
 /** The name prefix of a wiki thread, counted in its 50-unit bound. */

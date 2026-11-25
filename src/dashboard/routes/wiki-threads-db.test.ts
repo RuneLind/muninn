@@ -57,9 +57,10 @@ const RULES = [
   "## Answering",
   "- Answer the marked passage first.",
   "",
-  "## Changing the page",
   "<!-- discuss:edit -->",
+  "## Changing the page",
   "- EDIT-RULES-SENTINEL: return at most one proposed edit, in a fenced json block.",
+  "<!-- /discuss:edit -->",
   "",
   "## Language",
   "- Reply in the language of the question.",
@@ -286,13 +287,15 @@ test("Edit mode: the rules' edit section goes only to an Edit turn, the stored m
   const explore = await frames(await pane(app, { question: "When?" }));
   const threadId = explore[0]!.data.threadId as string;
   expect(calls[0]!.opts.systemPrompt).not.toContain("EDIT-RULES-SENTINEL");
-  expect(calls[0]!.opts.systemPrompt).not.toContain("<!-- discuss:edit -->");
+  expect(calls[0]!.opts.systemPrompt).not.toContain("Changing the page");
+  expect(calls[0]!.opts.systemPrompt).not.toContain("discuss:edit");
   expect(calls[0]!.opts.systemPrompt).toContain("Reply in the language of the question.");
 
   answer = EDIT_ANSWER;
   const edit = await frames(await pane(app, { question: "Fix it", mode: "edit", discussionId: threadId }));
   expect(calls[1]!.opts.systemPrompt).toContain("EDIT-RULES-SENTINEL");
-  expect(calls[1]!.opts.systemPrompt).not.toContain("<!-- discuss:edit -->");
+  expect(calls[1]!.opts.systemPrompt).toContain("## Changing the page");
+  expect(calls[1]!.opts.systemPrompt).not.toContain("discuss:edit");
   const done = edit.find((e) => e.event === "done")!.data;
   expect(done.proposedEdit).not.toBeNull();
 
