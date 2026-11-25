@@ -817,7 +817,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       });
       const call = oneShot(prompt, config, p.bot, {
         toolSurface: surface,
-        systemPrompt: renderAgentSystemPrompt(p.wiki, rulesForMode(p.rules, p.mode)),
+        systemPrompt: renderAgentSystemPrompt(p.wiki, rulesForMode(p.rules, p.mode, (msg) => log.warn(msg, { wiki: p.wiki }))),
         timeoutMs: timeoutMs + DISCUSS_CONNECTOR_GRACE_MS,
         onProgress: (ev) => {
           if (pastDeadline) return;

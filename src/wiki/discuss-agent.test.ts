@@ -211,6 +211,28 @@ describe("Discuss v2: modes, the stored answer, the thread name and the body", (
     expect(edit).toContain("## not a heading inside a fence");
     expect(edit).not.toContain("<!-- discuss:edit -->");
   });
+  test("every marked section goes only to Edit, and no marker line reaches either mode", () => {
+    const two = "# T\n## A\na\n## E1\n<!-- discuss:edit -->\ne1\n## B\nb\n## E2\n<!-- discuss:edit -->\ne2";
+    const explore = rulesForMode(two, "explore");
+    expect(explore).toBe("# T\n## A\na\n## B\nb");
+    const edit = rulesForMode(two, "edit");
+    expect(edit).toBe("# T\n## A\na\n## E1\ne1\n## B\nb\n## E2\ne2");
+  });
+  test("a marker under the document's single H1 marks nothing: the file goes whole (marker dropped) and a warning is logged", () => {
+    const warned: string[] = [];
+    const h1 = "# Title\n<!-- discuss:edit -->\n## A\na\n## B\nb";
+    expect(rulesForMode(h1, "explore", (m) => warned.push(m))).toBe("# Title\n## A\na\n## B\nb");
+    expect(rulesForMode(h1, "edit")).toBe("# Title\n## A\na\n## B\nb");
+    expect(warned.length).toBe(1);
+  });
+  test("a closing fence takes no info string, so a ```js line inside a fence does not end it", () => {
+    const fenced = "# T\n## A\n```md\nx\n```js\ny\n```\n## E\n<!-- discuss:edit -->\ne\n## B\nb";
+    const explore = rulesForMode(fenced, "explore");
+    expect(explore).not.toContain("## E");
+    expect(explore).not.toContain("\ne\n");
+    expect(explore).toContain("## B\nb");
+    expect(rulesForMode(fenced, "edit")).toContain("## E\ne\n## B");
+  });
   test("a file with no marker is sent whole in both modes", () => {
     const plain = "# A\n\n## Changing the page\n- edits\n";
     expect(rulesForMode(plain, "explore")).toBe(plain);

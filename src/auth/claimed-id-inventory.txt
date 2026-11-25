@@ -48,6 +48,7 @@ src/chat/routes.ts | query("viewer") in GET /events | own-user-guard   # PR D's 
 src/dashboard/routes/sse-routes.ts | query("viewer") in GET /api/events | own-user-guard   # a claimed identity under another name: it scopes the waterfall + phase pill, and the run metadata carries a traceId that /api/prompts/:traceId expands into a whole prompt
 src/dashboard/routes/wiki-routes.ts | body.userId in POST /api/wiki/ask/chat | own-user-guard   # same shape as research/chat
 src/dashboard/routes/wiki-discuss.ts | query("userId") in GET /api/wiki/discuss/thread | admin-zone   # Discuss is admin-only (route gate + default-deny); the id is checked against loadChatConfig(bot) like the pane's body.userId
+src/dashboard/routes/wiki-discuss.ts | parseDiscussBody(userId) in POST /api/wiki/discuss | admin-zone   # the pane's body.userId, read inside the parser: it picks whose wiki thread the turn runs under; admin-only by the route's gate and default-deny, and the engine refuses an id loadChatConfig(bot) does not list
 
 ## Access-Control-Allow-Origin
 

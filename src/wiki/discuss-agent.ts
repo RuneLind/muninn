@@ -84,35 +84,38 @@ export type DiscussMode = "explore" | "edit";
 export const DISCUSS_EDIT_SECTION_MARKER = "<!-- discuss:edit -->";
 
 /**
- * The rules a turn gets for its mode. The section whose heading has a
+ * The rules a turn gets for its mode. Each section whose heading has a
  * {@link DISCUSS_EDIT_SECTION_MARKER} line under it (from that heading down
- * to the next heading of the same or a higher level, fenced code skipped) is
- * sent only in Edit mode; the marker line itself is never sent. A file with no
- * marker is sent whole in both modes.
+ * to the next heading of the same or a higher level, fenced code skipped, the
+ * fences read as {@link fencedBlocks} reads them) is sent only in Edit mode;
+ * no marker line is ever sent. A marker above every heading, or under the
+ * document's only H1 (whose section would be the whole file), marks nothing:
+ * `warn` hears of the second. A file with no marker is sent whole in both modes.
  */
-export function rulesForMode(rules: string, mode: DiscussMode): string {
-  const lines = rules.split("\n");
+export function rulesForMode(rules: string, mode: DiscussMode, warn?: (msg: string) => void): string {
+  const lines = rules.replace(/\r\n?/g, "\n").split("\n");
   const fenced = new Set<number>();
-  let open: string | null = null;
-  for (let i = 0; i < lines.length; i++) {
-    const m = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i]!);
-    if (m && (open === null || (m[1]![0] === open[0] && m[1]!.length >= open.length))) {
-      fenced.add(i);
-      open = open === null ? m[1]! : null;
-    } else if (open !== null) fenced.add(i);
-  }
-  const markerAt = lines.findIndex((l, i) => !fenced.has(i) && l.trim() === DISCUSS_EDIT_SECTION_MARKER);
-  if (markerAt < 0) return rules;
+  for (const { from, to } of fencedBlockSpans(rules)) for (let i = from; i <= to; i++) fenced.add(i);
+  const markers = lines.flatMap((l, i) => (!fenced.has(i) && l.trim() === DISCUSS_EDIT_SECTION_MARKER ? [i] : []));
+  if (markers.length === 0) return rules;
   const level = (i: number) => (fenced.has(i) ? 0 : (/^(#{1,6})\s/.exec(lines[i]!)?.[1]!.length ?? 0));
-  let start = markerAt;
-  while (start > 0 && !level(start)) start--;
-  const lv = level(start);
-  // A marker above every heading marks nothing but itself.
-  if (!lv) return lines.filter((_, i) => i !== markerAt).join("\n").trim();
-  let end = markerAt + 1;
-  while (end < lines.length && !(level(end) && level(end) <= lv)) end++;
-  const kept = mode === "edit" ? lines.filter((_, i) => i !== markerAt) : [...lines.slice(0, start), ...lines.slice(end)];
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  const h1s = lines.filter((_, i) => level(i) === 1).length;
+  const drop = new Set(markers);
+  for (const markerAt of markers) {
+    let start = markerAt;
+    while (start > 0 && !level(start)) start--;
+    const lv = level(start);
+    if (!lv) continue;
+    if (lv === 1 && h1s === 1) {
+      warn?.(`${DISCUSS_EDIT_SECTION_MARKER} sits under the rules file's only H1, so it would mark the whole file: ignored`);
+      continue;
+    }
+    if (mode === "edit") continue;
+    let end = markerAt + 1;
+    while (end < lines.length && !(level(end) && level(end) <= lv)) end++;
+    for (let i = start; i < end; i++) drop.add(i);
+  }
+  return lines.filter((_, i) => !drop.has(i)).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /** The name prefix of a wiki thread, counted in its 50-unit bound. */

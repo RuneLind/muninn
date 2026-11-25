@@ -37,9 +37,18 @@ export const CLAIMED_ID_PARAM_GREP =
 export const CLAIMED_ID_BODY_GREP = String.raw`body\.userId|query\("userId"\)|query\("viewer"\)`;
 export const CORS_GREP = "Access-Control-Allow-Origin";
 
-/** Every route registration, both forms, used to attribute a body/query read to
+/** Every route registration, both forms, with a literal path or a constant one
+ *  (`app.post(WIKI_DISCUSS_PATH, …)`), used to attribute a body/query read to
  *  the route it lives in. */
-export const ROUTE_REGISTRATION_GREP = String.raw`app\.[a-z]+\(\s*("[A-Z]+"\s*,\s*)?"`;
+export const ROUTE_REGISTRATION_GREP = String.raw`app\.[a-z]+\(\s*("[A-Z]+"\s*,\s*)?("|[A-Z][A-Z0-9_]*\s*,)`;
+/**
+ * A route's call to its body parser. A claimed id can be read inside the
+ * parser (`parseDiscussBody` reads `r.userId`), where no grep over the route
+ * files sees it, so each parser a route calls (and each parser it calls in
+ * turn) is read for `userId`. A parser not named `parse…Body` is not followed:
+ * the same limit as `CLAIMED_ID_BODY_GREP`'s names.
+ */
+export const BODY_PARSER_CALL_GREP = String.raw`\bparse[A-Za-z]*Body\(`;
 
 /**
  * The files §2 names. The DIRECTORY, not a `*.ts` glob: `Bun.$` escapes its
@@ -86,6 +95,42 @@ async function grepLines(pattern: string, files: string[]): Promise<string[]> {
     .filter((l) => l.trim() !== "")
     // A test file naming a route is not a route.
     .filter((l) => !l.split(":")[0]!.includes(".test."));
+}
+
+/** A route constant's path: `NAME = "<path>"` in the route's file, else
+ *  anywhere in `src/`; the bare name when neither has it. */
+async function constPath(file: string, name: string): Promise<string> {
+  const pattern = String.raw`\b${name}[[:space:]]*=[[:space:]]*"`;
+  for (const where of [[file], ["src/"]]) {
+    for (const line of await grepLines(pattern, where)) {
+      const m = line.match(new RegExp(String.raw`\b${name}\s*=\s*"([^"]+)"`));
+      if (m) return m[1]!;
+    }
+  }
+  return name;
+}
+
+/** Whether the body parser `name` (anywhere under `roots`) reads `userId` on a
+ *  non-comment line of its body, itself or through a `parse…Body` it calls. */
+export async function parserReadsUserId(name: string, roots: string[] = ["src/"], seen = new Set<string>()): Promise<boolean> {
+  if (seen.has(name)) return false;
+  seen.add(name);
+  for (const def of await grepLines(String.raw`function[[:space:]]+${name}[[:space:]]*\(`, roots)) {
+    const { file } = splitLine(def);
+    const from = Number(def.match(/^[^:]+:(\d+):/)![1]) - 1;
+    const lines = (await Bun.file(file).text()).split("\n");
+    const indent = /^\s*/.exec(lines[from]!)![0];
+    let to = from + 1;
+    while (to < lines.length && lines[to] !== `${indent}}`) to++;
+    const body = lines.slice(from, to + 1).filter((l) => !isCommentLine(l));
+    if (body.some((l) => /\buserId\b/.test(l))) return true;
+    for (const l of body.slice(1)) {
+      for (const [, inner] of l.matchAll(/\b(parse[A-Za-z]*Body)\(/g)) {
+        if (await parserReadsUserId(inner!, roots, seen)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function splitLine(line: string): { file: string; text: string } {
@@ -149,27 +194,45 @@ export async function claimedIdBodyRows(): Promise<InventoryRow[]> {
     const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
     const leading = text.match(/app\.on\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"/);
     const verb = text.match(/app\.([a-z]+)\(\s*"([^"]+)"/);
+    const named = text.match(/app\.([a-z]+)\(\s*([A-Z][A-Z0-9_]*)\s*,/);
     const label = leading
       ? `${leading[1]} ${leading[2]}`
       : verb
         ? `${verb[1]!.toUpperCase()} ${verb[2]}`
-        : null;
+        : named
+          ? `${named[1]!.toUpperCase()} ${await constPath(file, named[2]!)}`
+          : null;
     if (label) enclosing.set(`${file}:${n}`, label);
   }
-
-  for (const line of await grepLines(CLAIMED_ID_BODY_GREP, ROUTE_PATHS)) {
-    const { file, text } = splitLine(line);
-    if (isCommentLine(text)) continue;
-    const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
-    // The nearest registration at or above this line, in the same file.
+  // The nearest registration at or above this line, in the same file.
+  const routeAt = (file: string, n: number): string => {
     let route = "(module scope)";
     let best = -1;
     for (const [key, label] of enclosing) {
       const [f, ln] = [key.slice(0, key.lastIndexOf(":")), Number(key.slice(key.lastIndexOf(":") + 1))];
       if (f === file && ln <= n && ln > best) { best = ln; route = label; }
     }
+    return route;
+  };
+
+  for (const line of await grepLines(CLAIMED_ID_BODY_GREP, ROUTE_PATHS)) {
+    const { file, text } = splitLine(line);
+    if (isCommentLine(text)) continue;
+    const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
+    const route = routeAt(file, n);
     for (const token of CLAIMED_TOKENS) {
       if (text.includes(token)) rows.add(`${file}\u0000${token} in ${route}`);
+    }
+  }
+
+  for (const line of await grepLines(BODY_PARSER_CALL_GREP, ROUTE_PATHS)) {
+    const { file, text } = splitLine(line);
+    if (isCommentLine(text)) continue;
+    const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
+    for (const [, name] of text.matchAll(/\b(parse[A-Za-z]*Body)\(/g)) {
+      // A parser's own definition line is not a call.
+      if (new RegExp(String.raw`function\s+${name}\s*\(`).test(text)) continue;
+      if (await parserReadsUserId(name!)) rows.add(`${file}\u0000${name}(userId) in ${routeAt(file, n)}`);
     }
   }
   return [...rows].map((r) => {
