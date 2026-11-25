@@ -408,3 +408,48 @@ test("«Fact check» reaches the existing selection fact-check route", async ({ 
   // The fact-check turn opens where it always has: the Ask tab.
   await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);
 });
+
+test("Enter with the bar open is the focused link's: the breadcrumb's ⌂ navigates and no turn starts", async ({ page }) => {
+  await openPage(page);
+  const turns: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname.startsWith("/api/wiki/discuss")) turns.push(r.url());
+  });
+  await dragSelect(page, NIGHT);
+  await expect(bar(page)).toBeVisible();
+  await page.locator("#wikiBreadcrumb a.wiki-bc-wiki").focus();
+  await expect(bar(page)).toBeVisible();
+  const from = page.url();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.url()).not.toBe(from);
+  expect(new URL(page.url()).searchParams.get("relPath")).toBeNull();
+  await expect(page.locator("#articleWrap .wiki-sel-card")).toHaveCount(0);
+  expect(turns).toEqual([]);
+});
+
+test("a triple-clicked paragraph's «Where else» card lands under that paragraph, not at the page's end", async ({ page }) => {
+  await openPage(page);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const at = await textBox(page, NIGHT);
+  await page.mouse.click((at.x0 + at.x1) / 2, at.y0, { clickCount: 3 });
+  await expect(bar(page)).toBeVisible();
+  // Where Chrome ends a triple-click: on a boundary, not in the paragraph's text.
+  const end = await page.evaluate(() => {
+    const r = getSelection()!.getRangeAt(0);
+    return { node: r.endContainer.nodeName, offset: r.endOffset, text: getSelection()!.toString().trim() };
+  });
+  test.info().annotations.push({ type: "triple-click end", description: JSON.stringify(end) });
+  expect(end.text).toBe(NIGHT);
+  await bar(page).locator('[data-selact="where"]').click();
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  // The whole sentence is named on this page only.
+  await expect(card.locator(".wiki-sel-file")).toHaveCount(1);
+  const order = await page.evaluate(() => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const text = article.textContent ?? "";
+    const c = article.querySelector(".wiki-sel-card")!.textContent ?? "";
+    return { night: text.indexOf("The night route"), card: text.indexOf(c), morning: text.indexOf("The morning route adds") };
+  });
+  expect(order.card).toBeGreaterThan(order.night);
+  expect(order.card).toBeLessThan(order.morning);
+});

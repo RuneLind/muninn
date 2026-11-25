@@ -249,7 +249,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-25, Discuss v2 PR 5 (the selection menu: its bar and right-click menu, the inline cards
 // for Explain, Where else and History, and the key chips, which bring `parseKeyKinds`' grammar check
 // and `classifyKey` into the bundle): 961,034 (326,737 gzipped), so the pin moves to 961,100.
-const WIKI_CLIENT_MAX_BYTES = 961_100;
+// PR 5 fix round 1 batch 1 (Enter's owners, the selection's end node, the read slice's hidden
+// actions left out of the bar): 962,255 (327,162 gzipped), so the pin moves to 962,300.
+const WIKI_CLIENT_MAX_BYTES = 962_300;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

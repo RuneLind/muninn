@@ -409,7 +409,7 @@ describe("wiki-browser.ts — listener order", () => {
       // the bar on a mouseup, the right-click menu, close on a collapsed selection, Escape and Enter, an
       // action's press, a keyboard click and the cards' buttons, the bar following a scroll or a resize;
       // then the whole-page Fact check's press, which the pill's mousedown used to hold.
-      "#articleWrap mouseup 16zwr", "#articleWrap contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 35lqq",
+      "#articleWrap mouseup 16zwr", "#articleWrap contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 1fnn8",
       "document mousedown 2jzhg", "document click 1dcm4", "document scroll capture 2k8ec", "window resize 2k8ec",
       "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",

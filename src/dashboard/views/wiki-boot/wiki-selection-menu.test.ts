@@ -220,3 +220,74 @@ test("a read-only wiki: Enter on the bar sends nothing, inline or classic", asyn
   close!();
   await settle();
 });
+
+test("Enter on a link, a summary or another control is that control's: no turn, nothing prevented", async () => {
+  renderPage();
+  document.querySelector(".wiki-article")!.insertAdjacentHTML(
+    "beforeend",
+    `<p>See <a id="inLink" href="#x">the link</a>.</p><details><summary id="inSummary">More</summary>Folded.</details><span id="inTab" tabindex="0">widget</span><span id="inRole" role="button">act</span>`,
+  );
+  // Outside the article: the breadcrumb's «⌂» link.
+  document.body.insertAdjacentHTML("afterbegin", `<div id="wikiBreadcrumb"><a id="crumbHome" href="/wiki">⌂</a></div>`);
+  const before = posts.length;
+  await selectText(NIGHT);
+  for (const id of ["crumbHome", "inLink", "inSummary", "inTab", "inRole"]) {
+    expect(barEl().style.display).toBe("flex");
+    const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    document.getElementById(id)!.dispatchEvent(ev);
+    await settle();
+    expect([id, ev.defaultPrevented]).toEqual([id, false]);
+    expect([id, posts.length]).toEqual([id, before]);
+  }
+  expect(classic).toEqual([NIGHT]);
+  // On the article's own text Enter is the bar's: the instrument fires.
+  const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  document.querySelector(".wiki-article")!.dispatchEvent(ev);
+  await settle();
+  expect(ev.defaultPrevented).toBe(true);
+  expect(posts.length).toBe(before + 1);
+  push!("turn", { turnId: "turn-4", seq: 4, discussionId: "thread-1" });
+  push!("done", { answer: "ok", proposedEdit: null });
+  close!();
+  await settle();
+  document.getElementById("wikiBreadcrumb")!.remove();
+});
+
+test("the read slice leaves only Copy: no bar, the browser's own right-click menu, Enter not taken", async () => {
+  // happy-dom lays nothing out: the selection gets one rect at the page's corner.
+  const proto = (globalThis as unknown as { Range: { prototype: { getClientRects: () => unknown } } }).Range.prototype;
+  const realRects = proto.getClientRects;
+  proto.getClientRects = () => [{ left: 0, right: 200, top: 0, bottom: 20, width: 200, height: 20 }];
+  const rightClick = () => {
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+    document.querySelector(".wiki-article")!.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+  const menuEl = () => document.getElementById("wikiSelMenu");
+  try {
+    renderPage();
+    // As the pod's payload has it: no mentions route.
+    setSelectionMenuPage({ mentions: false });
+    // The full instance: the bar, and our menu on a right-click.
+    await selectText(NIGHT);
+    expect(barEl().style.display).toBe("flex");
+    expect(rightClick()).toBe(true);
+    expect(menuEl()!.style.display).toBe("block");
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    document.body.classList.add("wiki-read-slice");
+    const before = posts.length;
+    await selectText(NIGHT);
+    expect(barEl().style.display).toBe("none");
+    expect(rightClick()).toBe(false);
+    expect(menuEl()!.style.display).toBe("none");
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(enter);
+    await settle();
+    expect(enter.defaultPrevented).toBe(false);
+    expect(posts.length).toBe(before);
+  } finally {
+    document.body.classList.remove("wiki-read-slice");
+    proto.getClientRects = realRects;
+  }
+});

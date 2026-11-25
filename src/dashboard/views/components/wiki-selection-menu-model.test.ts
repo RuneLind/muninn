@@ -148,6 +148,56 @@ describe("inlineCardAnchor: under the paragraph the selection ends in", () => {
   });
 });
 
+describe("inlineCardAnchor: a range that ends on a boundary (triple-click, a drag to the next line)", () => {
+  /** `html` in an article; the range starts at `from`'s first character and
+   *  ends at the point `end` picks. Returns the article with the card placed. */
+  function place(html: string, from: string, end: (article: Element) => [Node, number]): string {
+    const doc = new Window().document;
+    const article = doc.createElement("div");
+    article.className = "wiki-article";
+    article.innerHTML = html;
+    doc.body.appendChild(article);
+    const walker = doc.createTreeWalker(article, 4);
+    let t = walker.nextNode();
+    while (t && !(t.textContent ?? "").includes(from)) t = walker.nextNode();
+    if (!t) throw new Error(from);
+    const r = doc.createRange();
+    r.setStart(t, t.textContent!.indexOf(from));
+    const [node, offset] = end(article as unknown as Element);
+    r.setEnd(node as never, offset);
+    const at = inlineCardAnchor(r as unknown as Range, article as unknown as Element);
+    const card = doc.createElement("div");
+    card.className = "card";
+    (at.parent as unknown as { insertBefore(a: unknown, b: unknown): void }).insertBefore(card, at.before);
+    return article.innerHTML;
+  }
+
+  test("an end at (the next block, 0): under the block the text is in, not the next one", () => {
+    expect(place(`<p>Alpha para.</p><p id="b">Beta para.</p><p>Gamma.</p>`, "Alpha", (a) => [a.querySelector("#b")!, 0])).toBe(
+      `<p>Alpha para.</p><div class="card"></div><p id="b">Beta para.</p><p>Gamma.</p>`,
+    );
+    // Blank text between the blocks, and the end in the next block's text at 0.
+    expect(place(`<ul><li>Alpha item.</li>\n<li id="b">Beta item.</li></ul>`, "Alpha", (a) => [a.querySelector("#b")!.firstChild!, 0])).toBe(
+      `<ul><li>Alpha item.<div class="card"></div></li>\n<li id="b">Beta item.</li></ul>`,
+    );
+  });
+
+  test("an end at (the container, child index) in a bare run: under the run, never at the article's end", () => {
+    const html = `<h2>Brief</h2>Alpha paragraph.<br><br>Beta paragraph.<h2>Oppfølging</h2><ul><li>one</li></ul>`;
+    const want = `<h2>Brief</h2>Alpha paragraph.<br><br><div class="card"></div>Beta paragraph.<h2>Oppfølging</h2><ul><li>one</li></ul>`;
+    // Right after the text, after the first <br>, after both.
+    for (const k of [2, 3, 4]) expect([k, place(html, "Alpha", (a) => [a, k])]).toEqual([k, want]);
+  });
+
+  test("a <br><br> run ending at (article, 1): under that paragraph", () => {
+    expect(place(`Alpha.<br><br>Beta.<br><br>Gamma.`, "Alpha", (a) => [a, 1])).toBe(`Alpha.<br><br><div class="card"></div>Beta.<br><br>Gamma.`);
+  });
+
+  test("an end at (the container, child index) after a block: under that block", () => {
+    expect(place(`<p>Alpha para.</p><p>Beta.</p>`, "Alpha", (a) => [a, 1])).toBe(`<p>Alpha para.</p><div class="card"></div><p>Beta.</p>`);
+  });
+});
+
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
   key: "MEL-1",
   kind: "case",

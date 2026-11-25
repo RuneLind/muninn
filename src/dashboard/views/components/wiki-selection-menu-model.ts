@@ -79,6 +79,12 @@ export function selMenuItems(s: SelMenuInput): SelMenuItem[] {
   return items;
 }
 
+/** Does the list offer more than «Copy»? A Copy-only bar (the read slice
+ *  hides the rest) is no better than the browser's own menu: no bar then. */
+export function selMenuOffers(items: readonly SelMenuItem[]): boolean {
+  return items.some((it) => it.act !== "copy");
+}
+
 function itemAttrs(it: SelMenuItem): string {
   return `data-selact="${it.act}"${it.key ? ` data-selkey="${esc(it.key)}"` : ""} title="${esc(it.title)}"`;
 }
@@ -163,16 +169,54 @@ const BLOCK_SEL = "li, p, blockquote, pre, figure, dd, dt, h1, h2, h3, h4, h5, h
 /** Elements a bare paragraph run ends at. */
 const RUN_END = new Set(["DIV", "UL", "OL", "TABLE", "PRE", "BLOCKQUOTE", "DETAILS", "P", "H1", "H2", "H3", "H4", "H5", "H6", "FIGURE", "HR", "SECTION", "DL"]);
 
+function lastLeaf(n: Node): Node {
+  while (n.lastChild) n = n.lastChild;
+  return n;
+}
+
+/** The leaf just before `n` in document order, not leaving `within`. */
+function prevLeaf(n: Node, within: Node): Node | null {
+  for (let cur: Node | null = n; cur && cur !== within; cur = cur.parentNode) {
+    if (cur.previousSibling) return lastLeaf(cur.previousSibling);
+  }
+  return null;
+}
+
 /**
- * Where a card about `range` goes: right under the paragraph the selection
- * ends in. A list item takes it inside, before any nested list; a table, a
- * heading or another block takes it after itself. A bare paragraph (the
- * reader's markdown has no `<p>`: paragraphs are text runs split by
- * `<br><br>`) takes it at the run's end: after its `<br><br>`, or before the
- * block that ends it.
+ * The node holding the selection's last character. A range often ends on a
+ * boundary instead: Chrome's triple-click ends at (the next block, 0) or at
+ * (the container, child index). So an end at a child index starts from the
+ * child before it, an end with nothing before it in its node walks back, and
+ * the walk skips `<br>`s and blank text. A walk that leaves the range, or
+ * finds nothing, keeps the end container.
+ */
+export function selectionEndNode(range: Range, within: Node): Node {
+  const c = range.endContainer;
+  const o = range.endOffset;
+  let n: Node | null;
+  if (c.nodeType === 3) {
+    if ((c.textContent ?? "").slice(0, o).trim()) return c;
+    n = prevLeaf(c, within);
+  } else {
+    const child = o > 0 ? c.childNodes[o - 1] : undefined;
+    n = child ? lastLeaf(child) : prevLeaf(c, within);
+  }
+  for (; n && range.intersectsNode(n); n = prevLeaf(n, within)) {
+    if (n.nodeType === 3 ? !!(n.textContent ?? "").trim() : n.nodeType === 1 && (n as Element).tagName === "IMG") return n;
+  }
+  return c;
+}
+
+/**
+ * Where a card about `range` goes: right under the paragraph that holds its
+ * last character ({@link selectionEndNode}). A list item takes it inside,
+ * before any nested list; a table, a heading or another block takes it after
+ * itself. A bare paragraph (the reader's markdown has no `<p>`: paragraphs
+ * are text runs split by `<br><br>`) takes it at the run's end: after its
+ * `<br><br>`, or before the block that ends it.
  */
 export function inlineCardAnchor(range: Range, article: Element): { parent: Node; before: Node | null } {
-  const end = range.endContainer;
+  const end = selectionEndNode(range, article);
   const start = end.nodeType === 1 ? (end as Element) : end.parentElement;
   const block = start?.closest(BLOCK_SEL);
   if (block && article.contains(block) && block !== article) {

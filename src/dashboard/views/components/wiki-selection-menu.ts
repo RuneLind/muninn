@@ -50,6 +50,8 @@ import {
   inlineCardHtml,
   keyKindsFrom,
   selBarHtml,
+  selMenuOffers,
+  selectionEndNode,
   selMenuHtml,
   selMenuItems,
   whereElseHtml,
@@ -57,6 +59,7 @@ import {
   type SelAction,
   type SelMenuItem,
 } from "./wiki-selection-menu-model.ts";
+import { WIKI_READ_SLICE_HIDDEN_SELECTOR, wikiToolsFlag } from "./wiki-read-slice.ts";
 import type { KeyKind } from "../../../wiki/key-kinds.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
 
@@ -181,22 +184,32 @@ function readSelection(): { text: string; heading: string; range: Range } | null
   return { text, heading: nearestHeading(range), range: range.cloneRange() };
 }
 
+/** The actions this viewer sees. Under the read slice its CSS hides the
+ *  egress actions (`wiki-read-slice.ts`): they are not offered at all, by the
+ *  same selector, matched on each action's own bar button. */
 function itemsFor(text: string, explainer: boolean): SelMenuItem[] {
   const a = article();
-  return selMenuItems({
+  const items = selMenuItems({
     text,
     explainer,
     mentions: page.mentions,
     follow: !explainer && discussAgentOn() && !!a && !!followHeading(a),
     keys: detectKeys(text, page.trackerProjects, page.kinds),
   });
+  if (wikiToolsFlag()) return items;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = selBarHtml(items);
+  const btns = Array.from(tpl.content.children);
+  return items.filter((_, i) => !btns[i]?.matches(WIKI_READ_SLICE_HIDDEN_SELECTOR));
 }
 
 /** Called on the article's `mouseup`: show the bar for the selection, or hide it. */
 export function maybeShowSelectionBar(): void {
   const s = readSelection();
   if (!s) return hideSelectionMenu();
-  shown = { ...s, explainer: false, items: itemsFor(s.text, false) };
+  const items = itemsFor(s.text, false);
+  if (!selMenuOffers(items)) return hideSelectionMenu();
+  shown = { ...s, explainer: false, items };
   const m = document.getElementById(SEL_MENU_ID);
   if (m) m.style.display = "none";
   const b = bar();
@@ -208,7 +221,9 @@ export function maybeShowSelectionBar(): void {
 /** The explainer iframe's selection (its bridge): the bar at the frame's top. */
 export function showSelectionBarForExplainer(text: string, heading: string): void {
   if (!deps?.currentName()) return;
-  shown = { text, heading, range: null, explainer: true, items: itemsFor(text, true) };
+  const items = itemsFor(text, true);
+  if (!selMenuOffers(items)) return hideSelectionMenu();
+  shown = { text, heading, range: null, explainer: true, items };
   const b = bar();
   b.innerHTML = selBarHtml(shown.items);
   b.style.display = "flex";
@@ -266,8 +281,11 @@ function onContextMenu(e: MouseEvent): void {
   if (e.shiftKey) return;
   const s = readSelection();
   if (!s || !onSelection(s.range, e.clientX, e.clientY)) return;
+  const items = itemsFor(s.text, false);
+  // Nothing but Copy: the browser's own menu, untouched.
+  if (!selMenuOffers(items)) return;
   e.preventDefault();
-  shown = { ...s, explainer: false, items: itemsFor(s.text, false) };
+  shown = { ...s, explainer: false, items };
   const b = document.getElementById(SEL_BAR_ID);
   if (b) b.style.display = "none";
   const m = menu();
@@ -324,7 +342,7 @@ function placeCard(s: Shown, html: string): HTMLElement | null {
   tpl.innerHTML = html;
   const card = tpl.content.firstElementChild as HTMLElement | null;
   if (!card) return null;
-  if (s.range && a && a.contains(s.range.endContainer)) {
+  if (s.range && a && a.contains(selectionEndNode(s.range, a))) {
     const at = inlineCardAnchor(s.range, a);
     at.parent.insertBefore(card, at.before);
   } else {
@@ -418,9 +436,21 @@ function selActOf(t: EventTarget | null): HTMLElement | null {
   return el?.closest?.<HTMLElement>(`#${SEL_BAR_ID} [data-selact], #${SEL_MENU_ID} [data-selact]`) ?? null;
 }
 
-function editable(t: EventTarget | null): boolean {
-  const el = t as HTMLElement | null;
-  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable === true);
+/** What Enter already means something on: links, controls, widgets. */
+const ENTER_OWNERS =
+  "a[href], area[href], button, input, select, textarea, summary, label, iframe, [contenteditable]:not([contenteditable='false']), " +
+  "[role=button], [role=link], [role=menuitem], [role=option], [role=tab], [role=checkbox], [role=radio], [role=switch], [role=treeitem], [role=combobox], [role=textbox], [tabindex]";
+
+/** Is Enter the bar's? Only with focus on the page itself or on the
+ *  article's own text: never on a control, and never outside the article
+ *  (the rail, the breadcrumb, the panes). */
+function enterIsOurs(t: EventTarget | null): boolean {
+  const el = t as Element | null;
+  if (!el || el === document.body || el === document.documentElement) return true;
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap || typeof el.closest !== "function" || !wrap.contains(el)) return false;
+  const hit = el.closest(ENTER_OWNERS);
+  return !hit || hit === wrap || !wrap.contains(hit);
 }
 
 /** Wire the menu once, at boot. */
@@ -448,8 +478,8 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   document.addEventListener("keydown", (e) => {
     if (!selectionMenuOpen()) return;
     if (e.key === "Escape") return hideSelectionMenu();
-    // Enter: the default action, unless the reader is typing or on a button.
-    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !editable(e.target) && (e.target as HTMLElement)?.tagName !== "BUTTON") {
+    // Enter: the default action, unless focus is on something Enter already drives.
+    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing && !e.defaultPrevented && enterIsOurs(e.target)) {
       const def = shown?.items[0];
       if (!def) return;
       e.preventDefault();
