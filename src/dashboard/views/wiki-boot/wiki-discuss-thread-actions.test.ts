@@ -210,7 +210,7 @@ test("a Delete answered 404 (the thread is already gone, say from another tab) i
   const note = document.querySelector<HTMLElement>(".wiki-discuss-user")!;
   expect(note.textContent ?? "").not.toContain("could not be deleted");
   expect(note.hidden).toBe(true);
-  expect(document.querySelector(`[data-earlier-thread="${C1}"]`)).toBe(null);
+  expect(document.querySelector(`[data-earlier-thread="${C1}"]`) !== null).toBe(false);
   document.body.innerHTML = "";
 });
 
@@ -257,8 +257,8 @@ test("the read retried after an unknown-user refusal is dropped when a newer rea
   await settle();
   release();
   await settle();
-  expect(document.querySelector(`[data-earlier-thread="${C9}"]`)).toBe(null);
-  expect(document.querySelector(`[data-earlier-thread="${C1}"]`)).toBe(null);
+  expect(document.querySelector(`[data-earlier-thread="${C9}"]`) !== null).toBe(false);
+  expect(document.querySelector(`[data-earlier-thread="${C1}"]`) !== null).toBe(false);
   document.body.innerHTML = "";
 });
 
@@ -287,7 +287,7 @@ test("the read again for the bot's kept user (the wiki moved to another bot) is 
   await settle();
   release();
   await settle();
-  expect(document.querySelector(`[data-earlier-thread="${C9}"]`)).toBe(null);
+  expect(document.querySelector(`[data-earlier-thread="${C9}"]`) !== null).toBe(false);
   document.body.innerHTML = "";
 });
 
