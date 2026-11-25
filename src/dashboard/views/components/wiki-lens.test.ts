@@ -33,6 +33,12 @@ describe("newestFirstOrder", () => {
 });
 
 describe("lensCss: the compact lists are the same in every lens (D45)", () => {
+  test("a collapsed DecisionLog item folds its rest away, never the selection menu's card (fix round 1 batch 2)", () => {
+    const rest = rulesWith(".dl-text ~ :not(.dl-when)").filter((r) => r.endsWith("{ display: none; }"));
+    expect(rest).toHaveLength(1);
+    expect(rest[0]).toContain(":not(.wiki-sel-card)");
+  });
+
   test("the five-cap, the date cell and the case line apply to an article in any lens", () => {
     expect(rulesWith(".dl-older").some((r) => r.startsWith(`${LENSED} .decision-log:not(.lens-show-all)`))).toBe(true);
     expect(rulesWith("> .dl-when {").some((r) => r.startsWith(`${LENSED} .dl-item.dl-decision`))).toBe(true);

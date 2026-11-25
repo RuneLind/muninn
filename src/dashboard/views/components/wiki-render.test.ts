@@ -251,7 +251,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // and `classifyKey` into the bundle): 961,034 (326,737 gzipped), so the pin moves to 961,100.
 // PR 5 fix round 1 batch 1 (Enter's owners, the selection's end node, the read slice's hidden
 // actions left out of the bar): 962,255 (327,162 gzipped), so the pin moves to 962,300.
-const WIKI_CLIENT_MAX_BYTES = 962_300;
+// PR 5 fix round 1 batch 2 (an inline card's Apply and «Change the wording» show the Discuss tab, the
+// card let through the DecisionLog fold): 962,365 (327,251 gzipped), so the pin moves to 962,400.
+const WIKI_CLIENT_MAX_BYTES = 962_400;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

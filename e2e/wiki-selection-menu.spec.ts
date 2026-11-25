@@ -21,11 +21,20 @@
  * the fake Messages API as its own process (`e2e/fake-messages-api-server.ts`)
  * with its request log served. `E2E_SHOTS=<dir>` saves one screenshot per
  * state, in light and dark.
+ *
+ * Fix round 1 batch 2: a card in a collapsed DecisionLog item is visible (the
+ * compact lens rule hid it), and an inline card's «Change the wording» and
+ * Apply show the Discuss tab (the reword box lives there; Apply's render
+ * removes the card). Those two stub the turn as `wiki-discuss-apply.spec.ts`
+ * does (a row with a hand-written edit, the discuss POST answered in the
+ * page); the preview and Apply are the real routes. Apply writes the page, so
+ * its test runs last.
  */
 
 import { test, expect, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
@@ -48,6 +57,9 @@ const PAGE = ["---", "title: Ferry plan", "---", "", "# Ferry plan", "", "## Bri
 const PAGE_NO_FOLLOW = ["---", "title: Harbour plan", "---", "", "# Harbour plan", "", `The harbour waits for ${KEY}.`, "", "The pier opens at six.", ""].join("\n");
 const RULES = ["# Rules", "", "Answer the question first.", "", "<!-- discuss:edit -->", "## Changing the page", "Propose at most one edit.", "<!-- /discuss:edit -->", ""].join("\n");
 const ANSWER = "EXPLAIN-ANSWER: the night route keeps its timetable for this case.";
+const DECISIONS = "plans/decisions.mdx";
+const FLAT = "Use the flat file";
+const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
 
 let server: ChildProcess | undefined;
 let fake: ChildProcess | undefined;
@@ -109,6 +121,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, ".wiki-agent.md"), RULES, "utf8");
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }), "utf8");
   await writeFile(path.join(root, OTHER), PAGE_NO_FOLLOW, "utf8");
+  await writeFile(path.join(root, DECISIONS), PAGE_DECISIONS, "utf8");
   await writeFile(path.join(root, "log.md"), `# Log\n\n## [2026-11-04] note | Q-3\n\n- ${KEY} is outside the data fix.\n`, "utf8");
   const init = spawnSync("git", ["init", "-q", "-b", "main", root], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
@@ -197,7 +210,8 @@ const menu = (page: Page) => page.locator("#wikiSelMenu");
 
 async function openPage(page: Page, rel = REL): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
-  await expect(page.locator("#articleWrap .wiki-article")).toContainText(rel === REL ? "The morning route adds a stop." : "The pier opens at six.");
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route." };
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
 /** The client rects of `text`'s first copy in the article: its first and last line. */
@@ -452,4 +466,85 @@ test("a triple-clicked paragraph's «Where else» card lands under that paragrap
   });
   expect(order.card).toBeGreaterThan(order.night);
   expect(order.card).toBeLessThan(order.morning);
+});
+
+test("a «Where else» card on a collapsed DecisionLog item is shown, in All and Overview", async ({ page }) => {
+  await openPage(page, DECISIONS);
+  const item = page.locator("#articleWrap .wiki-article li.dl-item").filter({ hasText: FLAT });
+  await expect(item).not.toHaveClass(/dl-expanded/);
+  await dragSelect(page, FLAT);
+  await bar(page).locator('[data-selact="where"]').click();
+  const card = item.locator('.wiki-sel-card[data-sel-card="where"]');
+  await expect(card.locator(`[data-sel-file="${DECISIONS}"]`)).toHaveCount(1);
+  // In the item, after its text, and laid out: not folded away with the item's rest.
+  await expect(card).toBeVisible();
+  const box = (await card.boundingBox())!;
+  expect(box.width).toBeGreaterThan(0);
+  expect(box.height).toBeGreaterThan(0);
+  // The item's rest is still folded: only the card is let through.
+  await expect(item.locator(".dl-rest")).toBeHidden();
+  await shot(page, "8-decisionlog-card");
+  // Overview: this wiki offers no lens switch, so its class is set by hand; the
+  // compact rule is the same, and the card stays shown.
+  await expect(page.locator("#articleWrap .wiki-article")).toHaveClass(/\blens-all\b/);
+  await page.evaluate(() => document.querySelector("#articleWrap .wiki-article")!.classList.replace("lens-all", "lens-overview"));
+  await expect(card).toBeVisible();
+  await expect(item.locator(".dl-rest")).toBeHidden();
+});
+
+const FOLLOW_OLD = "The morning route adds a stop.";
+const FOLLOW_NEW = "The morning route adds two stops.";
+const pageText = () => readFile(path.join(root, REL), "utf8");
+
+/** «Add to Oppfølging» on the morning sentence, its turn stubbed to end with an
+ *  edit (a row with that edit, the discuss POST answered in the page); the real
+ *  preview gives the inline card its Apply. The Discuss tab is not shown. */
+async function followCardWithEdit(page: Page) {
+  const proposedEdit = { edits: [{ claimIndex: 0, verdict: "", old: FOLLOW_OLD, new: FOLLOW_NEW, reason: "Two stops now." }], dropped: [], overLimit: false };
+  const hash = createHash("sha256").update(await pageText()).digest("hex");
+  const [row] = await sql!`
+    INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, rel_path, page_hash, question, answer, end_state, bot_name, connector, proposed_edit, finished_at)
+    VALUES (${randomUUID()}, 1, ${WIKI}, ${REL}, ${hash}, 'Add this to Oppfølging', 'Proposed.', 'done', ${BOT}, 'claude-sdk', ${sql!.json(proposedEdit as never)}, now())
+    RETURNING id`;
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const discussionId = randomUUID();
+  const body =
+    frame("turn", { turnId: row!.id, discussionId, seq: 1, location: null }) +
+    frame("done", { turnId: row!.id, discussionId, endState: "done", answer: "Proposed.", proposedEdit, toolCalls: [] }) +
+    frame("end", {});
+  await page.route("**/api/wiki/discuss", (route) => route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body }), { times: 1 });
+  await openPage(page);
+  await expect(page.locator('[data-conntab="discuss"]')).not.toHaveClass(/active/);
+  await dragSelect(page, FOLLOW_OLD);
+  await bar(page).locator('[data-selact="follow"]').click();
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="follow"]');
+  await expect(card.locator('.wiki-discuss-edit[data-edit-state="ready"] [data-discuss-apply]')).toBeVisible();
+  await expect(page.locator('[data-conntab="discuss"]')).not.toHaveClass(/active/);
+  return card;
+}
+
+test("«Change the wording» on an inline card shows the Discuss tab, its box holding the draft and focused", async ({ page }) => {
+  const card = await followCardWithEdit(page);
+  await card.locator("[data-discuss-reword]").click();
+  await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+  const input = page.locator("#wikiDiscussInput");
+  await expect(input).toBeVisible();
+  await expect(input).toHaveValue("Propose another wording for that edit, for the same passage: ");
+  await expect(input).toBeFocused();
+  await shot(page, "9-reword-from-card");
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("Apply on an inline card with the tab closed: the page renders again without the card, and the reader is on Discuss looking at the applied turn", async ({ page }) => {
+  const card = await followCardWithEdit(page);
+  await card.locator("[data-discuss-apply]").click();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(FOLLOW_NEW);
+  await expect(page.locator("#articleWrap .wiki-sel-card")).toHaveCount(0);
+  await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+  const applied = page.locator('#discussBody .wiki-discuss-edit[data-edit-state="applied"]');
+  await expect(applied).toBeVisible();
+  await expect(applied).toContainText("Applied to the page, with a log.md entry and a commit.");
+  await expect(applied.locator(".wiki-discuss-edit-done")).toBeFocused();
+  await shot(page, "10-applied-from-card");
+  expect(await pageText()).toBe(PAGE.replace(FOLLOW_OLD, FOLLOW_NEW));
 });

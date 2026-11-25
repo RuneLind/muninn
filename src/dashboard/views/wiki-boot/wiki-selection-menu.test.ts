@@ -12,6 +12,11 @@
  *   read-only guard sees) sends nothing, whether the default is the inline
  *   turn or the classic Explain (no agent).
  * - An action's press does not bring the bar back on the release that follows.
+ * - An inline card's edit controls that need the tab show it (fix round 1
+ *   batch 2): «Change the wording» opens it before filling its box, and an
+ *   Apply that renders the page again (written, commit failed, or a lost answer
+ *   the check finds written) opens it on the applied turn, which the render
+ *   then focuses; an outcome with no render stays on the card.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -20,6 +25,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
+import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
 import { initSelectionMenu, setSelectionMenuPage } from "../components/wiki-selection-menu.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
@@ -35,6 +41,22 @@ let close: (() => void) | null = null;
 const classic: string[] = [];
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
+/** The pages rendered again after an Apply. */
+let reloads = 0;
+/** What the next Apply request is answered with. */
+let applyAnswer: () => Response = () => json({ ok: true, committed: true });
+/** Answers for the preview requests that follow, before the default preview. */
+const checkAnswers: (() => Response)[] = [];
+const gateway = () => new Response("Bad Gateway", { status: 502 });
+const EDIT_OLD = "The morning route adds a stop.";
+const EDIT_NEW = "The morning route adds two stops.";
+
+/** The shell's tab switch, as `switchConnTab` does it: the tab marked, its body shown. */
+function showTab(tab: string): void {
+  switched.push(tab);
+  document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`)!.classList.toggle("active", tab === DISCUSS_TAB);
+  document.getElementById("discussBody")!.style.display = tab === DISCUSS_TAB ? "flex" : "none";
+}
 
 beforeAll(() => {
   const win = new GlobalWindow({ url: "http://localhost:3011/wiki" });
@@ -48,6 +70,12 @@ beforeAll(() => {
   }
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/wiki/discuss/apply") {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body.preview === true && checkAnswers.length) return checkAnswers.shift()!();
+      if (body.preview === true) return json({ ok: true, before: EDIT_OLD, after: EDIT_NEW, beforeCtx: "", afterCtx: "", fromLine: 9, toLine: 9, baseHash: "b1", previewHash: "p1" });
+      return applyAnswer();
+    }
     if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -63,7 +91,17 @@ beforeAll(() => {
     return json({}, 404);
   }) as typeof fetch;
   document.body.innerHTML = `<div id="articleWrap"></div><button data-conntab="${DISCUSS_TAB}" hidden>Discuss</button>${discussTabBodyHtml()}`;
-  initDiscussTab({ wiki: () => "w", relPath: () => REL, switchTab: (tab) => switched.push(tab) });
+  initDiscussTab({
+    wiki: () => "w",
+    relPath: () => REL,
+    switchTab: showTab,
+    // The shell's render: the agent off, the article again (the card gone), the agent on.
+    reload: () => {
+      reloads++;
+      setDiscussAgentEnabled(false);
+      renderPage(EDIT_NEW);
+    },
+  });
   initSelectionMenu({
     wiki: () => "w",
     relPath: () => REL,
@@ -97,8 +135,8 @@ const settle = async () => {
 const NIGHT = "The night route for MEL-12 is unchanged.";
 
 /** The page renders: its article, the reader flags, the agent on. */
-function renderPage(): void {
-  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${NIGHT}<br><br>The morning route adds a stop.<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+function renderPage(morning = EDIT_OLD): void {
+  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${NIGHT}<br><br>${morning}<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
   setDiscussAgentEnabled(true);
   setSelectionMenuPage({ mentions: true, keyKinds: [{ name: "case", pattern: "MEL-\\d+" }] });
 }
@@ -290,4 +328,114 @@ test("the read slice leaves only Copy: no bar, the browser's own right-click men
     document.body.classList.remove("wiki-read-slice");
     proto.getClientRects = realRects;
   }
+});
+
+/** «Add to Oppfølging» on the morning sentence, its turn ending with an edit
+ *  the preview answers: the inline card offers Apply. The tab is not shown. */
+async function followCardWithEdit(turnId: string, seq: number): Promise<Element> {
+  renderPage();
+  showTab("conn");
+  switched.length = 0;
+  // A press in the article takes focus from the tab's box.
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  await selectText(EDIT_OLD);
+  press(barEl().querySelector('[data-selact="follow"]')!);
+  // The press's release, which the bar takes as its own.
+  document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  await settle();
+  expect(posts.at(-1)).toMatchObject({ mode: "edit", selection: EDIT_OLD });
+  push!("turn", { turnId, seq, discussionId: "thread-1" });
+  push!("done", { answer: "Proposed.", proposedEdit: { edits: [{ old: EDIT_OLD, new: EDIT_NEW }], dropped: [], overLimit: false } });
+  close!();
+  await settle();
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="follow"]')!;
+  expect(card.querySelector('[data-edit-state="ready"] [data-discuss-apply]')).toBeTruthy();
+  expect(document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`)!.classList.contains("active")).toBe(false);
+  return card;
+}
+
+test("«Change the wording» on an inline card shows the tab, then fills and focuses its box", async () => {
+  const card = await followCardWithEdit("turn-5", 5);
+  (card.querySelector("[data-discuss-reword]") as HTMLButtonElement).click();
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(document.getElementById("discussBody")!.style.display).toBe("flex");
+  const input = document.getElementById("wikiDiscussInput") as HTMLTextAreaElement;
+  expect(input.value).toBe("Propose another wording for that edit, for the same passage: ");
+  expect(document.activeElement).toBe(input);
+});
+
+test("Apply on an inline card with the tab closed: the tab opens on the applied turn, focused after the page renders again", async () => {
+  const card = await followCardWithEdit("turn-6", 6);
+  const key = card.getAttribute("data-sel-turn");
+  const before = reloads;
+  (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+  await settle();
+  // The page was rendered again: the inline card went with it.
+  expect(reloads).toBe(before + 1);
+  expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+  // The outcome is on the pane's turn, the tab shown and its note focused.
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`)!.classList.contains("active")).toBe(true);
+  const done = document.querySelector(`#discussBody [data-turn-key="${key}"] [data-edit-state="applied"] .wiki-discuss-edit-done`);
+  expect(done?.textContent).toBe("Applied to the page, with a log.md entry and a commit.");
+  expect(document.activeElement).toBe(done);
+});
+
+test("Apply on an inline card whose commit failed: the tab shows that outcome too", async () => {
+  const card = await followCardWithEdit("turn-7", 7);
+  const key = card.getAttribute("data-sel-turn");
+  applyAnswer = () => json({ ok: true, committed: false, uncommitted: true });
+  try {
+    (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+    await settle();
+  } finally {
+    applyAnswer = () => json({ ok: true, committed: true });
+  }
+  expect(switched).toEqual([DISCUSS_TAB]);
+  const done = document.querySelector(`#discussBody [data-turn-key="${key}"] [data-edit-state="applied"] .wiki-discuss-edit-done`);
+  expect(done?.textContent).toBe("Applied to the page, but the commit failed: the page now has changes no commit holds.");
+  expect(document.activeElement).toBe(done);
+});
+
+test("Apply on an inline card whose answer was lost, the check finding it written: the tab shows that outcome", async () => {
+  const card = await followCardWithEdit("turn-8", 8);
+  const key = card.getAttribute("data-sel-turn");
+  applyAnswer = gateway;
+  checkAnswers.push(() => json({ ok: false, reason: "applied", error: "already applied" }, 409));
+  try {
+    (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+    await settle();
+  } finally {
+    applyAnswer = () => json({ ok: true, committed: true });
+    checkAnswers.length = 0;
+  }
+  expect(switched).toEqual([DISCUSS_TAB]);
+  const done = document.querySelector(`#discussBody [data-turn-key="${key}"] [data-edit-state="applied"] .wiki-discuss-edit-done`);
+  expect(done?.textContent).toBe(LOST_APPLY_APPLIED);
+  expect(document.activeElement).toBe(done);
+});
+
+test("a lost Apply the check cannot settle stays on the inline card; its «Check again» finding it written shows the tab", async () => {
+  const card = await followCardWithEdit("turn-9", 9);
+  const key = card.getAttribute("data-sel-turn");
+  applyAnswer = gateway;
+  checkAnswers.push(gateway, () => json({ ok: false, reason: "applied", error: "already applied" }, 409));
+  try {
+    (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+    await settle();
+    // Nothing was rendered again: the card says so itself, the tab left closed.
+    expect(card.isConnected).toBe(true);
+    expect(switched).toEqual([]);
+    const again = card.querySelector<HTMLButtonElement>("[data-discuss-repreview]");
+    expect(again?.textContent).toBe("Check again");
+    again!.click();
+    await settle();
+  } finally {
+    applyAnswer = () => json({ ok: true, committed: true });
+    checkAnswers.length = 0;
+  }
+  expect(switched).toEqual([DISCUSS_TAB]);
+  const done = document.querySelector(`#discussBody [data-turn-key="${key}"] [data-edit-state="applied"] .wiki-discuss-edit-done`);
+  expect(done?.textContent).toBe(LOST_APPLY_APPLIED);
+  expect(document.activeElement).toBe(done);
 });

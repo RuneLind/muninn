@@ -185,7 +185,8 @@ let followAfterPress = false;
  *  pane stood (the bar and «Earlier discussions» sit above the turns, so a
  *  short pane can start past the follow margin). */
 let followSend = false;
-/** An Apply wrote this page while the tab was shown, and the page is rendered
+/** An Apply wrote this page while the tab was shown (an inline card's Apply
+ *  shows it first), and the page is rendered
  *  again: that render keeps the tab, then shows the reader the applied card and
  *  the changed passage. Cleared by the render, or by leaving the page. */
 let afterApply: { page: string; key: string } | null = null;
@@ -502,19 +503,20 @@ async function previewEdit(t: DiscussTurnView): Promise<void> {
   schedulePaint();
 }
 
-/** «Preview again» / «Check again» on a card that holds no Apply. */
-function retryEdit(key: string): void {
+/** «Preview again» / «Check again» on a card that holds no Apply. `offPane`:
+ *  pressed on an inline card in the article, not in the tab. */
+function retryEdit(key: string, offPane = false): void {
   const d = here();
   const t = turnByKey(key);
   const e = t?.edit;
   if (!d || !t || !e?.retry || (e.state !== "refused" && e.state !== "failed") || currentTurn(d) !== t || discussSendBlocked()) return;
-  if (e.retry === "lost") void settleLostApply(d, t, e.preview ?? null);
+  if (e.retry === "lost") void settleLostApply(d, t, e.preview ?? null, offPane);
   else void previewEdit(t);
 }
 
 /** Apply's answer was lost: preview the same turn again to learn whether it
  *  wrote ({@link editAfterLostApply}); `shown` is the preview Apply sent. */
-async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: DiscussEditPreview | null): Promise<void> {
+async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: DiscussEditPreview | null, offPane: boolean): Promise<void> {
   const preview = shown ?? lostPreview.get(t.key) ?? null;
   if (!t.turnId || !preview) return;
   lostPreview.set(t.key, preview);
@@ -524,17 +526,20 @@ async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: Dis
   const out = editAfterLostApply(preview, r);
   t.edit = out.edit;
   if (out.edit.retry !== "lost") lostPreview.delete(t.key);
-  finishApply(d, t, out.reload);
+  finishApply(d, t, out.reload, offPane);
 }
 
 /** The preview a lost Apply sent, kept while «Check again» is offered. */
 const lostPreview = new Map<string, DiscussEditPreview>();
 
 /** Paint the card; render the page again when it reads as written, keeping
- *  the reader on the tab when it is the one shown. */
-function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean): void {
+ *  the reader on the tab when it is the one shown. An Apply from an inline
+ *  card (`offPane`) opens the tab first: the render removes the card, so the
+ *  outcome is shown on the pane's turn, as a pane Apply ends. */
+function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean, offPane = false): void {
   paint();
   if (!reload || !deps || deps.relPath() !== d.relPath) return;
+  if (offPane) openDiscussTab();
   const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
   if (tab?.classList.contains("active")) afterApply = { page: `${deps.wiki()}\n${d.relPath}`, key: t.key };
   deps.reload?.();
@@ -551,7 +556,7 @@ async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; 
 }
 
 /** Apply: the previewed edit, by turn id and the two hashes the preview gave. */
-async function applyEdit(key: string): Promise<void> {
+async function applyEdit(key: string, offPane = false): Promise<void> {
   const d = here();
   const t = turnByKey(key);
   if (!d || !t?.turnId || t.edit?.state !== "ready" || !t.edit.preview || currentTurn(d) !== t || discussSendBlocked()) return;
@@ -567,13 +572,13 @@ async function applyEdit(key: string): Promise<void> {
       message: r.body.committed === true ? "Applied to the page, with a log.md entry and a commit." : uncommitted ? "Applied to the page, but the commit failed: the page now has changes no commit holds." : "Applied to the page, with a log.md entry; it was not committed here.",
     };
     // The page on screen is the one written: render it again.
-    finishApply(d, t, true);
+    finishApply(d, t, true, offPane);
     return;
   }
   // No answer, a success whose body did not arrive whole, or a gateway's 5xx:
   // the request may have written, so ask the route rather than claim either way.
   if (applyAnswerLost(r)) {
-    await settleLostApply(d, t, preview);
+    await settleLostApply(d, t, preview, offPane);
     return;
   }
   t.edit = editAfterApplyRefusal(preview, r.status, r.body);
@@ -581,11 +586,14 @@ async function applyEdit(key: string): Promise<void> {
 }
 
 /** «Change the wording»: the follow-up box asks for another wording, ahead of
- *  any draft the reader had typed; the reader sends it. */
-function rewordEdit(key: string): void {
+ *  any draft the reader had typed; the reader sends it. The box is in the tab:
+ *  from an inline card (`offPane`) the tab is shown first. */
+function rewordEdit(key: string, offPane = false): void {
   const t = turnByKey(key);
+  if (!t || discussSendBlocked()) return;
+  if (offPane) openDiscussTab();
   const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
-  if (!t || !input || discussSendBlocked()) return;
+  if (!input) return;
   input.value = rewordDraft(input.value);
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
@@ -1004,19 +1012,22 @@ export function initDiscussTab(d: DiscussTabDeps): void {
       void continueInClaudeCode(cont.dataset.discussContinue ?? "");
       return;
     }
+    // The edit card's controls also sit in the selection menu's inline card,
+    // outside the tab's body (`offPane`).
+    const offPane = (el: HTMLElement) => !el.closest(`#${DISCUSS_BODY_ID}`);
     const apply = t.closest<HTMLElement>("[data-discuss-apply]");
     if (apply) {
-      void applyEdit(apply.dataset.discussApply ?? "");
+      void applyEdit(apply.dataset.discussApply ?? "", offPane(apply));
       return;
     }
     const reword = t.closest<HTMLElement>("[data-discuss-reword]");
     if (reword) {
-      rewordEdit(reword.dataset.discussReword ?? "");
+      rewordEdit(reword.dataset.discussReword ?? "", offPane(reword));
       return;
     }
     const retry = t.closest<HTMLElement>("[data-discuss-repreview]");
     if (retry) {
-      retryEdit(retry.dataset.discussRepreview ?? "");
+      retryEdit(retry.dataset.discussRepreview ?? "", offPane(retry));
       return;
     }
     const discard = t.closest<HTMLElement>("[data-discuss-discard]");
