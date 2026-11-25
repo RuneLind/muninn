@@ -742,6 +742,24 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
     }
     .thread-item.paused .thread-item-name,
     .thread-item.paused .thread-item-desc { color: var(--text-muted); }
+    /* Discuss v2: a wiki page's threads, under their own heading. */
+    .thread-group-label {
+      margin: 10px 8px 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .chat-transient-error {
+      margin: 8px 12px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--status-error, #e5534b);
+      border: 1px solid color-mix(in srgb, var(--status-error, #e5534b) 45%, transparent);
+      background: color-mix(in srgb, var(--status-error, #e5534b) 10%, transparent);
+    }
     .thread-item-tag {
       display: inline-block;
       margin-left: 6px;

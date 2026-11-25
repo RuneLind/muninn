@@ -71,6 +71,8 @@ export function jiraEntryScript(): string {
   function appendJiraEntryControl(wrap) {
     if (!wrap) return;
     if (!jiraEntryVisible({ selectedBot: selectedBot, jiraBot: jiraBotName, threadId: activeThreadId })) return;
+    // A wiki page's Discuss thread: the server refuses a draft from it (409).
+    if (isWikiThread(activeThreadId)) return;
     wrap.insertAdjacentHTML('beforeend', jiraEntryButtonHtml(activeThreadId));
     // The feedback row is hover-revealed (opacity 0 at rest) — right for a 👍/👎,
     // wrong for an action the reader has to FIND. The class un-hides the row for

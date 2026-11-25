@@ -147,7 +147,7 @@ function apps() {
     log: quiet,
   });
   const app = new Hono();
-  registerWikiDiscussRoute(app, config, { engine, log: quiet });
+  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar] });
   registerWikiDiscussApplyRoute(app, config, { readonlyRefusal: () => null, egressRefusal: () => null });
   app.route("/chat", createChatRoutes([ivar], config, { discussEngine: engine }));
   return app;
@@ -369,4 +369,50 @@ test("the default root (WIKI_DIR, no wiki named): the pane stores wiki '' and a 
     else process.env.WIKI_DIR = prev;
     __resetWikiCacheForTest();
   }
+});
+
+// ── PR 4: the pane on the thread ─────────────────────────────────────────
+
+test("a pane refusal on the page's thread reaches /chat as a transient event; one naming no live thread of this page does not", async () => {
+  const app = apps();
+  const evs = await frames(await pane(app, { question: "When?" }));
+  const threadId = evs[0]!.data.threadId as string;
+  await getDb()`UPDATE threads SET closed_at = now() WHERE id = ${threadId}`;
+  const conv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "kari" });
+  events = [];
+  const closed = await pane(app, { question: "Again?", discussionId: threadId });
+  expect(closed.status).toBe(409);
+  expect(((await closed.json()) as { reason: string }).reason).toBe("closed");
+  const mirrored = events.filter((e) => e.type === "transient_error");
+  expect(mirrored).toHaveLength(1);
+  expect(mirrored[0]).toMatchObject({ type: "transient_error", conversationId: conv.id, threadId });
+  events = [];
+  const unknown = await pane(app, { question: "Again?", discussionId: crypto.randomUUID() });
+  expect(unknown.status).toBe(404);
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+});
+
+test("the thread read gives each closed thread its messages, and /chat's thread list hides a closed wiki thread but lists an open one", async () => {
+  const app = apps();
+  const first = (await frames(await pane(app, { question: "When does it open?" })))[0]!.data.threadId as string;
+  await app.request("/api/wiki/discuss/thread/close", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: first }) });
+  const second = (await frames(await pane(app, { question: "And on Sundays?" })))[0]!.data.threadId as string;
+  expect(second).not.toBe(first);
+
+  const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as {
+    thread: { id: string };
+    messages: { role: string }[];
+    closed: { id: string; messages: { role: string; content: string; turn: { question: string } | null }[] }[];
+  };
+  expect(read.thread.id).toBe(second);
+  expect(read.closed.map((t) => t.id)).toEqual([first]);
+  expect(read.closed[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  expect(read.closed[0]!.messages[0]!.content).toBe("When does it open?");
+  expect(read.closed[0]!.messages[1]!.turn?.question).toBe("When does it open?");
+
+  const list = (await (await app.request("/chat/threads/kari/ivar")).json()) as { threads: { id: string; kind: string }[] };
+  const ids = list.threads.map((t) => t.id);
+  expect(ids).toContain(second);
+  expect(ids).not.toContain(first);
+  expect(list.threads.find((t) => t.id === second)?.kind).toBe("wiki");
 });

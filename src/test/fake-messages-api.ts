@@ -170,7 +170,10 @@ export interface FakeMessagesApi {
  * (Discuss P3's e2e spec).
  */
 export interface FakeMessagesApiOptions {
-  reply?: { chunks: string[]; delayMs: number };
+  /** `toolFirst`: a request with no assistant message yet is answered with
+   *  these tool_use blocks first, and the next one with the chunks, so a
+   *  client sees a tool line before the text (Discuss v2 PR 4's spec). */
+  reply?: { chunks: string[]; delayMs: number; toolFirst?: ScriptedToolUse[] };
 }
 
 /** A streamed text answer, one `content_block_delta` per chunk, `delayMs` apart. */
@@ -245,6 +248,9 @@ export function startFakeMessagesApi(opts: FakeMessagesApiOptions = {}): FakeMes
         } else {
           blocks = [{ type: "text", text: "PROBE-DONE" }];
         }
+      } else if (opts.reply?.toolFirst?.length && turn === 0) {
+        blocks = opts.reply.toolFirst.map((t, i) => ({ type: "tool_use", id: `toolu_first_${i}_${Math.random().toString(36).slice(2, 8)}`, name: t.name, input: t.input }));
+        stop = "tool_use";
       } else if (opts.reply) {
         if (body.stream) {
           return new Response(slowTextStream(opts.reply.chunks, opts.reply.delayMs), {

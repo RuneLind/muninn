@@ -90,6 +90,18 @@ export function connectorSelectorScript(): string {
   // protected. Fixing that needs a durable "this thread means bot default" fact,
   // which the threads table cannot currently express (no connector IS the value).
   var connectorStampSuppressedThreads = {};
+
+  // A wiki page's Discuss thread (\`kind = 'wiki'\`, Discuss v2) always runs on
+  // the wiki's own bot and connector: the server ignores a connector on it and
+  // refuses a stamp, but stampConnectorOnThread below updates the thread's
+  // label before it knows, so the selector is hidden on one and never stamps it.
+  function isWikiThread(threadId) {
+    if (!threadId) return false;
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === threadId) return threads[i].kind === 'wiki';
+    }
+    return false;
+  }
   function suppressConnectorStamp(threadId) {
     if (threadId) connectorStampSuppressedThreads[threadId] = true;
   }
@@ -101,7 +113,7 @@ export function connectorSelectorScript(): string {
   // default. The dropdown-change path passes onlyIfEmpty=false to allow the
   // user's explicit pick to override.
   async function stampConnectorOnThread(threadId, connectorId, onlyIfEmpty) {
-    if (!threadId) return;
+    if (!threadId || isWikiThread(threadId)) return;
     // Suppression applies to the preference-stamping paths only (both pass
     // onlyIfEmpty) and only to the threads that registered it. An explicit
     // dropdown pick still wins — that is the user deliberately changing this
@@ -151,7 +163,9 @@ export function connectorSelectorScript(): string {
   });
 
   function syncConnectorDropdown() {
-    if (!connectors.length) return;
+    var wiki = isWikiThread(activeThreadId);
+    connectorSelector.style.display = connectors.length > 0 && !wiki ? '' : 'none';
+    if (!connectors.length || wiki) return;
 
     // If active thread has its own connector, show that; otherwise show the sidebar selection
     var threadConnId = '';

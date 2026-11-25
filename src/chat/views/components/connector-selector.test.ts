@@ -48,15 +48,18 @@ interface Harness {
 /** Build a running copy of the page's connector + deep-link code over stubs. */
 async function harness(opts: {
   /** Threads the client has loaded — a deep-linked thread is often NOT among them. */
-  threads: { id: string; connectorId?: string | null }[];
+  threads: { id: string; connectorId?: string | null; kind?: string }[];
   /** What the sidebar remembers (the value that would get stamped). */
   selectedConnectorId: string;
   /** Query string of the deep link. */
   search: string;
   /** Whether `GET /chat/pending/:id` has a seed to deliver. */
   pendingText?: string;
-}): Promise<Harness> {
+  /** The send's answer (default 202): a wiki thread's refusal is a 409 with `error`. */
+  sendStatus?: number;
+}): Promise<Harness & { input: () => string; notices: string[] }> {
   const fetchCalls: FetchCall[] = [];
+  const notices: string[] = [];
   const el = (): Record<string, unknown> => ({
     addEventListener: () => {},
     innerHTML: "",
@@ -69,7 +72,7 @@ async function harness(opts: {
     window: { location: { search: opts.search } },
     localStorage: { getItem: () => null, setItem: () => {} },
     chatInput: { value: "", style: {} as Record<string, string> },
-    chatMessages: { querySelector: () => null },
+    chatMessages: { querySelector: () => null, appendChild: (n: { textContent?: string }) => notices.push(n.textContent ?? "") },
     threads: opts.threads.map((t) => ({ ...t })),
     connectors: [] as unknown[],
     fetch: async (url: string, init?: { method?: string; body?: string }) => {
@@ -78,8 +81,12 @@ async function harness(opts: {
         method: init?.method || "GET",
         body: init?.body ? JSON.parse(init.body) : undefined,
       });
+      const isSend = init?.method === "POST" && url.indexOf("/messages") > -1;
+      const status = isSend ? (opts.sendStatus ?? 202) : 200;
+      if (isSend && status >= 400) return { ok: false, status, json: async () => ({ error: "the discussion's last turn is still running", reason: "busy" }) };
       return {
         ok: true,
+        status,
         json: async () => (url.indexOf("/chat/pending/") === 0 || url.indexOf("/chat/pending/") > -1
           ? { text: opts.pendingText || "" }
           : {}),
@@ -102,6 +109,7 @@ async function harness(opts: {
     "function renderThreadList(){} function updateInspector(){}" +
     "function escapeHtml(s){return s;} function getBotInfo(){return null;}" +
     "function getSkipExtractions(){return false;}" +
+    "function scrollToBottom(){}" +
     "async function selectBot(_b, t){ activeConvId = 'C1'; activeThreadId = t || null; }" +
     connectorSelectorScript() +
     (await deepLinkBlockSource()) +
@@ -116,6 +124,8 @@ async function harness(opts: {
   };
   return {
     fetchCalls,
+    notices,
+    input: () => ctx.chatInput.value,
     get patches() { return fetchCalls.filter((f) => f.method === "PATCH"); },
     run: () => made.handleDeepLink(),
     stamp: (id, cid, only) => made.stampConnectorOnThread(id, cid, only),
@@ -224,5 +234,35 @@ describe("connector stamp suppression (&src=wiki)", () => {
     await h.stamp("T1", "chosen-conn");
     expect(h.patches.length).toBe(1);
     expect(h.patches[0]!.body).toEqual({ connectorId: "chosen-conn" });
+  });
+});
+
+describe("a wiki page's Discuss thread in /chat (Discuss v2 PR 4)", () => {
+  test("is never stamped, with or without src=wiki, and the selector stays out of it", async () => {
+    const h = await harness({
+      threads: [{ id: "T1", connectorId: null, kind: "wiki" }],
+      selectedConnectorId: "sidebar-conn", search: PLAIN_LINK, pendingText: "seed",
+    });
+    await h.run();
+    await h.send("a follow-up");
+    expect(h.patches).toEqual([]);
+    // An explicit pick is refused on a wiki thread too: the server ignores it, and the label must not lie.
+    await h.stamp("T1", "sidebar-conn", false);
+    expect(h.patches).toEqual([]);
+    expect(h.fetchCalls.filter((f) => f.method === "POST" && f.url.indexOf("/messages") > -1)).toHaveLength(2);
+  });
+
+  test("a refused send gives the typed text back and shows the server's reason; a chat thread's send does not", async () => {
+    const wiki = await harness({ threads: [{ id: "T1", kind: "wiki" }], selectedConnectorId: "", search: PLAIN_LINK, sendStatus: 409 });
+    await wiki.run();
+    await wiki.send("Where else is it named?");
+    expect(wiki.input()).toBe("Where else is it named?");
+    expect(wiki.notices).toEqual(["the discussion's last turn is still running"]);
+
+    const chat = await harness({ threads: [{ id: "T1" }], selectedConnectorId: "", search: PLAIN_LINK, sendStatus: 409 });
+    await chat.run();
+    await chat.send("hello");
+    expect(chat.input()).toBe("");
+    expect(chat.notices).toEqual([]);
   });
 });

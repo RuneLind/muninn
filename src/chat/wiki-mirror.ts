@@ -12,7 +12,7 @@
  * `processChatMessage`.
  */
 import { getLog } from "../logging.ts";
-import type { Thread } from "../db/threads.ts";
+import { getThreadById, type Thread } from "../db/threads.ts";
 import { parseDiscussBody, type DiscussEngine, type DiscussMirrorFactory, type DiscussRefusal } from "../wiki/discuss-engine.ts";
 import { chatState } from "./state.ts";
 import { loadChatConfig } from "./chat-config.ts";
@@ -38,6 +38,18 @@ export function chatWikiMirror(): DiscussMirrorFactory {
       },
     };
   };
+}
+
+/**
+ * A refusal from the pane's entry, on a live wiki thread: /chat shows it as it
+ * shows a refusal of its own send (a transient error event on the thread's
+ * owner's web conversation; nothing is stored). Discuss v2 PR 4.
+ */
+export async function publishWikiRefusal(threadId: string, message: string): Promise<void> {
+  const thread = await getThreadById(threadId);
+  if (!thread || thread.kind !== "wiki") return;
+  const conv = await chatState.findOrCreateBotConversation({ botName: thread.botName, userId: thread.userId });
+  chatState.publishTransientError(conv.id, message, thread.id);
 }
 
 /**

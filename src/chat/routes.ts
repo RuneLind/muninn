@@ -437,14 +437,16 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config, opts: 
     }
   });
 
-  // List threads for a user+bot (excludes slack: threads)
+  // List threads for a user+bot (excludes slack: threads, and a wiki page's
+  // Discuss thread once «Start over» closed it: it lives on in the page's
+  // «Earlier discussions»; the client groups the open ones under «Wiki»)
   app.get("/threads/:userId/:botName", async (c) => {
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return own.response;
     const userId = own.userId!;
     const botName = c.req.param("botName");
     const allThreads = await listThreads(userId, botName);
-    const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
+    const threads = allThreads.filter((t) => !t.name.startsWith("slack:") && !(t.kind === "wiki" && t.closedAt !== undefined));
     return c.json({ threads });
   });
 

@@ -140,9 +140,11 @@ export function threadManagerScript(): string {
     if (autoSelectThreadId) {
       selectThread(autoSelectThreadId);
     } else if (!activeThreadId) {
-      // Select the most recently active thread (first in the list, already sorted by activity)
+      // Select the most recently active thread (first in the list, already sorted by
+      // activity), a chat thread before a wiki page's Discuss thread
+      var firstChat = threads.find(function(t) { return t.kind !== 'wiki'; });
       if (threads.length > 0) {
-        selectThread(threads[0].id);
+        selectThread((firstChat || threads[0]).id);
       } else {
         renderThreadList();
       }
@@ -159,7 +161,13 @@ export function threadManagerScript(): string {
 
     var currentBot = bots.find(function(b) { return b.name === selectedBot; });
 
-    threadList.innerHTML = threads.map(function(t) {
+    // A wiki page's Discuss threads (Discuss v2) go under their own «Wiki»
+    // heading after the chat threads; a closed one is never listed (the server
+    // leaves it out, and this filter backs that up).
+    var chatThreads = threads.filter(function(t) { return t.kind !== 'wiki'; });
+    var wikiThreads = threads.filter(function(t) { return t.kind === 'wiki' && !t.closedAt; });
+
+    function threadItemHtml(t) {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var isPaused = isPeer && t.autoRespondPaused === true;
@@ -176,6 +184,7 @@ export function threadManagerScript(): string {
         : '';
 
       var classes = 'thread-item'
+        + (t.kind === 'wiki' ? ' wiki' : '')
         + (isActive ? ' active' : '')
         + (isPeer ? ' peer' : '')
         + (isPaused ? ' paused' : '');
@@ -190,7 +199,13 @@ export function threadManagerScript(): string {
         + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
         + (chips ? '<div class="thread-item-chips">' + chips + '</div>' : '')
         + '</div>';
-    }).join('');
+    }
+
+    threadList.innerHTML = chatThreads.map(threadItemHtml).join('')
+      + (wikiThreads.length
+        ? '<div class="thread-group-label" title="Discuss threads of wiki pages: each runs on its wiki agent">Wiki</div>'
+          + wikiThreads.map(threadItemHtml).join('')
+        : '');
 
     threadList.querySelectorAll('.thread-item').forEach(function(el) {
       el.onclick = function() {

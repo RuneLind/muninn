@@ -52,7 +52,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { getWikiIndex, readWikiText, resolveWikiRoot } from "../../wiki/store.ts";
-import { chatWikiMirror, chatUsersFor } from "../../chat/wiki-mirror.ts";
+import { chatWikiMirror, chatUsersFor, publishWikiRefusal } from "../../chat/wiki-mirror.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { egressRefusal } from "./wiki-egress.ts";
@@ -89,6 +89,9 @@ export interface DiscussRouteDeps extends DiscussEngineDeps {
   engine?: DiscussEngine;
   /** The /chat mirror; default `chatWikiMirror()`, null for none. */
   mirror?: DiscussMirrorFactory | null;
+  /** Publishes a pane refusal on its thread to /chat (PR 4); default
+   *  `publishWikiRefusal` when `mirror` is the default too, else none. */
+  refusalMirror?: ((threadId: string, message: string) => Promise<void>) | null;
   /** The continue route's reads and its one write; default the DB's. */
   continueStore?: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; handedOver: typeof markDiscussTurnHandedOver };
 }
@@ -99,6 +102,10 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   const engine =
     deps.engine ?? (Object.keys(deps).length === 0 ? sharedDiscussEngine(config, { chatUsers }) : createDiscussEngine(config, { ...deps, chatUsers }));
   const mirror = deps.mirror === undefined ? chatWikiMirror() : deps.mirror;
+  const refusalMirror = deps.refusalMirror !== undefined ? deps.refusalMirror : deps.mirror === undefined ? publishWikiRefusal : null;
+  /** Refusals that say nothing about the thread's own turns (another page,
+   *  user or bot named it, or it is not a live thread) are not mirrored. */
+  const UNMIRRORED = new Set(["unknown-discussion", "other-page", "other-user", "other-bot"]);
 
   const admin = async (c: Context, next: Next) => {
     if ((c.get("role") ?? "admin") !== "admin") return c.json({ error: "Discuss's wiki agent is for admins" }, 403);
@@ -126,7 +133,14 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     if (typeof body === "string") return c.json({ error: body }, 400);
 
     const started = await engine.start({ role: c.get("role") ?? "admin", body, ...(mirror ? { mirror } : {}) });
-    if (started.refused) return c.json(started.body, started.status);
+    if (started.refused) {
+      // A popped-out /chat on this thread shows the refusal as /chat's own
+      // entry does (a transient error event; nothing is stored).
+      if (refusalMirror && body.discussionId && !UNMIRRORED.has(String(started.body.reason ?? ""))) {
+        await refusalMirror(body.discussionId, started.body.error).catch((err) => log.warn("discuss refusal mirror failed: {error}", { error: String(err) }));
+      }
+      return c.json(started.body, started.status);
+    }
 
     try {
       return streamSSE(c, async (stream) => {
@@ -206,7 +220,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
 
   // The page's wiki thread (PR 4's pane reads it): the live thread, its
   // messages each joined to its ledger row (so an edit card has its turn id),
-  // the page's closed threads («Earlier discussions») and its old one-shot
+  // the page's closed threads («Earlier discussions», each with its messages) and its old one-shot
   // turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
   // prologue. Refusals: 403 role · 400 query · 404 unknown wiki or page · 503
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
@@ -231,12 +245,14 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         listClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath),
         listPageOneShotTurns(wikiName, meta.relPath),
       ]);
+      // «Earlier discussions» shows each closed thread's turns, read-only (PR 4).
+      const closedMessages = await Promise.all(closed.map((t) => listThreadMessagesWithTurns(t.id)));
       return c.json({
         userId: who.userId,
         bot: bot.name,
         thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null,
         messages,
-        closed: closed.map((t) => ({ id: t.id, name: t.name, createdAt: t.createdAt, closedAt: t.closedAt ?? null })),
+        closed: closed.map((t, i) => ({ id: t.id, name: t.name, createdAt: t.createdAt, closedAt: t.closedAt ?? null, messages: closedMessages[i] })),
         oneShot,
       });
     } catch (err) {

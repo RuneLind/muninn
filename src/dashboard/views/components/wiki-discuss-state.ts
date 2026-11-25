@@ -189,9 +189,213 @@ export function discussEditRefusalMessage(status: number, body: Record<string, u
 export interface DiscussionView {
   wiki: string;
   relPath: string;
-  /** The route's discussion id, from the first turn's `turn` event. */
+  /** The route's discussion id: the page's live wiki thread (Discuss v2), from
+   *  the thread read or the first turn's `turn` event. */
   discussionId: string | null;
   turns: DiscussTurnView[];
+  /** The wiki's bot and the thread's user, from the thread read (PR 4): what
+   *  «Pop out ↗» opens /chat with. */
+  bot?: string | null;
+  userId?: string | null;
+  /** The mode the next turn is sent in (the Explore/Edit toggle). */
+  mode?: "explore" | "edit";
+  /** Where the thread read stands for this page. */
+  load?: "loading" | "done" | "failed";
+  loadError?: string | null;
+  /** The route answered `no-user`/`unknown-user`: the users to pick from. */
+  userPick?: { users: { id: string; name: string }[]; message: string } | null;
+  /** «Earlier discussions»: the page's closed threads and old one-shot turns. */
+  earlier?: EarlierDiscussions | null;
+}
+
+// ── The page's thread as `GET /api/wiki/discuss/thread` answers it (PR 4) ──
+
+/** A ledger row as the thread read sends it (the fields the tab reads). */
+export interface StoredDiscussTurn {
+  id: string;
+  discussionId: string;
+  seq: number;
+  selection: string | null;
+  question: string;
+  answer: string;
+  endState: string;
+  error: string | null;
+  toolCalls: { name: string; input: string }[];
+  proposedEdit: unknown;
+  editAppliedAt: number | null;
+  createdAt: number;
+}
+
+/** A thread message joined to its ledger row. */
+export interface StoredThreadMessage {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: number;
+  turn: StoredDiscussTurn | null;
+}
+
+export interface EarlierDiscussions {
+  /** The page's closed wiki threads (Start over), newest first, with their messages. */
+  closed: { id: string; name: string; createdAt: number; closedAt: number | null; messages: StoredThreadMessage[] }[];
+  /** The page's old one-shot turns (v1, no thread), oldest first. */
+  oneShot: StoredDiscussTurn[];
+}
+
+/** Words for a stored turn that did not end done. */
+const STORED_END_WORDS: Record<string, string> = {
+  error: "The turn failed.",
+  timeout: "The turn ran past its time limit and was stopped.",
+  abandoned: "The turn was abandoned: its run stopped before it ended.",
+  running: "This turn is still running on the server. Reload the page once it has ended to see its answer.",
+};
+
+/** A stored turn as the tab shows it: its key is `s:<turn id>`, so a turn this
+ *  tab streamed and the same turn read back are one turn. A turn still running
+ *  reads as `dropped` (this tab has no stream for it, and sending is left to
+ *  the route, which answers busy). */
+export function turnFromStored(t: StoredDiscussTurn): DiscussTurnView {
+  const passage: DiscussPassage | null = t.selection ? { selection: t.selection, before: "", after: "", atStart: false, atEnd: false, heading: "" } : null;
+  const view = newTurn(`s:${t.id}`, t.question, passage);
+  view.turnId = t.id;
+  view.seq = t.seq;
+  view.text = t.answer ?? "";
+  view.tools = (t.toolCalls ?? []).map((c) => (c.input ? `${c.name} ${c.input}` : c.name));
+  if (t.endState === "done") {
+    view.state = "done";
+    view.proposedEdit = t.proposedEdit !== null && t.proposedEdit !== undefined;
+    if (view.proposedEdit && t.editAppliedAt) view.edit = { state: "applied", preview: null, message: "This edit is applied to the page." };
+  } else {
+    view.state = t.endState === "running" ? "dropped" : END_STATES.has(t.endState) ? (t.endState as DiscussTurnState) : "error";
+    view.message = STORED_END_WORDS[t.endState] ?? STORED_END_WORDS.error!;
+    if (t.error && t.endState !== "running") view.message += ` ${t.error}`;
+  }
+  return view;
+}
+
+/** The live thread's turns from its messages, in turn order (a message with
+ *  no ledger row is left out: every turn's pair carries its row). */
+export function turnsFromThread(messages: StoredThreadMessage[]): DiscussTurnView[] {
+  const seen = new Set<string>();
+  const out: DiscussTurnView[] = [];
+  for (const m of messages) {
+    if (!m.turn || seen.has(m.turn.id)) continue;
+    seen.add(m.turn.id);
+    out.push(turnFromStored(m.turn));
+  }
+  return out.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+}
+
+/**
+ * Add the thread read's turns to the discussion: a turn the tab already holds
+ * (same turn id) is kept as the tab has it, since it may be streaming or carry
+ * an edit card's state; nothing the tab holds is removed. The read's thread
+ * becomes the discussion id when the tab has none yet.
+ */
+export function mergeThreadTurns(d: DiscussionView, threadId: string | null, stored: DiscussTurnView[]): void {
+  if (threadId && !d.discussionId) d.discussionId = threadId;
+  const have = new Set(d.turns.map((t) => t.turnId).filter((x): x is string => !!x));
+  // A turn this tab is starting has no id yet: the read may already list it
+  // as running. It is the newest; the `turn` event files it under its id.
+  const sending = d.turns.some((t) => t.state === "sending");
+  for (const t of stored) {
+    if (t.turnId && have.has(t.turnId)) continue;
+    if (sending && t.state === "dropped") continue;
+    d.turns.push(t);
+  }
+}
+
+/** The `turn` event gave `t` its id: drop a read-back copy of the same turn. */
+export function dropStoredCopy(d: DiscussionView, t: DiscussTurnView): void {
+  if (!t.turnId) return;
+  d.turns = d.turns.filter((x) => x === t || x.turnId !== t.turnId);
+}
+
+/** The pop-out link: the page's thread in /chat (`src=wiki` keeps /chat from
+ *  stamping its remembered connector on it). Null until the thread, its bot
+ *  and its user are known. */
+export function discussPopOutHref(d: DiscussionView | null): string | null {
+  if (!d?.discussionId || !d.bot || !d.userId) return null;
+  const q = new URLSearchParams({ bot: d.bot, thread: d.discussionId, user: d.userId, src: "wiki" });
+  return `/chat?${q.toString()}`;
+}
+
+function shortDate(ms: number | null | undefined): string {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function earlierExchange(q: string, a: string): string {
+  return (
+    `<div class="wiki-discuss-earlier-turn">` +
+    `<div class="wiki-discuss-q">${esc(q)}</div>` +
+    (a ? `<div class="wiki-discuss-answer">${renderStreamingBody(a)}</div>` : "") +
+    `</div>`
+  );
+}
+
+/**
+ * «Earlier discussions»: a collapsed `<details>` with the page's closed
+ * threads (read-only, each with Delete) and its old one-shot turns grouped by
+ * discussion (read-only). Empty string when there are none. Its own classes,
+ * never `.wiki-discuss-turn`: nothing in it is a turn of the live thread.
+ */
+export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): string {
+  if (!e || (e.closed.length === 0 && e.oneShot.length === 0)) return "";
+  const groups: string[] = [];
+  for (const t of e.closed) {
+    const items: string[] = [];
+    let q: string | null = null;
+    for (const m of t.messages) {
+      if (m.role === "user") {
+        if (q !== null) items.push(earlierExchange(q, ""));
+        q = m.content;
+      } else if (m.role === "assistant") {
+        items.push(earlierExchange(q ?? "", m.content));
+        q = null;
+      }
+    }
+    if (q !== null) items.push(earlierExchange(q, ""));
+    groups.push(
+      `<div class="wiki-discuss-earlier-group" data-earlier-thread="${esc(t.id)}">` +
+        `<div class="wiki-discuss-earlier-head"><span>${esc(t.name)}${t.closedAt ? ` · closed ${esc(shortDate(t.closedAt))}` : ""}</span>` +
+        `<button type="button" class="wiki-discuss-earlier-delete" data-discuss-delete-thread="${esc(t.id)}" title="Delete this discussion and its turns">Delete</button></div>` +
+        (items.length ? items.join("") : `<div class="wiki-discuss-hint">No turns.</div>`) +
+        `</div>`,
+    );
+  }
+  const byDiscussion = new Map<string, StoredDiscussTurn[]>();
+  for (const t of e.oneShot) {
+    const list = byDiscussion.get(t.discussionId) ?? [];
+    list.push(t);
+    byDiscussion.set(t.discussionId, list);
+  }
+  for (const [id, turns] of byDiscussion) {
+    turns.sort((a, b) => a.seq - b.seq);
+    groups.push(
+      `<div class="wiki-discuss-earlier-group" data-earlier-oneshot="${esc(id)}">` +
+        `<div class="wiki-discuss-earlier-head"><span>Before threads · ${esc(shortDate(turns[0]!.createdAt))}</span></div>` +
+        turns.map((t) => earlierExchange(t.selection ? `> ${t.selection.replace(/\s+/g, " ").trim()}\n\n${t.question}` : t.question, t.answer)).join("") +
+        `</div>`,
+    );
+  }
+  const n = e.closed.length + byDiscussion.size;
+  return `<details class="wiki-discuss-earlier"><summary>Earlier discussions (${n})</summary>${groups.join("")}</details>`;
+}
+
+/** The user picker the tab shows when the route needs the thread's user. */
+export function discussUserPickHtml(p: { users: { id: string; name: string }[]; message: string } | null | undefined): string {
+  if (!p) return "";
+  const opts = p.users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("");
+  return (
+    `<div class="wiki-discuss-error" role="alert">${esc(p.message)}</div>` +
+    (p.users.length
+      ? `<div class="wiki-discuss-actions"><select class="wiki-discuss-user-select" aria-label="The user this discussion belongs to">${opts}</select>` +
+        `<button type="button" class="wiki-discuss-continue" data-discuss-pick-user>Use this user</button></div>`
+      : "")
+  );
 }
 
 export function newTurn(key: string, question: string, passage: DiscussPassage | null): DiscussTurnView {
@@ -271,15 +475,15 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
 }
 
 /** The stream ended: a turn still running lost its reader, not its run. The
- *  tab keeps discussions in memory and no route lists a discussion's turns, so
- *  the words never promise that a reload shows the turn. */
+ *  server stores it on the page's thread, which the tab reads on a page load
+ *  (Discuss v2), so a reload shows it once it has ended. */
 export function streamClosed(t: DiscussTurnView): void {
   if (!turnLive(t)) return;
   t.state = "dropped";
   t.phase = null;
   t.message = t.turnId
-    ? "The connection closed before the turn ended. The server runs it to its end and stores it, but this tab cannot show it, and reloading the page does not bring it back. Once it has ended, «Continue in Claude Code» copies the discussion with its answer."
-    : "The connection closed before the turn started here. The server may still run it and store it, but this tab cannot show it, and reloading the page does not bring it back.";
+    ? "The connection closed before the turn ended. The server runs it to its end and stores it in this page's discussion: reload the page once it has ended to see the answer."
+    : "The connection closed before the turn started here. The server may still run it and store it in this page's discussion: reload the page to see it.";
 }
 
 /** Readable words for a refusal the route answered as JSON before its stream
@@ -307,7 +511,13 @@ export function discussRefusalMessage(status: number, body: { error?: unknown; r
       return `The wiki agent cannot read this page: ${error.replace(/^the wiki agent cannot read this page: /, "")}.`;
     case "unknown-discussion":
     case "other-page":
+    case "closed":
+    case "other-user":
+    case "other-bot":
       return `${error}. Start a new discussion: reload the page.`;
+    case "no-user":
+    case "unknown-user":
+      return "The route needs the user this page's discussion belongs to: pick one above, then ask again.";
   }
   if (status === 403) return error || "The wiki agent is for admins.";
   return error ? `The turn could not start: ${error} (${status}).` : `The turn could not start (${status}).`;
@@ -317,6 +527,7 @@ const PHASE_WORDS: Record<string, string> = {
   snapshots: "Taking snapshots of the wiki and the code…",
   card: "Reading the plan card…",
   model: "The agent is reading…",
+  writing: "Writing the answer…",
 };
 
 /** The quote a chip shows; the chip itself carries the whole passage. */

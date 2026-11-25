@@ -9,11 +9,27 @@ export const DISCUSS_TAB = "discuss";
 export const DISCUSS_BODY_ID = "discussBody";
 export const DISCUSS_INPUT_ID = "wikiDiscussInput";
 export const DISCUSS_ASK_BTN_ID = "wikiDiscussAskBtn";
+/** Discuss v2 (PR 4): the page's thread in /chat. */
+export const DISCUSS_POPOUT_ID = "wikiDiscussPopout";
+/** Discuss v2 (PR 4): close the page's live thread. */
+export const DISCUSS_START_OVER_ID = "wikiDiscussStartOver";
 
-/** The tab's skeleton, server-rendered into the pane (the turns are painted). */
+/** The tab's skeleton, server-rendered into the pane (the turns, the user
+ *  picker and «Earlier discussions» are painted). */
 export function discussTabBodyHtml(): string {
   return (
     `<div class="wiki-conn-body wiki-discuss-body" id="${DISCUSS_BODY_ID}" style="display:none">` +
+    `<div class="wiki-discuss-bar">` +
+    `<div class="wiki-discuss-mode" role="group" aria-label="Mode of the next turn">` +
+    `<button type="button" data-discuss-mode="explore" aria-pressed="true" title="Ask and read: the agent explains, it proposes no edit">Explore</button>` +
+    `<button type="button" data-discuss-mode="edit" aria-pressed="false" title="The agent may propose one edit to this page">Edit</button>` +
+    `</div>` +
+    `<span class="wiki-discuss-bar-gap"></span>` +
+    `<a class="wiki-discuss-popout" id="${DISCUSS_POPOUT_ID}" target="_blank" rel="noopener" hidden title="This discussion as a thread in /chat">Pop out ↗</a>` +
+    `<button type="button" class="wiki-discuss-startover" id="${DISCUSS_START_OVER_ID}" hidden title="Close this discussion; it stays under Earlier discussions">Start over</button>` +
+    `</div>` +
+    `<div class="wiki-discuss-user" hidden></div>` +
+    `<div class="wiki-discuss-earlier-wrap"></div>` +
     `<div class="wiki-discuss-turns"></div>` +
     `<div class="wiki-discuss-compose">` +
     `<textarea class="wiki-discuss-input" id="${DISCUSS_INPUT_ID}" rows="2" maxlength="${HANDOFF_QUESTION_MAX}" placeholder="Ask the wiki agent about this page…" aria-label="Ask the wiki agent"></textarea>` +
@@ -25,6 +41,25 @@ export function discussTabBodyHtml(): string {
 export function discussTabStyles(): string {
   return `
     .wiki-discuss-body { flex-direction: column; gap: 10px; padding: 12px 12px 10px; }
+    .wiki-discuss-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .wiki-discuss-bar-gap { flex: 1; }
+    .wiki-discuss-mode { display: inline-flex; border: 1px solid var(--border-secondary); border-radius: 8px; overflow: hidden; }
+    .wiki-discuss-mode button { padding: 4px 10px; border: none; background: var(--bg-inset); color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
+    .wiki-discuss-mode button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+    .wiki-discuss-popout { font-size: 12px; color: var(--accent-light); text-decoration: none; }
+    .wiki-discuss-popout:hover { text-decoration: underline; }
+    .wiki-discuss-startover { padding: 4px 10px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-secondary); }
+    .wiki-discuss-startover:disabled { opacity: 0.5; cursor: default; }
+    .wiki-discuss-user { display: flex; flex-direction: column; gap: 6px; }
+    .wiki-discuss-user[hidden] { display: none; }
+    .wiki-discuss-user-select { font: inherit; font-size: 12px; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary); }
+    .wiki-discuss-earlier { font-size: 12px; color: var(--text-secondary); }
+    .wiki-discuss-earlier > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+    .wiki-discuss-earlier-group { display: flex; flex-direction: column; gap: 8px; margin: 8px 0 12px; padding: 8px; border-radius: 8px; border: 1px solid var(--border-primary); background: var(--bg-surface); }
+    .wiki-discuss-earlier-head { display: flex; align-items: center; gap: 8px; justify-content: space-between; font-size: 11.5px; color: var(--text-dim); }
+    .wiki-discuss-earlier-delete { padding: 2px 8px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 11px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-secondary); }
+    .wiki-discuss-earlier-turn { display: flex; flex-direction: column; gap: 4px; padding-bottom: 6px; border-bottom: 1px dashed var(--border-primary); }
+    .wiki-discuss-earlier-turn:last-child { border-bottom: none; }
     .wiki-discuss-turns { display: flex; flex-direction: column; gap: 14px; }
     .wiki-discuss-hint { font-size: 12px; color: var(--text-dim); padding: 6px 4px; line-height: 1.5; }
     .wiki-discuss-turn { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--border-primary); }

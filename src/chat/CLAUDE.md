@@ -145,6 +145,10 @@ once. The save additionally **requires `application/json` (415 otherwise)** — 
 body-less or `text/plain` POST is a CORS *simple* request that executes whatever
 the response headers say, the same rule `from-thread` lives by.
 
+## Wiki threads in /chat (Discuss v2)
+
+A wiki page's Discuss thread (`threads.kind = 'wiki'`) shows in /chat under its own «Wiki» heading (`thread-manager.ts`); `GET /chat/threads/:userId/:botName` leaves out a closed one (it lives on in the page's «Earlier discussions»). A send on one runs on the Discuss engine (`wiki-mirror.ts`), so the connector selector is hidden on it and `stampConnectorOnThread` never stamps it (`isWikiThread`, `connector-selector.ts`), and the «Lag Jira-sak» control is not offered. A refused send (409 busy or closed, 403, 400) gives the typed text back and shows the refusal in the thread's one `#chatTransientError` slot, which the `transient_error` event also fills (published by /chat's own refusals, by a failed turn, and by the pane's refusals on that thread, `publishWikiRefusal`). Nothing of it is stored.
+
 ## Common Pitfalls
 
 1. **Snapshot-before-subscribe**: `ws.ts` sends snapshot BEFORE subscribing to avoid missed events during the gap. Both halves are owner-filtered — filtering the live fan-out while shipping an unfiltered snapshot would close nothing, since the snapshot is the larger disclosure of the two.

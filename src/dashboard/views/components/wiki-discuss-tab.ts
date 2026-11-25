@@ -46,9 +46,23 @@
  * card in this tab only. Apply
  * is in the read-only write selectors, «Change the wording» in the egress
  * ones, and both in `WIKI_READ_SLICE_HIDDEN_SELECTOR`.
+ *
+ * Discuss v2 (PR 4, mimir plan muninn-wiki-discuss-v2): the discussion is the
+ * page's wiki thread. When the tab is shown (or a turn starts) the tab reads
+ * `GET /api/wiki/discuss/thread` once per page per session: the live thread's
+ * turns join the ones streamed here (by turn id), the bot and user give
+ * «Pop out ↗» (`/chat?…&src=wiki`), and the closed threads and old one-shot
+ * turns fill «Earlier discussions». The user is the one the route resolved;
+ * it is kept per bot in localStorage (`muninn-discuss-user-<bot>`) once a
+ * thread holds it (or the reader picked it after a `no-user` refusal) and sent
+ * with every turn and read afterwards, so /chat's default-user dropdown never
+ * moves the page's thread. The Explore/Edit toggle sets the next turn's
+ * `mode`; «Start over» closes the live thread (it moves under «Earlier
+ * discussions»), and an earlier thread's Delete is /chat's thread delete.
  */
 
 import { copyText } from "./copy-path.ts";
+import { escHtml } from "./escape.ts";
 import { makeSseFrameParser } from "./client-runtime.ts";
 import { revealRange } from "./wiki-hash-target.ts";
 import { revealRightPane } from "./wiki-pane-toggle.ts";
@@ -64,6 +78,14 @@ import {
   openFoldsAround,
   rewordDraft,
   currentTurn,
+  discussEarlierHtml,
+  discussPopOutHref,
+  discussUserPickHtml,
+  dropStoredCopy,
+  mergeThreadTurns,
+  turnsFromThread,
+  type EarlierDiscussions,
+  type StoredThreadMessage,
   applyAnswerLost,
   editAfterApplyRefusal,
   editAfterLostApply,
@@ -83,12 +105,35 @@ import {
   type DiscussionView,
 } from "./wiki-discuss-state.ts";
 import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
-import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
+import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_POPOUT_ID, DISCUSS_START_OVER_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
 
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
 const APPLY_PATH = "/api/wiki/discuss/apply";
+const THREAD_PATH = "/api/wiki/discuss/thread";
+const CLOSE_PATH = "/api/wiki/discuss/thread/close";
+/** The wiki's bot as the last thread read named it, and each bot's user once
+ *  a thread holds it (or the reader picked it). */
+const botKey = (wiki: string) => `muninn-discuss-bot-${wiki}`;
+const userKey = (bot: string) => `muninn-discuss-user-${bot}`;
+
+function lsGet(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function lsSet(key: string, value: string | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* storage blocked: the route's default user answers instead */
+  }
+}
 /** The CSS highlight (`::highlight(…)`) on the text the current turn's proposed edit would replace. */
 export const DISCUSS_EDIT_MARK_HIGHLIGHT = "wiki-discuss-edit-mark";
 export { DISCUSS_REWORD_PROMPT };
@@ -136,6 +181,10 @@ let pressTop = 0;
 /** The press began at the bottom and the pane was not scrolled meanwhile: the
  *  next paint scrolls to the bottom though the stream grew past the margin. */
 let followAfterPress = false;
+/** A turn was just sent: the next paint scrolls to the bottom, wherever the
+ *  pane stood (the bar and «Earlier discussions» sit above the turns, so a
+ *  short pane can start past the follow margin). */
+let followSend = false;
 /** An Apply wrote this page while the tab was shown, and the page is rendered
  *  again: that render keeps the tab, then shows the reader the applied card and
  *  the changed passage. Cleared by the render, or by leaving the page. */
@@ -158,7 +207,7 @@ function ensureHere(): DiscussionView | null {
   const k = keyOf(deps.wiki(), relPath);
   let d = discussions.get(k);
   if (!d) {
-    d = { wiki: deps.wiki(), relPath, discussionId: null, turns: [] };
+    d = { wiki: deps.wiki(), relPath, discussionId: null, turns: [], mode: "explore" };
     discussions.set(k, d);
   }
   return d;
@@ -198,6 +247,7 @@ export function setDiscussAgentEnabled(on: boolean): void {
     const input = body?.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
     if (input) input.value = "";
   }
+  if (enabled && tab?.classList.contains("active")) maybeLoad();
   paint();
   // The render's later enhancements (the ref links) replace text nodes the
   // mark's range may sit in: the mark is checked again once they have run.
@@ -240,6 +290,7 @@ export function openDiscussTab(focus = false): void {
   if (!enabled || !deps) return;
   revealRightPane();
   deps.switchTab(DISCUSS_TAB);
+  maybeLoad();
   paint();
   if (focus) document.getElementById(DISCUSS_INPUT_ID)?.focus();
 }
@@ -256,6 +307,7 @@ function startTurn(question: string, passage: DiscussPassage | null, selected: R
   const d = ensureHere();
   if (!d || !question.trim() || discussionLive(d)) return false;
   openDiscussTab();
+  maybeLoad();
   void runTurn(d, question.trim(), passage, passage ? selected : null, box);
   return true;
 }
@@ -273,15 +325,19 @@ function paint(): void {
   if (!body) return;
   const list = body.querySelector<HTMLElement>(".wiki-discuss-turns");
   const d = here();
+  const live = !!d && discussionLive(d);
+  // Follow the stream while the reader is at the bottom of the pane: read
+  // before anything is drawn, and scroll after all of it (the bar, the user
+  // picker and «Earlier discussions» change the pane's height too).
+  const atBottom = !pressing && (followAfterPress || followSend || body.scrollHeight - body.scrollTop - body.clientHeight < 40);
+  followSend = false;
+  paintBar(body, d, live);
   if (list) {
-    // Follow the stream while the reader is at the bottom of the pane.
-    const atBottom = !pressing && (followAfterPress || body.scrollHeight - body.scrollTop - body.clientHeight < 40);
     patchDiscussTurns(list, d);
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (!pressing) followAfterPress = false;
   }
   syncEditMark(d);
-  const live = !!d && discussionLive(d);
   const input = body.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
   const btn = body.querySelector<HTMLButtonElement>(`#${DISCUSS_ASK_BTN_ID}`);
   const started = !!d && d.turns.some((t) => t.turnId !== null);
@@ -311,6 +367,7 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
   const turn = newTurn(`t${++turnSeq}`, question, passage);
   if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
+  followSend = true;
   paint();
   const body: Record<string, unknown> = { wiki: d.wiki, relPath: d.relPath, question };
   if (passage) {
@@ -318,6 +375,9 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     if (passage.edge) body.edge = passage.edge;
   }
   if (d.discussionId) body.discussionId = d.discussionId;
+  body.mode = d.mode ?? "explore";
+  const user = sendUser(d);
+  if (user) body.userId = user;
   let res: Response;
   try {
     res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body) });
@@ -336,6 +396,7 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     }
     turn.state = "refused";
     turn.message = discussRefusalMessage(res.status, data);
+    noteUserRefusal(d, data);
     schedulePaint();
     return;
   }
@@ -350,6 +411,10 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     }
     const out = applyDiscussFrame(turn, frame.event, data);
     if (out.discussionId && !d.discussionId) d.discussionId = out.discussionId;
+    if (frame.event === "turn") {
+      dropStoredCopy(d, turn);
+      if (typeof data.userId === "string") keepUser(d, data.userId);
+    }
     if (frame.event === "turn" && box) {
       clearSentBox(box);
       box = null;
@@ -593,6 +658,225 @@ function endPress(): void {
   if (followAfterPress) schedulePaint();
 }
 
+// ── The page's thread (Discuss v2, PR 4) ─────────────────────────────────
+
+/** The user a turn or a read sends: only one kept for the wiki's bot, which a
+ *  thread holds or the reader picked (so /chat lists it and the route takes
+ *  it). Otherwise none, and the route uses the bot's default user. */
+function sendUser(d: DiscussionView): string | null {
+  const bot = d.bot ?? lsGet(botKey(d.wiki));
+  return bot ? lsGet(userKey(bot)) : null;
+}
+
+/** A thread now holds `userId` (a turn was accepted, or the read found one):
+ *  keep it for the wiki's bot. */
+function keepUser(d: DiscussionView, userId: string): void {
+  d.userId = userId;
+  const bot = d.bot ?? lsGet(botKey(d.wiki));
+  if (bot) lsSet(userKey(bot), userId);
+}
+
+/** A `no-user`/`unknown-user` refusal: drop a kept user the route no longer
+ *  lists, and offer the users it named. */
+function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null): void {
+  const reason = data?.reason;
+  if (reason !== "no-user" && reason !== "unknown-user") return;
+  if (typeof data?.bot === "string") d.bot = data.bot;
+  if (reason === "unknown-user") {
+    const bot = d.bot ?? lsGet(botKey(d.wiki));
+    if (bot) lsSet(userKey(bot), null);
+  }
+  const users = Array.isArray(data?.users)
+    ? (data.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" ? u.name : (u.id as string) }))
+    : [];
+  d.userPick = {
+    users,
+    message: users.length
+      ? "Pick the user this page's discussion belongs to (it is kept in this browser)."
+      : `No chat user is set up for this wiki's bot${d.bot ? ` (${d.bot})` : ""}: add one in /chat, then reload the page.`,
+  };
+}
+
+/** Read the thread once per page per session, when the tab is shown or a turn starts. */
+function maybeLoad(): void {
+  const d = ensureHere();
+  if (d && !d.load) void loadThread(d);
+}
+
+async function getThread(d: DiscussionView, user: string | null): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
+  const q = new URLSearchParams({ relPath: d.relPath });
+  if (d.wiki) q.set("wiki", d.wiki);
+  if (user) q.set("userId", user);
+  try {
+    const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" } });
+    const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    return { ok: res.ok, status: res.status, body };
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
+}
+
+async function loadThread(d: DiscussionView): Promise<void> {
+  if (d.load === "loading") return;
+  d.load = "loading";
+  const cachedBot = d.bot ?? lsGet(botKey(d.wiki));
+  const kept = sendUser(d);
+  let r = await getThread(d, kept);
+  if (kept && r.status === 422 && r.body?.reason === "unknown-user") {
+    if (cachedBot) lsSet(userKey(cachedBot), null);
+    r = await getThread(d, null);
+  }
+  // The wiki answers on another bot than last time: that bot's kept user, if any.
+  const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
+  if (bot && bot !== cachedBot) {
+    lsSet(botKey(d.wiki), bot);
+    const forBot = lsGet(userKey(bot));
+    if (forBot && forBot !== r.body?.userId) {
+      const again = await getThread(d, forBot);
+      if (again.ok) r = again;
+      else if (again.body?.reason === "unknown-user") lsSet(userKey(bot), null);
+    }
+  }
+  if (r.ok && r.body) {
+    const b = r.body;
+    d.bot = typeof b.bot === "string" ? b.bot : (d.bot ?? null);
+    d.userPick = null;
+    d.loadError = null;
+    const thread = b.thread as { id?: unknown } | null;
+    const threadId = thread && typeof thread.id === "string" ? thread.id : null;
+    if (typeof b.userId === "string") {
+      if (threadId) keepUser(d, b.userId);
+      else d.userId = d.userId ?? b.userId;
+    }
+    mergeThreadTurns(d, threadId, turnsFromThread(Array.isArray(b.messages) ? (b.messages as StoredThreadMessage[]) : []));
+    d.earlier = {
+      closed: Array.isArray(b.closed) ? (b.closed as EarlierDiscussions["closed"]) : [],
+      oneShot: Array.isArray(b.oneShot) ? (b.oneShot as EarlierDiscussions["oneShot"]) : [],
+    };
+    d.load = "done";
+    // A read-back current turn with an edit not yet applied: its card, as a streamed turn gets.
+    const cur = currentTurn(d);
+    if (cur && cur.state === "done" && cur.proposedEdit && !cur.edit && cur.turnId) void previewEdit(cur);
+  } else {
+    d.load = "failed";
+    noteUserRefusal(d, r.body);
+    if (!d.userPick) {
+      d.loadError =
+        r.status === 0
+          ? "The page's discussion could not be read: the server did not answer."
+          : `The page's discussion could not be read${typeof r.body?.error === "string" ? `: ${r.body.error}` : ""} (${r.status}).`;
+    }
+  }
+  schedulePaint();
+}
+
+/** Read the page's thread again (after Start over, a delete or a user pick). */
+function reloadThread(d: DiscussionView): void {
+  d.load = undefined;
+  void loadThread(d);
+}
+
+/** The bar (mode, «Pop out ↗», «Start over»), the user picker and «Earlier
+ *  discussions»: each drawn only when its markup changed, so an open
+ *  `<details>` or a focused select survives the stream's repaints. */
+function paintBar(body: HTMLElement, d: DiscussionView | null, live: boolean): void {
+  const mode = d?.mode ?? "explore";
+  for (const b of Array.from(body.querySelectorAll<HTMLButtonElement>("[data-discuss-mode]"))) b.setAttribute("aria-pressed", String(b.dataset.discussMode === mode));
+  const pop = body.querySelector<HTMLAnchorElement>(`#${DISCUSS_POPOUT_ID}`);
+  const href = discussPopOutHref(d);
+  if (pop) {
+    pop.hidden = !href;
+    if (href && pop.getAttribute("href") !== href) pop.setAttribute("href", href);
+  }
+  const over = body.querySelector<HTMLButtonElement>(`#${DISCUSS_START_OVER_ID}`);
+  if (over) {
+    over.hidden = !d?.discussionId;
+    over.disabled = live;
+  }
+  const userEl = body.querySelector<HTMLElement>(".wiki-discuss-user");
+  if (userEl) {
+    const html = d?.userPick ? discussUserPickHtml(d.userPick) : d?.loadError ? `<div class="wiki-discuss-hint">${escHtml(d.loadError)}</div>` : "";
+    if (userEl.dataset.drawn !== html) {
+      userEl.innerHTML = html;
+      userEl.dataset.drawn = html;
+    }
+    userEl.hidden = !html;
+  }
+  const earlierEl = body.querySelector<HTMLElement>(".wiki-discuss-earlier-wrap");
+  if (earlierEl) {
+    const html = discussEarlierHtml(d?.earlier);
+    if (earlierEl.dataset.drawn !== html) {
+      const wasOpen = !!earlierEl.querySelector("details[open]");
+      earlierEl.innerHTML = html;
+      earlierEl.dataset.drawn = html;
+      const det = earlierEl.querySelector<HTMLDetailsElement>("details");
+      if (det && wasOpen) det.open = true;
+    }
+  }
+}
+
+function setMode(mode: string): void {
+  const d = ensureHere();
+  if (!d || (mode !== "explore" && mode !== "edit")) return;
+  d.mode = mode;
+  paint();
+}
+
+/** «Start over»: close the live thread; it moves under «Earlier discussions»
+ *  and the next turn starts a new one. Not while a turn runs. */
+async function startOver(): Promise<void> {
+  const d = here();
+  if (!d?.discussionId || discussionLive(d) || discussSendBlocked()) return;
+  const threadId = d.discussionId;
+  let ok = false;
+  let error = "";
+  try {
+    const res = await fetch(CLOSE_PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ threadId }) });
+    ok = res.ok;
+    if (!ok) error = ((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `status ${res.status}`;
+  } catch {
+    error = "the server did not answer";
+  }
+  // A thread already closed elsewhere is just as gone from this page.
+  if (!ok && !/no live wiki thread/.test(error)) {
+    d.loadError = `Start over failed: ${error}.`;
+    paint();
+    return;
+  }
+  for (const t of d.turns) anchors.delete(t.key);
+  d.turns = [];
+  d.discussionId = null;
+  reloadThread(d);
+  paint();
+}
+
+/** Delete an earlier (closed) thread with its turns: /chat's thread delete. */
+async function deleteEarlier(threadId: string): Promise<void> {
+  const d = here();
+  if (!d || !threadId || discussSendBlocked()) return;
+  if (typeof confirm === "function" && !confirm("Delete this earlier discussion and its turns?")) return;
+  try {
+    const res = await fetch(`/chat/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+    if (!res.ok) d.loadError = `The discussion could not be deleted (${res.status}).`;
+  } catch {
+    d.loadError = "The discussion could not be deleted: the server did not answer.";
+  }
+  reloadThread(d);
+}
+
+/** The picker's choice: kept for the bot, then the thread is read for that user. */
+function pickUser(): void {
+  const d = here();
+  const sel = document.querySelector<HTMLSelectElement>(`#${DISCUSS_BODY_ID} .wiki-discuss-user-select`);
+  if (!d || !sel?.value) return;
+  const bot = d.bot ?? lsGet(botKey(d.wiki));
+  if (bot) lsSet(userKey(bot), sel.value);
+  d.userId = sel.value;
+  d.userPick = null;
+  reloadThread(d);
+  paint();
+}
+
 /** Wire the tab once, at boot. */
 export function initDiscussTab(d: DiscussTabDeps): void {
   deps = d;
@@ -601,6 +885,33 @@ export function initDiscussTab(d: DiscussTabDeps): void {
     if (!t.closest) return;
     if (t.closest(`#${DISCUSS_ASK_BTN_ID}`)) {
       askFromBox();
+      return;
+    }
+    // The shell switches to the tab on this click: read the page's thread once it shows.
+    if (t.closest(`[data-conntab="${DISCUSS_TAB}"]`)) {
+      afterRender(() => {
+        if (!enabled) return;
+        maybeLoad();
+        paint();
+      });
+      return;
+    }
+    const mode = t.closest<HTMLElement>("[data-discuss-mode]");
+    if (mode) {
+      setMode(mode.dataset.discussMode ?? "");
+      return;
+    }
+    if (t.closest(`#${DISCUSS_START_OVER_ID}`)) {
+      void startOver();
+      return;
+    }
+    const del = t.closest<HTMLElement>("[data-discuss-delete-thread]");
+    if (del) {
+      void deleteEarlier(del.dataset.discussDeleteThread ?? "");
+      return;
+    }
+    if (t.closest("[data-discuss-pick-user]")) {
+      pickUser();
       return;
     }
     const chip = t.closest<HTMLElement>("[data-discuss-chip]");
