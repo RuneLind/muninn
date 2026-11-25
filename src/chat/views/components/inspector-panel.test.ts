@@ -574,4 +574,23 @@ describe("inspector Context on a wiki page's Discuss thread", () => {
     expect(personal(h.fetched).filter((u) => u.startsWith("/api/memories/"))).toHaveLength(2);
     expect(personal(h.fetched).filter((u) => u.startsWith("/api/goals/"))).toHaveLength(2);
   });
+
+  test("a switch from one wiki thread to another redraws the section with the second thread's page", async () => {
+    const other = { id: "t-wiki-2", name: "wiki: ferry", kind: "wiki", wiki: "mimir", relPath: "notes/ferry.md" };
+    const h = inspectorHarness([chatThread, wikiThread, other]);
+    await h.show(wikiThread.id);
+    expect(h.contextHtml()).toContain("notes/harbour.md");
+    await h.show(other.id);
+    expect(h.contextHtml()).toContain("notes/ferry.md");
+    expect(h.contextHtml()).not.toContain("notes/harbour.md");
+  });
+
+  test("the page link encodes wiki and relPath into the href and escapes the label", async () => {
+    const odd = { id: "t-odd", name: "wiki: odd", kind: "wiki", wiki: 'a&b#"<x', relPath: 'notes/a&b#"<c>.md' };
+    const h = inspectorHarness([chatThread, odd]);
+    await h.show(odd.id);
+    const html = h.contextHtml();
+    expect(html).toContain('href="/wiki?wiki=a%26b%23%22%3Cx&relPath=notes%2Fa%26b%23%22%3Cc%3E.md"');
+    expect(html).toContain(">a&amp;b#&quot;&lt;x: notes/a&amp;b#&quot;&lt;c&gt;.md</a>");
+  });
 });

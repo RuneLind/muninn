@@ -302,11 +302,13 @@ async function pageHarness(opts: {
   };
   const chatInput = mk();
   const chatHeader = mk();
+  const chatSend = mk();
+  const threadList = mk();
   const ctx = {
     document: { getElementById: byIdEl, createElement: () => mk() },
     window: { location: { search: "?bot=jarvis&thread=T1&user=u1&src=wiki" } },
     localStorage: { getItem: () => null, setItem: () => {} },
-    chatInput, chatHeader, chatSend: mk(), threadList: mk(),
+    chatInput, chatHeader, chatSend, threadList,
     chatMessages: { querySelector: () => null, appendChild: (n: { textContent?: string }) => notices.push(n.textContent ?? "") },
     connectors: [{ id: "sidebar-conn", name: "Sidebar" }],
     fetch: async (url: string, init?: { method?: string; body?: string }) => {
@@ -351,6 +353,8 @@ async function pageHarness(opts: {
     selector: () => byIdEl("connectorSelector").style as Record<string, string>,
     title: () => (chatHeader.querySelector as (s: string) => { textContent: string })(".chat-title").textContent,
     input: chatInput as { value: string; disabled: boolean; placeholder: string },
+    send: chatSend as { disabled: boolean },
+    listHtml: () => threadList.innerHTML as string,
     get patches() { return fetchCalls.filter((f) => f.method === "PATCH"); },
     get sends() { return fetchCalls.filter((f) => f.method === "POST" && f.url.indexOf("/messages") > -1); },
   };
@@ -383,10 +387,30 @@ describe("a wiki thread the thread list leaves out, reached by link (fix round 1
     expect(h.selector().display).toBe("none");
     expect(h.title()).toContain("(closed)");
     expect(h.input.disabled).toBe(true);
+    expect(h.send.disabled).toBe(true);
+    expect(h.input.placeholder).toBe("Closed with Start over: the page's Discuss tab starts a new discussion.");
     h.input.value = "typed anyway";
     await h.made.sendMessage();
     expect(h.sends).toEqual([]);
     expect(h.patches).toEqual([]);
     expect(h.input.value).toBe("typed anyway");
+  });
+
+  test("an open one keeps the box: enabled, Send enabled, the usual placeholder", async () => {
+    const h = await pageHarness({ list: [MAIN], byId: wikiT1() });
+    await h.made.handleDeepLink();
+    expect(h.input.disabled).toBe(false);
+    expect(h.send.disabled).toBe(false);
+    expect(h.input.placeholder).toBe("Type a message...");
+  });
+
+  test("a lookup that finds a CHAT thread the list leaves out keeps it out: not a wiki thread, never listed", async () => {
+    const hidden = { id: "T1", name: "slack:hidden-thread", kind: "chat", botName: "jarvis", userId: "u1" };
+    const h = await pageHarness({ list: [MAIN], byId: hidden });
+    await h.made.handleDeepLink();
+    expect(h.fetchCalls.some((f) => f.url === "/chat/threads/T1")).toBe(true);
+    expect(h.made.isWikiThread("T1")).toBe(false);
+    expect(h.listHtml()).toContain("main");
+    expect(h.listHtml()).not.toContain("slack:hidden-thread");
   });
 });
