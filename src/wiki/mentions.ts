@@ -12,7 +12,7 @@
  * (`prMentions`) and the wiki's `prGrammar`, so `api #3625` resolves the way a
  * fact chip does. A bare `#n` is not read: it needs a page's home repo and a
  * facts title, which a lone line does not have. States come only from the
- * caches (`cachedPrFacts`); a miss is `unknown`/`stale` and starts one
+ * caches (`cachedPrFacts`); a miss is `unknown`/`stale` and is handed to the
  * background refresh (`askPrsInBackground`), so `gh` never runs on the request.
  *
  * The route is a thin caller (`dashboard/routes/wiki-mentions.ts`); the Trace
@@ -135,8 +135,8 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
     const url = `https://github.com/${ref.repo}/pull/${ref.n}`;
     const fact = cached.facts.get(ref.id);
     if (fact === undefined) {
-      // A repo whose last query failed within the hour is not asked again until that answer ages out.
-      if (!cached.failures.has(ref.repo.toLowerCase())) misses.push(ref);
+      // `askPrsInBackground` decides which misses are due: not a repo that failed within the hour or went unanswered within minutes.
+      misses.push(ref);
       return { repo: ref.repo, number: ref.n, state: "unknown", mergedAt: null, url, stale: true };
     }
     if (fact === null) return { repo: ref.repo, number: ref.n, state: "not-a-pr", mergedAt: null, url, stale: false };

@@ -2,8 +2,9 @@
  * `GET /api/wiki/mentions` (Discuss v2 PR 2) on a real temp git repo: files
  * with page titles, commits, `log.md` entries with their date and kind, PR refs
  * resolved through the wiki's `prGrammar`, key kinds from `trackers` and
- * `keys`, and the background `gh` refresh (one flight, never on a read-only
- * root, never with the check off). The nais half is in `routes-profile.test.ts`.
+ * `keys`, and the background `gh` refresh (one flight at a time with one
+ * follow-up for what arrived meanwhile, an unanswered repo left alone for a
+ * few minutes, never on a read-only root, never with the check off). The nais half is in `routes-profile.test.ts`.
  * Invented content only.
  */
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -13,7 +14,7 @@ import path from "node:path";
 import { Hono } from "hono";
 import { realGit } from "../../wiki/decision-triage/git.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
-import { __mentionPrsSettledForTest, __resetGhCheckForTest, type GhResult } from "../../wiki/work-map/gh-check.ts";
+import { MENTION_UNANSWERED_RETRY_MS, __mentionPrsSettledForTest, __resetGhCheckForTest, type GhResult } from "../../wiki/work-map/gh-check.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiMentionsRoute, type WikiMentionsRouteDeps } from "./wiki-mentions.ts";
 import type { MentionsBody } from "../../wiki/mentions.ts";
@@ -45,6 +46,7 @@ beforeAll(async () => {
   await put("log.md", "# Log\n\nIntro naming CASE-7 before any entry.\n\n## [2026-11-01] decide | CASE-7 goes first\nbody line\n\n## [2026-11-03] build | other work\nThe fix for CASE-7 is api #12.\n");
   await put("plans/alpha.md", "---\ntitle: Alpha plan\n---\n# Alpha plan\n\nCASE-7 is the one case. See acme/acme-web#40 and ABC-12.\n");
   await put("plans/beta.md", "# Beta\n\nNothing here.\n");
+  await put("plans/gamma.md", "# Gamma\n\nCASE-8 waits on api #13.\n");
   await put("plans/q/Q-1.csv", "id,case\n1,CASE-7\n");
   await git("add", "-A");
   await git("commit", "-q", "-m", "first: CASE-7 in alpha, log and csv");
@@ -59,7 +61,11 @@ function appWith(over: Partial<WikiMentionsRouteDeps> = {}, opts: { disabled?: b
   const runGh = async (args: string[]): Promise<GhResult> => {
     calls.push(args);
     await opts.gate;
-    return { exitCode: 0, stdout: JSON.stringify({ data: { repository: { p12: { state: "MERGED", mergedAt: "2026-11-04T10:00:00Z" }, p40: { state: "OPEN", mergedAt: null } } } }), stderr: "" };
+    // A state for every number asked: #12 merged, any other open.
+    const repository = Object.fromEntries(
+      [...args.join(" ").matchAll(/p(\d+):pullRequest/g)].map(([, n]) => [`p${n}`, n === "12" ? { state: "MERGED", mergedAt: "2026-11-04T10:00:00Z" } : { state: "OPEN", mergedAt: null }]),
+    );
+    return { exitCode: 0, stdout: JSON.stringify({ data: { repository } }), stderr: "" };
   };
   const app = new Hono();
   registerWikiMentionsRoute(app, {
@@ -125,6 +131,74 @@ describe("GET /api/wiki/mentions", () => {
     expect(calls.length).toBe(2);
   });
 
+  test("a miss while a flight runs is asked once that flight ends", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { app, calls } = appWith({}, { gate });
+    await get(app, `wiki=${WIKI}&key=CASE-7`); // starts the flight for acme-api#12 and acme-web#40
+    await get(app, `wiki=${WIKI}&key=CASE-8`); // acme-api#13 while it runs
+    expect(calls.length).toBe(2);
+    release();
+    await __mentionPrsSettledForTest(WIKI);
+    expect(calls.length).toBe(3);
+    expect(calls[2]!.join(" ")).toContain("p13:pullRequest");
+    const body = (await (await get(app, `wiki=${WIKI}&key=CASE-8`)).json()) as MentionsBody;
+    expect(body.prs.map((p) => [p.number, p.state, p.stale])).toEqual([[13, "open", false]]);
+    await __mentionPrsSettledForTest(WIKI);
+    expect(calls.length).toBe(3);
+  });
+
+  const unanswering: [string, GhResult][] = [
+    ["a timeout", { exitCode: -1, stdout: "", stderr: "", timedOut: true }],
+    ["exit 1 with stdout that is no JSON", { exitCode: 1, stdout: "<html>bad gateway</html>", stderr: "HTTP 502" }],
+    ["an answer with none of the aliases", { exitCode: 0, stdout: JSON.stringify({ data: { repository: {} } }), stderr: "" }],
+  ];
+  for (const [what, result] of unanswering) {
+    test(`an unanswered query (${what}) is not asked again by the next request`, async () => {
+      let n = 0;
+      const app = new Hono();
+      registerWikiMentionsRoute(app, {
+        registry: () => [{ name: WIKI, root } as never],
+        index: (r) => getWikiIndex({ root: r }),
+        gh: () => ({ runGh: async () => (n++, result), disabled: () => false }),
+        isReadonlyRoot: () => false,
+        now: Date.now,
+        authMode: () => "off",
+      });
+      await get(app, `wiki=${WIKI}&key=CASE-8`);
+      await __mentionPrsSettledForTest(WIKI);
+      expect(n).toBe(1);
+      const body = (await (await get(app, `wiki=${WIKI}&key=CASE-8`)).json()) as MentionsBody;
+      await __mentionPrsSettledForTest(WIKI);
+      expect(n).toBe(1);
+      expect(body.prs.map((p) => [p.state, p.stale])).toEqual([["unknown", true]]);
+    });
+  }
+
+  test("an unanswered repo is asked again once the retry window has passed", async () => {
+    let n = 0;
+    let clock = Date.parse("2026-11-25T10:00:00Z");
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: WIKI, root } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({ runGh: async () => (n++, { exitCode: -1, stdout: "", stderr: "", timedOut: true }), disabled: () => false }),
+      isReadonlyRoot: () => false,
+      now: () => clock,
+      authMode: () => "off",
+    });
+    await get(app, `wiki=${WIKI}&key=CASE-8`);
+    await __mentionPrsSettledForTest(WIKI);
+    clock += MENTION_UNANSWERED_RETRY_MS - 1;
+    await get(app, `wiki=${WIKI}&key=CASE-8`);
+    await __mentionPrsSettledForTest(WIKI);
+    expect(n).toBe(1);
+    clock += 1;
+    await get(app, `wiki=${WIKI}&key=CASE-8`);
+    await __mentionPrsSettledForTest(WIKI);
+    expect(n).toBe(2);
+  });
+
   test("a repo whose last query failed is not asked again within the hour", async () => {
     let n = 0;
     const app = new Hono();
@@ -143,6 +217,46 @@ describe("GET /api/wiki/mentions", () => {
     await __mentionPrsSettledForTest(WIKI);
     expect(n).toBe(2);
     expect(body.prs.every((p) => p.state === "unknown" && p.stale)).toBe(true);
+  });
+
+  test("a failed repo stays skipped for the hour, past the unanswered retry window", async () => {
+    let n = 0;
+    let clock = Date.parse("2026-11-25T10:00:00Z");
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: WIKI, root } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({ runGh: async () => (n++, { exitCode: 4, stdout: "", stderr: "gh auth login" }), disabled: () => false }),
+      isReadonlyRoot: () => false,
+      now: () => clock,
+      authMode: () => "off",
+    });
+    await get(app, `wiki=${WIKI}&key=CASE-8`);
+    await __mentionPrsSettledForTest(WIKI);
+    clock += MENTION_UNANSWERED_RETRY_MS + 1;
+    await get(app, `wiki=${WIKI}&key=CASE-8`);
+    await __mentionPrsSettledForTest(WIKI);
+    expect(n).toBe(1);
+  });
+
+  test("the follow-up skips a repo the flight before it found failing", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const calls: string[][] = [];
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: WIKI, root } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({ runGh: async (args) => (calls.push(args), await gate, { exitCode: 4, stdout: "", stderr: "gh auth login" }), disabled: () => false }),
+      isReadonlyRoot: () => false,
+      now: Date.now,
+      authMode: () => "off",
+    });
+    await get(app, `wiki=${WIKI}&key=CASE-7`); // acme-api#12 and acme-web#40, held
+    await get(app, `wiki=${WIKI}&key=CASE-8`); // acme-api#13 waits
+    release();
+    await __mentionPrsSettledForTest(WIKI);
+    expect(calls.length).toBe(2); // acme-api failed, so #13 is not due
   });
 
   test("a read-only root and a disabled check start no gh", async () => {
