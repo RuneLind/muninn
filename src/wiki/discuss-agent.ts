@@ -11,6 +11,7 @@
  */
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
+import { Lexer, Tokenizer, getDefaults } from "marked";
 import { findRepo, type GitRun, originBasename } from "./decision-triage/git.ts";
 import type { ContextPack } from "./discuss-pack.ts";
 import { clampLine, passageWhere } from "./discuss-prompt.ts";
@@ -84,35 +85,94 @@ export type DiscussMode = "explore" | "edit";
 export const DISCUSS_EDIT_SECTION_MARKER = "<!-- discuss:edit -->";
 
 /**
- * The rules a turn gets for its mode. Each section whose heading has a
- * {@link DISCUSS_EDIT_SECTION_MARKER} line under it (from that heading down
- * to the next heading of the same or a higher level, fenced code skipped, the
- * fences read as {@link fencedBlocks} reads them) is sent only in Edit mode;
- * no marker line is ever sent. A marker above every heading, or under the
- * document's only H1 (whose section would be the whole file), marks nothing:
- * `warn` hears of the second. A file with no marker is sent whole in both modes.
+ * marked's block tokenizer, recording where each top-level heading and marker
+ * starts. At the top level the lexer hands a tokenizer the input from the
+ * current block on, so `src.length` gives the block's offset exactly; summing
+ * the tokens' raws would not (a link definition leaves no token, and indented
+ * code after a paragraph is merged into it with an added newline). Block quotes
+ * and lists are the only block tokenizers that lex nested blocks; what they
+ * hold is not top level.
+ */
+class RulesBlockTokenizer extends Tokenizer {
+  readonly found: { rest: number; depth: number | null }[] = [];
+  private nested = 0;
+  private top(src: string, depth: number | null): void {
+    if (this.nested === 0) this.found.push({ rest: src.length, depth });
+  }
+  override heading(src: string) {
+    const t = super.heading(src);
+    if (t) this.top(src, t.depth);
+    return t;
+  }
+  override lheading(src: string) {
+    const t = super.lheading(src);
+    if (t) this.top(src, t.depth);
+    return t;
+  }
+  override html(src: string) {
+    const t = super.html(src);
+    if (t && t.raw.trim() === DISCUSS_EDIT_SECTION_MARKER) this.top(src, null);
+    return t;
+  }
+  override blockquote(src: string) {
+    this.nested++;
+    try {
+      return super.blockquote(src);
+    } finally {
+      this.nested--;
+    }
+  }
+  override list(src: string) {
+    this.nested++;
+    try {
+      return super.list(src);
+    } finally {
+      this.nested--;
+    }
+  }
+}
+
+/**
+ * The rules a turn gets for its mode. The file's block structure is CommonMark's,
+ * read by marked's lexer: its top-level headings (ATX and Setext) and its
+ * top-level HTML blocks; fenced code (backticks or tildes, any info string, an
+ * unclosed fence running to the end) and indented code are opaque.
+ *
+ * A marker is a top-level HTML block that is exactly
+ * {@link DISCUSS_EDIT_SECTION_MARKER}; one inside code, a list or a block quote
+ * is not a marker and is sent as written. A marker belongs to the nearest
+ * heading above it; that heading's section runs from the heading through the
+ * line before the next heading of the same or a higher level, and goes only to
+ * Edit turns. A section that would cover every heading of the file (its
+ * heading is the first and nothing after it is of the same or a higher level)
+ * is the whole rules file, whatever its level: it marks nothing, the file is
+ * sent whole and `warn` hears of it once. A marker above every heading marks
+ * nothing. No marker line is ever sent; a file with no marker is sent unchanged
+ * in both modes.
  */
 export function rulesForMode(rules: string, mode: DiscussMode, warn?: (msg: string) => void): string {
-  const lines = rules.replace(/\r\n?/g, "\n").split("\n");
-  const fenced = new Set<number>();
-  for (const { from, to } of fencedBlockSpans(rules)) for (let i = from; i <= to; i++) fenced.add(i);
-  const markers = lines.flatMap((l, i) => (!fenced.has(i) && l.trim() === DISCUSS_EDIT_SECTION_MARKER ? [i] : []));
+  const text = rules.replace(/\r\n?/g, "\n");
+  const lines = text.split("\n");
+  const tokenizer = new RulesBlockTokenizer();
+  new Lexer({ ...getDefaults(), tokenizer }).lex(text);
+  const lineAt = (rest: number) => text.slice(0, text.length - rest).split("\n").length - 1;
+  const headings = tokenizer.found.flatMap(({ rest, depth }) => (depth === null ? [] : [{ line: lineAt(rest), depth }]));
+  const markers = tokenizer.found.flatMap(({ rest, depth }) => (depth === null ? [lineAt(rest)] : []));
   if (markers.length === 0) return rules;
-  const level = (i: number) => (fenced.has(i) ? 0 : (/^(#{1,6})\s/.exec(lines[i]!)?.[1]!.length ?? 0));
-  const h1s = lines.filter((_, i) => level(i) === 1).length;
   const drop = new Set(markers);
+  let warned = false;
   for (const markerAt of markers) {
-    let start = markerAt;
-    while (start > 0 && !level(start)) start--;
-    const lv = level(start);
-    if (!lv) continue;
-    if (lv === 1 && h1s === 1) {
-      warn?.(`${DISCUSS_EDIT_SECTION_MARKER} sits under the rules file's only H1, so it would mark the whole file: ignored`);
+    const h = headings.findLastIndex((x) => x.line < markerAt);
+    if (h < 0) continue;
+    const { line: start, depth } = headings[h]!;
+    const next = headings.findIndex((x, i) => i > h && x.depth <= depth);
+    if (h === 0 && next < 0) {
+      if (!warned) warn?.(`${DISCUSS_EDIT_SECTION_MARKER} sits under the rules file's first heading, whose section is the whole file: ignored`);
+      warned = true;
       continue;
     }
     if (mode === "edit") continue;
-    let end = markerAt + 1;
-    while (end < lines.length && !(level(end) && level(end) <= lv)) end++;
+    const end = next < 0 ? lines.length : headings[next]!.line;
     for (let i = start; i < end; i++) drop.add(i);
   }
   return lines.filter((_, i) => !drop.has(i)).join("\n").replace(/\n{3,}/g, "\n\n").trim();

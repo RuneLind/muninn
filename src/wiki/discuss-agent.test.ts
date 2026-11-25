@@ -238,6 +238,31 @@ describe("Discuss v2: modes, the stored answer, the thread name and the body", (
     expect(rulesForMode(plain, "explore")).toBe(plain);
     expect(rulesForMode(plain, "edit")).toBe(plain);
   });
+  // Each probe: [name, rules, Explore, Edit, warnings per call].
+  const PROBES: [string, string, string, string, number][] = [
+    ["a whole-file section under a top H2", "## Rules\n<!-- discuss:edit -->\n### a\nx\n### b\ny", "## Rules\n### a\nx\n### b\ny", "## Rules\n### a\nx\n### b\ny", 1],
+    ["two markers under a whole-file heading warn once", "## Rules\n<!-- discuss:edit -->\nr\n<!-- discuss:edit -->\ns", "## Rules\nr\ns", "## Rules\nr\ns", 1],
+    ["a whole-file section after intro text","intro\n## Rules\n<!-- discuss:edit -->\nr", "intro\n## Rules\nr", "intro\n## Rules\nr", 1],
+    ["a lone H1 after an earlier H2", "## Intro\ni\n# Title\n<!-- discuss:edit -->\n## A\na", "## Intro\ni", "## Intro\ni\n# Title\n## A\na", 0],
+    ["a lone ATX H1 after a Setext H1", "Top\n===\n# T\n<!-- discuss:edit -->\n## A\na", "Top\n===", "Top\n===\n# T\n## A\na", 0],
+    // CommonMark: `a` and `Edit` are one Setext heading's two lines, so `a` goes with it.
+    ["a Setext H2 that takes the paragraph above it", "# T\n## A\na\nEdit\n----\n<!-- discuss:edit -->\ne\n## B\nb", "# T\n## A\n## B\nb", "# T\n## A\na\nEdit\n----\ne\n## B\nb", 0],
+    ["a Setext H2 after a blank line", "# T\n## A\na\n\nEdit\n----\n<!-- discuss:edit -->\ne\n## B\nb", "# T\n## A\na\n\n## B\nb", "# T\n## A\na\n\nEdit\n----\ne\n## B\nb", 0],
+    ["a tilde fence with an info string hides a heading and a marker", "# T\n## E\n<!-- discuss:edit -->\n~~~md x\n## F\n<!-- discuss:edit -->\n~~~\ne\n## B\nb", "# T\n## B\nb", "# T\n## E\n~~~md x\n## F\n<!-- discuss:edit -->\n~~~\ne\n## B\nb", 0],
+    ["an unclosed fence runs to the end", "# T\n## A\na\n## E\n<!-- discuss:edit -->\n```\n# not a heading\n", "# T\n## A\na", "# T\n## A\na\n## E\n```\n# not a heading", 0],
+    // The lexer emits no token for a link definition and merges an indented line into the paragraph above: lines still count.
+    ["a link definition and an indented continuation above the section", "# T\n[x]: http://e\np\n    q\n## E\n<!-- discuss:edit -->\ne\n## B\nb", "# T\n[x]: http://e\np\n    q\n## B\nb", "# T\n[x]: http://e\np\n    q\n## E\ne\n## B\nb", 0],
+    ["a marker inside a list item or indented as code is not a marker", "# T\n## A\n- x\n  <!-- discuss:edit -->\n\n    <!-- discuss:edit -->\n## B\nb", "# T\n## A\n- x\n  <!-- discuss:edit -->\n\n    <!-- discuss:edit -->\n## B\nb", "# T\n## A\n- x\n  <!-- discuss:edit -->\n\n    <!-- discuss:edit -->\n## B\nb", 0],
+  ];
+  for (const [name, rules, explore, edit, warns] of PROBES) {
+    test(`probe: ${name}`, () => {
+      const warned: string[] = [];
+      expect(rulesForMode(rules, "explore", (m) => warned.push(m))).toBe(explore);
+      expect(warned.length).toBe(warns);
+      expect(rulesForMode(rules, "edit", (m) => warned.push(m))).toBe(edit);
+      expect(warned.length).toBe(2 * warns);
+    });
+  }
   test("the stored answer replaces the block extractProposedEdit reads with the marker line; an answer with none is unchanged", () => {
     const answer = 'Wrong.\n\n```json\n{"edits": [{"old": "a", "new": "b"}]}\n```\n\nRead: x';
     expect(extractProposedEdit(answer)).not.toBeNull();
@@ -256,5 +281,64 @@ describe("Discuss v2: modes, the stored answer, the thread name and the body", (
     expect(parseDiscussBody({ ...base, mode: "write" })).toBeString();
     expect(parseDiscussBody({ ...base, userId: "" })).toBeString();
     expect(parseDiscussBody({ ...base, userId: 7 })).toBeString();
+  });
+});
+
+describe("rulesForMode: heading style × marker position × prefix, against an explicit section list", () => {
+  type Style = "ATX H1" | "ATX H2" | "Setext H1" | "Setext H2";
+  const MARK = "<!-- discuss:edit -->";
+  /** One block of the file: a section's own lines (its heading and body, never the marker), or the intro text (`level` null). */
+  type Section = { name: string; level: number | null; lines: string[] };
+  const heading = (text: string, level: number, setext: boolean): string[] =>
+    setext && level <= 2 ? [text, level === 1 ? "===" : "---"] : [`${"#".repeat(level)} ${text}`];
+  const sectionsOf = (style: Style, shape: "full" | "single", prefix: "none" | "intro" | "earlier"): Section[] => {
+    const lv = style.endsWith("H1") ? 1 : 2;
+    const setext = style.startsWith("Setext");
+    const out: Section[] = [];
+    if (prefix === "intro") out.push({ name: "intro", level: null, lines: ["intro text"] });
+    if (prefix === "earlier") out.push({ name: "earlier", level: lv + 1, lines: [`${"#".repeat(lv + 1)} Earlier`, "earlier body"] });
+    out.push({ name: "top", level: lv, lines: [...heading("Top", lv, setext), "top body"] });
+    out.push({ name: "child", level: lv + 1, lines: [...heading("Child", lv + 1, setext), "child body"] });
+    if (shape === "full") {
+      out.push({ name: "sibling", level: lv, lines: [...heading("Sibling", lv, setext), "sibling body"] });
+      out.push({ name: "grandchild", level: lv + 1, lines: [...heading("Grandchild", lv + 1, setext), "grandchild body"] });
+    }
+    return out;
+  };
+  /** The file: the blocks one blank line apart, the marker right under the marked block's heading (every body is one line). */
+  const fileOf = (secs: Section[], marked: number): string =>
+    secs
+      .map((s, i) => (i === marked ? [...s.lines.slice(0, -1), MARK, s.lines.at(-1)!] : s.lines).join("\n"))
+      .join("\n\n");
+  /** The reference: the marked section runs to the next block of the same or a higher level; when it starts at the
+   *  first heading and runs to the end it is the whole file, which marks nothing and warns once. */
+  const reference = (secs: Section[], marked: number) => {
+    const lv = secs[marked]!.level!;
+    let end = marked + 1;
+    while (end < secs.length && (secs[end]!.level ?? Infinity) > lv) end++;
+    const whole = marked === secs.findIndex((s) => s.level !== null) && end === secs.length;
+    const join = (keep: Section[]) => keep.map((s) => s.lines.join("\n")).join("\n\n");
+    return { explore: join(whole ? secs : secs.filter((_, i) => i < marked || i >= end)), edit: join(secs), warns: whole ? 1 : 0 };
+  };
+  const cases: [string, string, ReturnType<typeof reference>][] = [];
+  for (const style of ["ATX H1", "ATX H2", "Setext H1", "Setext H2"] as const)
+    for (const shape of ["full", "single"] as const)
+      for (const position of ["top", "sibling", "child"] as const)
+        for (const prefix of ["none", "intro", "earlier"] as const) {
+          if (shape === "single" && position === "sibling") continue;
+          const secs = sectionsOf(style, shape, prefix);
+          const marked = secs.findIndex((s) => s.name === position);
+          cases.push([`${style}, ${shape}, marker under ${position}, prefix ${prefix}`, fileOf(secs, marked), reference(secs, marked)]);
+        }
+  test("the table holds every combination, the whole-file one among them", () => {
+    expect(cases.length).toBe(4 * (3 * 3 + 2 * 3));
+    // A single-shape file marked under its top heading, with no earlier heading: one per style and prefix none/intro.
+    expect(cases.filter(([, , r]) => r.warns === 1).length).toBe(4 * 2);
+  });
+  test.each(cases)("%s", (_name, rules, want) => {
+    const warned: string[] = [];
+    expect(rulesForMode(rules, "explore", (m) => warned.push(m))).toBe(want.explore);
+    expect(rulesForMode(rules, "edit", (m) => warned.push(m))).toBe(want.edit);
+    expect(warned.length).toBe(2 * want.warns);
   });
 });
