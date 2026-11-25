@@ -18,6 +18,7 @@ import { parseEditList, type EditListResult } from "./integrate-edits.ts";
 import type { RepoRoots } from "./decision-triage/git.ts";
 import { sameWikiRoot } from "./readonly.ts";
 import { truncateUnits } from "./ask-chat.ts";
+import { STORED_EDIT_MARKER } from "./discuss-bounds.ts";
 
 /** The rules file, at the wiki root beside `.wiki-reader.json` (D3). */
 export const WIKI_AGENT_RULES_FILE = ".wiki-agent.md";
@@ -429,9 +430,8 @@ function proposedEditBlock(answer: string): { edit: ProposedEdit; from: number; 
   return null;
 }
 
-/** The one line a thread's stored assistant message carries in place of the
- *  proposed edit's JSON block: the edit itself is the ledger row's. */
-export const STORED_EDIT_MARKER = "_(Proposed edit: preview and apply it in the page's Discuss tab.)_";
+/** Defined in `discuss-bounds.ts` (dependency-free: the reader bundle matches it). */
+export { STORED_EDIT_MARKER };
 
 /** The answer as a thread's message stores it: the block
  *  {@link extractProposedEdit} reads, replaced by {@link STORED_EDIT_MARKER};

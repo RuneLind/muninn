@@ -305,11 +305,21 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await expect(chat.locator(".thread-group-label")).toHaveText("Wiki");
   await expect(chat.locator(`.thread-item.wiki[data-id="${thread!.id}"]`)).toHaveClass(/active/);
   await expect(chat.locator("#connectorSelector")).toBeHidden();
-  // A chat thread shows the selector: the hiding is the wiki thread's kind.
+  // The inspector shows no personal context on it (D7): its page instead.
+  const insContext = chat.locator("#inspectorContext");
+  await expect(insContext).toContainText("no personal context");
+  await expect(insContext).toContainText(REL);
+  await expect(insContext).not.toContainText("Memories");
+  await expect(chat.locator("#skipExtractionsCheckbox")).toHaveCount(0);
+  // A chat thread shows the selector and the personal sections: the hiding is the wiki thread's kind.
   await chat.locator(".thread-item:not(.wiki)").first().click();
   await expect(chat.locator("#connectorSelector")).toBeVisible();
+  await expect(insContext).toContainText("Memories");
+  await expect(chat.locator("#skipExtractionsCheckbox")).toHaveCount(1);
   await chat.locator(`.thread-item.wiki[data-id="${thread!.id}"]`).click();
   await expect(chat.locator("#connectorSelector")).toBeHidden();
+  await expect(insContext).not.toContainText("Memories");
+  await expect(insContext).toContainText("no personal context");
   await expect(msgs).toContainText(Q2);
   await shot(chat, "4-chat-popped-out-wiki-thread");
 
@@ -348,6 +358,9 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await expect(closedGroup).toContainText(Q4);
   await expect(page.locator("[data-earlier-oneshot]")).toContainText(OLD_Q);
   await expect(page.locator("[data-earlier-oneshot]")).toContainText("It was, in October.");
+  // Turn 3 proposed an edit: the closed thread says so, without pointing to an Apply it has not got.
+  await expect(closedGroup).toContainText("This answer proposed an edit; an earlier discussion cannot apply it.");
+  await expect(closedGroup).not.toContainText("preview and apply");
   await shot(page, "3-earlier-discussions-open");
   // The closed thread is gone from /chat's list.
   const list = (await (await fetch(`${BASE}/chat/threads/${USER}/${BOT}`)).json()) as { threads: { id: string }[] };
@@ -364,6 +377,8 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await expect(reopened.locator("#chatHeader .chat-title")).toContainText("(closed)");
   await expect(reopened.locator("#chatInput")).toBeDisabled();
   await expect(reopened.locator("#connectorSelector")).toBeHidden();
+  await expect(reopened.locator("#inspectorContext")).toContainText("no personal context");
+  await expect(reopened.locator("#inspectorContext")).not.toContainText("Memories");
   await expect(reopened.locator(`.thread-item[data-id="${thread!.id}"]`)).toHaveCount(0);
   await shot(reopened, "6-chat-closed-wiki-thread-read-only");
   expect(patches).toEqual([]);

@@ -10,7 +10,9 @@ import {
   latestNoteForHandoff,
   devRunEventKindClass,
   devRunEventIcon,
+  inspectorPanelScript,
 } from "./inspector-panel.ts";
+import { threadKindScript } from "./thread-manager.ts";
 
 // ── aggregateToolCalls ─────────────────────────────────────────────────
 
@@ -463,5 +465,113 @@ describe("devRunEventIcon", () => {
     expect(devRunEventIcon("milestone")).toBe("✓");
     expect(devRunEventIcon("discovery")).toBe("🔍");
     expect(devRunEventIcon("nonsense")).toBe("🔍");
+  });
+});
+
+// ── The Context section on a wiki page's Discuss thread (Discuss v2, D7) ──
+//
+// Harness for the INJECTED script (the connector-selector.test.ts precedent):
+// the real inspectorPanelScript() + threadKindScript() source over stubbed
+// IIFE state and DOM, driven through updateInspector() as a thread switch
+// does. A wiki thread's turn never sees memories, goals or tasks and runs no
+// extractor, so the inspector must neither fetch nor show them there, and the
+// personal sections come back on a chat thread.
+
+interface InspectorHarness {
+  fetched: string[];
+  contextHtml: () => string;
+  show: (threadId: string) => Promise<void>;
+}
+
+function inspectorHarness(threads: unknown[]): InspectorHarness {
+  const fetched: string[] = [];
+  const contextEl = { innerHTML: "" };
+  const contentEl = { innerHTML: "" };
+  const stub = () => ({ innerHTML: "", style: {}, checked: false, addEventListener() {}, querySelectorAll: () => [] });
+  const always = new Set(["inspectorTabs", "inspectorDetailsTab", "inspectorAgents"]);
+  const ctx = {
+    threads,
+    contextEl,
+    contentEl,
+    document: {
+      // An element exists when the markup the script wrote names it.
+      getElementById: (id: string) =>
+        always.has(id) || contextEl.innerHTML.includes(`id="${id}"`) || contentEl.innerHTML.includes(`id="${id}"`) ? stub() : null,
+    },
+    fetch: async (url: string) => {
+      fetched.push(url);
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+    pure: { aggregateToolCalls, fmtToolTime, fmtNum, fmtDuration, computeContextUsage, computeLastResponseRows, mergeDevRunEventsById, latestNoteForHandoff, devRunEventKindClass, devRunEventIcon },
+  };
+  const prelude =
+    "var document = ctx.document; var authedFetch = ctx.fetch; var threads = ctx.threads;" +
+    "var aggregateToolCalls = ctx.pure.aggregateToolCalls; var fmtToolTime = ctx.pure.fmtToolTime; var fmtNum = ctx.pure.fmtNum;" +
+    "var fmtDuration = ctx.pure.fmtDuration; var computeContextUsage = ctx.pure.computeContextUsage;" +
+    "var computeLastResponseRows = ctx.pure.computeLastResponseRows; var mergeDevRunEventsById = ctx.pure.mergeDevRunEventsById;" +
+    "var latestNoteForHandoff = ctx.pure.latestNoteForHandoff; var devRunEventKindClass = ctx.pure.devRunEventKindClass; var devRunEventIcon = ctx.pure.devRunEventIcon;" +
+    "var selectedUserId = 'kari'; var selectedBot = 'ivar'; var selectedUsername = 'Kari'; var activeThreadId = null;" +
+    "var activeConvId = null; var conversations = {}; var lastResponseMeta = {}; var connectors = []; var bots = [];" +
+    "var connectorDropdown = null; var inspectorContextKey = null; var devRun = null; var devRunEvents = {};" +
+    "var inspectorTab = 'details'; var inspectorUserPickedTab = false; var inspectorAgentsAutoFocused = false; var inspectorAgentsHasNew = false;" +
+    "var inspectorContent = ctx.contentEl; var inspectorContext = ctx.contextEl; var inspectorToolUsage = null; var inspectorMcpStatus = null;" +
+    "var mcpStatusByBot = {}; var mcpStatusFetchedAt = {}; var mcpStatusRefreshing = false; var mcpExpandState = {};" +
+    "function escapeHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;'); }" +
+    "function escapeAttr(s){ return escapeHtml(s); } function avatarStyle(){ return ''; }" +
+    "function getSkipExtractions(){ return false; } function setSkipExtractions(){}";
+  const made = new Function(
+    "ctx",
+    prelude + threadKindScript() + inspectorPanelScript() +
+      "return { show: function(id){ activeThreadId = id; updateInspector(); } };",
+  )(ctx) as { show: (id: string) => void };
+  return {
+    fetched,
+    contextHtml: () => contextEl.innerHTML,
+    show: async (id: string) => {
+      made.show(id);
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    },
+  };
+}
+
+const chatThread = { id: "t-chat", name: "main", kind: "chat" };
+const wikiThread = { id: "t-wiki", name: "wiki: harbour", kind: "wiki", wiki: "mimir", relPath: "notes/harbour.md" };
+const closedWikiThread = { id: "t-closed", name: "wiki: harbour", kind: "wiki", wiki: "mimir", relPath: "notes/harbour.md", closedAt: 5 };
+const personal = (urls: string[]) => urls.filter((u) => /^\/api\/(memories|goals|scheduled-tasks)\//.test(u));
+
+describe("inspector Context on a wiki page's Discuss thread", () => {
+  for (const [label, t] of [["an open", wikiThread], ["a closed", closedWikiThread]] as const) {
+    test(`${label} wiki thread fetches and shows no personal context, and names its page`, async () => {
+      const h = inspectorHarness([chatThread, t]);
+      await h.show(t.id);
+      expect(personal(h.fetched)).toEqual([]);
+      const html = h.contextHtml();
+      expect(html).not.toContain("Memories");
+      expect(html).not.toContain("Goals");
+      expect(html).not.toContain("Tasks");
+      expect(html).not.toContain("skipExtractionsCheckbox");
+      expect(html).not.toContain("Skip extractions");
+      expect(html).toContain("no personal context");
+      expect(html).toContain("notes/harbour.md");
+    });
+  }
+
+  test("switching chat → wiki → chat: the personal sections leave and come back", async () => {
+    const h = inspectorHarness([chatThread, wikiThread]);
+    await h.show(chatThread.id);
+    expect(personal(h.fetched)).toHaveLength(3);
+    expect(h.contextHtml()).toContain("skipExtractionsCheckbox");
+
+    await h.show(wikiThread.id);
+    expect(h.contextHtml()).not.toContain("Memories");
+    expect(h.contextHtml()).not.toContain("skipExtractionsCheckbox");
+    expect(personal(h.fetched)).toHaveLength(3);
+
+    await h.show(chatThread.id);
+    expect(h.contextHtml()).toContain("Memories");
+    expect(h.contextHtml()).toContain("skipExtractionsCheckbox");
+    expect(personal(h.fetched).filter((u) => u.startsWith("/api/memories/"))).toHaveLength(2);
+    expect(personal(h.fetched).filter((u) => u.startsWith("/api/goals/"))).toHaveLength(2);
   });
 });

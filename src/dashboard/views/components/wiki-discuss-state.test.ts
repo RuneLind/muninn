@@ -25,6 +25,7 @@ import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
+import { STORED_EDIT_MARKER } from "../../../wiki/discuss-agent.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
 
@@ -1171,6 +1172,27 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
     expect(all).toContain("Earlier discussions (1)");
     expect(all).not.toContain("Showing the");
     expect(all).not.toContain("not shown");
+  });
+
+  test("Earlier discussions: a turn that proposed an edit says so without sending the reader to an Apply it has not got", () => {
+    const answer = `The page says six.\n\n${STORED_EDIT_MARKER}\n\nRead: notes/a.md`;
+    const html = discussState.discussEarlierHtml({
+      closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r1", seq: 1, answer })) }],
+      oneShot: [stored({ id: "o1", seq: 1, discussionId: "d-old", answer })],
+    });
+    expect(html).not.toContain("preview and apply");
+    expect(html).not.toContain("Discuss tab");
+    expect(html.match(/This answer proposed an edit; an earlier discussion cannot apply it\./g)).toHaveLength(2);
+    // The rest of the answer stays.
+    expect(html).toContain("The page says six.");
+    expect(html).toContain("Read: notes/a.md");
+    // Matched exactly: a sentence that only resembles the marker is left alone.
+    const near = discussState.discussEarlierHtml({
+      closed: [{ id: "c2", name: "two", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r2", seq: 1, answer: "Proposed edit: preview and apply it in the page's Discuss tab." })) }],
+      oneShot: [],
+    });
+    expect(near).toContain("Proposed edit: preview and apply it in the page");
+    expect(near).not.toContain("earlier discussion cannot apply");
   });
 
   test("the user picker lists the users the route named, escaped; with none it says what to do", () => {

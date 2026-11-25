@@ -12,7 +12,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { HANDOFF_CONTEXT_MAX } from "../../../wiki/discuss-bounds.ts";
+import { HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { DISCUSS_TEXT_HIDDEN, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
@@ -343,11 +343,16 @@ function shortDate(ms: number | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** What «Earlier discussions» shows in place of {@link STORED_EDIT_MARKER}:
+ *  a closed thread or an old one-shot turn has no edit card, so no Apply. */
+export const EARLIER_EDIT_NOTE = "_(This answer proposed an edit; an earlier discussion cannot apply it.)_";
+
 function earlierExchange(q: string, a: string): string {
+  const answer = a.split(STORED_EDIT_MARKER).join(EARLIER_EDIT_NOTE);
   return (
     `<div class="wiki-discuss-earlier-turn">` +
     `<div class="wiki-discuss-q">${esc(q)}</div>` +
-    (a ? `<div class="wiki-discuss-answer">${renderStreamingBody(a)}</div>` : "") +
+    (answer ? `<div class="wiki-discuss-answer">${renderStreamingBody(answer)}</div>` : "") +
     `</div>`
   );
 }
