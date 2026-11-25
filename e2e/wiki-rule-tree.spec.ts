@@ -434,6 +434,9 @@ test.describe("Wiki reader: RuleTree", () => {
       const w = window.getSelection()!;
       w.removeAllRanges();
       w.addRange(r);
+      // On screen, as a reader's selection is: the bar hides while its selection is scrolled away.
+      const sw = document.getElementById("articleWrap")!;
+      sw.scrollTop += window.getSelection()!.getRangeAt(0).getBoundingClientRect().top - sw.getBoundingClientRect().top - 40;
       document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     });
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();

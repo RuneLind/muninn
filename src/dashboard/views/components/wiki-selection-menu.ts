@@ -774,9 +774,10 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   // scrolls or resizes. The menu closes on a scroll, as the browser's own does.
   document.addEventListener(
     "scroll",
-    (e) => {
+    () => {
+      // (The menu itself never scrolls: it has no overflow.)
       const m = document.getElementById(SEL_MENU_ID);
-      if (m && m.style.display !== "none" && !m.contains(e.target as Node)) return hideSelectionMenu();
+      if (m && m.style.display !== "none") return hideSelectionMenu();
       queueReposition();
     },
     true,

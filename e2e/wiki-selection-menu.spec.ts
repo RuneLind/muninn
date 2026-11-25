@@ -771,6 +771,35 @@ test("the bar hides while its selection is scrolled out of the article pane and 
   await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
   await expect(bar(page)).toBeVisible();
 
+  // A selection that fills the pane, its last line at the viewport's foot: the
+  // bar has no room under it, and above it may not climb over the breadcrumb.
+  await page.evaluate((text) => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    let start: Text | null = null;
+    let end: Text | null = null;
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      if (t.data.includes(text)) start = t;
+      if (!start || !t.data.trim()) continue;
+      // An .mdx page's bare paragraphs are text runs in one block: measured per text node.
+      const tr = document.createRange();
+      tr.selectNodeContents(t);
+      if (tr.getBoundingClientRect().bottom < innerHeight - 8) end = t;
+    }
+    const r = document.createRange();
+    r.setStart(start!, start!.data.indexOf(text));
+    r.setEnd(end!, end!.data.length);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(r);
+    document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  }, LONG_TARGET);
+  await expect(bar(page)).toBeVisible();
+  const tall = (await bar(page).boundingBox())!;
+  expect(tall.y).toBeGreaterThanOrEqual(pane.y);
+  await dragSelect(page, LONG_TARGET);
+  // The release shows the bar on a timer: a right-click before it lands would be closed by it.
+  await expect(bar(page)).toBeVisible();
+
   // The right-click menu closes on a scroll, as the browser's own does.
   await page.mouse.click((at.x0 + at.x1) / 2, at.y0, { button: "right" });
   await expect(menu(page)).toBeVisible();

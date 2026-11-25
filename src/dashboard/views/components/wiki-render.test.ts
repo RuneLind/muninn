@@ -256,7 +256,7 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // PR 5 fix round 1 batch 3 (the classic Explain streamed into an inline card where the thread cannot
 // take the turn, the mentions answers' freshness window): 964,800 (328,019 gzipped), so the pin moves to 964,900.
 // PR 5 fix round 1 batch 4 (a card put back after a render of its page, the keyboard's menu and its
-// arrows, the bar hidden off-screen and the menu closed on a scroll): 967,509 (328,943 gzipped), so the
+// arrows, the bar hidden off-screen and the menu closed on a scroll): 967,485 (328,936 gzipped), so the
 // pin moves to 967,600.
 const WIKI_CLIENT_MAX_BYTES = 967_600;
 

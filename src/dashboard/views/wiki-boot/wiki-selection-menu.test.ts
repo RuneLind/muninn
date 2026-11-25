@@ -753,10 +753,13 @@ test("a render of the same page while an inline Explain streams: the same card i
   try {
     const card = await explainNight("turn-20", 20);
     const key = card.getAttribute("data-sel-turn");
-    // An in-place reload: the article's markup replaced, the card taken out
-    // with it; a frame lands while it is out.
-    renderPage();
+    // An Ask answer takes the pane (no page render): the card is out, and a
+    // frame lands meanwhile, which no repaint of a card on the page can reach.
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-ask-view">An answer.</div>`;
     push!("delta", { text: " DURING" });
+    await settle();
+    // The page renders again (an in-place reload).
+    renderPage();
     await settle();
     // The same element (a mismatch is compared by identity, not printed).
     expect(document.querySelector(`#articleWrap .wiki-sel-card[data-sel-turn="${key}"]`) === card).toBe(true);

@@ -679,6 +679,8 @@ test.describe("Wiki reader: lenses", () => {
       page.evaluate((sel) => {
         const r = document.createRange();
         r.selectNodeContents(document.querySelector(sel)!);
+        const wrap = document.getElementById("articleWrap")!;
+        wrap.scrollTop += r.getBoundingClientRect().top - wrap.getBoundingClientRect().top - 40;
         const w = window.getSelection()!;
         w.removeAllRanges();
         w.addRange(r);
@@ -694,6 +696,9 @@ test.describe("Wiki reader: lenses", () => {
       const r = document.createRange();
       r.setStart(first, first.textContent!.indexOf("Se "));
       r.setEnd(s6.nextSibling!, 1);
+      // On screen, as a reader's selection is: the bar hides while its selection is scrolled away.
+      const wrap = document.getElementById("articleWrap")!;
+      wrap.scrollTop += r.getBoundingClientRect().top - wrap.getBoundingClientRect().top - 40;
       const w = window.getSelection()!;
       w.removeAllRanges();
       w.addRange(r);
