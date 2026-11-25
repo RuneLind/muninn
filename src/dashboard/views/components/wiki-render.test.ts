@@ -239,7 +239,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // picker, «Earlier discussions»): 938,812 (318,825 gzipped), so the pin moves to 939,000.
 // PR 4 fix round 1 batch 1 (the thread read's generation guard, the «Earlier discussions»
 // left-out hints): 939,350 (318,989 gzipped), so the pin moves to 939,500.
-const WIKI_CLIENT_MAX_BYTES = 939_500;
+// PR 4 fix round 1 batch 2 (the wiki's bot kept from a refusal, a failed Start over or Delete kept
+// apart from the read's error): 939,536 (319,026 gzipped), so the pin moves to 939,600.
+const WIKI_CLIENT_MAX_BYTES = 939_600;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

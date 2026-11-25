@@ -365,6 +365,7 @@ function schedulePaint(): void {
 
 async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): Promise<void> {
   const turn = newTurn(`t${++turnSeq}`, question, passage);
+  noteActionError(d, null);
   if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
   followSend = true;
@@ -676,12 +677,19 @@ function keepUser(d: DiscussionView, userId: string): void {
   if (bot) lsSet(userKey(bot), userId);
 }
 
+/** The route named the wiki's bot (a thread read or a refusal): kept for the
+ *  wiki, so a later session sends the user kept for that bot. */
+function learnBot(d: DiscussionView, bot: string): void {
+  d.bot = bot;
+  lsSet(botKey(d.wiki), bot);
+}
+
 /** A `no-user`/`unknown-user` refusal: drop a kept user the route no longer
  *  lists, and offer the users it named. */
 function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null): void {
   const reason = data?.reason;
   if (reason !== "no-user" && reason !== "unknown-user") return;
-  if (typeof data?.bot === "string") d.bot = data.bot;
+  if (typeof data?.bot === "string") learnBot(d, data.bot);
   if (reason === "unknown-user") {
     const bot = d.bot ?? lsGet(botKey(d.wiki));
     if (bot) lsSet(userKey(bot), null);
@@ -738,8 +746,8 @@ async function loadThread(d: DiscussionView): Promise<void> {
   }
   // The wiki answers on another bot than last time: that bot's kept user, if any.
   const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
+  if (bot) learnBot(d, bot);
   if (bot && bot !== cachedBot) {
-    lsSet(botKey(d.wiki), bot);
     const forBot = lsGet(userKey(bot));
     if (forBot && forBot !== r.body?.userId) {
       const again = await getThread(d, forBot);
@@ -788,6 +796,12 @@ function reloadThread(d: DiscussionView): void {
   void loadThread(d);
 }
 
+/** «Start over» or a Delete failed: shown until the reader's next action
+ *  (a thread read after it leaves it, unlike a read failure). */
+function noteActionError(d: DiscussionView, message: string | null): void {
+  d.actionError = message;
+}
+
 /** The bar (mode, «Pop out ↗», «Start over»), the user picker and «Earlier
  *  discussions»: each drawn only when its markup changed, so an open
  *  `<details>` or a focused select survives the stream's repaints. */
@@ -807,7 +821,9 @@ function paintBar(body: HTMLElement, d: DiscussionView | null, live: boolean): v
   }
   const userEl = body.querySelector<HTMLElement>(".wiki-discuss-user");
   if (userEl) {
-    const html = d?.userPick ? discussUserPickHtml(d.userPick) : d?.loadError ? `<div class="wiki-discuss-hint">${escHtml(d.loadError)}</div>` : "";
+    const html =
+      (d?.actionError ? `<div class="wiki-discuss-hint">${escHtml(d.actionError)}</div>` : "") +
+      (d?.userPick ? discussUserPickHtml(d.userPick) : d?.loadError ? `<div class="wiki-discuss-hint">${escHtml(d.loadError)}</div>` : "");
     if (userEl.dataset.drawn !== html) {
       userEl.innerHTML = html;
       userEl.dataset.drawn = html;
@@ -840,6 +856,7 @@ async function startOver(): Promise<void> {
   const d = here();
   if (!d?.discussionId || discussionLive(d) || discussSendBlocked()) return;
   const threadId = d.discussionId;
+  noteActionError(d, null);
   let ok = false;
   let error = "";
   try {
@@ -851,7 +868,7 @@ async function startOver(): Promise<void> {
   }
   // A thread already closed elsewhere is just as gone from this page.
   if (!ok && !/no live wiki thread/.test(error)) {
-    d.loadError = `Start over failed: ${error}.`;
+    noteActionError(d, `Start over failed: ${error}.`);
     paint();
     return;
   }
@@ -867,11 +884,12 @@ async function deleteEarlier(threadId: string): Promise<void> {
   const d = here();
   if (!d || !threadId || discussSendBlocked()) return;
   if (typeof confirm === "function" && !confirm("Delete this earlier discussion and its turns?")) return;
+  noteActionError(d, null);
   try {
     const res = await fetch(`/chat/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
-    if (!res.ok) d.loadError = `The discussion could not be deleted (${res.status}).`;
+    if (!res.ok) noteActionError(d, `The discussion could not be deleted (${res.status}).`);
   } catch {
-    d.loadError = "The discussion could not be deleted: the server did not answer.";
+    noteActionError(d, "The discussion could not be deleted: the server did not answer.");
   }
   reloadThread(d);
 }
@@ -885,6 +903,7 @@ function pickUser(): void {
   if (bot) lsSet(userKey(bot), sel.value);
   d.userId = sel.value;
   d.userPick = null;
+  noteActionError(d, null);
   reloadThread(d);
   paint();
 }

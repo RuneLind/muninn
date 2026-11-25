@@ -1127,6 +1127,9 @@ const CHAT_SCRIPT = `
   var pendingConnector = null;
   async function sendMessage() {
     if (!activeConvId || !activeThreadId || !chatInput.value.trim()) return;
+    // A closed wiki thread is read-only (selectThread disables the box): a
+    // programmatic send leaves the text where it is.
+    if (isClosedWikiThread(activeThreadId)) return;
 
     // Dismiss research action buttons when sending any message
     var researchActions = chatMessages.querySelector('.research-actions');

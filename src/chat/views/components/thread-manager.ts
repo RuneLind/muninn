@@ -11,10 +11,41 @@
 //   Helpers: escapeHtml, escapeAttr, timeAgo
 //   Funcs:   loadThreadMessages, updateInspector, syncConnectorDropdown,
 //            clearChat, scrollToBottom, setChatStatusText
+//
+// Defines for the other scripts (threadKindScript): findThread, isWikiThread,
+// isClosedWikiThread.
+
+/**
+ * What /chat knows of a thread's kind, over the IIFE's `threads`: a wiki
+ * page's Discuss thread (`kind = 'wiki'`, Discuss v2) runs on the Discuss
+ * engine only, so the connector selector, the stamp and «Lag Jira-sak» stay out
+ * of it, and a closed one is read-only. Its own export so a harness can load it
+ * without the rest of the thread manager.
+ */
+export function threadKindScript(): string {
+  return `
+  function findThread(threadId) {
+    if (!threadId) return null;
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === threadId) return threads[i];
+    }
+    return null;
+  }
+  function isWikiThread(threadId) {
+    var t = findThread(threadId);
+    return !!t && t.kind === 'wiki';
+  }
+  function isClosedWikiThread(threadId) {
+    var t = findThread(threadId);
+    return !!t && t.kind === 'wiki' && !!t.closedAt;
+  }
+  `;
+}
 
 /** Returns all thread manager functions as a browser-compatible JS string. */
 export function threadManagerScript(): string {
   return `
+  ${threadKindScript()}
   // ── Thread modal DOM refs ───────────────────────────────────────────────
 
   var threadModal = document.getElementById('threadModalBackdrop');
@@ -126,6 +157,7 @@ export function threadManagerScript(): string {
     } catch {
       threads = [];
     }
+    if (autoSelectThreadId) await lookUpLinkedThread(autoSelectThreadId);
 
     // DB sorts by COALESCE(last_activity, created_at) DESC — most recent
     // activity on top, new threads without messages sort by creation time.
@@ -151,6 +183,20 @@ export function threadManagerScript(): string {
     } else {
       renderThreadList();
     }
+  }
+
+  // A deep link can name a wiki thread the list leaves out (closed by «Start
+  // over»). Looked up by id, it joins \`threads\` so isWikiThread knows it;
+  // renderThreadList never lists a closed one. A chat thread the list leaves
+  // out (\`slack:\`) stays unknown, as before.
+  async function lookUpLinkedThread(threadId) {
+    if (findThread(threadId)) return;
+    try {
+      var res = await authedFetch('/chat/threads/' + encodeURIComponent(threadId));
+      if (!res.ok) return;
+      var data = await res.json();
+      if (data && data.thread && data.thread.id === threadId && data.thread.kind === 'wiki') threads.push(data.thread);
+    } catch {}
   }
 
   function renderThreadList() {
@@ -261,6 +307,8 @@ export function threadManagerScript(): string {
       var hdrBot = bots.find(function(b) { return b.name === selectedBot; });
       headerThreadName = 'peer:' + peerDisplayName(headerThreadName, hdrBot);
     }
+    var closedWiki = isClosedWikiThread(threadId);
+    if (closedWiki) headerThreadName += ' (closed)';
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + headerThreadName;
     document.getElementById('chatDescription').textContent = threadDesc;
@@ -270,9 +318,12 @@ export function threadManagerScript(): string {
     // Highlight in sidebar
     renderThreadList();
 
-    // Enable input
-    chatInput.disabled = false;
-    chatSend.disabled = false;
+    // Enable input; a closed wiki thread is read-only (its page starts a new one)
+    chatInput.disabled = closedWiki;
+    chatSend.disabled = closedWiki;
+    chatInput.placeholder = closedWiki
+      ? "Closed with Start over: the page's Discuss tab starts a new discussion."
+      : 'Type a message...';
 
     // Load messages
     loadThreadMessages(threadId);

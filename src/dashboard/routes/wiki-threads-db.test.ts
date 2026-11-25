@@ -524,3 +524,20 @@ test("the thread read bounds «Earlier discussions»: the 10 newest closed threa
   expect(withTurn).toHaveLength(2);
   expect(new Set(withTurn.map((m) => m.turn!.id)).size).toBe(2);
 });
+
+// ── PR 4 fix round 1 batch 2 ─────────────────────────────────────────────
+
+test("a closed wiki thread the /chat list leaves out is found by id with its kind and closedAt, so a deep link knows what it is", async () => {
+  const app = apps();
+  const id = (await frames(await pane(app, { question: "When does it open?" })))[0]!.data.threadId as string;
+  await app.request("/api/wiki/discuss/thread/close", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: id }) });
+  const list = (await (await app.request("/chat/threads/kari/ivar")).json()) as { threads: { id: string }[] };
+  expect(list.threads.map((t) => t.id)).not.toContain(id);
+  const res = await app.request(`/chat/threads/${id}`);
+  expect(res.status).toBe(200);
+  const { thread } = (await res.json()) as { thread: { id: string; kind: string; closedAt?: number; botName: string } };
+  expect(thread).toMatchObject({ id, kind: "wiki", botName: "ivar" });
+  expect(typeof thread.closedAt).toBe("number");
+  expect((await app.request(`/chat/threads/${crypto.randomUUID()}`)).status).toBe(404);
+  expect((await app.request("/chat/threads/not-a-uuid")).status).toBe(404);
+});

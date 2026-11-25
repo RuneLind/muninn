@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import path from "node:path";
 import { connectorSelectorScript } from "./connector-selector.ts";
+import { threadKindScript, threadManagerScript } from "./thread-manager.ts";
 
 /**
  * Regression harness for the connector STAMP — the chat page's habit of writing
@@ -111,6 +112,7 @@ async function harness(opts: {
     "function getSkipExtractions(){return false;}" +
     "function scrollToBottom(){}" +
     "async function selectBot(_b, t){ activeConvId = 'C1'; activeThreadId = t || null; }" +
+    threadKindScript() +
     connectorSelectorScript() +
     (await deepLinkBlockSource()) +
     "selectedConnectorId = " + JSON.stringify(opts.selectedConnectorId) + ";" +
@@ -264,5 +266,127 @@ describe("a wiki page's Discuss thread in /chat (Discuss v2 PR 4)", () => {
     await chat.send("hello");
     expect(chat.input()).toBe("");
     expect(chat.notices).toEqual([]);
+  });
+});
+
+/**
+ * Fix round 1 batch 2: a wiki thread the thread list leaves out (a closed one,
+ * reached by an old link or a pop-out reloaded after «Start over»). This
+ * harness runs the REAL thread manager too, so `selectBot` → `loadThreads` →
+ * `selectThread` decide what /chat knows about the deep-linked thread.
+ */
+async function pageHarness(opts: {
+  /** What `GET /chat/threads/:userId/:botName` lists. */
+  list: Record<string, unknown>[];
+  /** What a lookup of the deep-linked thread by id answers (null: 404). */
+  byId: Record<string, unknown> | null;
+  sendStatus?: number;
+  sendError?: { error: string; reason: string };
+}) {
+  const fetchCalls: FetchCall[] = [];
+  const notices: string[] = [];
+  const els = new Map<string, Record<string, unknown>>();
+  const mk = (): Record<string, unknown> => {
+    const title = { textContent: "" };
+    return {
+      addEventListener: () => {}, innerHTML: "", value: "", textContent: "", style: {} as Record<string, string>,
+      hidden: false, disabled: false, placeholder: "Type a message...", dataset: {},
+      classList: { add: () => {}, remove: () => {}, toggle: () => {} },
+      appendChild: () => {}, focus: () => {}, setAttribute: () => {}, dispatchEvent: () => {},
+      querySelector: (s: string) => (s === ".chat-title" ? title : null), querySelectorAll: () => [],
+    };
+  };
+  const byIdEl = (id: string) => {
+    if (!els.has(id)) els.set(id, mk());
+    return els.get(id)!;
+  };
+  const chatInput = mk();
+  const chatHeader = mk();
+  const ctx = {
+    document: { getElementById: byIdEl, createElement: () => mk() },
+    window: { location: { search: "?bot=jarvis&thread=T1&user=u1&src=wiki" } },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    chatInput, chatHeader, chatSend: mk(), threadList: mk(),
+    chatMessages: { querySelector: () => null, appendChild: (n: { textContent?: string }) => notices.push(n.textContent ?? "") },
+    connectors: [{ id: "sidebar-conn", name: "Sidebar" }],
+    fetch: async (url: string, init?: { method?: string; body?: string }) => {
+      const method = init?.method || "GET";
+      fetchCalls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
+      if (method === "GET" && url === "/chat/threads/u1/jarvis") return { ok: true, status: 200, json: async () => ({ threads: opts.list }) };
+      if (method === "GET" && url === "/chat/threads/T1") {
+        return opts.byId ? { ok: true, status: 200, json: async () => ({ thread: opts.byId }) } : { ok: false, status: 404, json: async () => ({ error: "Thread not found" }) };
+      }
+      const isSend = method === "POST" && url.indexOf("/messages") > -1;
+      const status = isSend ? (opts.sendStatus ?? 202) : 200;
+      if (isSend && status >= 400) return { ok: false, status, json: async () => opts.sendError ?? { error: "refused", reason: "x" } };
+      return { ok: true, status, json: async () => (url.indexOf("/chat/pending/") > -1 ? { text: "" } : {}) };
+    },
+  };
+  const body =
+    "var document = ctx.document; var window = ctx.window;" +
+    "var localStorage = ctx.localStorage; var authedFetch = ctx.fetch;" +
+    "var threads = []; var connectors = ctx.connectors; var bots = [];" +
+    "var chatInput = ctx.chatInput; var chatMessages = ctx.chatMessages; var chatHeader = ctx.chatHeader;" +
+    "var chatSend = ctx.chatSend; var threadList = ctx.threadList;" +
+    "var selectedBot = 'jarvis'; var selectedUserId = 'u1'; var selectedUsername = 'Kari';" +
+    "var sessionUser = null; var activeThreadId = null; var activeConvId = null;" +
+    "function updateInspector(){} function clearChat(){} function loadThreadMessages(){}" +
+    "function escapeHtml(s){return s;} function escapeAttr(s){return s;} function timeAgo(){return '';}" +
+    "function getBotInfo(){return null;} function getSkipExtractions(){return false;} function scrollToBottom(){}" +
+    "async function selectBot(_b, t){ activeConvId = 'C1'; activeThreadId = null; await loadThreads(t); }" +
+    threadManagerScript() +
+    connectorSelectorScript() +
+    (await deepLinkBlockSource()) +
+    "selectedConnectorId = 'sidebar-conn';" +
+    "return { handleDeepLink: handleDeepLink, sendMessage: sendMessage, isWikiThread: isWikiThread," +
+    " active: function(){ return activeThreadId; } };";
+  const made = new Function("ctx", body)(ctx) as {
+    handleDeepLink: () => Promise<void>;
+    sendMessage: () => Promise<void>;
+    isWikiThread: (id: string) => boolean;
+    active: () => string | null;
+  };
+  return {
+    fetchCalls, notices, made,
+    selector: () => byIdEl("connectorSelector").style as Record<string, string>,
+    title: () => (chatHeader.querySelector as (s: string) => { textContent: string })(".chat-title").textContent,
+    input: chatInput as { value: string; disabled: boolean; placeholder: string },
+    get patches() { return fetchCalls.filter((f) => f.method === "PATCH"); },
+    get sends() { return fetchCalls.filter((f) => f.method === "POST" && f.url.indexOf("/messages") > -1); },
+  };
+}
+
+describe("a wiki thread the thread list leaves out, reached by link (fix round 1 batch 2)", () => {
+  const MAIN = { id: "M1", name: "main", kind: "chat" };
+  const wikiT1 = (closedAt?: number) => ({ id: "T1", name: "wiki: plans/a.mdx", kind: "wiki", botName: "jarvis", userId: "u1", wiki: "mimir", relPath: "plans/a.mdx", ...(closedAt ? { closedAt } : {}) });
+
+  test("one the list omits but a lookup finds open: no selector, no stamp, no Jira control, a header naming it, and a 409 closed gives the text back", async () => {
+    const h = await pageHarness({ list: [MAIN], byId: wikiT1(), sendStatus: 409, sendError: { error: "the discussion was closed with Start over", reason: "closed" } });
+    await h.made.handleDeepLink();
+    expect(h.made.active()).toBe("T1");
+    expect(h.made.isWikiThread("T1")).toBe(true);
+    expect(h.selector().display).toBe("none");
+    expect(h.title()).toContain("wiki: plans/a.mdx");
+    h.input.value = "Is it still open?";
+    await h.made.sendMessage();
+    expect(h.patches).toEqual([]);
+    expect(h.sends).toHaveLength(1);
+    expect(h.input.value).toBe("Is it still open?");
+    expect(h.notices).toEqual(["the discussion was closed with Start over"]);
+  });
+
+  test("a closed one is read-only: the box is disabled, a send does nothing, nothing is stamped", async () => {
+    const h = await pageHarness({ list: [MAIN], byId: wikiT1(5) });
+    await h.made.handleDeepLink();
+    expect(h.made.active()).toBe("T1");
+    expect(h.made.isWikiThread("T1")).toBe(true);
+    expect(h.selector().display).toBe("none");
+    expect(h.title()).toContain("(closed)");
+    expect(h.input.disabled).toBe(true);
+    h.input.value = "typed anyway";
+    await h.made.sendMessage();
+    expect(h.sends).toEqual([]);
+    expect(h.patches).toEqual([]);
+    expect(h.input.value).toBe("typed anyway");
   });
 });

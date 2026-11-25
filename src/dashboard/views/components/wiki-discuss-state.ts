@@ -201,7 +201,11 @@ export interface DiscussionView {
   mode?: "explore" | "edit";
   /** Where the thread read stands for this page. */
   load?: "loading" | "done" | "failed";
+  /** Why the thread read failed; a successful read clears it. */
   loadError?: string | null;
+  /** Why «Start over» or a Delete failed; kept through the read that follows
+   *  it, cleared by the reader's next action. */
+  actionError?: string | null;
   /** The route answered `no-user`/`unknown-user`: the users to pick from. */
   userPick?: { users: { id: string; name: string }[]; message: string } | null;
   /** «Earlier discussions»: the page's closed threads and old one-shot turns. */

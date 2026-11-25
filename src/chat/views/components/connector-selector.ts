@@ -2,7 +2,7 @@
 // via connectorSelectorScript(). Injected INSIDE the CHAT_SCRIPT IIFE so it has
 // access to IIFE-scoped variables (selectedBot, bots, threads, connectors,
 // selectedUserId, activeThreadId, renderThreadList, updateInspector, escapeHtml,
-// getBotInfo, etc.).
+// getBotInfo, isWikiThread from thread-manager.ts, etc.).
 
 /** Returns all connector selector functions as a browser-compatible JS string. */
 export function connectorSelectorScript(): string {
@@ -91,17 +91,11 @@ export function connectorSelectorScript(): string {
   // which the threads table cannot currently express (no connector IS the value).
   var connectorStampSuppressedThreads = {};
 
-  // A wiki page's Discuss thread (\`kind = 'wiki'\`, Discuss v2) always runs on
-  // the wiki's own bot and connector: the server ignores a connector on it and
-  // refuses a stamp, but stampConnectorOnThread below updates the thread's
-  // label before it knows, so the selector is hidden on one and never stamps it.
-  function isWikiThread(threadId) {
-    if (!threadId) return false;
-    for (var i = 0; i < threads.length; i++) {
-      if (threads[i].id === threadId) return threads[i].kind === 'wiki';
-    }
-    return false;
-  }
+  // A wiki page's Discuss thread (\`kind = 'wiki'\`, Discuss v2; isWikiThread
+  // in thread-manager.ts) always runs on the wiki's own bot and connector: the
+  // server ignores a connector on it and refuses a stamp, but
+  // stampConnectorOnThread below updates the thread's label before it knows, so
+  // the selector is hidden on one and never stamps it.
   function suppressConnectorStamp(threadId) {
     if (threadId) connectorStampSuppressedThreads[threadId] = true;
   }

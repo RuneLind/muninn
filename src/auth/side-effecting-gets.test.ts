@@ -76,7 +76,7 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
     "/api/jira/templates", "/api/jira/draft/:id", "/api/jira/drafts",
     "/chat/knowledge-config", "/chat/bots", "/chat/me", "/chat/preferences/:userId/:botName",
     "/chat/bot-preferences/:botName/default-user", "/chat/conversations",
-    "/chat/conversations/:id", "/chat/threads/:userId/:botName",
+    "/chat/conversations/:id", "/chat/threads/:userId/:botName", "/chat/threads/:id",
     "/chat/conversations/:id/messages", "/chat/context-usage/:userId/:botName",
     "/chat/tool-usage/:userId/:botName", "/chat/reports/:botName/:userId/:issueKey",
     "/chat/specs/:botName/:userId/:issueKey", "/chat/dev-run/by-thread/:threadId",

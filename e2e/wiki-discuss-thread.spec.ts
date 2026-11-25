@@ -352,6 +352,22 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   // The closed thread is gone from /chat's list.
   const list = (await (await fetch(`${BASE}/chat/threads/${USER}/${BOT}`)).json()) as { threads: { id: string }[] };
   expect(list.threads.map((t) => t.id)).not.toContain(thread!.id);
+  // The pop-out link opened again after Start over: /chat still knows it is a wiki thread
+  // (looked up by id), shows it read-only, and stamps nothing on it.
+  const reopened = await context.newPage();
+  const patches: string[] = [];
+  reopened.on("request", (r) => {
+    if (r.method() === "PATCH") patches.push(r.url());
+  });
+  await reopened.goto(new URL(href!, BASE).toString());
+  await expect(reopened.locator("#chatMessages")).toContainText(Q4, { timeout: 20_000 });
+  await expect(reopened.locator("#chatHeader .chat-title")).toContainText("(closed)");
+  await expect(reopened.locator("#chatInput")).toBeDisabled();
+  await expect(reopened.locator("#connectorSelector")).toBeHidden();
+  await expect(reopened.locator(`.thread-item[data-id="${thread!.id}"]`)).toHaveCount(0);
+  await shot(reopened, "6-chat-closed-wiki-thread-read-only");
+  expect(patches).toEqual([]);
+  await reopened.close();
   // Delete it: its turns go with it; the one-shot turn stays.
   page.once("dialog", (d) => void d.accept());
   await closedGroup.locator("[data-discuss-delete-thread]").click();

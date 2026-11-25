@@ -1,0 +1,181 @@
+/**
+ * Discuss v2 PR 4, fix round 1 batch 2: what the pane keeps across a reload.
+ *
+ * - A user picked after a `no-user` refusal is remembered with the wiki's bot,
+ *   so the next page (a fresh discussion, as a new session has) reads and
+ *   sends with that user instead of meeting the picker again.
+ * - A failed Delete under «Earlier discussions» stays shown after the thread
+ *   read that follows it, until the reader's next action.
+ *
+ * Own process: it installs happy-dom's globals and wires the tab's document
+ * listeners once, so it is alone in its `bun test` link.
+ */
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { GlobalWindow } from "happy-dom";
+import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
+
+const g = globalThis as unknown as Record<string, unknown>;
+const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
+const saved = new Map<string, PropertyDescriptor | undefined>();
+const realFetch = globalThis.fetch;
+
+let wiki = "jarvis";
+let relPath = "plans/a.mdx";
+let route: (url: string, init?: RequestInit) => Response | Promise<Response> = () => json({}, 404);
+const reads: string[] = [];
+
+beforeAll(() => {
+  const win = new GlobalWindow({ url: "http://localhost:3011/wiki" });
+  for (const [key, desc] of Object.entries(Object.getOwnPropertyDescriptors(win))) {
+    if (IGNORE.has(key)) continue;
+    const cur = Object.getOwnPropertyDescriptor(globalThis, key);
+    if (cur && "value" in desc && cur.value === desc.value) continue;
+    saved.set(key, cur);
+    const next = "value" in desc && desc.value === win ? { ...desc, value: globalThis } : desc;
+    Object.defineProperty(globalThis, key, { ...next, configurable: true });
+  }
+  g.confirm = () => true;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.startsWith("/api/wiki/discuss/thread?")) reads.push(url);
+    return route(url, init);
+  }) as typeof fetch;
+  initDiscussTab({ wiki: () => wiki, relPath: () => relPath, switchTab: () => {} });
+});
+
+afterAll(() => {
+  globalThis.fetch = realFetch;
+  for (const [key, desc] of saved) {
+    if (desc) Object.defineProperty(globalThis, key, desc);
+    else delete g[key];
+  }
+  saved.clear();
+});
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+const flush = () => new Promise((r) => setTimeout(r, 0));
+const settle = async () => {
+  for (let i = 0; i < 10; i++) await flush();
+  await new Promise((r) => setTimeout(r, 20));
+};
+
+/** The page renders with the tab, and the reader opens it (the first thread read). */
+async function openTab(): Promise<void> {
+  document.body.innerHTML = `<button data-conntab="${DISCUSS_TAB}" hidden>Discuss</button>${discussTabBodyHtml()}`;
+  setDiscussAgentEnabled(true);
+  (document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`) as HTMLButtonElement).click();
+  await settle();
+}
+
+const emptyThread = (userId: string, bot: string, closed: unknown[] = []) => ({ userId, bot, thread: null, messages: [], closed, closedTotal: closed.length, oneShot: [] });
+
+test("a user picked after a no-user refusal is kept with the wiki's bot: the next page's thread read carries that user", async () => {
+  wiki = "jarvis";
+  relPath = "plans/a.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  route = (url) => {
+    if (!url.startsWith("/api/wiki/discuss/thread?")) return json({}, 404);
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (userId === "u1") return json(emptyThread("u1", "jarvis-bot"));
+    return json({ error: "Pick a user", reason: "no-user", bot: "jarvis-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
+  };
+
+  await openTab();
+  const sel = document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select");
+  expect(sel !== null).toBe(true);
+  sel!.value = "u1";
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("u1");
+  expect(localStorage.getItem("muninn-discuss-bot-jarvis")).toBe("jarvis-bot");
+
+  // Another page of the same wiki: a fresh discussion, as a new session starts with.
+  relPath = "plans/b.mdx";
+  const before = reads.length;
+  await openTab();
+  expect(reads.length).toBe(before + 1);
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("u1");
+  expect(document.querySelector(".wiki-discuss-user-select")).toBe(null);
+  document.body.innerHTML = "";
+});
+
+test("the bot a no-user refusal names is kept at once: a pick whose read then fails still reaches the next page", async () => {
+  wiki = "mimir";
+  relPath = "plans/d.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  route = (url) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (userId === "u1") return json({ error: "boom" }, 500);
+    return json({ error: "Pick a user", reason: "no-user", bot: "mimir-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
+  };
+  await openTab();
+  expect(localStorage.getItem("muninn-discuss-bot-mimir")).toBe("mimir-bot");
+  const sel = document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!;
+  sel.value = "u1";
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  relPath = "plans/e.mdx";
+  await openTab();
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("u1");
+  document.body.innerHTML = "";
+});
+
+test("a stale kept user is still dropped on unknown-user, and the picker returns", async () => {
+  wiki = "jarvis";
+  relPath = "plans/c.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  localStorage.setItem("muninn-discuss-bot-jarvis", "jarvis-bot");
+  localStorage.setItem("muninn-discuss-user-jarvis-bot", "gone");
+  route = (url) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (userId === "gone") return json({ error: "Unknown user", reason: "unknown-user", bot: "jarvis-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
+    return json({ error: "Pick a user", reason: "no-user", bot: "jarvis-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
+  };
+  await openTab();
+  expect(localStorage.getItem("muninn-discuss-user-jarvis-bot")).toBe(null);
+  expect(document.querySelector(".wiki-discuss-user-select") !== null).toBe(true);
+  document.body.innerHTML = "";
+});
+
+test("a failed Delete under «Earlier discussions» is still shown after the read that follows it, and the next action clears it", async () => {
+  wiki = "w2";
+  relPath = "plans/del.mdx";
+  localStorage.clear();
+  const C1 = crypto.randomUUID();
+  const closed = [{ id: C1, name: "wiki: del", createdAt: 1, closedAt: 2, messages: [{ id: "m1", role: "user", content: "Old?", createdAt: 1 }], messageTotal: 1 }];
+  let deleteStatus = 403;
+  let deletes = 0;
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return json(emptyThread("kari", "ivar", deleteStatus === 204 && deletes > 1 ? [] : closed));
+    if (url === `/chat/threads/${C1}` && init?.method === "DELETE") {
+      deletes++;
+      return deleteStatus === 204 ? new Response(null, { status: 204 }) : json({ error: "Not your thread" }, deleteStatus);
+    }
+    return json({}, 404);
+  };
+
+  await openTab();
+  (document.querySelector(`[data-discuss-delete-thread="${C1}"]`) as HTMLButtonElement).click();
+  await settle();
+  expect(deletes).toBe(1);
+  const note = document.querySelector<HTMLElement>(".wiki-discuss-user")!;
+  expect(note.hidden).toBe(false);
+  expect(note.textContent).toContain("could not be deleted (403)");
+  // The thread is still listed: the delete did not happen.
+  expect(document.querySelector(`[data-earlier-thread="${C1}"]`) !== null).toBe(true);
+
+  // The reader tries again and it goes through: the old failure is gone with it.
+  deleteStatus = 204;
+  (document.querySelector(`[data-discuss-delete-thread="${C1}"]`) as HTMLButtonElement).click();
+  await settle();
+  expect(deletes).toBe(2);
+  expect(note.textContent ?? "").not.toContain("could not be deleted");
+  expect(note.hidden).toBe(true);
+  document.body.innerHTML = "";
+});

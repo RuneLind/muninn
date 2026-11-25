@@ -450,6 +450,18 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config, opts: 
     return c.json({ threads });
   });
 
+  // One thread by id: a deep link (`/chat?thread=…`) can name one the list
+  // leaves out (a closed wiki thread), and the client needs its kind.
+  app.get("/threads/:id", async (c) => {
+    const id = c.req.param("id");
+    if (!isValidUuid(id)) return c.json({ error: "Thread not found" }, 404);
+    const owned = await requireOwnedResource(c, "thread", id);
+    if (!owned.ok) return c.json({ error: "Thread not found" }, 404);
+    const thread = await getThreadById(id);
+    if (!thread) return c.json({ error: "Thread not found" }, 404);
+    return c.json({ thread });
+  });
+
   // Update a thread's connector
   app.patch("/threads/:id/connector", async (c) => {
     const id = c.req.param("id");
