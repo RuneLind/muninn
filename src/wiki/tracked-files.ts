@@ -105,7 +105,7 @@ export interface GrepHit {
   line: number;
   /** The line's text, cut at `GIT_LINE_CHARS`. */
   text: string;
-  /** With `fullText`: the line uncut, up to {@link GREP_FULL_LINE_CHARS}. */
+  /** With `fullText`: the line uncut. Only realGit's 4 MB bound on git's whole output limits it (mimir had a 25,804-character line on 2026-11-25). */
   full?: string;
 }
 
@@ -143,8 +143,6 @@ export const GREP_DEFAULT_MAX = 100;
 export const GREP_MAX_RESULTS = 500;
 /** How many matching lines one search counts before it stops: past it, totals read «at least». */
 export const GREP_SCAN_LINES = 5_000;
-/** How much of a line `fullText` keeps: the longest line seen on the live wikis was 797 characters. */
-export const GREP_FULL_LINE_CHARS = 4_000;
 /** Pathspec bytes per `git grep` when a glob expands to a file list. */
 export const GREP_PATHSPEC_CHUNK_BYTES = 64_000;
 
@@ -178,7 +176,7 @@ function parseGrep(stdout: string, fullText: boolean): GrepHit[] {
     const line = Number(raw.slice(a + 1, b));
     if (!Number.isInteger(line)) continue;
     const text = raw.slice(b + 1);
-    hits.push({ relPath: raw.slice(0, a), line, text: cutLine(text), ...(fullText ? { full: text.slice(0, GREP_FULL_LINE_CHARS) } : {}) });
+    hits.push({ relPath: raw.slice(0, a), line, text: cutLine(text), ...(fullText ? { full: text } : {}) });
   }
   return hits;
 }
@@ -298,7 +296,7 @@ export async function grepRootLog(root: string, pattern: string, opts: Omit<Grep
 
 export interface LogHeader {
   line: number;
-  /** The `##` line uncut, up to {@link GREP_FULL_LINE_CHARS}: the caller parses it with the reader's `parseLogEntries`. */
+  /** The `##` line uncut: the caller parses it with the reader's `parseLogEntries`. */
   text: string;
 }
 

@@ -336,12 +336,17 @@ describe("GET /api/wiki/mentions", () => {
     expect(calls.length).toBe(2); // acme-api failed, so #13 is not due
   });
 
-  test("a read-only root and a disabled check start no gh", async () => {
-    for (const [over, opts] of [[{ isReadonlyRoot: () => true }, {}], [{}, { disabled: true }]] as const) {
+  test("a read-only root and a disabled check start no gh: a miss is not-checked with the reason, not stale", async () => {
+    for (const [over, opts, reason] of [[{ isReadonlyRoot: () => true }, {}, "read-only"], [{}, { disabled: true }, "disabled"]] as const) {
       const { app, calls } = appWith(over, opts);
-      const body = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
-      expect(body.prs.every((p) => p.state === "unknown" && p.stale)).toBe(true);
-      await __mentionPrsSettledForTest(WIKI);
+      for (let pass = 0; pass < 2; pass++) {
+        const body = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+        expect(body.prs.map((p) => [p.number, p.state, p.stale, p.reason])).toEqual([
+          [12, "not-checked", false, reason],
+          [40, "not-checked", false, reason],
+        ]);
+        await __mentionPrsSettledForTest(WIKI);
+      }
       expect(calls.length).toBe(0);
     }
   });
@@ -425,6 +430,8 @@ describe("GET /api/wiki/mentions: bounds, totals, the log and long lines", () =>
     await bput("archive/old.md", Array.from({ length: MENTIONS_MAX_LINES + 100 }, (_, i) => `BUSY-1 line ${i}`).join("\n") + "\n");
     await bput("log.md", "# Log\n\n## [2026-10-01] build | BUSY-1 begins\nbody\n\n## [2026-10-02] decide | other\nThen BUSY-1 again, after api #13.\n");
     await bput("plans/long.md", `# Long\n\nLONG-1 ${filler} then api #12 settles it.\n`);
+    // A ref past character 4,000, and one at the end of a line longer than 25,000 (mimir's dashboard.md has one of 25,804).
+    await bput("plans/wide.md", `# Wide\n\nWIDE-1 ${"y".repeat(4_100)} then api #14.\n\nWIDE-1 ${"z".repeat(26_000)} then api #15.\n`);
     await bgit("add", "-A");
     await bgit("commit", "-q", "-m", "busy and long");
     // EXACT-1 changes in exactly MENTIONS_MAX_COMMITS commits, MORE-1 in one more.
@@ -501,6 +508,11 @@ describe("GET /api/wiki/mentions: bounds, totals, the log and long lines", () =>
     const b = await body(busyApp(), "LONG-1");
     expect(b.prs.map((p) => `${p.repo}#${p.number}`)).toEqual(["acme/acme-api#12"]);
     expect(b.files[0]!.lines[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  test("a PR ref past character 4,000, or at the end of a line over 25,000 characters, is listed", async () => {
+    const b = await body(busyApp(), "WIDE-1");
+    expect(b.prs.map((p) => `${p.repo}#${p.number}`)).toEqual(["acme/acme-api#14", "acme/acme-api#15"]);
   });
 
   test("the log's dates come through the tracked-files seam, not a read of the file", async () => {

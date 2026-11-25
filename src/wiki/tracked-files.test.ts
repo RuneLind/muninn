@@ -12,7 +12,7 @@ import path from "node:path";
 import { realGit, type GitRun } from "./decision-triage/git.ts";
 import { WIKI_LOCK_BASENAME } from "./lockfile.ts";
 import { testTempDir } from "../test/temp-dir.ts";
-import { GREP_FULL_LINE_CHARS, GREP_SCAN_LINES, chunkPaths, globMatches, grepRootLog, grepTracked, historyFor, isSafeRelPath, readTracked, rootLogHeaders, trackedFiles } from "./tracked-files.ts";
+import { GREP_SCAN_LINES, chunkPaths, globMatches, grepRootLog, grepTracked, historyFor, isSafeRelPath, readTracked, rootLogHeaders, trackedFiles } from "./tracked-files.ts";
 
 let repo = "";
 let wiki = ""; // a wiki in a subdirectory of `repo`
@@ -647,7 +647,7 @@ describe("the root log.md: its entry headers and its own grep", () => {
     const res = await rootLogHeaders(lwiki, { git: fake });
     expect(res.ok && [res.headers.length > 1_345, res.atLeast]).toEqual([true, true]);
   });
-  test("fullText carries the line uncut beside the cut text, up to GREP_FULL_LINE_CHARS", async () => {
+  test("fullText carries the line uncut beside the cut text", async () => {
     const res = await grepTracked(lwiki, "tab-spaced", { fullText: true });
     if (!res.ok) throw new Error(res.error);
     const hit = res.hits[0]!;
@@ -655,6 +655,5 @@ describe("the root log.md: its entry headers and its own grep", () => {
     expect(hit.full).toBe(`##\t[2026-11-02] build | tab-spaced ${longTail} LOG-1`);
     const plain = await grepTracked(lwiki, "tab-spaced");
     expect(plain.ok && "full" in plain.hits[0]!).toBe(false);
-    expect(GREP_FULL_LINE_CHARS).toBeGreaterThan(797);
   });
 });
