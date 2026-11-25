@@ -114,6 +114,13 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     expect(registeredPaths(build("default")).has(path)).toBe(true);
   });
 
+  test("the key mentions route (Discuss v2) is off the pod: it spawns git and gh on this machine", async () => {
+    const path = "/api/wiki/mentions";
+    expect(await status(build("nais"), `${path}?wiki=w&key=MEL-1`)).toBe(404);
+    expect(registeredPaths(build("nais")).has(path)).toBe(false);
+    expect(registeredPaths(build("default")).has(path)).toBe(true);
+  });
+
   test("the same paths are REGISTERED on the default profile", () => {
     // The other half of the pin: a 404 above has to mean "dropped", not "that
     // path never existed" — a typo'd path would make the whole suite vacuous.

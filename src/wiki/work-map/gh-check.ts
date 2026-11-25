@@ -13,8 +13,10 @@
  * `prs:` of each live plan page ({@link prsRefsOf}) that the card does not ask
  * for itself. It has a cache of its own (states, failures, hourly cap) and the
  * request does not wait for it, so nothing asked for a page reaches the card's
- * body. The status date check (`../status-date-check.ts`) reads both caches
- * through {@link cachedPrFacts}, which never asks.
+ * body. The status date check (`../status-date-check.ts`) reads the caches
+ * through {@link cachedPrFacts}, which never asks. The mentions route
+ * (`../mentions.ts`) reads them the same way and fills a third cache of its own
+ * through {@link askPrsInBackground}, never awaited.
  *
  * Nothing here writes to a wiki.
  */
@@ -39,6 +41,8 @@ export const GH_PRS_PER_QUERY = 50;
 export const GH_QUERIES_AT_ONCE = 4;
 /** PRs asked per wiki per hour; the rest count as unchecked. */
 export const GH_PRS_PER_HOUR = 500;
+/** How long the mentions cache leaves a repo alone after a query that went unanswered (a timeout, a network error, an answer it could not read). */
+export const MENTION_UNANSWERED_RETRY_MS = 5 * 60_000;
 /** How much of an unlinked row's label the drill list carries. */
 const ROW_LABEL_MAX = 80;
 
@@ -190,7 +194,8 @@ function prRef(repo: string, n: number): PrRef | null {
   return { repo, n, key, id: key.toLowerCase() };
 }
 
-function parseRefString(s: string): PrRef | null {
+/** `owner/repo#n` as a {@link PrRef}, or null when it is not one. */
+export function parseRefString(s: string): PrRef | null {
   const m = /^(.+)#(\d+)$/.exec(s);
   return m ? prRef(m[1]!, Number(m[2])) : null;
 }
@@ -491,18 +496,24 @@ interface WikiCache {
   asked: { at: number; n: number }[];
   /** Per lowercased repo, why its last query could not be read. */
   failures: Map<string, { repo: string; reason: Exclude<NotCheckedReason, "disabled">; at: number }>;
+  /** Per lowercased repo, when its last query went unanswered. Only {@link askPrsInBackground} reads it. */
+  unanswered: Map<string, number>;
   flight: Flight | null;
 }
 
 const caches = new Map<string, WikiCache>();
 /** Per wiki, what was asked for the pages' `prs:`: apart from the card's cache, so its failures and its hourly cap are its own. */
 const pagePrCaches = new Map<string, WikiCache>();
+/** Per wiki, what the mentions route asked for ({@link askPrsInBackground}): a third cache, so a burst of key lookups never spends the other two's hourly caps. */
+const mentionPrCaches = new Map<string, WikiCache>();
+/** Per wiki, the mentions misses that arrived while a flight ran: asked when it ends. */
+const mentionPending = new Map<string, Map<string, PrRef>>();
 
 function cacheFor(wiki: string, of: Map<string, WikiCache> = caches): WikiCache {
   const key = wiki.toLowerCase();
   let c = of.get(key);
   if (!c) {
-    c = { states: new Map(), asked: [], failures: new Map(), flight: null };
+    c = { states: new Map(), asked: [], failures: new Map(), unanswered: new Map(), flight: null };
     of.set(key, c);
   }
   return c;
@@ -511,6 +522,13 @@ function cacheFor(wiki: string, of: Map<string, WikiCache> = caches): WikiCache 
 export function __resetGhCheckForTest(): void {
   caches.clear();
   pagePrCaches.clear();
+  mentionPrCaches.clear();
+  mentionPending.clear();
+}
+
+/** Resolves when the wiki's mentions flights have ended, the follow-up a flight starts for the misses it left included. */
+export async function __mentionPrsSettledForTest(wiki: string): Promise<void> {
+  for (let f = mentionPrCaches.get(wiki.toLowerCase())?.flight; f; f = mentionPrCaches.get(wiki.toLowerCase())?.flight) await f.promise.catch(() => {});
 }
 
 /** Resolves when the running flight for the wiki's page `prs:` has ended. */
@@ -519,9 +537,9 @@ export function __pagePrsSettledForTest(wiki: string): Promise<void> {
 }
 
 /**
- * What the wiki's two caches hold for `refs`, with no ask and no spawn.
+ * What the wiki's three caches hold for `refs`, with no ask and no spawn.
  * `facts` has an entry per PR GitHub answered for within the hour: its state,
- * or null for a number that is no PR; where both caches hold one, the newer
+ * or null for a number that is no PR; where several caches hold one, the newer
  * answer. A PR with no entry was never asked, was asked more than an hour ago,
  * or went unanswered. `failures` is the reason the last query for a repo could
  * not be read, by lowercased repo, the card's cache first; like a state, it is
@@ -535,7 +553,7 @@ export function cachedPrFacts(
   const facts = new Map<string, PrFact | null>();
   const failures = new Map<string, Exclude<NotCheckedReason, "disabled">>();
   const answeredAt = new Map<string, number>();
-  for (const c of [caches.get(wiki.toLowerCase()), pagePrCaches.get(wiki.toLowerCase())]) {
+  for (const c of [caches.get(wiki.toLowerCase()), pagePrCaches.get(wiki.toLowerCase()), mentionPrCaches.get(wiki.toLowerCase())]) {
     if (!c) continue;
     for (const ref of refs) {
       const hit = c.states.get(ref.id);
@@ -634,7 +652,8 @@ function jobsFor(refs: readonly PrRef[]): { repo: string; refs: PrRef[] }[] {
   return jobs;
 }
 
-function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now: () => number): Flight {
+/** `onEnd` runs once the flight is over and `c.flight` is cleared, before its promise settles. */
+function startFlight(c: WikiCache, ask: readonly PrRef[], deps: Pick<GhCheckDeps, "runGh">, now: () => number, onEnd?: () => void): Flight {
   const jobs = jobsFor(ask);
   for (const j of jobs) c.failures.delete(j.repo.toLowerCase());
   const runJob = async (job: { repo: string; refs: PrRef[] }): Promise<void> => {
@@ -648,6 +667,7 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
     const answer = readGhAnswer(result, numbers, job.repo);
     if (answer.failure) c.failures.set(job.repo.toLowerCase(), { repo: job.repo, reason: answer.failure, at: now() });
     if (answer.unanswered) {
+      c.unanswered.set(job.repo.toLowerCase(), now());
       log.warn("GitHub check: the query for {repo} was not answered (exit {code}): {stderr}", { repo: job.repo, code: result.exitCode, stderr: result.stderr.trim().slice(0, 200) });
       return;
     }
@@ -663,6 +683,7 @@ function startFlight(c: WikiCache, ask: readonly PrRef[], deps: GhCheckDeps, now
     .then(() => {})
     .finally(() => {
       c.flight = null;
+      onEnd?.();
     });
   const flight: Flight = { ids: new Set(ask.map((r) => r.id)), promise };
   c.flight = flight;
@@ -802,4 +823,58 @@ function askPagePrs(pc: WikiCache, scanned: Scan, deps: GhCheckDeps, now: () => 
   startFlight(pc, ask, deps, now).promise.catch((err) => {
     log.warn("GitHub check: the flight for the pages' prs: failed: {error}", { error: err instanceof Error ? err.message : String(err) });
   });
+}
+
+/**
+ * Starts one background flight for those of `refs` that are due, and answers
+ * whether it did. Due: the wiki's mentions cache holds no answer from the last
+ * hour, no cache holds a failure for the repo from the last hour, and the
+ * repo's last mentions query did not go unanswered (a timeout, a network
+ * error, an answer it could not read) within {@link MENTION_UNANSWERED_RETRY_MS}.
+ * Single-flight: while one runs for the wiki, what is due waits in a pending
+ * set, and when the flight ends one follow-up flight asks what of it is still
+ * due. Not awaited, and capped by the cache's own hourly budget, which counts
+ * answered PRs; with the check off it starts nothing.
+ */
+export function askPrsInBackground(wiki: string, refs: readonly PrRef[], deps: Pick<GhCheckDeps, "runGh" | "disabled">, now: () => number): boolean {
+  if (deps.disabled()) return false;
+  const mc = cacheFor(wiki, mentionPrCaches);
+  const due = dueMentions(wiki, mc, refs, now());
+  if (mc.flight) {
+    const asked = mc.flight.ids;
+    const pending = mentionPending.get(wiki.toLowerCase()) ?? new Map<string, PrRef>();
+    for (const ref of due) if (!asked.has(ref.id) && pending.size < GH_PRS_PER_HOUR) pending.set(ref.id, ref);
+    if (pending.size) mentionPending.set(wiki.toLowerCase(), pending);
+    return false;
+  }
+  return startMentionFlight(wiki, mc, due, deps, now);
+}
+
+function dueMentions(wiki: string, mc: WikiCache, refs: readonly PrRef[], at: number): PrRef[] {
+  const failures = cachedPrFacts(wiki, refs, at).failures;
+  const due = new Map<string, PrRef>();
+  for (const ref of refs) {
+    const repo = ref.repo.toLowerCase();
+    const hit = mc.states.get(ref.id);
+    const silentAt = mc.unanswered.get(repo);
+    if (due.has(ref.id) || failures.has(repo) || (hit && at - hit.at < GH_STATE_TTL_MS)) continue;
+    if (silentAt !== undefined && at - silentAt < MENTION_UNANSWERED_RETRY_MS) continue;
+    due.set(ref.id, ref);
+  }
+  return [...due.values()];
+}
+
+function startMentionFlight(wiki: string, mc: WikiCache, due: readonly PrRef[], deps: Pick<GhCheckDeps, "runGh" | "disabled">, now: () => number): boolean {
+  const ask = due.slice(0, budgetLeft(mc, now()));
+  if (!ask.length) return false;
+  // The follow-up: what arrived while this flight ran and is still due after it.
+  const onEnd = (): void => {
+    const pending = mentionPending.get(wiki.toLowerCase());
+    mentionPending.delete(wiki.toLowerCase());
+    if (pending?.size && !deps.disabled()) startMentionFlight(wiki, mc, dueMentions(wiki, mc, [...pending.values()], now()), deps, now);
+  };
+  startFlight(mc, ask, deps, now, onEnd).promise.catch((err) => {
+    log.warn("GitHub check: the mentions flight failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+  });
+  return true;
 }
