@@ -243,7 +243,10 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // apart from the read's error): 939,536 (319,026 gzipped), so the pin moves to 939,600.
 // PR 4 fix round 1 batch 3 («Earlier discussions» replaces the stored edit marker): 939,725
 // (319,086 gzipped), so the pin moves to 939,800.
-const WIKI_CLIENT_MAX_BYTES = 939_800;
+// PR 4 fix round 2 (an old one-shot turn's edit block found as the server finds it, which
+// brings `extractJson` and the fence reader into the bundle): 941,764 (319,985 gzipped),
+// so the pin moves to 941,800.
+const WIKI_CLIENT_MAX_BYTES = 941_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

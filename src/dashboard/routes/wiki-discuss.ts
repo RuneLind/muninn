@@ -84,9 +84,10 @@ export const WIKI_DISCUSS_THREAD_PATH = "/api/wiki/discuss/thread";
 /** «Start over»: `{threadId}` closes the live thread. */
 export const WIKI_DISCUSS_THREAD_CLOSE_PATH = "/api/wiki/discuss/thread/close";
 /** «Earlier discussions» bounds on the thread read: the newest closed threads,
- *  and the first messages of each (30 turns). Measured 2026-11-25 on the dev
- *  DB: answers average 1,457 chars (max 1,704, 4 turns), so the full bound is
- *  about 10 × 30 × 1.5k ≈ 0.5 MB. The payload says what it leaves out. */
+ *  and the first messages of each (30 turns). A count bound, not a size bound:
+ *  answers have no length cap. On the dev DB (2026-11-25, 4 turns) answers
+ *  averaged 1,457 chars, which puts a full read near 10 × 30 × 1.5k ≈ 0.5 MB
+ *  of answers, questions not counted. The payload says what it leaves out. */
 export const DISCUSS_EARLIER_THREADS_MAX = 10;
 export const DISCUSS_EARLIER_MESSAGES_MAX = 60;
 

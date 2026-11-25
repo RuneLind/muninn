@@ -19,6 +19,7 @@ import type { RepoRoots } from "./decision-triage/git.ts";
 import { sameWikiRoot } from "./readonly.ts";
 import { truncateUnits } from "./ask-chat.ts";
 import { STORED_EDIT_MARKER } from "./discuss-bounds.ts";
+import { fencedBlockSpans, proposedEditSpan, replaceProposedEdit } from "./discuss-edit-block.ts";
 
 /** The rules file, at the wiki root beside `.wiki-reader.json` (D3). */
 export const WIKI_AGENT_RULES_FILE = ".wiki-agent.md";
@@ -378,56 +379,23 @@ export interface ProposedEdit extends EditListResult {
   overLimit: boolean;
 }
 
-/**
- * The bodies of an answer's fenced code blocks, in order. A fence opens with
- * three or more backticks or tildes (up to three spaces in, any info string)
- * and closes on a line of the same character, at least as long, and nothing
- * else; an unclosed fence runs to the end. CRLF reads as LF.
- */
+/** The bodies of an answer's fenced code blocks, in order (the fence rule is
+ *  `fencedBlockSpans`, `discuss-edit-block.ts`). */
 export function fencedBlocks(text: string): { info: string; body: string }[] {
   return fencedBlockSpans(text).map(({ info, body }) => ({ info, body }));
-}
-
-/** {@link fencedBlocks} with each block's line span in the CRLF-normalized
- *  text: `from` is the opening fence's line, `to` the closing fence's (the
- *  last line for an unclosed fence). */
-function fencedBlockSpans(text: string): { info: string; body: string; from: number; to: number }[] {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const out: { info: string; body: string; from: number; to: number }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]!);
-    if (!open) continue;
-    const fence = open[1]!;
-    const info = open[2]!.trim();
-    // A backtick fence's info string holds no backtick (CommonMark): that line is inline code.
-    if (fence[0] === "`" && info.includes("`")) continue;
-    const closer = new RegExp(`^ {0,3}${fence[0] === "`" ? "`" : "~"}{${fence.length},}[ \t]*$`);
-    const body: string[] = [];
-    let j = i + 1;
-    for (; j < lines.length && !closer.test(lines[j]!); j++) body.push(lines[j]!);
-    out.push({ info, body: body.join("\n"), from: i, to: Math.min(j, lines.length - 1) });
-    i = j;
-  }
-  return out;
 }
 
 /**
  * The proposed edit in an answer: the last fenced block, whatever its info
  * string, that holds `"edits"` and that `parseEditList` reads as an edit list
- * with at least one item. Null when the answer proposes none. Read here so the
- * stored turn carries it; P4 applies it.
+ * with at least one item (`proposedEditSpan`, which the reader bundle shares).
+ * Null when the answer proposes none. Read here so the stored turn carries it;
+ * P4 applies it.
  */
 export function extractProposedEdit(answer: string): ProposedEdit | null {
-  return proposedEditBlock(answer)?.edit ?? null;
-}
-
-function proposedEditBlock(answer: string): { edit: ProposedEdit; from: number; to: number } | null {
-  for (const { body, from, to } of fencedBlockSpans(answer).reverse()) {
-    if (!/"edits"\s*:/.test(body)) continue;
-    const parsed = parseEditList(body);
-    if (parsed && parsed.edits.length + parsed.dropped.length > 0) return { edit: { ...parsed, overLimit: parsed.edits.length > 1 }, from, to };
-  }
-  return null;
+  const span = proposedEditSpan(answer);
+  const parsed = span ? parseEditList(span.body) : null;
+  return parsed ? { ...parsed, overLimit: parsed.edits.length > 1 } : null;
 }
 
 /** Defined in `discuss-bounds.ts` (dependency-free: the reader bundle matches it). */
@@ -437,8 +405,5 @@ export { STORED_EDIT_MARKER };
  *  {@link extractProposedEdit} reads, replaced by {@link STORED_EDIT_MARKER};
  *  an answer with no edit unchanged. */
 export function stripProposedEdit(answer: string): string {
-  const block = proposedEditBlock(answer);
-  if (!block) return answer;
-  const lines = answer.replace(/\r\n?/g, "\n").split("\n");
-  return [...lines.slice(0, block.from), STORED_EDIT_MARKER, ...lines.slice(block.to + 1)].join("\n");
+  return replaceProposedEdit(answer, STORED_EDIT_MARKER);
 }

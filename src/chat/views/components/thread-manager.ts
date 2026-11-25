@@ -13,7 +13,9 @@
 //            clearChat, scrollToBottom, setChatStatusText
 //
 // Defines for the other scripts (threadKindScript): findThread, isWikiThread,
-// isClosedWikiThread.
+// isClosedWikiThread, wikiAnswerForThread.
+
+import { EARLIER_EDIT_NOTE, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 
 /**
  * What /chat knows of a thread's kind, over the IIFE's `threads`: a wiki
@@ -38,6 +40,18 @@ export function threadKindScript(): string {
   function isClosedWikiThread(threadId) {
     var t = findThread(threadId);
     return !!t && t.kind === 'wiki' && !!t.closedAt;
+  }
+  // A stored wiki answer carries the edit marker in place of its edit block,
+  // pointing to the page's Discuss tab. A closed thread has no Apply there, so
+  // its answers say what «Earlier discussions» says. With html set, the text
+  // is formatWebHtml output (a web conversation's assistant row); else markdown.
+  var WIKI_STORED_EDIT_MARKER = ${JSON.stringify(STORED_EDIT_MARKER)};
+  var WIKI_EARLIER_EDIT_NOTE = ${JSON.stringify(EARLIER_EDIT_NOTE)};
+  function wikiAnswerForThread(threadId, text, html) {
+    if (typeof text !== 'string' || !isClosedWikiThread(threadId)) return text;
+    var marker = html ? formatWebHtml(WIKI_STORED_EDIT_MARKER) : WIKI_STORED_EDIT_MARKER;
+    if (text.indexOf(marker) === -1) return text;
+    return text.split(marker).join(html ? formatWebHtml(WIKI_EARLIER_EDIT_NOTE) : WIKI_EARLIER_EDIT_NOTE);
   }
   `;
 }

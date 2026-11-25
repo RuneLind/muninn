@@ -27,6 +27,7 @@ import {
 } from "../../format/markdown-ast.ts";
 import { escHtml as esc } from "../../utils/escape-html.ts";
 import { lineCodeSpanRanges } from "../../format/code-spans.ts";
+import { extractJson } from "../../utils/json-extract.ts";
 
 /**
  * The four verdict markers, matching `VERDICT_RE` in `factcheck-sse.ts`. The VS16
@@ -1547,4 +1548,33 @@ export function integrateSuccessCopy(result: {
   }
   if (result.reason) return head + " — not committed (" + result.reason + ")";
   return head + " — not committed";
+}
+
+/**
+ * An edit list's shape, before any item is checked: `{edits:[…]}` (with an
+ * optional `note`) or a bare `[…]`, read through `extractJson`; null when the
+ * text holds neither. `parseEditList` (`integrate-edits.ts`) sorts each item
+ * into edits or dropped; Discuss's edit-block detection
+ * (`src/wiki/discuss-edit-block.ts`) counts them. One shape for the server and
+ * the reader bundle.
+ */
+export function editListShape(raw: string): { items: unknown[]; note?: string } | null {
+  if (!raw || typeof raw !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = extractJson<unknown>(raw);
+  } catch {
+    return null;
+  }
+  let items: unknown;
+  let note: string | undefined;
+  if (Array.isArray(parsed)) {
+    items = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    items = obj.edits;
+    if (typeof obj.note === "string" && obj.note.trim()) note = obj.note.trim();
+  }
+  if (!Array.isArray(items)) return null;
+  return note ? { items, note } : { items };
 }

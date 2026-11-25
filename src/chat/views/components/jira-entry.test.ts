@@ -61,7 +61,7 @@ async function harness(opts: {
   selectedBot?: string;
   jiraBot?: string | null;
   activeThreadId?: string | null;
-  /** The active thread is a wiki page's Discuss thread (the connector selector's `isWikiThread`). */
+  /** The active thread is a wiki page's Discuss thread (`isWikiThread`, `threadKindScript` in thread-manager.ts). */
   wikiThread?: boolean;
   templatesResponse?: { ok: boolean; body: unknown };
   /** One entry per `/api/jira/templates` call; the last one repeats. */

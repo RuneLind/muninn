@@ -12,7 +12,8 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
+import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
+import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
 import { DISCUSS_TEXT_HIDDEN, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
@@ -343,12 +344,17 @@ function shortDate(ms: number | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** What «Earlier discussions» shows in place of {@link STORED_EDIT_MARKER}:
- *  a closed thread or an old one-shot turn has no edit card, so no Apply. */
-export const EARLIER_EDIT_NOTE = "_(This answer proposed an edit; an earlier discussion cannot apply it.)_";
+/** What «Earlier discussions» shows in place of a proposed edit (defined in
+ *  `discuss-bounds.ts`, which /chat shares): a closed thread or an old
+ *  one-shot turn has no edit card, so no Apply. */
+export { EARLIER_EDIT_NOTE };
 
-function earlierExchange(q: string, a: string): string {
-  const answer = a.split(STORED_EDIT_MARKER).join(EARLIER_EDIT_NOTE);
+/** One exchange, its proposed edit replaced by {@link EARLIER_EDIT_NOTE}. A
+ *  closed thread's message carries {@link STORED_EDIT_MARKER} (matched
+ *  exactly); an old one-shot turn's answer is the ledger's raw one, whose edit
+ *  block is found as the server finds it (`replaceProposedEdit`). */
+function earlierExchange(q: string, a: string, stored: "message" | "ledger"): string {
+  const answer = stored === "message" ? a.split(STORED_EDIT_MARKER).join(EARLIER_EDIT_NOTE) : replaceProposedEdit(a, EARLIER_EDIT_NOTE);
   return (
     `<div class="wiki-discuss-earlier-turn">` +
     `<div class="wiki-discuss-q">${esc(q)}</div>` +
@@ -371,14 +377,14 @@ export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): st
     let q: string | null = null;
     for (const m of t.messages) {
       if (m.role === "user") {
-        if (q !== null) items.push(earlierExchange(q, ""));
+        if (q !== null) items.push(earlierExchange(q, "", "message"));
         q = m.content;
       } else if (m.role === "assistant") {
-        items.push(earlierExchange(q ?? "", m.content));
+        items.push(earlierExchange(q ?? "", m.content, "message"));
         q = null;
       }
     }
-    if (q !== null) items.push(earlierExchange(q, ""));
+    if (q !== null) items.push(earlierExchange(q, "", "message"));
     const more = (t.messageTotal ?? 0) - t.messages.length;
     if (more > 0) items.push(`<div class="wiki-discuss-hint">${more} later message${more === 1 ? "" : "s"} not shown.</div>`);
     groups.push(
@@ -400,7 +406,7 @@ export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): st
     groups.push(
       `<div class="wiki-discuss-earlier-group" data-earlier-oneshot="${esc(id)}">` +
         `<div class="wiki-discuss-earlier-head"><span>Before threads · ${esc(shortDate(turns[0]!.createdAt))}</span></div>` +
-        turns.map((t) => earlierExchange(t.selection ? `> ${t.selection.replace(/\s+/g, " ").trim()}\n\n${t.question}` : t.question, t.answer)).join("") +
+        turns.map((t) => earlierExchange(t.selection ? `> ${t.selection.replace(/\s+/g, " ").trim()}\n\n${t.question}` : t.question, t.answer, "ledger")).join("") +
         `</div>`,
     );
   }

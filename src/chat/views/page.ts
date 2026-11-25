@@ -1414,13 +1414,15 @@ const CHAT_SCRIPT = `
       // meta ever names — harmless, and it keeps one rule for both paths.
       if (msg.id) div.dataset.clientId = msg.id;
       body.className = 'msg-body' + platformClass;
+      // A closed wiki thread's edit marker points to an Apply that is gone (threadKindScript).
+      var botText = wikiAnswerForThread(msg.threadId || activeThreadId, msg.text, isWeb);
       if (isWeb || isTg) {
-        body.innerHTML = sanitizeHtml(msg.text, isWeb);
+        body.innerHTML = sanitizeHtml(botText, isWeb);
         if (isWeb) { enhanceCodeTabs(body); enhanceCodeBlocks(body); }
         augmentIndexLinks(body);
         augmentIssueLinks(body);
       } else {
-        body.innerHTML = renderSlackMrkdwn(msg.text);
+        body.innerHTML = renderSlackMrkdwn(botText);
       }
       headName = selectedBot;
       dotColor = avatarColor(selectedBot);

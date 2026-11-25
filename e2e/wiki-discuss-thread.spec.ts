@@ -63,6 +63,7 @@ const Q3 = "Fix the night route line.";
 const Q4 = "Sent from chat: is the morning stop new?";
 const Q5 = "Sent while the last turn runs";
 const OLD_Q = "Is the berth list current?";
+const OLD_EDIT_JSON = JSON.stringify({ edits: [{ old: "The morning route adds a stop.", new: "The morning route adds two stops.", reason: "October list." }] });
 
 let server: ChildProcess | undefined;
 let fake: ChildProcess | undefined;
@@ -158,11 +159,13 @@ test.beforeAll(async () => {
   await sql`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'main', true)`;
   // A connector, so /chat shows its selector on a chat thread: its absence on the wiki thread is then the kind's doing.
   await sql`INSERT INTO connectors (name, connector_type, model) SELECT 'e2e-thread-conn', 'claude-cli', 'claude-sonnet-4-5' WHERE NOT EXISTS (SELECT 1 FROM connectors WHERE name = 'e2e-thread-conn')`;
-  // An old one-shot discussion of the page (v1: no thread).
+  // An old one-shot discussion of the page (v1: no thread). Its answer is the
+  // ledger's raw one, edit block and all, as v1 stored it.
   const pageHash = createHash("sha256").update(PAGE).digest("hex");
+  const oldAnswer = `It was, in October.\n\n\`\`\`json\n${OLD_EDIT_JSON}\n\`\`\``;
   await sql`
     INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, rel_path, page_hash, question, answer, end_state, bot_name, connector, finished_at)
-    VALUES (${randomUUID()}, 1, ${WIKI}, ${REL}, ${pageHash}, ${OLD_Q}, 'It was, in October.', 'done', ${BOT}, 'claude-sdk', now())`;
+    VALUES (${randomUUID()}, 1, ${WIKI}, ${REL}, ${pageHash}, ${OLD_Q}, ${oldAnswer}, 'done', ${BOT}, 'claude-sdk', now())`;
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -302,6 +305,8 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await expect(msgs).toContainText(Q1, { timeout: 20_000 });
   await expect(msgs).toContainText(Q2);
   await expect(msgs).toContainText(Q3);
+  // The open thread keeps the pointer: the pane has the edit card.
+  await expect(msgs).toContainText("Proposed edit: preview and apply it in the page's Discuss tab.");
   await expect(chat.locator(".thread-group-label")).toHaveText("Wiki");
   await expect(chat.locator(`.thread-item.wiki[data-id="${thread!.id}"]`)).toHaveClass(/active/);
   await expect(chat.locator("#connectorSelector")).toBeHidden();
@@ -358,6 +363,9 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await expect(closedGroup).toContainText(Q4);
   await expect(page.locator("[data-earlier-oneshot]")).toContainText(OLD_Q);
   await expect(page.locator("[data-earlier-oneshot]")).toContainText("It was, in October.");
+  // Its raw edit block reads as the server reads it: the note, no JSON.
+  await expect(page.locator("[data-earlier-oneshot]")).toContainText("This answer proposed an edit; an earlier discussion cannot apply it.");
+  await expect(page.locator("[data-earlier-oneshot]")).not.toContainText("adds two stops");
   // Turn 3 proposed an edit: the closed thread says so, without pointing to an Apply it has not got.
   await expect(closedGroup).toContainText("This answer proposed an edit; an earlier discussion cannot apply it.");
   await expect(closedGroup).not.toContainText("preview and apply");
@@ -375,6 +383,9 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   await reopened.goto(new URL(href!, BASE).toString());
   await expect(reopened.locator("#chatMessages")).toContainText(Q4, { timeout: 20_000 });
   await expect(reopened.locator("#chatHeader .chat-title")).toContainText("(closed)");
+  // Turn 3's edit: no pointer to an Apply the closed thread has not got.
+  await expect(reopened.locator("#chatMessages")).toContainText("This answer proposed an edit; an earlier discussion cannot apply it.");
+  await expect(reopened.locator("#chatMessages")).not.toContainText("preview and apply");
   await expect(reopened.locator("#chatInput")).toBeDisabled();
   await expect(reopened.locator("#connectorSelector")).toBeHidden();
   await expect(reopened.locator("#inspectorContext")).toContainText("no personal context");

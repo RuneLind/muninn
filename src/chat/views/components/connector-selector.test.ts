@@ -360,7 +360,7 @@ describe("a wiki thread the thread list leaves out, reached by link (fix round 1
   const MAIN = { id: "M1", name: "main", kind: "chat" };
   const wikiT1 = (closedAt?: number) => ({ id: "T1", name: "wiki: plans/a.mdx", kind: "wiki", botName: "jarvis", userId: "u1", wiki: "mimir", relPath: "plans/a.mdx", ...(closedAt ? { closedAt } : {}) });
 
-  test("one the list omits but a lookup finds open: no selector, no stamp, no Jira control, a header naming it, and a 409 closed gives the text back", async () => {
+  test("one the list omits but a lookup finds open: no selector, no stamp, a header naming it, and a 409 closed gives the text back (the Jira control: jira-entry.test.ts)", async () => {
     const h = await pageHarness({ list: [MAIN], byId: wikiT1(), sendStatus: 409, sendError: { error: "the discussion was closed with Start over", reason: "closed" } });
     await h.made.handleDeepLink();
     expect(h.made.active()).toBe("T1");

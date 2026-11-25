@@ -25,7 +25,7 @@ import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
-import { STORED_EDIT_MARKER } from "../../../wiki/discuss-agent.ts";
+import { STORED_EDIT_MARKER, extractProposedEdit, stripProposedEdit } from "../../../wiki/discuss-agent.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
 
@@ -1175,17 +1175,34 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
   });
 
   test("Earlier discussions: a turn that proposed an edit says so without sending the reader to an Apply it has not got", () => {
-    const answer = `The page says six.\n\n${STORED_EDIT_MARKER}\n\nRead: notes/a.md`;
+    // As each is stored: a closed thread's message carries the marker
+    // (`stripProposedEdit`), an old one-shot turn the ledger's raw answer with
+    // its fenced edit block.
+    const edit = '{"edits": [{"old": "The harbour opens at six.", "new": "The harbour opens at seven.", "reason": "timetable"}]}';
+    const raw = `The page says six.\n\n\`\`\`json\n${edit}\n\`\`\`\n\nRead: notes/a.md`;
+    expect(stripProposedEdit(raw)).toContain(STORED_EDIT_MARKER);
     const html = discussState.discussEarlierHtml({
-      closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r1", seq: 1, answer })) }],
-      oneShot: [stored({ id: "o1", seq: 1, discussionId: "d-old", answer })],
+      closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r1", seq: 1, answer: stripProposedEdit(raw) })) }],
+      oneShot: [stored({ id: "o1", seq: 1, discussionId: "d-old", answer: raw })],
     });
     expect(html).not.toContain("preview and apply");
     expect(html).not.toContain("Discuss tab");
+    expect(html).not.toContain("edits");
+    expect(html).not.toContain("opens at seven");
     expect(html.match(/This answer proposed an edit; an earlier discussion cannot apply it\./g)).toHaveLength(2);
+    const oneShot = html.slice(html.indexOf('data-earlier-oneshot="d-old"'));
+    expect(oneShot).toContain("This answer proposed an edit; an earlier discussion cannot apply it.");
+    expect(oneShot).toContain("The page says six.");
+    expect(oneShot).toContain("Read: notes/a.md");
     // The rest of the answer stays.
     expect(html).toContain("The page says six.");
     expect(html).toContain("Read: notes/a.md");
+    // The server's own detection: a json block that is no edit list stays as it is.
+    const notEdit = 'Here is the shape:\n\n```json\n{"edits": []}\n```';
+    expect(extractProposedEdit(notEdit)).toBeNull();
+    const kept = discussState.discussEarlierHtml({ closed: [], oneShot: [stored({ id: "o2", seq: 1, discussionId: "d-two", answer: notEdit })] });
+    expect(kept).toContain("edits");
+    expect(kept).not.toContain("earlier discussion cannot apply");
     // Matched exactly: a sentence that only resembles the marker is left alone.
     const near = discussState.discussEarlierHtml({
       closed: [{ id: "c2", name: "two", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r2", seq: 1, answer: "Proposed edit: preview and apply it in the page's Discuss tab." })) }],

@@ -887,7 +887,8 @@ async function deleteEarlier(threadId: string): Promise<void> {
   noteActionError(d, null);
   try {
     const res = await fetch(`/chat/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
-    if (!res.ok) noteActionError(d, `The discussion could not be deleted (${res.status}).`);
+    // 404: already gone (deleted in another tab), as «Start over» treats a thread closed elsewhere.
+    if (!res.ok && res.status !== 404) noteActionError(d, `The discussion could not be deleted (${res.status}).`);
   } catch {
     noteActionError(d, "The discussion could not be deleted: the server did not answer.");
   }

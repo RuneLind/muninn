@@ -134,7 +134,8 @@ test("a stale kept user is still dropped on unknown-user, and the picker returns
   localStorage.setItem("muninn-discuss-user-jarvis-bot", "gone");
   route = (url) => {
     const userId = new URL(url, "http://x").searchParams.get("userId");
-    if (userId === "gone") return json({ error: "Unknown user", reason: "unknown-user", bot: "jarvis-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
+    // As the engine answers it: an unknown-user refusal names no bot (only no-user does).
+    if (userId === "gone") return json({ error: "Unknown user", reason: "unknown-user", users: [{ id: "u1", name: "Kari" }] }, 422);
     return json({ error: "Pick a user", reason: "no-user", bot: "jarvis-bot", users: [{ id: "u1", name: "Kari" }] }, 422);
   };
   await openTab();
@@ -177,5 +178,38 @@ test("a failed Delete under «Earlier discussions» is still shown after the rea
   expect(deletes).toBe(2);
   expect(note.textContent ?? "").not.toContain("could not be deleted");
   expect(note.hidden).toBe(true);
+  document.body.innerHTML = "";
+});
+
+test("a Delete answered 404 (the thread is already gone, say from another tab) is no failure: no note, and the read after it drops the row", async () => {
+  wiki = "w3";
+  relPath = "plans/gone.mdx";
+  localStorage.clear();
+  const C1 = crypto.randomUUID();
+  const closed = [{ id: C1, name: "wiki: gone", createdAt: 1, closedAt: 2, messages: [{ id: "m1", role: "user", content: "Old?", createdAt: 1 }], messageTotal: 1 }];
+  let deleted = false;
+  let deletes = 0;
+  reads.length = 0;
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return json(emptyThread("kari", "ivar", deleted ? [] : closed));
+    if (url === `/chat/threads/${C1}` && init?.method === "DELETE") {
+      deletes++;
+      // Deleted elsewhere just before this click: the route no longer finds it.
+      deleted = true;
+      return json({ error: "Thread not found or is the main thread" }, 404);
+    }
+    return json({}, 404);
+  };
+
+  await openTab();
+  const readsBefore = reads.length;
+  (document.querySelector(`[data-discuss-delete-thread="${C1}"]`) as HTMLButtonElement).click();
+  await settle();
+  expect(deletes).toBe(1);
+  expect(reads.length).toBe(readsBefore + 1);
+  const note = document.querySelector<HTMLElement>(".wiki-discuss-user")!;
+  expect(note.textContent ?? "").not.toContain("could not be deleted");
+  expect(note.hidden).toBe(true);
+  expect(document.querySelector(`[data-earlier-thread="${C1}"]`)).toBe(null);
   document.body.innerHTML = "";
 });
