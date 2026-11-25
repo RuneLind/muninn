@@ -28,6 +28,17 @@
  *   (a page with an `Oppfølging` heading and an agent) is an Edit turn whose
  *   proposed-edit card and Apply are the pane's.
  *
+ * - An Explain or Oppfølging card still open when the same page renders again
+ *   (an in-place reload, an Apply from the pane) is put back at its passage,
+ *   found again by the Discuss chip's finder, or at the article's top with a
+ *   note when the passage is gone; its classic stream keeps running meanwhile.
+ *   Not after an Apply of its own turn (its outcome is on the Discuss tab),
+ *   and not on another page.
+ * - Keyboard: the ContextMenu key or ⇧F10 opens the menu at the selection
+ *   with focus on its first item; arrows move (↑/↓ in the menu, ←/→ in the
+ *   bar), Escape closes with focus back on the page. The bar hides while its
+ *   selection is scrolled out of the article pane; a scroll closes the menu.
+ *
  * The bar's Explain and Fact check keep the ids `#wikiExplainBtn` and
  * `#wikiFactcheckBtn`, and every egress action carries `data-selact`, which
  * the read-only selectors name. Actions run on `mousedown` (its default
@@ -42,7 +53,7 @@ import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
 import { discussAgentOn, discussSendBlocked, discussTurnForCard, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
-import { discussTurnBodyParts } from "./wiki-discuss-state.ts";
+import { discussTurnBodyParts, findPassage, renderedPassageText, type PassageContext } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
   FOLLOW_QUESTION,
@@ -120,6 +131,12 @@ let repositionQueued = false;
  *  under the bar (now hidden) and must not show the bar again. The next
  *  press clears it. */
 let actedOnPress = false;
+/** The open Explain / Oppfølging card, kept so a render of its page can put it back. */
+let held: { el: HTMLElement; wiki: string; relPath: string; passage: string; context: PassageContext | null } | null = null;
+let reattachQueued = false;
+/** Until then a `contextmenu` belongs to the keyboard gesture that opened the menu. */
+let keyMenuUntil = 0;
+const KEY_MENU_MS = 500;
 
 function bar(): HTMLElement {
   let el = document.getElementById(SEL_BAR_ID);
@@ -145,20 +162,27 @@ function menu(): HTMLElement {
   return el;
 }
 
-/** Is the bar or the menu on screen? */
+/** Is the bar or the menu on screen? (A bar hidden while its selection is
+ *  scrolled away is not.) */
 export function selectionMenuOpen(): boolean {
   return [SEL_BAR_ID, SEL_MENU_ID].some((id) => {
     const el = document.getElementById(id);
-    return !!el && el.style.display !== "none";
+    return !!el && el.style.display !== "none" && el.style.visibility !== "hidden";
   });
 }
 
+/** Hide both. Focus inside them goes back to the page: the keyboard opens the
+ *  menu only from there (`enterIsOurs`: the page or the article's own text,
+ *  which holds no focusable element). */
 export function hideSelectionMenu(): void {
   shown = null;
   const b = document.getElementById(SEL_BAR_ID);
-  if (b) b.style.display = "none";
   const m = document.getElementById(SEL_MENU_ID);
+  const active = document.activeElement as HTMLElement | null;
+  const focusIn = !!active && (!!b?.contains(active) || !!m?.contains(active));
+  if (b) b.style.display = "none";
   if (m) m.style.display = "none";
+  if (focusIn) active?.blur?.();
 }
 
 /** Per page render: the reader payload's mentions flag, tracker projects and key kinds. */
@@ -171,6 +195,53 @@ export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjec
   // The page rendered again (navigation, a reload, an Apply's commit): what
   // the files and history say may have moved.
   mentionsCache.clear();
+  if (held && !reattachQueued) {
+    reattachQueued = true;
+    // After the rest of the render: its enhancements must not run over the card.
+    const run = () => {
+      reattachQueued = false;
+      reattachCard();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else setTimeout(run, 0);
+  }
+}
+
+/** Is `card` the held card, on the page still shown? (Its stream keeps running.) */
+function cardHeld(card: Element): boolean {
+  return !!held && held.el === card && !!deps && deps.wiki() === held.wiki && deps.relPath() === held.relPath;
+}
+
+const MOVED_CLASS = "wiki-sel-card-moved";
+
+/** The held card, taken out by a render of its page: back under its passage,
+ *  or at the article's top saying the passage is gone. Dropped on another
+ *  page and after an Apply of its own turn (the Discuss tab shows that outcome). */
+function reattachCard(): void {
+  const h = held;
+  if (!h || h.el.isConnected) return;
+  if (!cardHeld(h.el)) {
+    held = null;
+    return;
+  }
+  const key = h.el.getAttribute("data-sel-turn");
+  if (key && discussTurnForCard(key)?.turn.edit?.state === "applied") {
+    held = null;
+    return;
+  }
+  const wrap = document.getElementById("articleWrap");
+  const a = article();
+  // Not a page view (an Ask answer took the pane): kept for the page's next render.
+  if (!wrap || !a) return;
+  const found = findPassage(wrap, h.passage, h.context);
+  h.el.querySelector(`.${MOVED_CLASS}`)?.remove();
+  if (found) insertCard(h.el, found.range);
+  else {
+    h.el.querySelector(".wiki-sel-card-head")?.insertAdjacentHTML("afterend", `<div class="wiki-discuss-hint ${MOVED_CLASS}" role="status">The passage this answers is no longer on the page as it was.</div>`);
+    a.insertBefore(h.el, a.firstChild);
+  }
+  if (key) paintTurnCard(h.el);
+  h.el.scrollIntoView?.({ block: "nearest" });
 }
 
 function article(): HTMLElement | null {
@@ -250,16 +321,36 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
 }
 
+/** The selection's first and last line on screen, or null when it has no
+ *  layout (a DOM without one, nodes a render took out). */
+function selectionBox(range: Range): { left: number; top: number; bottom: number; rects: DOMRect[] } | null {
+  const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 || r.height > 0);
+  if (!rects.length) return null;
+  return { left: rects[0]!.left, top: rects[0]!.top, bottom: rects.at(-1)!.bottom, rects };
+}
+
+/** The part of the viewport the article pane shows (under the top nav). */
+function readingArea(): { top: number; bottom: number } {
+  const vh = window.innerHeight || 768;
+  const r = document.getElementById("articleWrap")?.getBoundingClientRect();
+  return r && r.bottom > r.top ? { top: Math.max(0, r.top), bottom: Math.min(vh, r.bottom) } : { top: 0, bottom: vh };
+}
+
 /** Put the bar under the selection's last line (above it when there is no
- *  room), inside the viewport. */
+ *  room), inside the article pane; hidden while no line of the selection is
+ *  in the pane. */
 function placeBar(): void {
   const b = document.getElementById(SEL_BAR_ID);
   if (!b || !shown || b.style.display === "none") return;
+  const area = readingArea();
   let rect: { left: number; top: number; bottom: number } | null = null;
+  const box = shown.range ? selectionBox(shown.range) : null;
+  // No layout to tell by (an explainer's bar, a DOM without one): shown.
+  const inView = !box || box.rects.some((r) => r.bottom > area.top && r.top < area.bottom);
+  b.style.visibility = inView ? "" : "hidden";
+  if (!inView) return;
   if (shown.range) {
-    const rects = Array.from(shown.range.getClientRects()).filter((r) => r.width > 0 || r.height > 0);
-    const last = rects.at(-1) ?? shown.range.getBoundingClientRect();
-    rect = { left: rects[0]?.left ?? last.left, top: rects[0]?.top ?? last.top, bottom: last.bottom };
+    rect = box ?? shown.range.getBoundingClientRect();
   } else {
     const frame = document.querySelector<HTMLElement>(".wiki-explainer-frame");
     const r = frame?.getBoundingClientRect();
@@ -273,7 +364,7 @@ function placeBar(): void {
   const below = rect.bottom + 6;
   const top = below + h > vh - 4 && rect.top - h - 6 > 4 ? rect.top - h - 6 : below;
   b.style.left = `${clamp(rect.left, 4, Math.max(4, vw - w - 4))}px`;
-  b.style.top = `${clamp(top, 4, Math.max(4, vh - h - 4))}px`;
+  b.style.top = `${clamp(top, area.top + 4, Math.max(area.top + 4, vh - h - 4))}px`;
 }
 
 function queueReposition(): void {
@@ -294,13 +385,22 @@ function onSelection(range: Range, x: number, y: number): boolean {
 
 /** A right-click: the menu when it is on the selection (not with ⇧). */
 function onContextMenu(e: MouseEvent): void {
-  if (e.shiftKey) return;
+  // The keyboard gesture opened the menu already (its keydown): no browser menu over it.
+  if (Date.now() < keyMenuUntil && selectionMenuOpen()) {
+    e.preventDefault();
+    return;
+  }
+  if (e.shiftKey || !document.getElementById("articleWrap")?.contains(e.target as Node)) return;
   const s = readSelection();
   if (!s || !onSelection(s.range, e.clientX, e.clientY)) return;
   const items = itemsFor(s.text, false);
   // Nothing but Copy: the browser's own menu, untouched.
   if (!selMenuOffers(items)) return;
   e.preventDefault();
+  showMenu(s, items, e.clientX, e.clientY);
+}
+
+function showMenu(s: { text: string; heading: string; range: Range }, items: SelMenuItem[], x: number, y: number): HTMLElement {
   shown = { ...s, explainer: false, items };
   const b = document.getElementById(SEL_BAR_ID);
   if (b) b.style.display = "none";
@@ -309,8 +409,38 @@ function onContextMenu(e: MouseEvent): void {
   m.style.display = "block";
   const w = m.offsetWidth || 270;
   const h = m.offsetHeight || 300;
-  m.style.left = `${clamp(e.clientX, 4, Math.max(4, (window.innerWidth || 1024) - w - 4))}px`;
-  m.style.top = `${clamp(e.clientY, 4, Math.max(4, (window.innerHeight || 768) - h - 4))}px`;
+  m.style.left = `${clamp(x, 4, Math.max(4, (window.innerWidth || 1024) - w - 4))}px`;
+  m.style.top = `${clamp(y, 4, Math.max(4, (window.innerHeight || 768) - h - 4))}px`;
+  return m;
+}
+
+/** The ContextMenu key or ⇧F10: the menu under the selection, focus on its
+ *  first item. False (the browser's own) when the selection offers nothing. */
+function openMenuFromKeyboard(): boolean {
+  const s = readSelection();
+  if (!s) return false;
+  const items = itemsFor(s.text, false);
+  if (!selMenuOffers(items)) return false;
+  const box = selectionBox(s.range);
+  const m = showMenu(s, items, box?.left ?? 0, box ? box.bottom + 6 : 0);
+  keyMenuUntil = Date.now() + KEY_MENU_MS;
+  m.querySelector<HTMLElement>("[data-selact]")?.focus({ preventScroll: true });
+  return true;
+}
+
+/** Arrow keys between the menu's items (↑/↓) or the bar's buttons (←/→), Home and End. */
+function moveFocus(e: KeyboardEvent): boolean {
+  const active = document.activeElement as HTMLElement | null;
+  const box = active?.closest?.<HTMLElement>(`#${SEL_BAR_ID}, #${SEL_MENU_ID}`);
+  if (!box || !active) return false;
+  const [prev, next] = box.id === SEL_MENU_ID ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"];
+  const items = Array.from(box.querySelectorAll<HTMLElement>("[data-selact]"));
+  const i = items.indexOf(active);
+  const n = items.length;
+  const to = e.key === "Home" ? 0 : e.key === "End" ? n - 1 : e.key === next ? (i + 1) % n : e.key === prev ? (i - 1 + n) % n : -1;
+  if (to < 0 || !n) return false;
+  items[to]!.focus({ preventScroll: true });
+  return true;
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────
@@ -327,7 +457,7 @@ function activate(act: SelAction, key: string | null): void {
   switch (act) {
     case "explain":
       if (s.explainer || !discussAgentOn()) deps.explainClassic(s.text, s.heading);
-      else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why) => classicExplainCard(s, why));
+      else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why, context) => classicExplainCard(s, why, context));
       return;
     case "follow":
       threadCard("follow", s, FOLLOW_QUESTION, "edit");
@@ -351,19 +481,28 @@ function activate(act: SelAction, key: string | null): void {
 /** Put a card under the selection's paragraph (before the frame on an
  *  explainer), replacing any card already open on the page. */
 function placeCard(s: Shown, html: string): HTMLElement | null {
-  const a = article();
-  const wrap = document.getElementById("articleWrap");
   for (const old of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}`))) old.remove();
+  held = null;
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
   const card = tpl.content.firstElementChild as HTMLElement | null;
-  if (!card) return null;
-  const endNode = s.range ? (a ? selectionEndNode(s.range, a) : s.range.endContainer) : null;
+  if (!card || !insertCard(card, s.range)) return null;
+  card.scrollIntoView?.({ block: "nearest" });
+  return card;
+}
+
+/** Insert `card` under the paragraph that holds `range`'s end; under the
+ *  article pane's part that holds it when that is not the page's text (its
+ *  head); else before an explainer's frame or at the pane's end. */
+function insertCard(card: HTMLElement, range: Range | null): boolean {
+  const a = article();
+  const wrap = document.getElementById("articleWrap");
+  const endNode = range ? (a ? selectionEndNode(range, a) : range.endContainer) : null;
   // In the article pane but not in the page's text (its head): under that part.
   let outside: Node | null = endNode && wrap?.contains(endNode) && !a?.contains(endNode) ? endNode : null;
   while (outside && outside.parentNode !== wrap) outside = outside.parentNode;
-  if (s.range && a && endNode && a.contains(endNode)) {
-    const at = inlineCardAnchor(s.range, a);
+  if (range && a && endNode && a.contains(endNode)) {
+    const at = inlineCardAnchor(range, a);
     at.parent.insertBefore(card, at.before);
   } else if (outside && wrap) {
     wrap.insertBefore(card, outside.nextSibling);
@@ -371,44 +510,57 @@ function placeCard(s: Shown, html: string): HTMLElement | null {
     const frame = document.querySelector(".wiki-explainer-frame");
     if (frame?.parentNode) frame.parentNode.insertBefore(card, frame);
     else if (wrap) wrap.appendChild(card);
-    else return null;
+    else return false;
   }
-  card.scrollIntoView?.({ block: "nearest" });
-  return card;
+  return true;
+}
+
+/** Keep an answer card for a render of its page (`reattachCard`): its
+ *  passage as the Discuss chip's finder reads the page. */
+function holdCard(card: HTMLElement, s: Shown, context: PassageContext | null): void {
+  const rel = deps?.relPath();
+  if (!deps || !rel || !s.range) return;
+  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: renderedPassageText(s.range), context };
 }
 
 /** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread.
  *  `fallback` runs instead of an error card, with the reason, when the
  *  selection is no passage or a turn of the discussion is still running. */
-function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit", fallback?: (why: string) => void): void {
+function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit", fallback?: (why: string, context: PassageContext | null) => void): void {
   const live = window.getSelection();
   const passage = live && s.range ? readSelectionPassage(live) : null;
   if (!passage) {
-    if (fallback) return fallback("outside the page's text, so not in its discussion");
+    if (fallback) return fallback("outside the page's text, so not in its discussion", null);
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">This selection cannot be sent as a passage of the page: select it again inside the page's text.</div>`, null));
     return;
   }
+  const context = { before: passage.before, after: passage.after };
   const p = { selection: passage.selection, before: passage.before, after: passage.after, atStart: passage.atStart, atEnd: passage.atEnd, heading: passage.heading, ...(passage.edge ? { edge: passage.edge } : {}) };
   const r = startInlineTurn(question, p, passage.range, mode);
-  if ("refused" in r && r.busy && fallback) return fallback("the page's discussion is busy, so not in it");
+  if ("refused" in r && r.busy && fallback) return fallback("the page's discussion is busy, so not in it", context);
   if ("refused" in r) {
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
   const card = placeCard(s, inlineCardHtml(kind, "a turn in this page's discussion", "", r.key));
-  if (card) paintTurnCard(card);
+  if (!card) return;
+  holdCard(card, s, context);
+  paintTurnCard(card);
 }
 
 /** Explain where the page's thread cannot take the turn: the classic
  *  `/api/wiki/explain` stream, painted into an inline card (D3) rather than in
  *  place of the page. Not a turn of the discussion; `why` is its sub line. A
- *  card that leaves the page (replaced, a render) aborts its stream. */
-function classicExplainCard(s: Shown, why: string): void {
+ *  card that leaves the page (replaced, closed, another page) aborts its
+ *  stream; one a render of its page took out keeps it, for `reattachCard`. */
+function classicExplainCard(s: Shown, why: string, context: PassageContext | null): void {
   const d = deps;
   if (!d) return;
   const card = placeCard(s, inlineCardHtml("explain", why, `<div class="wiki-discuss-status"><span class="spinner"></span><span>Searching the wiki…</span></div>`, null));
   const body = card?.querySelector(".wiki-sel-card-body");
   if (!card || !body) return;
+  holdCard(card, s, context);
+  const live = () => card.isConnected || cardHeld(card);
   const ctl = new AbortController();
   let text = "";
   let ended = false;
@@ -417,7 +569,7 @@ function classicExplainCard(s: Shown, why: string): void {
     body.innerHTML = `<div class="wiki-discuss-error" role="alert">${escText(msg)}</div>`;
   };
   const parser = makeSseFrameParser((f) => {
-    if (!card.isConnected) return ctl.abort();
+    if (!live()) return ctl.abort();
     let m: Record<string, unknown> = {};
     try {
       m = JSON.parse(f.data) as Record<string, unknown>;
@@ -444,9 +596,9 @@ function classicExplainCard(s: Shown, why: string): void {
       const dec = new TextDecoder();
       for (let r = await reader.read(); !r.done; r = await reader.read()) parser.push(dec.decode(r.value, { stream: true }));
       parser.end();
-      if (!ended && card.isConnected) fail("The explanation ended before its answer.");
+      if (!ended && live()) fail("The explanation ended before its answer.");
     } catch {
-      if (!ctl.signal.aborted && card.isConnected) fail("The explanation failed: the server did not answer.");
+      if (!ctl.signal.aborted && live()) fail("The explanation failed: the server did not answer.");
     }
   })();
 }
@@ -549,15 +701,25 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
     if ((e.target as Element | null)?.closest?.(`.${SEL_CARD_CLASS}, button, input, textarea, select`)) return;
     setTimeout(maybeShowSelectionBar, 0);
   });
-  document.getElementById("articleWrap")?.addEventListener("contextmenu", (e) => onContextMenu(e as MouseEvent));
+  // On the document: the keyboard's own context menu goes to the focused element.
+  document.addEventListener("contextmenu", (e) => onContextMenu(e as MouseEvent));
   // Dismiss on selection collapse and Escape.
   document.addEventListener("selectionchange", () => {
     const sel = window.getSelection();
     if ((!sel || sel.isCollapsed) && shown && !shown.explainer) hideSelectionMenu();
   });
   document.addEventListener("keydown", (e) => {
+    // The keyboard's context-menu gesture: our menu for a selection that offers it.
+    const gesture = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+    // Taken where Enter is (focus on the page or the article's own text): on a
+    // link or a control it is that element's menu.
+    if (gesture && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented) {
+      if (enterIsOurs(e.target) && openMenuFromKeyboard()) e.preventDefault();
+      return;
+    }
     if (!selectionMenuOpen()) return;
     if (e.key === "Escape") return hideSelectionMenu();
+    if (moveFocus(e)) return e.preventDefault();
     // Enter: the default action, unless focus is on something Enter already drives.
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing && !e.defaultPrevented && enterIsOurs(e.target)) {
       const def = shown?.items[0];
@@ -600,14 +762,25 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
     }
     const close = t.closest?.(`.${SEL_CARD_CLASS} [data-sel-card-close]`);
     if (close) {
-      close.closest(`.${SEL_CARD_CLASS}`)?.remove();
+      const card = close.closest(`.${SEL_CARD_CLASS}`);
+      if (card && held?.el === card) held = null;
+      card?.remove();
       return;
     }
     const pane = t.closest?.<HTMLElement>(`.${SEL_CARD_CLASS} [data-sel-card-pane]`);
     if (pane) showTurnInDiscuss(pane.dataset.selCardPane ?? "");
   });
-  // The bar is placed in the viewport: it follows the selection when the page scrolls or resizes.
-  document.addEventListener("scroll", queueReposition, true);
+  // The bar is placed in the viewport: it follows the selection when the page
+  // scrolls or resizes. The menu closes on a scroll, as the browser's own does.
+  document.addEventListener(
+    "scroll",
+    (e) => {
+      const m = document.getElementById(SEL_MENU_ID);
+      if (m && m.style.display !== "none" && !m.contains(e.target as Node)) return hideSelectionMenu();
+      queueReposition();
+    },
+    true,
+  );
   window.addEventListener("resize", queueReposition);
   onDiscussChange(paintTurnCards);
 }

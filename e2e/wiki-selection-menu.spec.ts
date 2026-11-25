@@ -34,6 +34,12 @@
  * in the source never says «named nowhere» (F8); a page render drops the
  * mentions answers (F7); Explain where the thread cannot take the turn (a
  * turn still running, the article head) is the classic Explain (F9).
+ *
+ * Fix round 1 batch 4: a render of the page (its rail row clicked again)
+ * puts the open Explain card back under its passage, a running turn's and a
+ * classic stream's alike (F10); ⇧F10 opens the menu from the keyboard, its
+ * arrows move and Escape closes it (F11); on a long page the bar hides while
+ * its selection is scrolled away and a scroll closes the menu (F12).
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -70,6 +76,10 @@ const WRAPPED = "The ferry leaves from the north quay.";
 const MARKED = "The berth list is long.";
 // One phrase wraps across two source lines, one carries bold in the source.
 const PAGE_QUAY = ["---", "title: Quay plan", "---", "", "# Quay plan", "", "The ferry leaves", "from the north quay.", "", "The **berth** list is long.", ""].join("\n");
+const LONG = "plans/long.mdx";
+const LONG_TARGET = "The long page keeps its target sentence near the top.";
+// Enough paragraphs that the article pane scrolls well past the first one.
+const PAGE_LONG = ["---", "title: Long plan", "---", "", "# Long plan", "", LONG_TARGET, "", ...Array.from({ length: 80 }, (_, i) => `Filler paragraph ${i + 1} about the harbour timetable and its berths.\n`)].join("\n");
 const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
 
 let server: ChildProcess | undefined;
@@ -134,6 +144,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, OTHER), PAGE_NO_FOLLOW, "utf8");
   await writeFile(path.join(root, DECISIONS), PAGE_DECISIONS, "utf8");
   await writeFile(path.join(root, QUAY), PAGE_QUAY, "utf8");
+  await writeFile(path.join(root, LONG), PAGE_LONG, "utf8");
   await writeFile(path.join(root, "log.md"), `# Log\n\n## [2026-11-04] note | Q-3\n\n- ${KEY} is outside the data fix.\n`, "utf8");
   const init = spawnSync("git", ["init", "-q", "-b", "main", root], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
@@ -222,7 +233,7 @@ const menu = (page: Page) => page.locator("#wikiSelMenu");
 
 async function openPage(page: Page, rel = REL): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
-  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long." };
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80" };
   await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
@@ -602,6 +613,170 @@ test("Explain where the page's thread cannot take the turn streams the classic a
   expect(await card.evaluate((c) => c.previousElementSibling?.classList.contains("wiki-article-head"))).toBe(true);
   await expect(page.locator("#articleWrap .wiki-sel-card .wiki-discuss-error")).toHaveCount(0);
   expect(discussPosts.length).toBe(1);
+});
+
+/** Where `card`'s text sits in the article's text, against two sentences around it. */
+async function cardBetween(page: Page, sel: string, before: string, after: string): Promise<boolean> {
+  return page.evaluate(({ sel, before, after }) => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const text = article.textContent ?? "";
+    const c = document.querySelector(sel)?.textContent ?? "";
+    const at = c ? text.indexOf(c) : -1;
+    return at > text.indexOf(before) && at < (after ? text.indexOf(after) : Infinity);
+  }, { sel, before, after });
+}
+
+test("a render of the same page puts the open Explain card back under its passage: a turn still running, then a classic stream", async ({ page }) => {
+  // The inline turn never answers: it stays live, so the second Explain is the classic one.
+  const discussPosts: string[] = [];
+  await page.route("**/api/wiki/discuss", (route) => {
+    discussPosts.push(route.request().postData() ?? "");
+  });
+  // The classic answer waits until the page has rendered again.
+  let release: () => void = () => {};
+  const released = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/explain?**", async (route) => {
+    await released;
+    const body = `event: delta\ndata: {"text":"CLASSIC "}\n\nevent: done\ndata: ${JSON.stringify({ answer: "CLASSIC-ANSWER after the render" })}\n\nevent: end\ndata: {}\n\n`;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  const renderAgain = async () => {
+    const rendered = page.waitForResponse((r) => r.url().includes("/api/wiki/page?"));
+    // The rail row of the page on screen: the page is fetched and rendered again.
+    await page.locator(`.wiki-list-item[data-relpath="${REL}"]`).first().click();
+    await rendered;
+    await expect(page.locator("#articleWrap .wiki-article")).toContainText(FOLLOW_OLD_TEXT);
+  };
+  await openPage(page);
+  await dragSelect(page, NIGHT);
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => discussPosts.length).toBe(1);
+  const threadCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+  await expect(threadCard).toBeVisible();
+  const key = await threadCard.getAttribute("data-sel-turn");
+  // A mark on the element: the card after the render is this one, not a new one.
+  await threadCard.evaluate((el) => el.setAttribute("data-e2e-mark", "thread"));
+  await renderAgain();
+  await expect(page.locator(`#articleWrap .wiki-sel-card[data-sel-turn="${key}"][data-e2e-mark="thread"]`)).toBeVisible();
+  expect(await cardBetween(page, ".wiki-sel-card", "The night route", FOLLOW_OLD_TEXT)).toBe(true);
+  await shot(page, "13-card-back-after-render");
+
+  // Explain on the morning sentence while that turn runs: the classic stream, its answer after a render.
+  await dragSelect(page, FOLLOW_OLD_TEXT);
+  await bar(page).locator("#wikiExplainBtn").click();
+  const classic = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])');
+  await expect(classic).toBeVisible();
+  await classic.evaluate((el) => el.setAttribute("data-e2e-mark", "classic"));
+  await renderAgain();
+  release();
+  await expect(classic.locator(".wiki-sel-card-body")).toContainText("CLASSIC-ANSWER after the render");
+  await expect(classic).toHaveAttribute("data-e2e-mark", "classic");
+  expect(await cardBetween(page, ".wiki-sel-card", FOLLOW_OLD_TEXT, "Check the berth list")).toBe(true);
+  expect(discussPosts.length).toBe(1);
+});
+
+test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on its first item; arrows move, Escape puts focus back on the page, Enter runs the item", async ({ page }) => {
+  await openPage(page);
+  // The night sentence's first character selected, extended with ⇧→ (a collapsed
+  // caret takes no ⇧→ outside caret browsing).
+  await page.evaluate((text) => {
+    const walker = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      const i = t.data.indexOf(text);
+      if (i === -1) continue;
+      getSelection()!.setBaseAndExtent(t, i, t, i + 1);
+      return;
+    }
+    throw new Error(text);
+  }, NIGHT);
+  for (let i = 1; i < NIGHT.length; i++) await page.keyboard.press("Shift+ArrowRight");
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(NIGHT);
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-selact") ?? document.activeElement?.tagName ?? null);
+  expect(await focused()).toBe("BODY");
+
+  await page.keyboard.press("Shift+F10");
+  await expect(menu(page)).toBeVisible();
+  expect(await focused()).toBe("explain");
+  // Under the selection, not at the corner.
+  const at = await textBox(page, NIGHT);
+  const box = (await menu(page).boundingBox())!;
+  expect(box.y).toBeGreaterThan(at.y1);
+  expect(box.y).toBeLessThan(at.y1 + 40);
+  await page.keyboard.press("ArrowDown");
+  expect(await focused()).toBe("where");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
+  // Wraps to the last item: the key chip.
+  expect(await focused()).toBe("key");
+  await page.keyboard.press("Home");
+  expect(await focused()).toBe("explain");
+  await shot(page, "14-keyboard-menu");
+  await page.keyboard.press("Escape");
+  await expect(menu(page)).toBeHidden();
+  expect(await focused()).toBe("BODY");
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(NIGHT);
+
+  // ↓ to «Where else», Enter: its card (no model), focus off the closed menu.
+  await page.keyboard.press("Shift+F10");
+  await page.keyboard.press("ArrowDown");
+  expect(await focused()).toBe("where");
+  await page.keyboard.press("Enter");
+  await expect(menu(page)).toBeHidden();
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  await expect(card.locator(`[data-sel-file="${REL}"]`)).toHaveCount(1);
+  expect(await focused()).toBe("BODY");
+
+  // ⇧F10 on a focused link is the link's: our menu stays closed.
+  await dragSelect(page, NIGHT);
+  await page.locator("#wikiBreadcrumb a.wiki-bc-wiki").focus();
+  await page.keyboard.press("Shift+F10");
+  await expect(menu(page)).toBeHidden();
+});
+
+test("the bar hides while its selection is scrolled out of the article pane and comes back with it; a scroll closes the right-click menu", async ({ page }) => {
+  await openPage(page, LONG);
+  const at = await dragSelect(page, LONG_TARGET);
+  await expect(bar(page)).toBeVisible();
+  const pane = (await page.locator("#articleWrap").boundingBox())!;
+  // The wheel over the article pane: the selection goes up out of it.
+  await page.mouse.move(pane.x + pane.width / 2, pane.y + pane.height / 2);
+  await page.mouse.wheel(0, 1500);
+  await expect.poll(() => page.locator("#articleWrap").evaluate((el) => el.scrollTop)).toBeGreaterThan(1000);
+  await expect(bar(page)).toBeHidden();
+  // Enter with the bar hidden starts nothing.
+  const turns: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname.startsWith("/api/wiki/discuss")) turns.push(r.url());
+  });
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#articleWrap .wiki-sel-card")).toHaveCount(0);
+  await page.mouse.wheel(0, -1500);
+  await expect.poll(() => page.locator("#articleWrap").evaluate((el) => el.scrollTop)).toBe(0);
+  await expect(bar(page)).toBeVisible();
+  const box = (await bar(page).boundingBox())!;
+  expect(box.y).toBeGreaterThan(at.y1);
+  expect(box.y).toBeLessThan(at.y1 + 40);
+  expect(turns).toEqual([]);
+  // Just above the pane's top, still in the viewport (under the breadcrumb): hidden too.
+  const under = await page.evaluate((text) => {
+    const wrap = document.getElementById("articleWrap")!;
+    const r = getSelection()!.getRangeAt(0).getBoundingClientRect();
+    wrap.scrollTop += r.bottom - wrap.getBoundingClientRect().top + 2;
+    return { text: getSelection()!.toString() === text, bottom: getSelection()!.getRangeAt(0).getBoundingClientRect().bottom, top: wrap.getBoundingClientRect().top };
+  }, LONG_TARGET);
+  expect(under.text).toBe(true);
+  expect(under.bottom).toBeLessThan(under.top);
+  expect(under.bottom).toBeGreaterThan(0);
+  await expect(bar(page)).toBeHidden();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
+  await expect(bar(page)).toBeVisible();
+
+  // The right-click menu closes on a scroll, as the browser's own does.
+  await page.mouse.click((at.x0 + at.x1) / 2, at.y0, { button: "right" });
+  await expect(menu(page)).toBeVisible();
+  await page.mouse.wheel(0, 300);
+  await expect(menu(page)).toBeHidden();
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(LONG_TARGET);
 });
 
 const FOLLOW_OLD = "The morning route adds a stop.";

@@ -26,6 +26,16 @@
  *   while the first streams, and a selection in the article head, stream the
  *   classic `/api/wiki/explain` answer into their inline card instead of an
  *   error card (never in place of the page); «Add to Oppfølging» is still refused.
+ * - A render of the same page (fix round 1 batch 4, F10) puts the open
+ *   Explain card back under its passage, the same element, its turn still
+ *   painting and its classic stream not aborted; at the article's top with a
+ *   note when the passage is gone. Not after an Apply of its own turn, not
+ *   once closed, and not on another page (its classic stream aborts). A
+ *   passage the page shows twice comes back under the copy it was on.
+ * - Keyboard (F11): ⇧F10 or the ContextMenu key opens the menu with focus on
+ *   its first item, ↑/↓ move, Escape closes with focus off the hidden menu,
+ *   and the browser's `contextmenu` that may follow the gesture is prevented;
+ *   on a link it is the link's.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -43,6 +53,8 @@ const saved = new Map<string, PropertyDescriptor | undefined>();
 const realFetch = globalThis.fetch;
 
 const REL = "plans/ferry.mdx";
+/** The page the menu's shell says is open (another one is a navigation). */
+let menuRel = REL;
 const posts: Record<string, unknown>[] = [];
 /** The stream a POST answers with: its frames are pushed by the test. */
 let push: ((event: string, data: unknown) => void) | null = null;
@@ -152,7 +164,7 @@ beforeAll(() => {
   });
   initSelectionMenu({
     wiki: () => "w",
-    relPath: () => REL,
+    relPath: () => menuRel,
     currentName: () => "ferry",
     pageType: () => "plan",
     graphId: "wikiGraph",
@@ -710,4 +722,218 @@ test("the classic card's stream: a delta paints at once, an app_error shows its 
   } finally {
     explainManual = false;
   }
+});
+
+/** Release the thread: the live turn ends (a stream already closed is left as it is). */
+async function endTurn(): Promise<void> {
+  try {
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+  } catch {
+    /* closed already */
+  }
+  await settle();
+}
+
+/** «Explain with context» on NIGHT, its turn started and painting. */
+async function explainNight(turnId: string, seq: number): Promise<Element> {
+  renderPage();
+  await selectText(NIGHT);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  push!("turn", { turnId, seq, discussionId: "thread-1" });
+  push!("delta", { text: "BEFORE the render" });
+  await settle();
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
+  expect(card.querySelector(".wiki-discuss-answer")?.textContent).toContain("BEFORE the render");
+  return card;
+}
+
+test("a render of the same page while an inline Explain streams: the same card is back under its paragraph, still painting its turn", async () => {
+  try {
+    const card = await explainNight("turn-20", 20);
+    const key = card.getAttribute("data-sel-turn");
+    // An in-place reload: the article's markup replaced, the card taken out
+    // with it; a frame lands while it is out.
+    renderPage();
+    push!("delta", { text: " DURING" });
+    await settle();
+    // The same element (a mismatch is compared by identity, not printed).
+    expect(document.querySelector(`#articleWrap .wiki-sel-card[data-sel-turn="${key}"]`) === card).toBe(true);
+    expect(card.previousSibling?.nodeName).toBe("BR");
+    expect(card.nextSibling?.textContent).toBe(EDIT_OLD);
+    expect(card.querySelector(".wiki-sel-card-moved")).toBeNull();
+    // Painted when it came back, not only on the next frame.
+    expect(card.querySelector(".wiki-discuss-answer")?.textContent).toContain("BEFORE the render DURING");
+    push!("delta", { text: " AFTER it" });
+    await settle();
+    expect(card.querySelector(".wiki-discuss-answer")?.textContent).toContain("BEFORE the render DURING AFTER it");
+  } finally {
+    await endTurn();
+  }
+});
+
+test("a render whose page no longer holds the passage: the card at the article's top, saying so", async () => {
+  try {
+    const card = await explainNight("turn-21", 21);
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${EDIT_OLD}<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+    setSelectionMenuPage({ mentions: true });
+    await settle();
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    expect(article.firstElementChild === card).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent).toBe("The passage this answers is no longer on the page as it was.");
+    // The passage back on a later render: under it again, the note gone.
+    renderPage();
+    await settle();
+    expect(card.previousSibling?.nodeName).toBe("BR");
+    expect(card.querySelector(".wiki-sel-card-moved")).toBeNull();
+  } finally {
+    await endTurn();
+  }
+});
+
+test("the classic in-card stream survives a render of its page: not aborted, the card back under its paragraph and painting", async () => {
+  try {
+    await explainNight("turn-22", 22);
+    explainManual = true;
+    try {
+      // The thread is busy: Explain on the morning sentence streams the classic answer.
+      await selectText(EDIT_OLD);
+      act(document.getElementById("wikiExplainBtn")!);
+      await settle();
+      const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])')!;
+      const ctl = explainCtl!;
+      ctl.push("delta", { text: "CLASSIC before" });
+      await settle();
+      renderPage();
+      // A frame between the render and the card's return paints into the same card.
+      ctl.push("delta", { text: " during" });
+      await settle();
+      expect(ctl.signal?.aborted).toBe(false);
+      expect(card.isConnected).toBe(true);
+      expect(card.previousSibling?.textContent).toBe(EDIT_OLD);
+      ctl.push("delta", { text: " after" });
+      await settle();
+      expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("CLASSIC before during after");
+      ctl.close();
+    } finally {
+      explainManual = false;
+    }
+  } finally {
+    await endTurn();
+  }
+});
+
+test("another page drops the open card for good and aborts its classic stream", async () => {
+  try {
+    await explainNight("turn-23", 23);
+    explainManual = true;
+    try {
+      await selectText(EDIT_OLD);
+      act(document.getElementById("wikiExplainBtn")!);
+      await settle();
+      const ctl = explainCtl!;
+      menuRel = "plans/harbour.mdx";
+      renderPage();
+      await settle();
+      expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+      ctl.push("delta", { text: "late" });
+      await settle();
+      expect(ctl.signal?.aborted).toBe(true);
+      // Back on the first page: the card stays gone.
+      menuRel = REL;
+      renderPage();
+      await settle();
+      expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+    } finally {
+      explainManual = false;
+      menuRel = REL;
+    }
+  } finally {
+    await endTurn();
+  }
+});
+
+test("a closed card does not come back on a render", async () => {
+  try {
+    const card = await explainNight("turn-24", 24);
+    (card.querySelector("[data-sel-card-close]") as HTMLButtonElement).click();
+    renderPage();
+    await settle();
+    expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+  } finally {
+    await endTurn();
+  }
+});
+
+test("Apply on an inline card: its render does not bring the card back, nor does a later render", async () => {
+  const card = await followCardWithEdit("turn-25", 25);
+  (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+  await settle();
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+  renderPage(EDIT_NEW);
+  await settle();
+  expect(document.querySelector("#articleWrap .wiki-sel-card")).toBeNull();
+});
+
+test("a passage the page shows twice: the card comes back under the copy it was on", async () => {
+  const twice = () => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2><p>First: ${NIGHT}</p><p>Second: ${NIGHT}</p><h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+    setSelectionMenuPage({ mentions: true });
+  };
+  try {
+    twice();
+    await selectText(NIGHT, ".wiki-article p:nth-of-type(2)");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    push!("turn", { turnId: "turn-26", seq: 26, discussionId: "thread-1" });
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-turn]')!;
+    expect(card.previousElementSibling?.textContent).toBe(`Second: ${NIGHT}`);
+    twice();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.previousElementSibling?.textContent).toBe(`Second: ${NIGHT}`);
+  } finally {
+    await endTurn();
+  }
+});
+
+const key = (target: EventTarget, k: string, shiftKey = false) => {
+  const ev = new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true });
+  target.dispatchEvent(ev);
+  return ev;
+};
+
+test("⇧F10 and the ContextMenu key: the menu with focus on its first item, ↓/↑ move, Escape closes with focus off it; the browser's menu after the gesture is prevented; on a link it is the link's", async () => {
+  renderPage();
+  const menuEl = () => document.getElementById("wikiSelMenu")!;
+  const focusedAct = () => (document.activeElement as HTMLElement | null)?.getAttribute("data-selact") ?? null;
+  for (const gesture of [["F10", true], ["ContextMenu", false]] as const) {
+    await selectText(NIGHT);
+    expect(key(document.body, gesture[0], gesture[1]).defaultPrevented).toBe(true);
+    expect(menuEl().style.display).toBe("block");
+    expect(focusedAct()).toBe("explain");
+    // The browser's own context menu the gesture may still send: not over ours.
+    const ctx = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    document.body.dispatchEvent(ctx);
+    expect(ctx.defaultPrevented).toBe(true);
+    expect(focusedAct()).toBe("explain");
+    expect(key(document.activeElement!, "ArrowDown").defaultPrevented).toBe(true);
+    expect(focusedAct()).toBe("where");
+    key(document.activeElement!, "ArrowUp");
+    expect(focusedAct()).toBe("explain");
+    key(document.activeElement!, "Escape");
+    expect(menuEl().style.display).toBe("none");
+    expect(menuEl().contains(document.activeElement)).toBe(false);
+    expect(window.getSelection()!.toString()).toBe(NIGHT);
+  }
+  // Focus on a link in the article: ⇧F10 is the link's, nothing prevented.
+  document.querySelector(".wiki-article")!.insertAdjacentHTML("beforeend", `<a href="#x" id="selLink">x</a>`);
+  await selectText(NIGHT);
+  const link = document.getElementById("selLink")!;
+  link.focus();
+  expect(key(link, "F10", true).defaultPrevented).toBe(false);
+  expect(menuEl().style.display).toBe("none");
 });

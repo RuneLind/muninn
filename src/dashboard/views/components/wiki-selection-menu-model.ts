@@ -365,6 +365,7 @@ export function selectionMenuStyles(): string {
     .wiki-selbar-btn:hover, .wiki-selbar-btn.def, .wiki-selmenu-it:hover, .wiki-selmenu-it.def, .wiki-selbar-btn:focus-visible, .wiki-selmenu-it:focus-visible {
       background: color-mix(in srgb, var(--accent) 16%, transparent);
     }
+    .wiki-selbar-btn:focus-visible, .wiki-selmenu-it:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
     .wiki-selbar-btn.def { font-weight: 600; }
     .wiki-selbar-btn.chip, .wiki-selmenu-it[data-selact="key"] { color: var(--accent-light); }
     #${SEL_MENU_ID} { padding: 5px; min-width: 260px; }
@@ -385,6 +386,7 @@ export function selectionMenuStyles(): string {
     }
     .wiki-sel-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
     .wiki-sel-card-title { font-weight: 600; }
+    .wiki-sel-card-moved { margin: 0 0 6px; }
     .wiki-sel-card-sub { font-weight: 400; color: var(--text-dim); }
     .wiki-sel-card-tools { display: flex; gap: 6px; flex-shrink: 0; }
     .wiki-sel-card-btn {

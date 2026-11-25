@@ -409,9 +409,11 @@ describe("wiki-browser.ts — listener order", () => {
       // The selection menu (`initSelectionMenu`, Discuss v2 PR 5), where the Explain pill's listeners were:
       // the bar on a mouseup, the right-click menu, close on a collapsed selection, Escape and Enter, an
       // action's press, a keyboard click and the cards' buttons, the bar following a scroll or a resize;
-      // then the whole-page Fact check's press, which the pill's mousedown used to hold.
-      "#articleWrap mouseup 16zwr", "#articleWrap contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 1fnn8",
-      "document mousedown 2jzhg", "document click 1dcm4", "document scroll capture 2k8ec", "window resize 2k8ec",
+      // then the whole-page Fact check's press, which the pill's mousedown used to hold. (PR 5 fix round 1
+      // batch 4: the context menu on the document, where the keyboard's goes; ⇧F10 and the arrows in the
+      // keydown; a closed card let go; the menu closed on a scroll.)
+      "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 2417h",
+      "document mousedown 2jzhg", "document click 37i4g", "document scroll capture 2aqvh", "window resize 2k8ec",
       "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",
