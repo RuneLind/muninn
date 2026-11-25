@@ -133,6 +133,9 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   // The owner-step checks SPAWN git per uncached probe, one of them a network
   // `ls-remote` to each named repo's origin. The reader's same-origin fetch passes.
   "/api/wiki/step-checks",
+  // Discuss v2's key mentions SPAWN `git grep` and `git log` on a caller-typed
+  // key per request, and a PR cache miss starts a background `gh` flight.
+  "/api/wiki/mentions",
   // The peer half of the same checks: the other machine's muninn asks this one
   // to run probes for itself, the same git spawns. A server-side fetch sends
   // neither Origin nor Sec-Fetch-Site, so it passes.
