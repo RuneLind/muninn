@@ -22,7 +22,12 @@ import {
   renderAgentSystemPrompt,
   renderAgentTurnPrompt,
   reposInReach,
+  rulesForMode,
+  stripProposedEdit,
+  wikiThreadName,
+  STORED_EDIT_MARKER,
 } from "./discuss-agent.ts";
+import { parseDiscussBody } from "./discuss-engine.ts";
 import { parseDiscussReaderConfig } from "./store.ts";
 
 let dir = "";
@@ -110,9 +115,12 @@ describe("the prompt", () => {
     expect(p).toContain("9: One line.");
     expect(p.endsWith("## Question\nQ?")).toBe(true);
   });
-  test("the system prompt carries the rules and no persona", () => {
+  test("the system prompt carries the rules and no persona, and frames a thread", () => {
     const s = renderAgentSystemPrompt("w", "Be brief.");
     expect(s).toContain("<wiki_rules>\nBe brief.\n</wiki_rules>");
+    expect(s).toContain("in a thread");
+    expect(s).toContain("The context pack describes this turn");
+    expect(s).not.toContain("one turn at a time");
   });
   test("earlier turns are bounded to the newest few", () => {
     const earlier = Array.from({ length: 9 }, (_, i) => ({ question: `q${i}`, selection: null, answer: `a${i}`, endState: "done" }));
@@ -170,5 +178,61 @@ describe("extractProposedEdit: the fences an answer really has", () => {
     const e = extractProposedEdit(`${cited}\`\`\`\`json\n\`\`\`\n${two}\n\`\`\`\`\n`);
     expect(e?.edits.map((x) => x.new)).toEqual(["b", "d"]);
     expect(e?.overLimit).toBe(true);
+  });
+});
+
+describe("Discuss v2: modes, the stored answer, the thread name and the body", () => {
+  const RULES = [
+    "# Agent",
+    "",
+    "## Answering",
+    "- First sentence answers.",
+    "",
+    "## Changing the page",
+    "<!-- discuss:edit -->",
+    "- One edit per turn.",
+    "### Shape",
+    "```md",
+    "## not a heading inside a fence",
+    "```",
+    "",
+    "## Language",
+    "- Reply in kind.",
+  ].join("\n");
+  test("the marked section (to the next heading of its level, fences skipped) goes only to Edit; the marker line never", () => {
+    const explore = rulesForMode(RULES, "explore");
+    expect(explore).not.toContain("Changing the page");
+    expect(explore).not.toContain("One edit per turn");
+    expect(explore).not.toContain("not a heading inside a fence");
+    expect(explore).toContain("## Answering");
+    expect(explore).toContain("## Language\n- Reply in kind.");
+    const edit = rulesForMode(RULES, "edit");
+    expect(edit).toContain("## Changing the page\n- One edit per turn.");
+    expect(edit).toContain("## not a heading inside a fence");
+    expect(edit).not.toContain("<!-- discuss:edit -->");
+  });
+  test("a file with no marker is sent whole in both modes", () => {
+    const plain = "# A\n\n## Changing the page\n- edits\n";
+    expect(rulesForMode(plain, "explore")).toBe(plain);
+    expect(rulesForMode(plain, "edit")).toBe(plain);
+  });
+  test("the stored answer replaces the block extractProposedEdit reads with the marker line; an answer with none is unchanged", () => {
+    const answer = 'Wrong.\n\n```json\n{"edits": [{"old": "a", "new": "b"}]}\n```\n\nRead: x';
+    expect(extractProposedEdit(answer)).not.toBeNull();
+    expect(stripProposedEdit(answer)).toBe(`Wrong.\n\n${STORED_EDIT_MARKER}\n\nRead: x`);
+    const plain = "Fine.\n\n```ts\nconst a = 1;\n```";
+    expect(stripProposedEdit(plain)).toBe(plain);
+  });
+  test("the thread name: `wiki: <title>` lowercased, cut to 50 units with its suffix, never splitting a pair", () => {
+    expect(wikiThreadName("Ferry   Timetable", "")).toBe("wiki: ferry timetable");
+    expect(wikiThreadName("x".repeat(60), " #ab12")).toBe(`wiki: ${"x".repeat(38)} #ab12`);
+    expect(wikiThreadName("😀".repeat(30), "").length).toBeLessThanOrEqual(50);
+  });
+  test("parseDiscussBody reads mode and userId and refuses a bad one", () => {
+    const base = { relPath: "a.md", question: "q" };
+    expect(parseDiscussBody({ ...base, mode: "edit", userId: "kari" })).toMatchObject({ mode: "edit", userId: "kari" });
+    expect(parseDiscussBody({ ...base, mode: "write" })).toBeString();
+    expect(parseDiscussBody({ ...base, userId: "" })).toBeString();
+    expect(parseDiscussBody({ ...base, userId: 7 })).toBeString();
   });
 });

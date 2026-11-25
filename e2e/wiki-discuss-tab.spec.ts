@@ -208,6 +208,10 @@ test.beforeAll(async () => {
   const fakeUrl = await startFake();
 
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
+  // Discuss v2 (PR 3): a turn runs on the page's wiki thread, which needs a
+  // user; until the pane sends one (PR 4) it is the bot's default chat user.
+  await sql!`INSERT INTO users (id, username, platform) VALUES ('e2e-discuss-user', 'E2E Discuss', 'web') ON CONFLICT (id) DO NOTHING`;
+  await sql!`INSERT INTO bot_default_user (bot_name, user_id) VALUES ('discussbot', 'e2e-discuss-user') ON CONFLICT (bot_name) DO UPDATE SET user_id = EXCLUDED.user_id`;
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
@@ -422,6 +426,11 @@ function holdNextDiscussStream(page: Page): Promise<void> {
 }
 
 test.describe("Wiki reader: the Discuss tab", () => {
+  // Each test starts its own discussion, as v1's tab did: a fresh ask now
+  // continues the page's live wiki thread, so close those first («Start over»).
+  test.beforeEach(async () => {
+    await sql!`UPDATE threads SET closed_at = now() WHERE kind = 'wiki' AND closed_at IS NULL`;
+  });
   test("select, ask here, the answer streams in the tab, the chip scrolls; a follow-up; Continue in Claude Code; a passage gone", async ({ page, context }) => {
     test.setTimeout(180_000);
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);

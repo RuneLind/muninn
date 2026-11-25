@@ -50,4 +50,9 @@ describe("renderContinuePrompt", () => {
     expect(p).toContain("end 8");
     expect(p).not.toContain("end 1");
   });
+  test("a trace turn (no page) names no page path", () => {
+    const p = renderContinuePrompt({ path: null, turns: [turn(1, { selection: null, location: null })] });
+    expect(p).not.toContain("Page:");
+    expect(p).toContain("Question: Question 1?");
+  });
 });

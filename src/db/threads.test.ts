@@ -12,7 +12,16 @@ import {
   deleteThreadById,
   getOrCreateSlackThread,
   getAllThreadsForBot,
+  getOrCreateWikiThread,
+  closeWikiThread,
+  listClosedWikiThreads,
+  createThread,
+  updateThreadConnector,
+  WikiThreadRefused,
 } from "./threads.ts";
+import { getDb } from "./client.ts";
+import { startDiscussTurn } from "./wiki-discuss-turns.ts";
+import { wikiThreadName } from "../wiki/discuss-agent.ts";
 import { saveMemory, getMemoriesForUser } from "./memories.ts";
 
 setupTestDb();
@@ -454,5 +463,60 @@ describe("threads", () => {
       expect(workMsgs).toHaveLength(1);
       expect(workMsgs[0]!.text).toBe("work msg");
     });
+  });
+});
+
+describe("wiki threads (kind 'wiki', migration 094)", () => {
+  const nameFor = (suffix: string) => `wiki: ferry timetable${suffix}`;
+
+  test("getOrCreateWikiThread: never active, lowercased name, and one live thread for two requests at once", async () => {
+    await switchThread("u1", "bot1", "work");
+    const [a, b] = await Promise.all([
+      getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", (s) => `Wiki: Ferry Timetable${s}`),
+      getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", (s) => `Wiki: Ferry Timetable${s}`),
+    ]);
+    expect(a.id).toBe(b.id);
+    expect(a.kind).toBe("wiki");
+    expect(a.name).toBe("wiki: ferry timetable");
+    expect(a.isActive).toBe(false);
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("work");
+    const [n] = await getDb()`SELECT count(*)::int AS n FROM threads WHERE kind = 'wiki'`;
+    expect(n!.n).toBe(1);
+  });
+
+  test("a name a chat thread or a closed wiki thread holds gets a short id suffix; the title is cut to fit 50 units", async () => {
+    await createThread("u1", "bot1", "wiki: ferry timetable");
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    expect(t.name).toMatch(/^wiki: ferry timetable #[0-9a-f]{4}$/);
+    expect(await closeWikiThread(t.id)).toBe(true);
+    expect(await closeWikiThread(t.id)).toBe(false);
+    const again = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    expect(again.id).not.toBe(t.id);
+    expect((await listClosedWikiThreads("u1", "bot1", "mimir", "plans/ferry.mdx")).map((x) => x.id)).toEqual([t.id]);
+    const long = "A".repeat(80);
+    const names = [wikiThreadName(long, ""), wikiThreadName(long, " #abcd")];
+    expect(names.map((x) => x.length)).toEqual([50, 50]);
+    expect(names[1]!.endsWith(" #abcd")).toBe(true);
+  });
+
+  test("switchThread, updateThreadConnector and createThread refuse a wiki thread; listThreads returns it with its kind", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    await expect(switchThread("u1", "bot1", t.name)).rejects.toBeInstanceOf(WikiThreadRefused);
+    await expect(updateThreadConnector(t.id, null)).rejects.toBeInstanceOf(WikiThreadRefused);
+    await expect(createThread("u1", "bot1", t.name)).rejects.toBeInstanceOf(WikiThreadRefused);
+    expect((await listThreads("u1", "bot1")).find((x) => x.id === t.id)?.kind).toBe("wiki");
+    expect(await deleteThread("u1", "bot1", t.name)).toBe(false);
+  });
+
+  test("deleting a wiki thread by id deletes its ledger rows (CASCADE) and its messages", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    const turn = await startDiscussTurn(
+      { discussionId: t.id, threadId: t.id, wiki: "mimir", relPath: "plans/ferry.mdx", pageHash: "h", selection: null, question: "q", location: null, botName: "bot1", connector: "claude-sdk", model: null, surface: {}, userMessage: { userId: "u1", botName: "bot1", content: "q" } },
+      { staleRunningMs: 60_000 },
+    );
+    expect(turn.userMessageId).not.toBeNull();
+    expect(await deleteThreadById(t.id)).not.toBeNull();
+    const [n] = await getDb()`SELECT (SELECT count(*) FROM wiki_discuss_turns)::int AS turns, (SELECT count(*) FROM messages)::int AS messages`;
+    expect(n).toEqual({ turns: 0, messages: 0 });
   });
 });

@@ -8,6 +8,7 @@ import { saveMessage } from "../db/messages.ts";
 import { Tracer } from "../tracing/index.ts";
 import { agentStatus, setConnectorInfo, getConnectorLabel } from "../observability/agent-status.ts";
 import { ensureUser } from "../db/users.ts";
+import { getThreadKind } from "../db/thread-kind.ts";
 import { getLog } from "../logging.ts";
 
 import { buildProgressCallback } from "./progress-callbacks.ts";
@@ -127,6 +128,13 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     say, setStatus, postToChannel, channelContext, recentChannelMessages, threadId,
     onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress,
   } = params;
+
+  // D7 backstop (Discuss v2): a wiki page's Discuss thread runs on the Discuss
+  // engine only (`src/wiki/discuss-engine.ts`): no persona, memories, goals,
+  // extractors or personal tools. Whatever the entry point, never here.
+  if (threadId && (await getThreadKind(threadId)) === "wiki") {
+    throw new Error(`thread ${threadId} is a wiki page's Discuss thread; it runs on the Discuss engine, never through the chat pipeline`);
+  }
 
   const isTelegram = platform.startsWith("telegram");
   const externalTracer = !!params.tracer;

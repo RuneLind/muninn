@@ -47,7 +47,10 @@ export type ChatEvent =
   | { type: "response_meta"; conversationId: string; threadId?: string | null; messageId?: string; clientMessageId?: string; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] }
   | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] }
-  | { type: "dev_run_event"; conversationId: string; runId: string; threadId?: string; event: DevRunEvent };
+  | { type: "dev_run_event"; conversationId: string; runId: string; threadId?: string; event: DevRunEvent }
+  /** A refusal or failure shown once and never stored (a wiki thread's
+   *  Discuss refusal: `no-agent`, egress, busy). */
+  | { type: "transient_error"; conversationId: string; threadId?: string | null; message: string };
 
 type EventSubscriber = (event: ChatEvent) => void;
 
@@ -254,6 +257,11 @@ export class ChatState {
   /** Broadcast a text delta to subscribers (ephemeral — no state mutation) */
   publishTextDelta(conversationId: string, delta: string, threadId?: string | null): void {
     this.publish({ type: "text_delta", conversationId, delta, threadId });
+  }
+
+  /** Broadcast an error that is shown once and stored nowhere (ephemeral). */
+  publishTransientError(conversationId: string, message: string, threadId?: string | null): void {
+    this.publish({ type: "transient_error", conversationId, message, threadId });
   }
 
   /** Signal subscribers to clear any streaming bubble (e.g. when tool calls start) */

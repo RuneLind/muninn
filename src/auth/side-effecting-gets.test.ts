@@ -40,6 +40,8 @@ const READ_ONLY_GETS: ReadonlyMap<string, string> = new Map([
   // Living facts PR 4: the cross-page id hover renders ONE page off disk (its
   // own sibling files) and reads the asked ids off it.
   ["/api/wiki/ref", "renders one page from disk and reads its id targets: no outbound call, spawn, search or model spend"],
+  // Discuss v2 PR 3: the page's wiki thread, its messages and old one-shot turns, read from the DB.
+  ["/api/wiki/discuss/thread", "reads the page's wiki thread and turns from the DB: no write, outbound call, spawn or model spend"],
   ...[
     "/", "/docs", "/traces", "/memsearch", "/logs", "/search", "/search/document/:collection/*",
     "/research", "/mcp-debug", "/serena", "/summaries", "/summaries/prompts", "/summaries/discover", "/youtube",

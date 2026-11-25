@@ -14,6 +14,14 @@ import type { ConversationMessage, Platform } from "../types.ts";
  */
 export const PROACTIVE_SOURCE_PREFIXES = ["watcher:", "task:", "goal:"] as const;
 
+/**
+ * The `source` of a wiki page's Discuss thread rows (Discuss v2): a real
+ * conversation row on its `kind = 'wiki'` thread, not a proactive one, so
+ * thread-scoped history keeps it. Readers not scoped by thread that build a
+ * chat prompt leave it out ({@link getRecentMessages}).
+ */
+export const WIKI_THREAD_SOURCE = "wiki";
+
 type SqlClient = ReturnType<typeof getDb>;
 
 /** SQL fragment keeping only conversation rows (NULL source, or any non-proactive tag). */
@@ -159,10 +167,13 @@ export async function getRecentMessages(
       LIMIT ${limit}
     `;
   } else if (botName) {
+    // Unscoped by thread, so a wiki page's Discuss thread (`source 'wiki'`,
+    // Discuss v2) stays out: it is the wiki agent's, never this conversation's.
     rows = await sql`
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
       WHERE user_id = ${userId} AND bot_name = ${botName}
+        AND source IS DISTINCT FROM ${WIKI_THREAD_SOURCE}
         ${proactive}
       ORDER BY created_at DESC
       LIMIT ${limit}
@@ -172,6 +183,7 @@ export async function getRecentMessages(
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
       WHERE user_id = ${userId}
+        AND source IS DISTINCT FROM ${WIKI_THREAD_SOURCE}
         ${proactive}
       ORDER BY created_at DESC
       LIMIT ${limit}

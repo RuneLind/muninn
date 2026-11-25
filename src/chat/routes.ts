@@ -30,6 +30,8 @@ import { pinnedLocalUserId } from "../auth/policy.ts";
 import { streamSSE } from "hono/streaming";
 import { agentStatus } from "../observability/agent-status.ts";
 import { applyCors, corsHeaders } from "../auth/cors.ts";
+import { sharedDiscussEngine, type DiscussEngine } from "../wiki/discuss-engine.ts";
+import { chatUsersFor, runWikiThreadTurnFromChat } from "./wiki-mirror.ts";
 
 const log = getLog("chat");
 
@@ -65,8 +67,11 @@ function stripSharePrompts(prompts: BotConfig["prompts"]): BotConfig["prompts"] 
  * Creates the chat Hono sub-router.
  * Mounted at /chat on the main dashboard server.
  */
-export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono {
+export function createChatRoutes(botConfigs: BotConfig[], config: Config, opts: { discussEngine?: DiscussEngine } = {}): Hono {
   const app = new Hono();
+  // A wiki thread's turns run on the Discuss engine (Discuss v2): the
+  // process's shared one, so the in-flight cap covers the pane and /chat.
+  const discussEngine = () => opts.discussEngine ?? sharedDiscussEngine(config, { chatUsers: chatUsersFor });
 
   // Bridge MCP status changes from the ai/ layer into the chat WebSocket.
   // Wired here (not in ai/mcp-status.ts) to keep ai/ free of chat-state imports.
@@ -643,6 +648,17 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       if (!isValidUuid(body.threadId)) return c.json({ error: "Conversation not found" }, 404);
       const ownsThread = await requireOwnedResource(c, "thread", body.threadId);
       if (!ownsThread.ok) return c.json({ error: "Conversation not found" }, 404);
+      // A wiki page's Discuss thread goes to the Discuss engine, never to
+      // `processChatMessage` (D7): the wiki's bot and connector (D6), so
+      // `body.connector` and the thread's `connector_id` are not read; an
+      // Explore turn; a refusal is a transient event, never a stored row.
+      const thread = await getThreadById(body.threadId);
+      if (thread?.kind === "wiki") {
+        if (thread.botName !== conversation.botName) return c.json({ error: "Conversation not found" }, 404);
+        const r = await runWikiThreadTurnFromChat({ engine: discussEngine(), conversationId: id, thread, text: body.text, role: sessionRole(c) ?? "admin" });
+        if ("refused" in r) return c.json(r.body, r.status);
+        return c.json({ status: "processing", turnId: r.turnId }, 202);
+      }
     }
 
     const bot = botConfigs.find((b) => b.name === conversation.botName);

@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
+import { getRecentMessages } from "./messages.ts";
 import {
   DiscussTurnConflict,
   finishDiscussTurn,
@@ -199,5 +200,76 @@ describe("wiki_discuss_turns", () => {
     expect((await markDiscussTurnHandedOver(a.id))?.handedOverAt).toBe(first!.handedOverAt);
     expect((await getDiscussTurn(b.id))?.handedOverAt).toBeNull();
     expect(await markDiscussTurnHandedOver(crypto.randomUUID())).toBeNull();
+  });
+});
+
+describe("wiki thread turns (migration 094)", () => {
+  async function thread(): Promise<string> {
+    const [t] = await getDb()`INSERT INTO threads (user_id, bot_name, name, kind, wiki, rel_path) VALUES ('kari', 'ivar', 'wiki: ferry', 'wiki', 'invented', 'plans/ferry.mdx') RETURNING id`;
+    return t!.id as string;
+  }
+  const threadStart = (threadId: string): DiscussTurnStart => ({
+    ...start(threadId),
+    threadId,
+    userMessage: { userId: "kari", botName: "ivar", content: "> The summer route adds a stop.\n\nWhich stop?" },
+  });
+
+  test("the user message is stored in the insert's transaction, and a refused insert stores none", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await expect(startDiscussTurn(threadStart(tid))).rejects.toBeInstanceOf(DiscussTurnConflict);
+    const msgs = await getDb()`SELECT id, role, source, platform, thread_id FROM messages`;
+    expect(msgs).toHaveLength(1);
+    expect({ ...msgs[0] }).toEqual({ id: a.userMessageId, role: "user", source: "wiki", platform: "web", thread_id: tid });
+    expect((await getDiscussTurn(a.id))!.userMessageId).toBe(a.userMessageId);
+  });
+
+  test("the sweep closes an abandoned thread turn with an «(unfinished)» assistant message; the turn coming back rewrites that message", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([a.id]);
+    const row = (await getDiscussTurn(a.id))!;
+    expect(row.endState).toBe("abandoned");
+    expect(row.assistantMessageId).not.toBeNull();
+    const [m] = await getDb()`SELECT content, role, source FROM messages WHERE id = ${row.assistantMessageId}`;
+    expect({ ...m }).toEqual({ content: turns.UNFINISHED_MARK, role: "assistant", source: "wiki" });
+    // A sweep again writes nothing more.
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([]);
+    // The stalled turn comes back: its own answer replaces the unfinished one.
+    expect(await done(a.id)).toBe(true);
+    expect(await turns.storeDiscussAssistantMessage(a.id, "An answer.")).toBe(row.assistantMessageId);
+    const all = await getDb()`SELECT content FROM messages WHERE role = 'assistant'`;
+    expect(all.map((r) => r.content)).toEqual(["An answer."]);
+  });
+
+  test("a one-shot turn (no thread) gets no message from the sweep or the store", async () => {
+    const a = await startDiscussTurn(start(crypto.randomUUID()));
+    await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([a.id]);
+    expect(await turns.storeDiscussAssistantMessage(a.id, "x")).toBeNull();
+    const [n] = await getDb()`SELECT count(*)::int AS n FROM messages`;
+    expect(n!.n).toBe(0);
+    expect((await turns.listPageOneShotTurns("invented", "plans/ferry.mdx")).map((t) => t.id)).toEqual([a.id]);
+  });
+
+  test("a thread's messages read joined to their ledger rows; a deleted message leaves the row with its id cleared", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    const aid = await turns.storeDiscussAssistantMessage(a.id, "An answer.");
+    const read = await turns.listThreadMessagesWithTurns(tid);
+    expect(read.map((m) => `${m.role}:${m.turn?.id === a.id}`)).toEqual(["user:true", "assistant:true"]);
+    await getDb()`DELETE FROM messages WHERE id = ${aid}`;
+    expect((await getDiscussTurn(a.id))!.assistantMessageId).toBeNull();
+  });
+
+  test("history not scoped by thread leaves the wiki thread's rows out; the thread's own history keeps them", async () => {
+    const tid = await thread();
+    await startDiscussTurn(threadStart(tid));
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES ('kari', 'ivar', 'user', 'a chat line', 'web')`;
+    expect((await getRecentMessages("kari", 20, "ivar")).map((m) => m.text)).toEqual(["a chat line"]);
+    expect((await getRecentMessages("kari", 20)).map((m) => m.text)).toEqual(["a chat line"]);
+    expect((await getRecentMessages("kari", 20, "ivar", tid, { excludeProactive: true })).map((m) => m.role)).toEqual(["user"]);
   });
 });
