@@ -112,8 +112,18 @@ describe("grepTracked", () => {
     if (!res.ok) throw new Error(res.error);
     expect(res.hits).toEqual([{ relPath: "plans/Q-3.csv", line: 2, text: "1;KEY-1" }]);
     expect(res).toMatchObject({ totalLines: 1, totalFiles: 1, atLeast: false });
-    const none = await grepTracked(wiki, "KEY-1", { glob: "*.nothing" });
-    expect(none).toEqual({ ok: true, hits: [], totalLines: 0, totalFiles: 0, atLeast: false });
+  });
+  test("a glob without a wildcard is a folder or file path; a leading ./ is dropped", async () => {
+    for (const glob of ["plans", "plans/", "./plans/**", "./plans", "plans/Q-3.csv", "Q-3.csv"]) {
+      const res = await grepTracked(wiki, "KEY-1", { glob });
+      expect({ glob, hits: res.ok ? res.hits.map((h) => h.relPath) : res.error }).toEqual({ glob, hits: ["plans/Q-3.csv"] });
+    }
+  });
+  test("a glob that selects no tracked file is an error, not a search that found nothing", async () => {
+    for (const glob of ["*.nothing", "*.CSV", "Q-3/*", "plan"]) {
+      const res = await grepTracked(wiki, "KEY-1", { glob });
+      expect({ glob, ok: res.ok, error: res.ok ? null : res.error }).toEqual({ glob, ok: false, error: expect.stringContaining(`glob "${glob}" selects no tracked file`) });
+    }
   });
   test("the scan bound turns the totals into lower bounds", async () => {
     const fake: GitRun = async (cwd, args, opts) => {
@@ -189,6 +199,36 @@ describe("historyFor", () => {
   test("a path climbing out of the wiki is refused", async () => {
     expect((await historyFor(wiki, "KEY-1", { path: "../README.md" })).ok).toBe(false);
     expect((await historyFor(wiki, "KEY-1", { path: "/etc" })).ok).toBe(false);
+  });
+  test("a glob as path is refused: git reads it as a literal path and would find nothing", async () => {
+    // The literal path finds the commit, so a glob that names it must not read as «no commit».
+    const lit = await historyFor(wiki, "KEY-1", { path: "plans/Q-3.csv" });
+    expect(lit.ok && lit.commits.map((c) => c.subject)).toEqual(["first: add KEY-1"]);
+    for (const p of ["plans/*.csv", "plans/Q-?.csv", "plans/[Q]-3.csv"]) {
+      const res = await historyFor(wiki, "KEY-1", { path: p });
+      expect({ p, res }).toEqual({ p, res: { ok: false, error: expect.stringContaining("not a glob") } });
+    }
+  });
+  const rec = (hash: string, subject: string, files: string[]) => `\x1e${hash}\x1f2026-01-02T03:04:05+01:00\x1fAnn\x1f${subject}\0\n${files.join("\0")}\0`;
+  test("output cut at realGit's bound drops the possibly cut last commit and reads as partial", async () => {
+    const cut = rec("a".repeat(40), "whole", ["a.md", "b.md"]) + rec("b".repeat(40), "cut", ["c.md", "d.m"]).slice(0, -1);
+    const fake: GitRun = async () => ({ ok: true, stdout: cut, capped: true });
+    const res = await historyFor(wiki, "KEY-1", { git: fake });
+    if (!res.ok) throw new Error(res.error);
+    expect(res.commits.map((c) => c.subject)).toEqual(["whole"]);
+    expect(res.partial).toBe(true);
+    const whole: GitRun = async () => ({ ok: true, stdout: cut, exitCode: 0 });
+    const full = await historyFor(wiki, "KEY-1", { git: whole });
+    expect(full.ok && [full.commits.length, full.partial]).toEqual([2, false]);
+  });
+  test("a commit lists at most 20 files and keeps the true count", async () => {
+    const files = Array.from({ length: 415 }, (_, i) => `sources/s-${i}.md`);
+    const fake: GitRun = async () => ({ ok: true, stdout: rec("c".repeat(40), "bulk", files) + rec("d".repeat(40), "one", ["a.md"]), exitCode: 0 });
+    const res = await historyFor(wiki, "KEY-1", { git: fake });
+    if (!res.ok) throw new Error(res.error);
+    expect(res.commits[0]!.files).toEqual(files.slice(0, 20));
+    expect(res.commits[0]!.fileCount).toBe(415);
+    expect(res.commits[1]).toMatchObject({ files: ["a.md"], fileCount: 1 });
   });
 });
 

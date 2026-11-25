@@ -110,13 +110,19 @@ export async function wikiHistoryTool(
   if (typeof w === "string") return fail(w);
   const res = await historyFor(w.root, args.term, { git: deps.git, path: args.path, limit: args.limit });
   if (!res.ok) return fail(`wiki_history on "${w.name}": ${res.error}`);
-  if (res.commits.length === 0) return text(`No commit in "${w.name}" added or removed ${JSON.stringify(args.term)}.`);
-  const lines = [`${res.commits.length} commit(s) in "${w.name}" that added or removed ${JSON.stringify(args.term)}, newest first:`];
+  const cut = res.partial ? "\n… output cut at its size bound: older commits may follow. Narrow with path or a longer term, or lower limit." : "";
+  if (res.commits.length === 0) {
+    if (res.partial) return fail(`wiki_history on "${w.name}": no whole commit fit in the output.${cut}`);
+    return text(`No commit in "${w.name}" added or removed ${JSON.stringify(args.term)}.`);
+  }
+  const atLeast = res.partial ? "at least " : "";
+  const lines = [`${atLeast}${res.commits.length} commit(s) in "${w.name}" that added or removed ${JSON.stringify(args.term)}, newest first:`];
   for (const c of res.commits) {
     lines.push(`${c.hash.slice(0, 10)} ${c.date.slice(0, 10)} ${c.author}: ${c.subject}`);
-    if (c.files.length > 0) lines.push(`  files: ${c.files.join(", ")}`);
+    const more = c.fileCount > c.files.length ? `, … and ${c.fileCount - c.files.length} more` : "";
+    if (c.files.length > 0) lines.push(`  files: ${c.files.join(", ")}${more}`);
   }
-  return text(lines.join("\n"));
+  return text(lines.join("\n") + cut);
 }
 
 const WIKI_ARG = (wikis: readonly BotWiki[]) =>
@@ -135,7 +141,12 @@ export function registerWikiTools(server: McpServer, wikis: readonly BotWiki[], 
       wiki: WIKI_ARG(wikis),
       pattern: z.string().min(1).describe("The text to find. A fixed string, unless regex is true."),
       regex: z.boolean().optional().describe("Read the pattern as a Perl-compatible regular expression (PCRE: \\b, \\d, \\w, \\s work), matched by character, so æøå are one character each."),
-      glob: z.string().optional().describe("Search only files this glob selects, e.g. `plans/**` or `*.csv` (without a `/` it matches the file name at any depth)."),
+      glob: z
+        .string()
+        .optional()
+        .describe(
+          "Search only files this glob selects, matched case-sensitively against wiki-root-relative paths: `plans/**` or `plans` for a folder, `plans/x.md` for one file, `*.csv` by name at any depth (a glob without `/` matches the file name). A glob that selects no file is an error.",
+        ),
       maxResults: z.number().int().positive().max(GREP_MAX_RESULTS).optional().describe(`Lines returned (default ${GREP_DEFAULT_MAX}); the rest are counted.`),
     },
     (args) => wikiGrepTool(wikis, args, deps),
@@ -157,7 +168,7 @@ export function registerWikiTools(server: McpServer, wikis: readonly BotWiki[], 
     {
       wiki: WIKI_ARG(wikis),
       term: z.string().min(1).describe("The exact text whose occurrences a commit changed."),
-      path: z.string().optional().describe("Limit to this file or folder, relative to the wiki root."),
+      path: z.string().optional().describe("Limit to this file or folder path, relative to the wiki root. Not a glob: *, ? and [ are refused."),
       limit: z.number().int().positive().max(HISTORY_MAX_LIMIT).optional().describe(`Commits returned (default ${HISTORY_DEFAULT_LIMIT}).`),
     },
     (args) => wikiHistoryTool(wikis, args, deps),

@@ -58,12 +58,26 @@ export async function trackedFiles(root: string, opts: TrackedOpts = {}): Promis
   return { ok: true, files };
 }
 
-/** Does `glob` select `relPath`? A glob without `/` also matches the basename
- *  at any depth (`*.csv` finds `plans/x/Q-3.csv`), as ripgrep's `-g` does. */
+/** `*`, `?`, `[` and `{` are what Bun.Glob treats as wildcards. */
+const hasWildcard = (glob: string) => /[*?[{]/.test(glob);
+
+/**
+ * Does `glob` select `relPath`? Case-sensitive; a leading `./` is dropped. A
+ * glob without a wildcard is a path: `plans` and `plans/` select the folder,
+ * `plans/x.md` the file, and one without `/` any file or folder of that name
+ * at any depth. A glob with one is matched from the root, and without `/` also
+ * against the basename at any depth (`*.csv` finds `plans/x/Q-3.csv`).
+ */
 export function globMatches(glob: string, relPath: string): boolean {
-  const g = new Bun.Glob(glob);
-  if (g.match(relPath)) return true;
-  return !glob.includes("/") && g.match(path.posix.basename(relPath));
+  const g = glob.replace(/^(\.\/)+/, "");
+  if (!hasWildcard(g)) {
+    const p = g.replace(/\/+$/, "");
+    if (p === "" || p === ".") return true;
+    return p.includes("/") ? relPath === p || relPath.startsWith(`${p}/`) : relPath.split("/").includes(p);
+  }
+  const bg = new Bun.Glob(g);
+  if (bg.match(relPath)) return true;
+  return !g.includes("/") && bg.match(path.posix.basename(relPath));
 }
 
 export interface GrepHit {
@@ -160,7 +174,10 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
     const listed = await trackedFiles(root, { git: rawGit });
     if (!listed.ok) return listed;
     const selected = listed.files.filter((f) => globMatches(opts.glob!, f));
-    if (selected.length === 0) return { ok: true, hits: [], totalLines: 0, totalFiles: 0, atLeast: false };
+    // Never a zero-hit search: that reads as «the key is nowhere».
+    if (selected.length === 0) {
+      return { ok: false, error: `glob ${JSON.stringify(opts.glob)} selects no tracked file (globs match wiki-root-relative paths, case-sensitively; use plans/** or plans for a folder)` };
+    }
     pathspecs = chunkPaths(selected);
   } else pathspecs = [["."]];
 
@@ -212,13 +229,24 @@ export interface HistoryCommit {
   date: string;
   author: string;
   subject: string;
-  /** Files the commit touched, root-relative. */
+  /** Files the commit touched, root-relative: the first {@link HISTORY_FILES_SHOWN}. */
   files: string[];
+  /** How many files it touched in all. */
+  fileCount: number;
 }
 
-export type HistoryResult = { ok: true; commits: HistoryCommit[] } | { ok: false; error: string };
+export type HistoryResult =
+  | {
+      ok: true;
+      commits: HistoryCommit[];
+      /** git's output ran past realGit's bound: the possibly cut last commit was dropped and more may follow. */
+      partial: boolean;
+    }
+  | { ok: false; error: string };
 
 export const HISTORY_DEFAULT_LIMIT = 20;
+/** Files listed per commit; one bulk commit touched 415 (huginn-nav/wiki). */
+export const HISTORY_FILES_SHOWN = 20;
 export const HISTORY_MAX_LIMIT = 100;
 const HISTORY_TIMEOUT_MS = 30_000;
 
@@ -233,6 +261,8 @@ export async function historyFor(root: string, term: string, opts: TrackedOpts &
   if (term === "") return { ok: false, error: "the term is empty" };
   if (term.includes("\0")) return { ok: false, error: "the term may not hold a NUL" };
   if (opts.path !== undefined && !isSafeRelPath(opts.path)) return { ok: false, error: "the path must be relative to the wiki root, without `..`" };
+  // git reads the path literally (`--literal-pathspecs`): a glob would find no commit and read as «never added».
+  if (opts.path !== undefined && /[*?[]/.test(opts.path)) return { ok: false, error: "path takes a file or folder path relative to the wiki root, not a glob (no *, ? or [)" };
   const git = pinned(opts.git ?? realGit);
   const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? HISTORY_DEFAULT_LIMIT)), HISTORY_MAX_LIMIT);
   const res = await git(
@@ -241,16 +271,19 @@ export async function historyFor(root: string, term: string, opts: TrackedOpts &
     { timeoutMs: HISTORY_TIMEOUT_MS },
   );
   if (!res.ok) return { ok: false, error: gitError(res, "git log") };
+  const records = res.stdout.split("\x1e");
+  // Past the bound the last record can stop mid file list, so it is dropped.
+  if (res.capped) records.pop();
   const commits: HistoryCommit[] = [];
-  for (const record of res.stdout.split("\x1e")) {
+  for (const record of records) {
     if (!record.trim()) continue;
     const [head = "", ...rest] = record.split("\0");
     const [hash = "", date = "", author = "", subject = ""] = head.split("\x1f");
     if (!/^[0-9a-f]{7,64}$/.test(hash)) continue;
     const files = rest.map((f) => f.replace(/^\n+/, "")).filter((f) => f !== "");
-    commits.push({ hash, date, author, subject: cutLine(subject), files });
+    commits.push({ hash, date, author, subject: cutLine(subject), files: files.slice(0, HISTORY_FILES_SHOWN), fileCount: files.length });
   }
-  return { ok: true, commits };
+  return { ok: true, commits, partial: res.capped === true };
 }
 
 export const READ_MAX_LINES = 2_000;

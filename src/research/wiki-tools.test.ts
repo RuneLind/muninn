@@ -16,7 +16,7 @@ import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import { botWikis, type WikiRegistryEntry } from "../wiki/registry.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 import { ResearchMcpServer } from "./mcp-server.ts";
-import { resolveToolWiki, wikiGrepTool } from "./wiki-tools.ts";
+import { resolveToolWiki, wikiGrepTool, wikiHistoryTool } from "./wiki-tools.ts";
 
 let base = "";
 let one = "";
@@ -111,6 +111,44 @@ describe("wikiGrepTool", () => {
     const pcre = textOf(await wikiGrepTool(wikis, { pattern: "\\bCASE-\\d\\b", regex: true }, { isReadonlyRoot: () => false }));
     expect(pcre).toContain("1 matching line(s)");
     expect(pcre).not.toContain("no PCRE");
+  });
+  test("a glob selecting no file is an error the model can act on; a bare folder name searches the folder", async () => {
+    const wikis = [{ name: "harbour", root: one }];
+    const deps = { isReadonlyRoot: () => false };
+    const folder = await wikiGrepTool(wikis, { pattern: "CASE-7", glob: "plans" }, deps);
+    expect(textOf(folder)).toBe('1 matching line(s) in 1 file(s) of "harbour" (files matching plans):\nplans/ferry.md:3: CASE-7 is the ferry case.');
+    const none = await wikiGrepTool(wikis, { pattern: "CASE-7", glob: "*.MD" }, deps);
+    expect(none.isError).toBe(true);
+    expect(textOf(none)).toContain('glob "*.MD" selects no tracked file');
+    expect(textOf(none)).toContain("plans/**");
+  });
+});
+
+describe("wikiHistoryTool", () => {
+  const rec = (hash: string, subject: string, files: string[]) => `\x1e${hash}\x1f2026-01-02T03:04:05+01:00\x1fAnn\x1f${subject}\0\n${files.join("\0")}\0`;
+  const deps = (stdout: string, capped: boolean): { git: GitRun; isReadonlyRoot: () => boolean } => ({
+    git: async () => ({ ok: true, stdout, ...(capped ? { capped } : { exitCode: 0 }) }),
+    isReadonlyRoot: () => false,
+  });
+  const wikis = [{ name: "harbour", root: "/nowhere" }];
+  test("a commit's file list is bounded, with the rest counted", async () => {
+    const files = Array.from({ length: 415 }, (_, i) => `sources/s-${i}.md`);
+    const out = textOf(await wikiHistoryTool(wikis, { term: "type: source" }, deps(rec("c".repeat(40), "bulk", files), false)));
+    const line = out.split("\n").find((l) => l.startsWith("  files: "))!;
+    expect(line).toEndWith("sources/s-19.md, … and 395 more");
+    expect(line.length).toBeLessThan(600);
+  });
+  test("cut output reads as at least N commits, never as the whole history", async () => {
+    const cut = rec("a".repeat(40), "whole", ["a.md"]) + rec("b".repeat(40), "cut", ["b.m"]).slice(0, -1);
+    const out = textOf(await wikiHistoryTool(wikis, { term: "KEY" }, deps(cut, true)));
+    expect(out).toStartWith('at least 1 commit(s) in "harbour"');
+    expect(out).toContain("output cut");
+    expect(out).not.toContain("Ann: cut");
+  });
+  test("a glob as path is refused, saying it takes a file or folder path", async () => {
+    const res = await wikiHistoryTool([{ name: "harbour", root: one }], { term: "CASE-7", path: "plans/*.md" }, { isReadonlyRoot: () => false });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toContain("a file or folder path");
   });
 });
 
