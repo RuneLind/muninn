@@ -203,6 +203,16 @@ describe("GET /api/wiki/mentions", () => {
     expect(n).toBe(2);
   });
 
+  // GitHub's answers for a repo it will not show: gone or private to this login, and an SSO wall.
+  const NO_REPO: GhResult = {
+    exitCode: 1,
+    stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND", path: ["repository"], message: "Could not resolve to a Repository with the name 'acme/acme-web'." }] }),
+    stderr: "",
+  };
+  const SSO: GhResult = { exitCode: 1, stdout: JSON.stringify({ data: { repository: null }, errors: [{ type: "FORBIDDEN", message: "Resource protected by organization SAML enforcement." }] }), stderr: "" };
+  const repoOf = (args: string[]) => args.find((a) => a.startsWith("repo="))?.slice("repo=".length);
+  const prRow = (p: MentionsBody["prs"][number]) => [p.number, p.state, p.stale, p.reason ?? null];
+
   test("a repo whose last query failed is not asked again within the hour", async () => {
     let n = 0;
     const app = new Hono();
@@ -220,7 +230,10 @@ describe("GET /api/wiki/mentions", () => {
     const body = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
     await __mentionPrsSettledForTest(WIKI);
     expect(n).toBe(2);
-    expect(body.prs.every((p) => p.state === "unknown" && p.stale)).toBe(true);
+    expect(body.prs.map(prRow)).toEqual([
+      [12, "not-checked", false, "no-gh"],
+      [40, "not-checked", false, "no-gh"],
+    ]);
   });
 
   test("a failed repo stays skipped for the hour, past the unanswered retry window", async () => {
@@ -241,6 +254,66 @@ describe("GET /api/wiki/mentions", () => {
     await get(app, `wiki=${WIKI}&key=CASE-8`);
     await __mentionPrsSettledForTest(WIKI);
     expect(n).toBe(1);
+  });
+
+  test("a ref in a repo GitHub refused is not-checked with the reason, not stale: no refresh is coming within the hour", async () => {
+    let n = 0;
+    let clock = Date.parse("2026-11-25T10:00:00Z");
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: WIKI, root } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({
+        runGh: async (args) => (n++, repoOf(args) === "acme-web" ? NO_REPO : { exitCode: 0, stdout: JSON.stringify({ data: { repository: { p12: { state: "MERGED", mergedAt: "2026-11-04T10:00:00Z" } } } }), stderr: "" }),
+        disabled: () => false,
+      }),
+      isReadonlyRoot: () => false,
+      now: () => clock,
+      authMode: () => "off",
+    });
+    await get(app, `wiki=${WIKI}&key=CASE-7`);
+    await __mentionPrsSettledForTest(WIKI);
+    expect(n).toBe(2);
+    // Twice: inside the unanswered window the refusal also opened, and past it, where the hour's skip still holds.
+    for (const step of [0, MENTION_UNANSWERED_RETRY_MS + 1]) {
+      clock += step;
+      const body = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+      await __mentionPrsSettledForTest(WIKI);
+      expect(n).toBe(2);
+      expect(body.prs.map(prRow)).toEqual([
+        [12, "merged", false, null],
+        [40, "not-checked", false, "no-access"],
+      ]);
+    }
+  });
+
+  test("inside the unanswered window a ref stays unknown and stale, and the first request past it starts the refresh", async () => {
+    const asked: string[] = [];
+    let clock = Date.parse("2026-11-25T10:00:00Z");
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: WIKI, root } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({ runGh: async (args) => (asked.push(repoOf(args)!), repoOf(args) === "acme-web" ? SSO : { exitCode: -1, stdout: "", stderr: "", timedOut: true }), disabled: () => false }),
+      isReadonlyRoot: () => false,
+      now: () => clock,
+      authMode: () => "off",
+    });
+    await get(app, `wiki=${WIKI}&key=CASE-7`);
+    await __mentionPrsSettledForTest(WIKI);
+    const expected: ReturnType<typeof prRow>[] = [
+      [12, "unknown", true, null],
+      [40, "not-checked", false, "sso"],
+    ];
+    const inWindow = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+    await __mentionPrsSettledForTest(WIKI);
+    expect(inWindow.prs.map(prRow)).toEqual(expected);
+    expect(asked.sort()).toEqual(["acme-api", "acme-web"]);
+    clock += MENTION_UNANSWERED_RETRY_MS;
+    const past = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+    await __mentionPrsSettledForTest(WIKI);
+    expect(past.prs.map(prRow)).toEqual(expected);
+    expect(asked.sort()).toEqual(["acme-api", "acme-api", "acme-web"]); // the timed-out repo again, the refused one not
   });
 
   test("the follow-up skips a repo the flight before it found failing", async () => {

@@ -19,6 +19,8 @@
  * facts title, which a lone line does not have. States come only from the
  * caches (`cachedPrFacts`); a miss is `unknown`/`stale` and is handed to the
  * background refresh (`askPrsInBackground`), so `gh` never runs on the request.
+ * A miss in a repo whose query failed within the hour is `not-checked`, with
+ * the reason and not stale: no refresh is asked for it before the hour is out.
  *
  * The route is a thin caller (`dashboard/routes/wiki-mentions.ts`); the Trace
  * view (PR 6) imports this module. Nothing here writes to a wiki.
@@ -31,7 +33,7 @@ import { prMentions } from "./live-facts.ts";
 import { parseLogEntries } from "./log-entries.ts";
 import type { WikiIndex } from "./store.ts";
 import { GREP_MAX_RESULTS, grepRootLog, grepTracked, historyFor, rootLogHeaders } from "./tracked-files.ts";
-import { askPrsInBackground, cachedPrFacts, parseRefString, type GhCheckDeps, type PrRef } from "./work-map/gh-check.ts";
+import { askPrsInBackground, cachedPrFacts, parseRefString, type GhCheckDeps, type NotCheckedReason, type PrRef } from "./work-map/gh-check.ts";
 
 export const MENTION_KEY_MIN = 3;
 export const MENTION_KEY_MAX = 80;
@@ -49,7 +51,7 @@ export function parseMentionKey(raw: string | undefined): { key: string } | { er
   return { key };
 }
 
-export type PrStateWord = "open" | "merged" | "closed" | "unknown" | "not-a-pr";
+export type PrStateWord = "open" | "merged" | "closed" | "unknown" | "not-a-pr" | "not-checked";
 
 export interface MentionsBody {
   key: string;
@@ -61,7 +63,8 @@ export interface MentionsBody {
   commits: { sha: string; date: string; subject: string; files: string[] }[];
   /** The matched lines of the root `log.md`, from a search of its own, each with the date and kind of the entry it sits in (null before the first entry, or past the last header read when the header bound was hit). */
   log: { date: string | null; kind: string | null; line: string; n: number }[];
-  prs: { repo: string; number: number; state: PrStateWord; mergedAt: string | null; url: string; stale: boolean }[];
+  /** `stale`: no current answer, and a refresh has been started or will be by a later request (one past the unanswered retry window, or past the hourly cap). A `not-checked` ref is never stale: its repo's query failed within the hour, for `reason`, and is not asked again before the hour is out. Known gap: with no `gh` (a read-only root, the check off) a miss is still stale, though no refresh comes. */
+  prs: { repo: string; number: number; state: PrStateWord; mergedAt: string | null; url: string; stale: boolean; reason?: Exclude<NotCheckedReason, "disabled"> }[];
   /** Matching lines and files in the whole wiki, `log.md` included: every one the search saw, not only those listed. */
   totalLines: number;
   totalFiles: number;
@@ -143,7 +146,10 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
     const url = `https://github.com/${ref.repo}/pull/${ref.n}`;
     const fact = cached.facts.get(ref.id);
     if (fact === undefined) {
-      // `askPrsInBackground` decides which misses are due: not a repo that failed within the hour or went unanswered within minutes.
+      const reason = cached.failures.get(ref.repo.toLowerCase());
+      // The same test `askPrsInBackground` skips a repo by, so no refresh is on its way for this one.
+      if (reason) return { repo: ref.repo, number: ref.n, state: "not-checked", mergedAt: null, url, stale: false, reason };
+      // `askPrsInBackground` decides which of the rest are due: not a repo that went unanswered within minutes.
       misses.push(ref);
       return { repo: ref.repo, number: ref.n, state: "unknown", mergedAt: null, url, stale: true };
     }
