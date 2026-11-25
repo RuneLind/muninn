@@ -114,13 +114,14 @@ describe("grepTracked", () => {
     expect(res).toMatchObject({ totalLines: 1, totalFiles: 1, atLeast: false });
   });
   test("a glob without a wildcard is a folder or file path; a leading ./ is dropped", async () => {
-    for (const glob of ["plans", "plans/", "./plans/**", "./plans", "plans/Q-3.csv", "Q-3.csv"]) {
+    for (const glob of ["plans", "plans/", "./plans/**", "./plans", "plans/Q-3.csv"]) {
       const res = await grepTracked(wiki, "KEY-1", { glob });
       expect({ glob, hits: res.ok ? res.hits.map((h) => h.relPath) : res.error }).toEqual({ glob, hits: ["plans/Q-3.csv"] });
     }
   });
   test("a glob that selects no tracked file is an error, not a search that found nothing", async () => {
-    for (const glob of ["*.nothing", "*.CSV", "Q-3/*", "plan"]) {
+    // A bare file name is a path from the root, not a name at any depth.
+    for (const glob of ["*.nothing", "*.CSV", "Q-3/*", "plan", "Q-3.csv"]) {
       const res = await grepTracked(wiki, "KEY-1", { glob });
       expect({ glob, ok: res.ok, error: res.ok ? null : res.error }).toEqual({ glob, ok: false, error: expect.stringContaining(`glob "${glob}" selects no tracked file`) });
     }
@@ -174,6 +175,57 @@ describe("globMatches and chunkPaths", () => {
     expect(res.ok && res.totalFiles).toBe(4);
     expect(seen).toHaveLength(1);
     expect(seen[0]).not.toContain(".");
+  });
+});
+
+describe("a wildcard-free glob is anchored at the wiki root", () => {
+  let nroot = "";
+  beforeAll(async () => {
+    nroot = await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-nested-")));
+    const files: Record<string, string> = {
+      "plans/a.md": "NEST-1 top\n",
+      "plans/deep/c.md": "NEST-1 deep\n",
+      "x/plans/b.md": "NEST-1 nested\n",
+      "README.md": "NEST-1 readme\n",
+      "x/README.md": "NEST-1 nested readme\n",
+    };
+    for (const [rel, text] of Object.entries(files)) {
+      await mkdir(path.dirname(path.join(nroot, rel)), { recursive: true });
+      await writeFile(path.join(nroot, rel), text);
+    }
+    await git(nroot, "init", "-q", "-b", "main");
+    await git(nroot, "add", "-A");
+    await git(nroot, "commit", "-q", "-m", "nested");
+  });
+  afterAll(async () => {
+    await rm(nroot, { recursive: true, force: true });
+  });
+  const paths = async (glob: string) => {
+    const res = await grepTracked(nroot, "NEST-1", { glob });
+    return res.ok ? res.hits.map((h) => h.relPath).sort() : res.error;
+  };
+
+  test("plans, plans/, ./plans and plans// select exactly what plans/** selects, never x/plans", async () => {
+    const want = await paths("plans/**");
+    expect(want).toEqual(["plans/a.md", "plans/deep/c.md"]);
+    for (const glob of ["plans", "plans/", "./plans", "plans//", "././plans/", "./plans/**"]) expect({ glob, hits: await paths(glob) }).toEqual({ glob, hits: want });
+  });
+  test("a bare file name is the root file, a nested folder needs its path or **/name/**", async () => {
+    expect(await paths("README.md")).toEqual(["README.md"]);
+    expect(await paths("x/plans")).toEqual(["x/plans/b.md"]);
+    expect(await paths("**/plans/**")).toEqual(["plans/a.md", "plans/deep/c.md", "x/plans/b.md"]);
+    expect(globMatches("plans", "x/plans/b.md")).toBe(false);
+    expect(globMatches("deep", "plans/deep/c.md")).toBe(false);
+  });
+  test(". and ./ select everything", async () => {
+    for (const glob of [".", "./"]) expect({ glob, n: (await paths(glob)).length }).toEqual({ glob, n: 5 });
+  });
+  test("a leading ! is refused as unsupported negation, with or without a wildcard", async () => {
+    for (const glob of ["!README.md", "!plans/**"]) {
+      const res = await grepTracked(nroot, "NEST-1", { glob });
+      expect({ glob, ok: res.ok, error: res.ok ? null : res.error }).toEqual({ glob, ok: false, error: expect.stringContaining("negation") });
+      expect(!res.ok && res.error).not.toContain("selects no tracked file");
+    }
   });
 });
 

@@ -107,7 +107,11 @@ describe("wikiGrepTool", () => {
     expect(hit).toContain("no PCRE");
     const miss = textOf(await wikiGrepTool(wikis, { pattern: "\\bCASE-\\d\\b", regex: true }, { git: noPcre, isReadonlyRoot: () => false }));
     expect(miss).toContain("No tracked file");
-    expect(miss).toContain("\\b, \\d, \\w and \\s match nothing");
+    // glibc git's ERE has \b, \w, \s as GNU extensions and reads \d as d: «match nothing» is false there.
+    expect(miss).not.toContain("match nothing");
+    expect(miss).toContain("POSIX ERE");
+    expect(miss).toContain("not portable");
+    expect(miss).toContain("[0-9]");
     const pcre = textOf(await wikiGrepTool(wikis, { pattern: "\\bCASE-\\d\\b", regex: true }, { isReadonlyRoot: () => false }));
     expect(pcre).toContain("1 matching line(s)");
     expect(pcre).not.toContain("no PCRE");
@@ -189,6 +193,11 @@ describe("over HTTP on /mcp/<bot>", () => {
       const grep = tools.find((t) => t.name === "wiki_grep")!;
       expect(grep.description).toContain('Use wiki_grep for an exact key, id or "where else"');
       expect(grep.description).toContain("paths it returns are valid wiki_read paths");
+      // The glob text must not promise that a bare name finds a folder at any depth, and must name `!` as refused.
+      const globDesc = (grep.inputSchema.properties as Record<string, { description?: string }>).glob!.description!;
+      expect(globDesc).toContain("from the wiki root");
+      expect(globDesc).toContain("**/name/**");
+      expect(globDesc).toContain("negation");
     } finally {
       await client.close();
     }
