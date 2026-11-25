@@ -716,15 +716,25 @@ async function getThread(d: DiscussionView, user: string | null): Promise<{ ok: 
   }
 }
 
+/** Each discussion's newest thread read: a read applies its result only while
+ *  it is still the newest, so one that started before «Start over», a delete
+ *  or a user pick (each starts a new read) never lands over the reset. */
+const readGen = new WeakMap<DiscussionView, number>();
+
 async function loadThread(d: DiscussionView): Promise<void> {
   if (d.load === "loading") return;
   d.load = "loading";
+  const gen = (readGen.get(d) ?? 0) + 1;
+  readGen.set(d, gen);
+  const stale = () => readGen.get(d) !== gen;
   const cachedBot = d.bot ?? lsGet(botKey(d.wiki));
   const kept = sendUser(d);
   let r = await getThread(d, kept);
+  if (stale()) return;
   if (kept && r.status === 422 && r.body?.reason === "unknown-user") {
     if (cachedBot) lsSet(userKey(cachedBot), null);
     r = await getThread(d, null);
+    if (stale()) return;
   }
   // The wiki answers on another bot than last time: that bot's kept user, if any.
   const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
@@ -733,6 +743,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     const forBot = lsGet(userKey(bot));
     if (forBot && forBot !== r.body?.userId) {
       const again = await getThread(d, forBot);
+      if (stale()) return;
       if (again.ok) r = again;
       else if (again.body?.reason === "unknown-user") lsSet(userKey(bot), null);
     }
@@ -751,6 +762,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     mergeThreadTurns(d, threadId, turnsFromThread(Array.isArray(b.messages) ? (b.messages as StoredThreadMessage[]) : []));
     d.earlier = {
       closed: Array.isArray(b.closed) ? (b.closed as EarlierDiscussions["closed"]) : [],
+      closedTotal: typeof b.closedTotal === "number" ? b.closedTotal : undefined,
       oneShot: Array.isArray(b.oneShot) ? (b.oneShot as EarlierDiscussions["oneShot"]) : [],
     };
     d.load = "done";

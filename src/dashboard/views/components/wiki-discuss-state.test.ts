@@ -1152,6 +1152,27 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
     expect(html).not.toContain("data-discuss-continue");
   });
 
+  test("Earlier discussions says what the read left out: closed threads past its bound, and a thread's later messages", () => {
+    const msgs = pair(stored({ id: "r1", seq: 1 }));
+    const html = discussState.discussEarlierHtml({
+      closed: [
+        { id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 5 },
+        { id: "c2", name: "two", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 2 },
+      ],
+      closedTotal: 14,
+      oneShot: [],
+    });
+    expect(html).toContain("Earlier discussions (14)");
+    expect(html).toContain("Showing the 2 most recently closed of 14 discussions");
+    expect(html).toContain("3 later messages not shown.");
+    expect(html.match(/not shown/g)).toHaveLength(1);
+    // Nothing left out: no hint.
+    const all = discussState.discussEarlierHtml({ closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 2 }], closedTotal: 1, oneShot: [] });
+    expect(all).toContain("Earlier discussions (1)");
+    expect(all).not.toContain("Showing the");
+    expect(all).not.toContain("not shown");
+  });
+
   test("the user picker lists the users the route named, escaped; with none it says what to do", () => {
     const html = discussState.discussUserPickHtml({ users: [{ id: "kari", name: "Kari <K>" }], message: "Pick one." });
     expect(html).toContain('<option value="kari">Kari &lt;K&gt; (kari)</option>');

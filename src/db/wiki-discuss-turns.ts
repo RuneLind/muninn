@@ -422,6 +422,41 @@ export interface ThreadMessageWithTurn {
   turn: DiscussTurn | null;
 }
 
+/** A closed thread's messages as «Earlier discussions» shows them: no ledger row. */
+export interface ClosedThreadMessage {
+  id: string;
+  role: "user" | "assistant" | "peer";
+  content: string;
+  createdAt: number;
+}
+
+/** The first `perThread` messages of each of `threadIds`, in the order
+ *  {@link listThreadMessagesWithTurns} gives them, and each thread's total
+ *  count, in one query. A thread with no messages maps to none and total 0. */
+export async function listClosedThreadMessages(threadIds: string[], perThread: number): Promise<Map<string, { messages: ClosedThreadMessage[]; total: number }>> {
+  const out = new Map<string, { messages: ClosedThreadMessage[]; total: number }>();
+  for (const id of threadIds) out.set(id, { messages: [], total: 0 });
+  if (threadIds.length === 0) return out;
+  const rows = await getDb()`
+    SELECT thread_id, id, role, content, created_at, total FROM (
+      SELECT m.thread_id, m.id, m.role, m.content, m.created_at,
+        row_number() OVER (PARTITION BY m.thread_id ORDER BY w.seq NULLS LAST, (m.role = 'user') DESC, m.created_at, m.id) AS rn,
+        count(*) OVER (PARTITION BY m.thread_id) AS total
+      FROM messages m
+      LEFT JOIN wiki_discuss_turns w ON w.thread_id = m.thread_id AND (w.user_message_id = m.id OR w.assistant_message_id = m.id)
+      WHERE m.thread_id = ANY(${threadIds}::uuid[])
+    ) x
+    WHERE rn <= ${perThread}
+    ORDER BY thread_id, rn`;
+  for (const r of rows) {
+    const slot = out.get(r.thread_id as string);
+    if (!slot) continue;
+    slot.total = Number(r.total);
+    slot.messages.push({ id: r.id as string, role: r.role as ClosedThreadMessage["role"], content: r.content as string, createdAt: new Date(r.created_at as string).getTime() });
+  }
+  return out;
+}
+
 /** A wiki thread's messages, oldest first, each joined to its ledger row:
  *  in turn order, a turn's question before its answer (a sweep's message and
  *  the next question can share a time); a message with no turn last. */

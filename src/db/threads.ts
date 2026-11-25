@@ -500,15 +500,27 @@ export async function getLiveWikiThread(userId: string, botName: string, wiki: s
   return row ? rowToThread(row) : null;
 }
 
-/** A page's closed wiki threads, newest first («Earlier discussions»). */
-export async function listClosedWikiThreads(userId: string, botName: string, wiki: string, relPath: string): Promise<Thread[]> {
+/** A page's closed wiki threads, newest first («Earlier discussions»), at
+ *  most `limit` of them when given. */
+export async function listClosedWikiThreads(userId: string, botName: string, wiki: string, relPath: string, limit?: number): Promise<Thread[]> {
   const rows = await getDb()`
     SELECT * FROM threads
     WHERE user_id = ${userId} AND bot_name = ${botName} AND kind = 'wiki'
       AND wiki = ${wiki} AND rel_path = ${relPath} AND closed_at IS NOT NULL
-    ORDER BY closed_at DESC
+    ORDER BY closed_at DESC, id
+    LIMIT ${limit ?? null}
   `;
   return rows.map(rowToThread);
+}
+
+/** How many closed wiki threads the page has for this user and bot. */
+export async function countClosedWikiThreads(userId: string, botName: string, wiki: string, relPath: string): Promise<number> {
+  const [row] = await getDb()`
+    SELECT count(*)::int AS n FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND kind = 'wiki'
+      AND wiki = ${wiki} AND rel_path = ${relPath} AND closed_at IS NOT NULL
+  `;
+  return (row?.n as number) ?? 0;
 }
 
 /**

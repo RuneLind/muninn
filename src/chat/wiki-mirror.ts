@@ -41,15 +41,19 @@ export function chatWikiMirror(): DiscussMirrorFactory {
 }
 
 /**
- * A refusal from the pane's entry, on a live wiki thread: /chat shows it as it
- * shows a refusal of its own send (a transient error event on the thread's
- * owner's web conversation; nothing is stored). Discuss v2 PR 4.
+ * A refusal from the pane's entry about the requester's own wiki thread (a
+ * turn still running on it, or it was closed): /chat shows it as it shows a
+ * refusal of its own send (a transient error event on the thread's owner's web
+ * conversation; nothing is stored). The caller passes only a refusal the
+ * engine marked `ownThread`. Addressed by the conversation's id, never created:
+ * with no conversation in memory no /chat tab is showing the thread. PR 4.
  */
 export async function publishWikiRefusal(threadId: string, message: string): Promise<void> {
   const thread = await getThreadById(threadId);
   if (!thread || thread.kind !== "wiki") return;
-  const conv = await chatState.findOrCreateBotConversation({ botName: thread.botName, userId: thread.userId });
-  chatState.publishTransientError(conv.id, message, thread.id);
+  const convId = await chatState.botConversationId(thread.userId, thread.botName);
+  if (chatState.conversationOwner(convId) !== thread.userId) return;
+  chatState.publishTransientError(convId, message, thread.id);
 }
 
 /**

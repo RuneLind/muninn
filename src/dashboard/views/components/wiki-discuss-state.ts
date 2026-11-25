@@ -235,9 +235,21 @@ export interface StoredThreadMessage {
   turn: StoredDiscussTurn | null;
 }
 
+/** A closed thread's message as the thread read sends it: no ledger row. */
+export interface EarlierThreadMessage {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: number;
+}
+
 export interface EarlierDiscussions {
-  /** The page's closed wiki threads (Start over), newest first, with their messages. */
-  closed: { id: string; name: string; createdAt: number; closedAt: number | null; messages: StoredThreadMessage[] }[];
+  /** The page's closed wiki threads (Start over), newest first, with their
+   *  first messages; `messageTotal` counts all of a thread's messages. The read
+   *  sends at most its bound of threads, and of messages per thread. */
+  closed: { id: string; name: string; createdAt: number; closedAt: number | null; messages: EarlierThreadMessage[]; messageTotal?: number }[];
+  /** How many closed threads the page has (more than `closed` holds when the read left some out). */
+  closedTotal?: number;
   /** The page's old one-shot turns (v1, no thread), oldest first. */
   oneShot: StoredDiscussTurn[];
 }
@@ -358,6 +370,8 @@ export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): st
       }
     }
     if (q !== null) items.push(earlierExchange(q, ""));
+    const more = (t.messageTotal ?? 0) - t.messages.length;
+    if (more > 0) items.push(`<div class="wiki-discuss-hint">${more} later message${more === 1 ? "" : "s"} not shown.</div>`);
     groups.push(
       `<div class="wiki-discuss-earlier-group" data-earlier-thread="${esc(t.id)}">` +
         `<div class="wiki-discuss-earlier-head"><span>${esc(t.name)}${t.closedAt ? ` · closed ${esc(shortDate(t.closedAt))}` : ""}</span>` +
@@ -381,8 +395,14 @@ export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): st
         `</div>`,
     );
   }
-  const n = e.closed.length + byDiscussion.size;
-  return `<details class="wiki-discuss-earlier"><summary>Earlier discussions (${n})</summary>${groups.join("")}</details>`;
+  const closedTotal = Math.max(e.closedTotal ?? 0, e.closed.length);
+  const n = closedTotal + byDiscussion.size;
+  const left = closedTotal - e.closed.length;
+  const head =
+    left > 0
+      ? `<div class="wiki-discuss-hint">Showing the ${e.closed.length} most recently closed of ${closedTotal} discussions: delete one to see an older one.</div>`
+      : "";
+  return `<details class="wiki-discuss-earlier"><summary>Earlier discussions (${n})</summary>${head}${groups.join("")}</details>`;
 }
 
 /** The user picker the tab shows when the route needs the thread's user. */
