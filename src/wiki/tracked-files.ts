@@ -105,6 +105,8 @@ export interface GrepHit {
   line: number;
   /** The line's text, cut at `GIT_LINE_CHARS`. */
   text: string;
+  /** With `fullText`: the line uncut, up to {@link GREP_FULL_LINE_CHARS}. */
+  full?: string;
 }
 
 export interface GrepOpts extends TrackedOpts {
@@ -115,6 +117,8 @@ export interface GrepOpts extends TrackedOpts {
   glob?: string;
   /** Hits returned; the rest are only counted. */
   max?: number;
+  /** Carry each hit's uncut line as `full`, for a caller that parses what the cut text would lose. */
+  fullText?: boolean;
 }
 
 export type GrepResult =
@@ -139,6 +143,8 @@ export const GREP_DEFAULT_MAX = 100;
 export const GREP_MAX_RESULTS = 500;
 /** How many matching lines one search counts before it stops: past it, totals read «at least». */
 export const GREP_SCAN_LINES = 5_000;
+/** How much of a line `fullText` keeps: the longest line seen on the live wikis was 797 characters. */
+export const GREP_FULL_LINE_CHARS = 4_000;
 /** Pathspec bytes per `git grep` when a glob expands to a file list. */
 export const GREP_PATHSPEC_CHUNK_BYTES = 64_000;
 
@@ -162,7 +168,7 @@ export function chunkPaths(paths: readonly string[], maxBytes = GREP_PATHSPEC_CH
 }
 
 /** `path\0line\0text` lines from `git grep --null -n`. */
-function parseGrep(stdout: string): GrepHit[] {
+function parseGrep(stdout: string, fullText: boolean): GrepHit[] {
   const hits: GrepHit[] = [];
   for (const raw of stdout.split("\n")) {
     if (!raw) continue;
@@ -171,7 +177,8 @@ function parseGrep(stdout: string): GrepHit[] {
     if (b === -1) continue;
     const line = Number(raw.slice(a + 1, b));
     if (!Number.isInteger(line)) continue;
-    hits.push({ relPath: raw.slice(0, a), line, text: cutLine(raw.slice(b + 1)) });
+    const text = raw.slice(b + 1);
+    hits.push({ relPath: raw.slice(0, a), line, text: cutLine(text), ...(fullText ? { full: text.slice(0, GREP_FULL_LINE_CHARS) } : {}) });
   }
   return hits;
 }
@@ -183,12 +190,12 @@ function parseGrep(stdout: string): GrepHit[] {
  * afterwards would filter text the line bound had already cut.
  */
 export async function grepTracked(root: string, pattern: string, opts: GrepOpts = {}): Promise<GrepResult> {
-  if (pattern === "") return { ok: false, error: "the pattern is empty" };
-  if (pattern.includes("\n") || pattern.includes("\0")) return { ok: false, error: "the pattern may not hold a newline or NUL" };
+  const refused = refusePattern(pattern);
+  if (refused) return refused;
   const rawGit = opts.git ?? realGit;
   const git = pinned(rawGit);
   const max = Math.min(Math.max(1, Math.floor(opts.max ?? GREP_DEFAULT_MAX)), GREP_MAX_RESULTS);
-  let engine: "pcre" | "ere" | undefined = opts.regex ? "pcre" : undefined;
+  const engine: Engine = opts.regex ? "pcre" : undefined;
   let pathspecs: string[][];
   const glob = opts.glob ? normalizeGlob(opts.glob) : undefined;
   if (glob && !glob.ok) return glob;
@@ -204,10 +211,44 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
     pathspecs = chunkPaths(selected);
   } else pathspecs = [["."]];
 
+  return counted(await grepChunks(root, git, pattern, engine, pathspecs, GREP_SCAN_LINES, opts.fullText === true), max);
+}
+
+function refusePattern(pattern: string): { ok: false; error: string } | null {
+  if (pattern === "") return { ok: false, error: "the pattern is empty" };
+  if (pattern.includes("\n") || pattern.includes("\0")) return { ok: false, error: "the pattern may not hold a newline or NUL" };
+  return null;
+}
+
+/** The first `max` hits, and the totals over every hit the scan saw. */
+function counted(res: Awaited<ReturnType<typeof grepChunks>>, max: number): GrepResult {
+  if (!res.ok) return res;
+  return {
+    ok: true,
+    hits: res.hits.slice(0, max),
+    totalLines: res.hits.length,
+    totalFiles: new Set(res.hits.map((h) => h.relPath)).size,
+    atLeast: res.atLeast,
+    ...(res.engine ? { regexEngine: res.engine } : {}),
+  };
+}
+
+type Engine = "pcre" | "ere" | undefined;
+
+/** The search itself: each chunk of pathspecs in turn until `scanLines` matching lines are seen, write artifacts dropped. `engine` undefined is a fixed string; `pcre` falls back to `ere` on a git without PCRE. */
+async function grepChunks(
+  root: string,
+  git: GitRun,
+  pattern: string,
+  engine: Engine,
+  pathspecs: string[][],
+  scanLines: number,
+  fullText: boolean,
+): Promise<{ ok: true; hits: GrepHit[]; atLeast: boolean; engine: Engine } | { ok: false; error: string }> {
   const all: GrepHit[] = [];
   let atLeast = false;
   for (const chunk of pathspecs) {
-    const budget = GREP_SCAN_LINES - all.length;
+    const budget = scanLines - all.length;
     if (budget <= 0) {
       atLeast = true;
       break;
@@ -223,7 +264,7 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
     }
     // Exit 1 with nothing on stderr is git grep's «no match», not a failure.
     if (!res.ok && !(res.exitCode === 1 && !res.stderr)) return { ok: false, error: gitError(res, "git grep") };
-    let hits = parseGrep(res.stdout);
+    let hits = parseGrep(res.stdout, fullText);
     if (res.capped) {
       atLeast = true;
       // At the line bound realGit keeps `budget` whole lines; at the byte bound
@@ -235,15 +276,42 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
     if (res.capped) break;
   }
   const isWriteArtifact = (h: GrepHit) => isWikiWriteArtifact(path.posix.basename(h.relPath));
-  const kept = all.filter((h) => !isWriteArtifact(h));
-  return {
-    ok: true,
-    hits: kept.slice(0, max),
-    totalLines: kept.length,
-    totalFiles: new Set(kept.map((h) => h.relPath)).size,
-    atLeast,
-    ...(engine ? { regexEngine: engine } : {}),
-  };
+  return { ok: true, hits: all.filter((h) => !isWriteArtifact(h)), atLeast, engine };
+}
+
+/** The wiki's own log, at its root. A literal pathspec: never a nested `x/log.md`. */
+export const ROOT_LOG = "log.md";
+/** Header lines {@link rootLogHeaders} reads before it stops: mimir's log had 1,355 `##` lines on 2026-11-25. */
+export const LOG_HEADER_SCAN_LINES = 10_000;
+
+/**
+ * `git grep` for a fixed string in the root `log.md` alone, with its own
+ * budget, so a busy key's hits elsewhere cannot use up the log's. An untracked
+ * or missing `log.md` has no hits.
+ */
+export async function grepRootLog(root: string, pattern: string, opts: Omit<GrepOpts, "regex" | "glob"> = {}): Promise<GrepResult> {
+  const refused = refusePattern(pattern);
+  if (refused) return refused;
+  const max = Math.min(Math.max(1, Math.floor(opts.max ?? GREP_DEFAULT_MAX)), GREP_MAX_RESULTS);
+  return counted(await grepChunks(root, pinned(opts.git ?? realGit), pattern, undefined, [[ROOT_LOG]], GREP_SCAN_LINES, opts.fullText === true), max);
+}
+
+export interface LogHeader {
+  line: number;
+  /** The `##` line uncut, up to {@link GREP_FULL_LINE_CHARS}: the caller parses it with the reader's `parseLogEntries`. */
+  text: string;
+}
+
+/**
+ * Every `##` line (not `###`) of the root `log.md`, numbered: a superset of
+ * the reader's entry headers, which the caller keeps by parsing each with
+ * `parseLogEntries`. `atLeast` when more lines matched than
+ * {@link LOG_HEADER_SCAN_LINES}. An untracked or missing `log.md` has none.
+ */
+export async function rootLogHeaders(root: string, opts: TrackedOpts = {}): Promise<{ ok: true; headers: LogHeader[]; atLeast: boolean } | { ok: false; error: string }> {
+  const res = await grepChunks(root, pinned(opts.git ?? realGit), "^##[^#]", "ere", [[ROOT_LOG]], LOG_HEADER_SCAN_LINES, true);
+  if (!res.ok) return res;
+  return { ok: true, headers: res.hits.map((h) => ({ line: h.line, text: h.full ?? h.text })), atLeast: res.atLeast };
 }
 
 export interface HistoryCommit {

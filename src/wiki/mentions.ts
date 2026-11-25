@@ -8,7 +8,12 @@
  * in `tracked-files.ts`). Its `kind` comes from the wiki's `trackers` or its
  * `keys` (`key-kinds.ts`) and never decides whether it is searched.
  *
- * PR refs are read from the matched lines with the live chips' parser
+ * Every read goes through `tracked-files.ts`: the whole-wiki grep, and the
+ * root `log.md` on a grep of its own (`grepRootLog`, `rootLogHeaders`), so a
+ * busy key's hits elsewhere cannot use up the log's budget. The headers are
+ * parsed with the reader's `parseLogEntries`.
+ *
+ * PR refs are read from the matched lines, uncut (`fullText`), with the live chips' parser
  * (`prMentions`) and the wiki's `prGrammar`, so `api #3625` resolves the way a
  * fact chip does. A bare `#n` is not read: it needs a page's home repo and a
  * facts title, which a lone line does not have. States come only from the
@@ -19,15 +24,13 @@
  * view (PR 6) imports this module. Nothing here writes to a wiki.
  */
 
-import { lstat } from "node:fs/promises";
-import path from "node:path";
 import { displayTitleOf } from "./core/wiki-filter.ts";
 import type { GitRun } from "./decision-triage/git.ts";
 import { classifyKey } from "./key-kinds.ts";
 import { prMentions } from "./live-facts.ts";
 import { parseLogEntries } from "./log-entries.ts";
 import type { WikiIndex } from "./store.ts";
-import { GREP_MAX_RESULTS, grepTracked, historyFor } from "./tracked-files.ts";
+import { GREP_MAX_RESULTS, grepRootLog, grepTracked, historyFor, rootLogHeaders } from "./tracked-files.ts";
 import { askPrsInBackground, cachedPrFacts, parseRefString, type GhCheckDeps, type PrRef } from "./work-map/gh-check.ts";
 
 export const MENTION_KEY_MIN = 3;
@@ -35,7 +38,8 @@ export const MENTION_KEY_MAX = 80;
 /** Matching lines returned; past it the answer says `truncated`. */
 export const MENTIONS_MAX_LINES = GREP_MAX_RESULTS;
 export const MENTIONS_MAX_COMMITS = 50;
-const LOG_FILE = "log.md";
+/** Matching `log.md` lines returned, on a budget of their own. */
+export const MENTIONS_MAX_LOG = GREP_MAX_RESULTS;
 
 /** The key as searched, or why it is refused: 3–80 characters, no line break, NUL or other control character. Surrounding blanks are trimmed. */
 export function parseMentionKey(raw: string | undefined): { key: string } | { error: string } {
@@ -55,10 +59,15 @@ export interface MentionsBody {
   files: { relPath: string; title: string | null; lines: { n: number; text: string }[] }[];
   /** Commits whose diff changes how often the key occurs, newest first. */
   commits: { sha: string; date: string; subject: string; files: string[] }[];
-  /** The matched lines of `log.md`, each with the date and kind of the entry it sits in (null before the first entry). */
+  /** The matched lines of the root `log.md`, from a search of its own, each with the date and kind of the entry it sits in (null before the first entry, or past the last header read when the header bound was hit). */
   log: { date: string | null; kind: string | null; line: string; n: number }[];
   prs: { repo: string; number: number; state: PrStateWord; mergedAt: string | null; url: string; stale: boolean }[];
-  /** A bound cut the lines or the commits: more exist than are listed. */
+  /** Matching lines and files in the whole wiki, `log.md` included: every one the search saw, not only those listed. */
+  totalLines: number;
+  totalFiles: number;
+  /** The search stopped at its scan bound, so the totals are lower bounds. */
+  totalsAtLeast: boolean;
+  /** A bound cut the lines, the log lines or the commits: more exist than are listed. */
   truncated: boolean;
 }
 
@@ -72,30 +81,24 @@ export interface MentionsInput {
 
 export interface MentionsDeps {
   git?: GitRun;
-  /** `log.md`'s text, or null. Default: the root's `log.md`, unless it is a symlink. */
-  readLog?: (root: string) => Promise<string | null>;
   /** The background refresh's `gh`; null starts none (a read-only root, a test). */
   gh: Pick<GhCheckDeps, "runGh" | "disabled"> | null;
   now: () => number;
-}
-
-async function readRootLog(root: string): Promise<string | null> {
-  const file = path.join(root, LOG_FILE);
-  const st = await lstat(file).catch(() => null);
-  if (!st?.isFile()) return null;
-  return Bun.file(file).text().catch(() => null);
 }
 
 const stateWord = (s: "OPEN" | "MERGED" | "CLOSED"): PrStateWord => (s === "OPEN" ? "open" : s === "MERGED" ? "merged" : "closed");
 
 export async function buildMentions(input: MentionsInput, deps: MentionsDeps): Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }> {
   const { root, key } = input;
-  const [grep, history] = await Promise.all([
-    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES }),
-    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS }),
+  const [grep, history, logGrep] = await Promise.all([
+    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true }),
+    // One more than shown: only a 51st commit says there are more than 50.
+    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS + 1 }),
+    grepRootLog(root, key, { git: deps.git, max: MENTIONS_MAX_LOG, fullText: true }),
   ]);
   if (!grep.ok) return grep;
   if (!history.ok) return history;
+  if (!logGrep.ok) return logGrep;
   const cfg = input.index?.readerConfig ?? null;
 
   const byFile = new Map<string, MentionsBody["files"][number]>();
@@ -110,21 +113,26 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
   }
 
   const log: MentionsBody["log"] = [];
-  const logHits = byFile.get(LOG_FILE)?.lines ?? [];
-  if (logHits.length) {
-    const text = await (deps.readLog ?? readRootLog)(root);
-    const entries = text === null ? [] : parseLogEntries(text);
-    for (const hit of logHits) {
-      // The entry a line sits in: the last header at or above it.
+  let headersCut = false;
+  if (logGrep.hits.length) {
+    const headers = await rootLogHeaders(root, { git: deps.git });
+    if (!headers.ok) return headers;
+    headersCut = headers.atLeast;
+    // A `##` line is an entry only where the reader's parser says so (`## [draft]` is body text).
+    const entries = headers.headers.flatMap((h) => parseLogEntries(h.text).map((e) => ({ ...e, line: h.line })));
+    const lastRead = headers.headers.at(-1)?.line ?? 0;
+    for (const hit of logGrep.hits) {
+      // The entry a line sits in: the last header at or above it. Past the last header read, an unread one may own it.
       let entry: (typeof entries)[number] | undefined;
-      for (const e of entries) if ((e.line ?? Infinity) <= hit.n && (!entry || (e.line ?? 0) > (entry.line ?? 0))) entry = e;
-      log.push({ date: entry?.date ?? null, kind: entry?.kind || null, line: hit.text, n: hit.n });
+      if (!(headersCut && hit.line > lastRead)) for (const e of entries) if (e.line <= hit.line && (!entry || e.line > entry.line)) entry = e;
+      log.push({ date: entry?.date ?? null, kind: entry?.kind || null, line: hit.text, n: hit.line });
     }
   }
 
+  // From the uncut lines: a ref late in a long paragraph is past the 300-character display cut.
   const refs = new Map<string, PrRef>();
-  for (const h of grep.hits) {
-    for (const m of prMentions(h.text, cfg?.prGrammar ?? null, null)) {
+  for (const h of [...grep.hits, ...logGrep.hits]) {
+    for (const m of prMentions(h.full ?? h.text, cfg?.prGrammar ?? null, null)) {
       const ref = parseRefString(m.id);
       if (ref && !refs.has(ref.id)) refs.set(ref.id, ref);
     }
@@ -150,10 +158,20 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
       key,
       kind: classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []),
       files: [...byFile.values()],
-      commits: history.commits.map((c) => ({ sha: c.hash, date: c.date, subject: c.subject, files: c.files })),
+      commits: history.commits.slice(0, MENTIONS_MAX_COMMITS).map((c) => ({ sha: c.hash, date: c.date, subject: c.subject, files: c.files })),
       log,
       prs,
-      truncated: grep.atLeast || grep.totalLines > grep.hits.length || history.partial || history.commits.length >= MENTIONS_MAX_COMMITS,
+      totalLines: grep.totalLines,
+      totalFiles: grep.totalFiles,
+      totalsAtLeast: grep.atLeast,
+      truncated:
+        grep.atLeast ||
+        grep.totalLines > grep.hits.length ||
+        logGrep.atLeast ||
+        logGrep.totalLines > logGrep.hits.length ||
+        headersCut ||
+        history.partial ||
+        history.commits.length > MENTIONS_MAX_COMMITS,
     },
   };
 }

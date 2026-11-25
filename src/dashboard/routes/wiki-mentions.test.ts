@@ -5,6 +5,10 @@
  * `keys`, and the background `gh` refresh (one flight at a time with one
  * follow-up for what arrived meanwhile, an unanswered repo left alone for a
  * few minutes, never on a read-only root, never with the check off). The nais half is in `routes-profile.test.ts`.
+ * The second block pins the bounds (exactly 50 commits is not truncated, the
+ * totals count past the line cap), `log.md` searched on its own budget, refs
+ * read past the 300-character display cut, and that every read goes through
+ * the tracked-files seam.
  * Invented content only.
  */
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -12,12 +16,12 @@ import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
-import { realGit } from "../../wiki/decision-triage/git.ts";
+import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import { getWikiIndex } from "../../wiki/store.ts";
 import { MENTION_UNANSWERED_RETRY_MS, __mentionPrsSettledForTest, __resetGhCheckForTest, type GhResult } from "../../wiki/work-map/gh-check.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiMentionsRoute, type WikiMentionsRouteDeps } from "./wiki-mentions.ts";
-import type { MentionsBody } from "../../wiki/mentions.ts";
+import { MENTIONS_MAX_COMMITS, MENTIONS_MAX_LINES, type MentionsBody } from "../../wiki/mentions.ts";
 
 const WIKI = "mentions-fixture";
 let root = "";
@@ -323,5 +327,122 @@ describe("GET /api/wiki/mentions", () => {
       __setAuthPolicyForTest(null);
     }
     expect(realWikiMentionsDeps().authMode()).toBe("off");
+  });
+});
+
+describe("GET /api/wiki/mentions: bounds, totals, the log and long lines", () => {
+  const BUSY_WIKI = "mentions-busy";
+  let busy = "";
+  async function bgit(...args: string[]) {
+    const res = await realGit(busy, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]);
+    if (!res.ok) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+  }
+  async function bput(rel: string, text: string) {
+    await mkdir(path.dirname(path.join(busy, rel)), { recursive: true });
+    await writeFile(path.join(busy, rel), text);
+  }
+  const filler = "y".repeat(310);
+
+  beforeAll(async () => {
+    busy = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-mentions-busy-"))), "wiki");
+    await mkdir(busy, { recursive: true });
+    await bgit("init", "-q", "-b", "main");
+    await bput(".wiki-reader.json", JSON.stringify(READER_CONFIG));
+    // archive/ sorts before log.md and holds more matching lines than the cap.
+    await bput("archive/old.md", Array.from({ length: MENTIONS_MAX_LINES + 100 }, (_, i) => `BUSY-1 line ${i}`).join("\n") + "\n");
+    await bput("log.md", "# Log\n\n## [2026-10-01] build | BUSY-1 begins\nbody\n\n## [2026-10-02] decide | other\nThen BUSY-1 again, after api #13.\n");
+    await bput("plans/long.md", `# Long\n\nLONG-1 ${filler} then api #12 settles it.\n`);
+    await bgit("add", "-A");
+    await bgit("commit", "-q", "-m", "busy and long");
+    // EXACT-1 changes in exactly MENTIONS_MAX_COMMITS commits, MORE-1 in one more.
+    let counter = "";
+    for (let i = 0; i < MENTIONS_MAX_COMMITS + 1; i++) {
+      counter += i < MENTIONS_MAX_COMMITS ? `EXACT-1 MORE-1 ${i}\n` : `MORE-1 ${i}\n`;
+      await bput("counter.md", counter);
+      await bgit("add", "counter.md");
+      await bgit("commit", "-q", "-m", `count ${i}`);
+    }
+  });
+
+  function busyApp(git?: GitRun) {
+    const app = new Hono();
+    registerWikiMentionsRoute(app, {
+      registry: () => [{ name: BUSY_WIKI, root: busy } as never],
+      index: (r) => getWikiIndex({ root: r }),
+      gh: () => ({ runGh: async () => ({ exitCode: -1, stdout: "", stderr: "", timedOut: true }), disabled: () => true }),
+      isReadonlyRoot: () => false,
+      now: Date.now,
+      authMode: () => "off",
+      git,
+    });
+    return app;
+  }
+  const body = async (app: Hono, key: string) => (await (await get(app, `wiki=${BUSY_WIKI}&key=${key}`)).json()) as MentionsBody;
+
+  test("exactly MENTIONS_MAX_COMMITS commits is not truncated; one more is", async () => {
+    const app = busyApp();
+    const exact = await body(app, "EXACT-1");
+    expect([exact.commits.length, exact.truncated]).toEqual([MENTIONS_MAX_COMMITS, false]);
+    const more = await body(app, "MORE-1");
+    expect([more.commits.length, more.truncated]).toEqual([MENTIONS_MAX_COMMITS, true]);
+  });
+
+  test("the totals count every matching line and file, past the line cap", async () => {
+    const b = await body(busyApp(), "BUSY-1");
+    expect(b.files.reduce((n, f) => n + f.lines.length, 0)).toBe(MENTIONS_MAX_LINES);
+    expect([b.totalLines, b.totalFiles, b.totalsAtLeast, b.truncated]).toEqual([MENTIONS_MAX_LINES + 102, 2, false, true]);
+  });
+
+  test("log.md is searched on its own budget: files earlier in git's order cannot use it up", async () => {
+    const b = await body(busyApp(), "BUSY-1");
+    expect(b.files.map((f) => f.relPath)).toEqual(["archive/old.md"]);
+    expect(b.log).toEqual([
+      { date: "2026-10-01", kind: "build", line: "## [2026-10-01] build | BUSY-1 begins", n: 3 },
+      { date: "2026-10-02", kind: "decide", line: "Then BUSY-1 again, after api #13.", n: 7 },
+    ]);
+    // A ref on a log line past the whole-wiki cap is still read.
+    expect(b.prs.map((p) => `${p.repo}#${p.number}`)).toEqual(["acme/acme-api#13"]);
+  });
+
+  test("a whole-wiki search stopped at its scan bound makes the totals lower bounds", async () => {
+    const capped: GitRun = async (cwd, args, opts) => {
+      const res = await realGit(cwd, args, opts);
+      return args.includes("grep") && args.at(-1) === "." ? { ...res, capped: true } : res;
+    };
+    const b = await body(busyApp(capped), "BUSY-1");
+    expect([b.totalsAtLeast, b.truncated]).toEqual([true, true]);
+  });
+
+  test("past the last header read when the header bound was hit, a log line has no date: an unread header may own it", async () => {
+    const firstHeaderOnly: GitRun = async (cwd, args, opts) => {
+      const res = await realGit(cwd, args, opts);
+      return args.includes("^##[^#]") ? { ...res, stdout: `${res.stdout.split("\n")[0]!}\n`, capped: true } : res;
+    };
+    // CASE-7 is otherwise untruncated, so only the header bound can set `truncated`.
+    const b = (await (await get(appWith({ git: firstHeaderOnly }).app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+    expect(b.log.map((l) => [l.n, l.date])).toEqual([[3, null], [5, "2026-11-01"], [9, null]]);
+    expect(b.truncated).toBe(true);
+  });
+
+  test("a PR ref past the display cut of a long line is still listed; the line's text stays cut", async () => {
+    const b = await body(busyApp(), "LONG-1");
+    expect(b.prs.map((p) => `${p.repo}#${p.number}`)).toEqual(["acme/acme-api#12"]);
+    expect(b.files[0]!.lines[0]!.text.endsWith("…")).toBe(true);
+  });
+
+  test("the log's dates come through the tracked-files seam, not a read of the file", async () => {
+    // A git runner that changes one header date in what grep returns: the answer can only show it if the headers came through git.
+    const spy: GitRun = async (cwd, args, opts) => {
+      const res = await realGit(cwd, args, opts);
+      return args.includes("grep") ? { ...res, stdout: res.stdout.replaceAll("2026-11-03", "2026-12-31") } : res;
+    };
+    const { app } = appWith({ git: spy });
+    const b = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+    expect(b.log.map((l) => l.date)).toEqual([null, "2026-11-01", "2026-12-31"]);
+  });
+
+  test("mentions.ts reads no file itself", async () => {
+    const src = await Bun.file(path.join(import.meta.dir, "../../wiki/mentions.ts")).text();
+    expect(src).not.toMatch(/node:fs|Bun\.file|readLog/);
   });
 });

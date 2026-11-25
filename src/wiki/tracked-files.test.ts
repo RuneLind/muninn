@@ -12,7 +12,7 @@ import path from "node:path";
 import { realGit, type GitRun } from "./decision-triage/git.ts";
 import { WIKI_LOCK_BASENAME } from "./lockfile.ts";
 import { testTempDir } from "../test/temp-dir.ts";
-import { GREP_SCAN_LINES, chunkPaths, globMatches, grepTracked, historyFor, isSafeRelPath, readTracked, trackedFiles } from "./tracked-files.ts";
+import { GREP_FULL_LINE_CHARS, GREP_SCAN_LINES, chunkPaths, globMatches, grepRootLog, grepTracked, historyFor, isSafeRelPath, readTracked, rootLogHeaders, trackedFiles } from "./tracked-files.ts";
 
 let repo = "";
 let wiki = ""; // a wiki in a subdirectory of `repo`
@@ -588,5 +588,73 @@ describe("git config cannot change what the reads return", () => {
     await badLocal(async () => {
       expect(shape(await historyFor(cwiki, "KEY-2", { git: withHome }))).toEqual(expectedHistory);
     });
+  });
+});
+
+describe("the root log.md: its entry headers and its own grep", () => {
+  let lrepo = "";
+  let lwiki = "";
+  const longTail = "x".repeat(320);
+  async function lput(rel: string, text: string) {
+    await mkdir(path.dirname(path.join(lrepo, rel)), { recursive: true });
+    await writeFile(path.join(lrepo, rel), text);
+  }
+  beforeAll(async () => {
+    lrepo = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-log-"))), "repo");
+    lwiki = path.join(lrepo, "w");
+    await mkdir(lwiki, { recursive: true });
+    await git(lrepo, "init", "-q", "-b", "main");
+    await lput("log.md", "## [2026-01-01] repo | the repo's own log, outside the wiki\nLOG-1\n");
+    await lput(
+      "w/log.md",
+      `# Log\n\nLOG-1 before any entry.\n\n## [2026-11-01] decide | LOG-1 first\n### a subheading, no entry\n##\t[2026-11-02] build | tab-spaced ${longTail} LOG-1\n## [draft] not an entry\nLOG-1 in the body.\n`,
+    );
+    await lput("w/a.md", "LOG-1 in a page\n");
+    await lput("w/sub/log.md", "## [2026-12-01] sub | LOG-1 in a nested log\n");
+    await git(lrepo, "add", "-A");
+    await git(lrepo, "commit", "-q", "-m", "logs");
+  });
+
+  test("rootLogHeaders: every ## line of the wiki's own log.md, uncut, numbered", async () => {
+    const res = await rootLogHeaders(lwiki);
+    if (!res.ok) throw new Error(res.error);
+    expect(res.atLeast).toBe(false);
+    expect(res.headers.map((h) => [h.line, h.text])).toEqual([
+      [5, "## [2026-11-01] decide | LOG-1 first"],
+      [7, `##\t[2026-11-02] build | tab-spaced ${longTail} LOG-1`],
+      [8, "## [draft] not an entry"],
+    ]);
+  });
+  test("grepRootLog: the key in the wiki's own log.md only, with its own totals", async () => {
+    const res = await grepRootLog(lwiki, "LOG-1", { max: 2 });
+    if (!res.ok) throw new Error(res.error);
+    expect(res.hits.map((h) => [h.relPath, h.line])).toEqual([["log.md", 3], ["log.md", 5]]);
+    expect(res).toMatchObject({ totalLines: 4, totalFiles: 1, atLeast: false });
+  });
+  test("an untracked log.md is no log: no headers and no hits, not an error", async () => {
+    const bare = path.join(lrepo, "bare");
+    await mkdir(bare, { recursive: true });
+    await writeFile(path.join(bare, "log.md"), "## [2026-11-01] decide | LOG-1 untracked\n");
+    expect(await rootLogHeaders(bare)).toEqual({ ok: true, headers: [], atLeast: false });
+    expect(await grepRootLog(bare, "LOG-1")).toEqual({ ok: true, hits: [], totalLines: 0, totalFiles: 0, atLeast: false });
+  });
+  test("the header bound turns the list into a lower bound", async () => {
+    const fake: GitRun = async (_cwd, _args, opts) => ({
+      ok: true,
+      stdout: Array.from({ length: opts!.maxLines! }, (_, i) => `log.md\x00${i + 1}\x00## [2026-11-01] e${i}`).join("\n"),
+      capped: true,
+    });
+    const res = await rootLogHeaders(lwiki, { git: fake });
+    expect(res.ok && [res.headers.length > 1_345, res.atLeast]).toEqual([true, true]);
+  });
+  test("fullText carries the line uncut beside the cut text, up to GREP_FULL_LINE_CHARS", async () => {
+    const res = await grepTracked(lwiki, "tab-spaced", { fullText: true });
+    if (!res.ok) throw new Error(res.error);
+    const hit = res.hits[0]!;
+    expect(hit.text.length).toBe(301);
+    expect(hit.full).toBe(`##\t[2026-11-02] build | tab-spaced ${longTail} LOG-1`);
+    const plain = await grepTracked(lwiki, "tab-spaced");
+    expect(plain.ok && "full" in plain.hits[0]!).toBe(false);
+    expect(GREP_FULL_LINE_CHARS).toBeGreaterThan(797);
   });
 });
