@@ -5,7 +5,7 @@
  *
  * On a wiki whose `.wiki-reader.json` sets `discuss.handoff` (the page
  * payload's `reader.discussHandoff`: admin viewers, tool half registered), a
- * selection reveals «Ask Claude Code» beside Explain and Fact check, and the
+ * selection reveals «Ask Claude Code» in the breadcrumb, and the
  * breadcrumb row has the same control for the whole page. It opens a small
  * panel — a group, not a dialog, so the reader's single-key shortcuts keep
  * working outside its question box — with the passage quoted and a question
@@ -59,7 +59,7 @@ export interface DiscussHandoffDeps {
   relPath(): string | null;
 }
 
-interface Captured extends DiscussContext {
+export interface Captured extends DiscussContext {
   selection: string;
   /** The selection's range, put back when the panel closes. */
   range: Range;
@@ -94,14 +94,15 @@ export function discussHandoffPageBtnHtml(): string {
 }
 
 /** Put the two controls into the breadcrumb the shell just rendered: the
- *  selection one after the selection-gated Fact check, the page one after the
- *  whole-page Fact check (else at the row's end). */
+ *  selection one just before the whole-page Fact check (where the
+ *  selection-gated Explain and Fact check stood before the selection menu,
+ *  Discuss v2 PR 5), the page one after it (else at the row's end). */
 function mountControls(): void {
   const bc = document.getElementById("wikiBreadcrumb");
   if (!bc) return;
   if (!document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)) {
-    const at = document.getElementById("wikiFactcheckBtn");
-    if (at) at.insertAdjacentHTML("afterend", discussHandoffSelBtnHtml(handoffOn));
+    const at = document.getElementById("wikiFactcheckArticleBtn");
+    if (at) at.insertAdjacentHTML("beforebegin", discussHandoffSelBtnHtml(handoffOn));
   }
   if (handoffOn && !document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)) {
     const at = document.getElementById("wikiFactcheckArticleBtn");
@@ -152,6 +153,13 @@ function mayBePassage(sel: Selection | null): boolean {
  *  it is no passage. */
 function readDiscussSelection(sel: Selection | null): Captured | null {
   if (!enabled) return null;
+  return readSelectionPassage(sel);
+}
+
+/** The same full read, whether or not this page offers the panel: the
+ *  selection menu's inline turns (Discuss v2 PR 5) send the passage the
+ *  panel would have sent. */
+export function readSelectionPassage(sel: Selection | null): Captured | null {
   const at = inArticle(sel);
   if (!at) return null;
   const { range, article } = at;

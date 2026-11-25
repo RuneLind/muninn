@@ -122,6 +122,7 @@ describe("the live chain", () => {
       "src/dashboard/views/wiki-boot/wiki-discuss-parity.test.ts",
       "src/dashboard/views/wiki-boot/wiki-discuss-thread-actions.test.ts",
       "src/dashboard/views/wiki-boot/wiki-discuss-thread-race.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-selection-menu.test.ts",
       "src/dashboard/views/wiki-boot/wiki-shell-boot.test.ts",
     ];
     const t = readTree();

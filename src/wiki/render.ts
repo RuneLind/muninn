@@ -366,6 +366,14 @@ export interface ReaderPayload {
    *  The route's rules refusals (404 `no-agent`, 422, 503) stay, for a file
    *  changed after the page loaded. */
   discussAgent: boolean;
+  /** Discuss v2 PR 5: the selection menu's «Where else» and «History» (no
+   *  model): `GET /api/wiki/mentions` is registered here (the tool half, and
+   *  `MUNINN_AUTH` off, where the route answers), and the viewer is admin. */
+  mentions: boolean;
+  /** The wiki's validated `keys` kinds (name and pattern), which the menu's
+   *  key chips classify with `classifyKey`, as the mentions route does.
+   *  Absent on a wiki with none. */
+  keyKinds?: { name: string; pattern: string }[];
 }
 
 export interface ViewerRoles {
@@ -388,10 +396,15 @@ export function readerPayload(
   /** Whether the wiki root holds a `.wiki-agent.md` the discuss route
    *  accepts (`readWikiAgentRules` state `ok`), computed by the caller. */
   agentRules = false,
+  /** Whether the mentions route answers here (Discuss v2 PR 5): registered
+   *  with the tool half and `MUNINN_AUTH` off, computed by the caller. */
+  mentionsRoute = false,
 ): ReaderPayload {
   const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
+  const keyKinds = (readerConfig?.keys ?? []).map((k) => ({ name: k.name, pattern: k.pattern }));
   return {
     ...(trackerProjects.length ? { trackerProjects } : {}),
+    ...(keyKinds.length ? { keyKinds } : {}),
     language: readerConfig?.language ?? DEFAULT_QUESTION_LANGUAGE,
     idLabels: readerConfig?.idLabels ?? {},
     defaultLens: pageDefaultLens(wiki, instanceDefault, readerConfig?.defaultLens),
@@ -400,6 +413,7 @@ export function readerPayload(
     discussHandoff: handoffRoute && readerConfig?.discuss?.handoff === true && viewer.admin,
     // The discuss route sits in the same tool half as the handoff's.
     discussAgent: handoffRoute && agentRules && viewer.admin,
+    mentions: mentionsRoute && viewer.admin,
   };
 }
 

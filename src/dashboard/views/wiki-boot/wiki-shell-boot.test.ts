@@ -404,8 +404,14 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiSelect change 3le4p", "window hashchange kobbe", "window popstate 24ens", "#wikiAskBtn click 7m320",
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
       "document click 13kk2", "document change 1typa", "document input smycp", "document keydown 2bnv5",
-      "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s", "#articleWrap mouseup 2roml",
-      "document selectionchange 33rjq", "document keydown crscu", "document mousedown 25hct", "window message 30vgu",
+      "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s",
+      // The selection menu (`initSelectionMenu`, Discuss v2 PR 5), where the Explain pill's listeners were:
+      // the bar on a mouseup, the right-click menu, close on a collapsed selection, Escape and Enter, an
+      // action's press, a keyboard click and the cards' buttons, the bar following a scroll or a resize;
+      // then the whole-page Fact check's press, which the pill's mousedown used to hold.
+      "#articleWrap mouseup 16zwr", "#articleWrap contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 35lqq",
+      "document mousedown 2jzhg", "document click 1dcm4", "document scroll capture 2k8ec", "window resize 2k8ec",
+      "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",
     ];
@@ -436,10 +442,10 @@ describe("wiki-browser.ts — listener order", () => {
   test("Escape with two surfaces open closes the top one only, then the next", async () => {
     const doc = g.document as Document;
     const pane = doc.getElementById("wikiOptions")!;
-    const explain = doc.getElementById("wikiExplainBtn") as HTMLElement;
-    expect(explain).toBeTruthy();
+    // The selection menu's bar (Discuss v2 PR 5), made on the first mouseup.
+    const bar = () => doc.getElementById("wikiSelBar") as HTMLElement | null;
 
-    // Surface 1: the ✨ Explain button, revealed by a real selection + mouseup.
+    // Surface 1: the selection bar, revealed by a real selection + mouseup.
     const text = doc.getElementById("alphaBody")!.firstChild!;
     const range = doc.createRange();
     range.setStart(text, 4);
@@ -449,21 +455,21 @@ describe("wiki-browser.ts — listener order", () => {
     sel.addRange(range);
     const ME = g.MouseEvent as typeof MouseEvent;
     doc.getElementById("articleWrap")!.dispatchEvent(new ME("mouseup", { bubbles: true }));
-    await until(() => explain.style.display === "", "the Explain button to show");
+    await until(() => bar()?.style.display === "flex" && !!doc.getElementById("wikiExplainBtn"), "the selection bar to show");
 
     // Surface 2: the View options pane.
     (doc.getElementById("wikiOptionsBtn") as HTMLElement).click();
     expect(pane.hidden).toBe(false);
 
     // The pane's capture-phase Escape closes it and stops the event, so the
-    // bubble-phase Explain dismissal never sees it.
+    // bubble-phase selection-bar dismissal never sees it.
     key("Escape");
     expect(pane.hidden).toBe(true);
-    expect(explain.style.display).toBe("");
+    expect(bar()!.style.display).toBe("flex");
 
-    // The next Escape reaches the bubble listeners: the Explain button goes.
+    // The next Escape reaches the bubble listeners: the bar goes.
     key("Escape");
-    expect(explain.style.display).toBe("none");
+    expect(bar()!.style.display).toBe("none");
   });
 });
 

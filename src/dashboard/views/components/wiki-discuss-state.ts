@@ -628,16 +628,13 @@ export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
   return parts.join("");
 }
 
-/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
- *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
-export function discussTurnHtml(t: DiscussTurnView, current = true): string {
-  const key = esc(t.key);
-  const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
-  if (t.passage) {
-    parts.push(`<button type="button" class="wiki-discuss-chip" data-discuss-chip="${key}" title="Show this passage in the page">“${esc(chipText(t.passage.selection))}”</button>`);
-    if (t.passageGone) parts.push(`<div class="wiki-discuss-gone" role="status">That passage is no longer in the page.</div>`);
-  } else parts.push(`<div class="wiki-discuss-whole">About the whole page</div>`);
-  parts.push(`<div class="wiki-discuss-q">${esc(t.question)}</div>`);
+/**
+ * A turn's body: the status line while it runs, its tool lines, the answer,
+ * the error and the proposed edit's card. The pane's turn and the selection
+ * menu's inline card (Discuss v2 PR 5) both draw it, so the two never differ.
+ */
+export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): string[] {
+  const parts: string[] = [];
   if (turnLive(t)) {
     const phase = t.state === "sending" ? "Starting the turn…" : (PHASE_WORDS[t.phase ?? ""] ?? "Working…");
     parts.push(`<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(phase)}</span></div>`);
@@ -648,6 +645,20 @@ export function discussTurnHtml(t: DiscussTurnView, current = true): string {
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${renderStreamingBody(t.text)}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
   if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
+  return parts;
+}
+
+/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
+ *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
+export function discussTurnHtml(t: DiscussTurnView, current = true): string {
+  const key = esc(t.key);
+  const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
+  if (t.passage) {
+    parts.push(`<button type="button" class="wiki-discuss-chip" data-discuss-chip="${key}" title="Show this passage in the page">“${esc(chipText(t.passage.selection))}”</button>`);
+    if (t.passageGone) parts.push(`<div class="wiki-discuss-gone" role="status">That passage is no longer in the page.</div>`);
+  } else parts.push(`<div class="wiki-discuss-whole">About the whole page</div>`);
+  parts.push(`<div class="wiki-discuss-q">${esc(t.question)}</div>`);
+  parts.push(...discussTurnBodyParts(t, current));
   if (t.turnId && !turnLive(t) && t.state !== "refused") {
     const h = t.handover;
     parts.push(

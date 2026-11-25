@@ -122,9 +122,14 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
  * `DECLINE_CHAT_BTN_ID`), so the two cannot drift by naming something else.
  */
 export const WIKI_READONLY_EGRESS_SELECTOR = [
-  // Breadcrumb article actions.
+  // The selection menu's model actions (Discuss v2 PR 5): its bar keeps the
+  // two ids, and `data-selact` covers the bar and the right-click menu alike.
   "#wikiExplainBtn",
   "#wikiFactcheckBtn",
+  '[data-selact="explain"]',
+  '[data-selact="factcheck"]',
+  '[data-selact="follow"]',
+  // Breadcrumb article actions.
   "#wikiFactcheckArticleBtn",
   "#wikiDiscussBtn",
   "#wikiShareBtn",
@@ -187,9 +192,10 @@ export const WIKI_READONLY_INSTANCE_HIDDEN_SELECTOR = ['[data-conntab="stale"]',
 export const WIKI_READONLY_INSTANCE_CLASS = "wiki-readonly-instance";
 
 /**
- * The three egress buttons that are activated from a **`mousedown`** delegate
- * (`wiki-browser.ts` — mousedown so `preventDefault` can keep the text selection
- * alive), i.e. the ones that had already spent the call by the time a click
+ * The egress controls that are activated from a **`mousedown`** delegate
+ * (the selection menu's actions in `wiki-selection-menu.ts` and the whole-page
+ * Fact check in `wiki-browser.ts` — mousedown so `preventDefault` can keep the
+ * text selection alive), i.e. the ones that had already spent the call by the time a click
  * listener ran. They are the ONLY controls whose mousedown the guard cancels.
  *
  * **Why this is not just `WIKI_READONLY_BLOCKED_SELECTOR`.** The cancel ends in
@@ -203,6 +209,9 @@ export const WIKI_READONLY_INSTANCE_CLASS = "wiki-readonly-instance";
 export const WIKI_READONLY_MOUSEDOWN_SELECTOR = [
   "#wikiExplainBtn",
   "#wikiFactcheckBtn",
+  '[data-selact="explain"]',
+  '[data-selact="factcheck"]',
+  '[data-selact="follow"]',
   "#wikiFactcheckArticleBtn",
 ].join(",");
 

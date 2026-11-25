@@ -299,17 +299,64 @@ export function openDiscussTab(focus = false): void {
  *  when `passage` is null), in this page's discussion. False when nothing was
  *  sent (off, read-only, off a page, or a turn of the discussion still running). */
 export function askInDiscuss(question: string, passage: DiscussPassage | null, selected: Range | null = null): boolean {
-  return startTurn(question, passage, selected, null);
+  return startTurn(question, passage, selected, null) !== null;
 }
 
-function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): boolean {
-  if (!enabled || discussSendBlocked()) return false;
+/**
+ * The selection menu's turn (Discuss v2 PR 5, D3): one turn of this page's
+ * thread about `passage`, answered in an inline card under the paragraph.
+ * It is the same turn record the pane draws (one turn, never a copy), sent
+ * through the pane's own entry with `mode` for this turn only (the toggle is
+ * left as the reader set it), and the pane is not opened. The card draws it
+ * through {@link discussTurnForCard} and repaints on {@link onDiscussChange}.
+ * A refusal before the request says why, in the words the panel uses.
+ */
+export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string } {
+  if (!enabled) return { refused: "This wiki has no wiki agent here." };
+  if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
-  if (!d || !question.trim() || discussionLive(d)) return false;
+  if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended." };
+  const key = startTurn(question, passage, selected, null, { mode, openPane: false });
+  return key ? { key } : { refused: "The turn could not start here." };
+}
+
+/** The turn an inline card draws, by key, in the open page's discussion;
+ *  `current` decides whether its edit card is offered. Null once the turn is
+ *  gone (Start over, another page). */
+export function discussTurnForCard(key: string): { turn: DiscussTurnView; current: boolean } | null {
+  const d = here();
+  const t = d?.turns.find((x) => x.key === key) ?? null;
+  return d && t ? { turn: t, current: currentTurn(d) === t } : null;
+}
+
+/** «Open in Discuss →» on an inline card: the pane on this page's thread,
+ *  scrolled to the turn. */
+export function showTurnInDiscuss(key: string): void {
   openDiscussTab();
+  afterRender(() => document.querySelector<HTMLElement>(`#${DISCUSS_BODY_ID} [data-turn-key="${CSS.escape(key)}"]`)?.scrollIntoView({ block: "nearest" }));
+}
+
+/** Called after every state change the tab paints (a stream frame, a preview,
+ *  an Apply), whether or not the tab is on screen: the inline cards repaint
+ *  from it. Returns the unsubscribe. */
+const changeListeners = new Set<() => void>();
+export function onDiscussChange(fn: () => void): () => void {
+  changeListeners.add(fn);
+  return () => changeListeners.delete(fn);
+}
+
+/** Start a turn of this page's discussion: its key, or null when nothing was
+ *  sent (off, read-only, off a page, or a turn still running). The pane opens
+ *  unless `openPane` is false (the selection menu's inline card). */
+function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, opts: { mode?: "explore" | "edit"; openPane?: boolean } = {}): string | null {
+  if (!enabled || discussSendBlocked()) return null;
+  const d = ensureHere();
+  if (!d || !question.trim() || discussionLive(d)) return null;
+  if (opts.openPane !== false) openDiscussTab();
   maybeLoad();
-  void runTurn(d, question.trim(), passage, passage ? selected : null, box);
-  return true;
+  const key = `t${++turnSeq}`;
+  void runTurn(d, key, question.trim(), passage, passage ? selected : null, box, opts.mode);
+  return key;
 }
 
 /** The turn the box sent was accepted: empty the box, unless the reader has
@@ -321,6 +368,7 @@ function clearSentBox(box: BoxSend): void {
 }
 
 function paint(): void {
+  for (const fn of changeListeners) fn();
   const body = document.getElementById(DISCUSS_BODY_ID);
   if (!body) return;
   const list = body.querySelector<HTMLElement>(".wiki-discuss-turns");
@@ -363,8 +411,8 @@ function schedulePaint(): void {
   else setTimeout(run, 0);
 }
 
-async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): Promise<void> {
-  const turn = newTurn(`t${++turnSeq}`, question, passage);
+async function runTurn(d: DiscussionView, key: string, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, mode?: "explore" | "edit"): Promise<void> {
+  const turn = newTurn(key, question, passage);
   noteActionError(d, null);
   if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
@@ -376,7 +424,7 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     if (passage.edge) body.edge = passage.edge;
   }
   if (d.discussionId) body.discussionId = d.discussionId;
-  body.mode = d.mode ?? "explore";
+  body.mode = mode ?? d.mode ?? "explore";
   const user = sendUser(d);
   if (user) body.userId = user;
   let res: Response;

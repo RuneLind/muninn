@@ -768,7 +768,7 @@ describe("«Ask Claude Code»: the selection is read when the control is activat
   const panelEl = () => document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
   test("a settled selectionchange shows the control without the reading class; activating reads once; the control follows the panel", async () => {
     document.body.innerHTML =
-      `<div id="wikiBreadcrumb"><button id="wikiFactcheckBtn" type="button">Fact check</button></div>` +
+      `<div id="wikiBreadcrumb"><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
       `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p><p>The night route is unchanged.</p></div>`;
     initDiscussHandoff({ wiki: () => "w", relPath: () => "plans/harbour.mdx" });
     setDiscussHandoffEnabled(true);
@@ -839,7 +839,7 @@ describe("a refused turn does not unlock the discussion while a later one runs (
     initDiscussTab({ wiki: () => "w", relPath: () => rel, switchTab: () => {} });
     initDiscussHandoff({ wiki: () => "w", relPath: () => rel });
     document.body.innerHTML =
-      `<div id="wikiBreadcrumb"><button id="wikiFactcheckBtn" type="button">Fact check</button><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
+      `<div id="wikiBreadcrumb"><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
       `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p></div>` +
       `<button data-conntab="discuss" hidden>Discuss</button>${discussTabBodyHtml()}`;
     const enc = new TextEncoder();
@@ -924,7 +924,7 @@ describe("the handoff panel with the wiki agent on (fix round 1)", () => {
   const panelEl = () => document.getElementById(DISCUSS_HANDOFF_PANEL_ID)!;
   const flush = () => new Promise((r) => setTimeout(r, 0));
   const pageHtml = () =>
-    `<div id="wikiBreadcrumb"><button id="wikiFactcheckBtn" type="button">Fact check</button><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
+    `<div id="wikiBreadcrumb"><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
     `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p></div>`;
 
   beforeAll(() => {

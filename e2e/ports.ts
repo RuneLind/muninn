@@ -429,6 +429,8 @@ export const E2E_PORTS = {
   "wiki-discuss-apply": 3254,
   // Discuss v2 PR 4: the pane on the page's thread, a follow-up, Edit → Apply, pop out to /chat.
   "wiki-discuss-thread": 3256,
+  // Discuss v2 PR 5: the selection menu's bar, right-click menu and inline cards.
+  "wiki-selection-menu": 3257,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
   // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.

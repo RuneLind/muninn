@@ -509,8 +509,14 @@ describe("the Ask tab (wiki-ask-controller.ts), driven through the booted shell"
   test("a page load that fails still leaves the shown view: its teardown runs (fix round 2)", async () => {
     popTo("/wiki?wiki=w&relPath=p.md");
     await until(() => !!doc().querySelector("#articleWrap .wiki-article h1#pmd"), "p.md to render");
-    const pill = () => doc().getElementById("wikiExplainBtn")!;
-    pill().style.display = ""; // a selection on p.md showed the Explain pill
+    // A selection on p.md showed the selection menu's bar (Discuss v2 PR 5).
+    const pill = () => doc().getElementById("wikiSelBar")!;
+    if (!doc().getElementById("wikiSelBar")) {
+      const b = doc().createElement("div");
+      b.id = "wikiSelBar";
+      doc().body.appendChild(b);
+    }
+    pill().style.display = "flex";
     failingPages.add("k.md");
     try {
       doc().querySelector<HTMLElement>('#wikiList .wiki-list-item[data-relpath="k.md"]')!.click();
