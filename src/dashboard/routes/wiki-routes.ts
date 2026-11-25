@@ -72,6 +72,7 @@ import { registerWikiClaimCheckRoute } from "./wiki-claim-check.ts";
 import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
 import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
+import { registerWikiMentionsRoute } from "./wiki-mentions.ts";
 import { registerChecksAnswerRoute } from "./checks-answer.ts";
 import { realBootLineDeps, registerWikiBootLineRoute } from "./wiki-boot-line.ts";
 import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
@@ -2124,6 +2125,8 @@ export function registerWikiToolRoutes(
   });
   // The owner-step checks beside Done: read-only probes of this machine.
   registerWikiStepChecksRoute(app, config);
+  // Where a key is mentioned (Discuss v2): git reads of this machine's wiki, 404 unless MUNINN_AUTH is off.
+  registerWikiMentionsRoute(app);
   // The other machine's step-checks route asks this one to answer probes for itself.
   registerChecksAnswerRoute(app, config);
   // The Your work card's boot line: the commit this process started from, and what moved in its checkout since.

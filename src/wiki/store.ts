@@ -12,6 +12,7 @@
  */
 
 import { parsePrGrammar, type PrGrammar } from "./pr-grammar.ts";
+import { parseKeyKinds, type KeyKind } from "./key-kinds.ts";
 import path from "node:path";
 import { readdir, stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
@@ -277,6 +278,13 @@ export interface WikiReaderConfig {
    * `owner/repo#n`). A bad field warns and is dropped.
    */
   prGrammar?: PrGrammar | null;
+  /**
+   * Key kinds the `trackers` cannot express (`keys: [{name, pattern}]`,
+   * `key-kinds.ts`), e.g. case numbers `MEL-\d+`. They classify a key's kind
+   * on the mentions route and never gate a search. A bad entry warns and is
+   * dropped. Optional so hand-built configs stay valid.
+   */
+  keys?: KeyKind[];
   /**
    * Discuss (mimir plan muninn-wiki-discuss): `"discuss": {"handoff": true}`
    * offers «Ask Claude Code» in the reader, which copies a prompt naming the
@@ -2290,6 +2298,10 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
   for (const reason of prGrammar.warnings) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "prGrammar", reason });
   }
+  const keyKinds = parseKeyKinds(obj.keys);
+  for (const reason of keyKinds.warnings) {
+    log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "keys", reason });
+  }
   const whatsNew = parseWhatsNewReaderConfig(obj.whatsNew);
   if (whatsNew.warning) {
     log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key: "whatsNew", reason: whatsNew.warning });
@@ -2331,6 +2343,7 @@ export async function readWikiReaderConfig(root: string): Promise<WikiReaderConf
     whatsNew: { mode: whatsNew.mode },
     discuss: { handoff: discuss.handoff, ...(discuss.repos ? { repos: discuss.repos } : {}) },
     prGrammar: prGrammar.grammar,
+    keys: keyKinds.kinds,
     trackers: parseTrackersConfig(obj.trackers, ({ key, reason }) =>
       log.warn("{file} at {root}: {key} {reason}", { file: WIKI_READER_CONFIG_FILE, root, key, reason }),
     ),
