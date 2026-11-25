@@ -425,6 +425,15 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // `requireOwnedResource`, which would re-run `getThreadById` for an answer
       // in hand — the same rule `ownsJiraDraft` below is written for.
       if (!ownsResourceRow(c, thread.userId)) return unknownThread(c);
+      // A wiki page's Discuss thread runs on the Discuss engine, never the chat
+      // pipeline (D7): refused here, before the probe, the flight lock and a row,
+      // not by `processMessage`'s backstop after a draft row exists.
+      if (thread.kind === "wiki") {
+        return c.json(
+          { error: "Dette er en Discuss-samtale om en wiki-side. Den kan ikke bli en Jira-sak; åpne den fra sidens Discuss-fane." },
+          409,
+        );
+      }
       // The bot is IMPLIED by the thread, and it must be the composer's bot. A
       // draft turn in a jarvis thread would be written by a bot whose collections
       // are the AI/tech shelf — the same wrong-corpus failure `resolveJiraBot`

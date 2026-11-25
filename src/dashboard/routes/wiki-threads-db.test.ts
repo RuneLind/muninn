@@ -340,3 +340,30 @@ test("a /chat send on a closed wiki thread is refused as a transient event, and 
   expect((await messagesOf(threadId)).length).toBe(before);
   expect(await listDiscussTurns(threadId)).toHaveLength(1);
 });
+
+test("the default root (WIKI_DIR, no wiki named): the pane stores wiki '' and a /chat turn on that thread runs on the engine", async () => {
+  const prev = process.env.WIKI_DIR;
+  process.env.WIKI_DIR = wiki;
+  __resetWikiCacheForTest();
+  try {
+    const app = apps();
+    const res = await app.request(WIKI_DISCUSS_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ relPath: "notes/harbour.md", question: "When?" }) });
+    const threadId = (await frames(res))[0]!.data.threadId as string;
+    const thread = (await getThreadById(threadId))!;
+    expect(thread.kind).toBe("wiki");
+    expect(thread.wiki).toBe("");
+    expect(thread.relPath).toBe("notes/harbour.md");
+
+    const conv = await chatState.findOrCreateBotConversation({ botName: thread.botName, userId: thread.userId });
+    const sent = await app.request(`/chat/conversations/${conv.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "And on Sundays?", threadId }) });
+    if (sent.status !== 202) throw new Error(`/chat refused the turn: ${sent.status} ${await sent.text()}`);
+    const rows = await settled(threadId, 2);
+    expect(rows.map((r) => `${r.seq}:${r.endState}`)).toEqual(["1:done", "2:done"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.prompt).toContain("Answer: It opens at six.");
+  } finally {
+    if (prev === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prev;
+    __resetWikiCacheForTest();
+  }
+});

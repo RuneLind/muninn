@@ -61,11 +61,14 @@ export async function runWikiThreadTurnFromChat(opts: {
     chatState.publishTransientError(opts.conversationId, r.body.error, thread.id);
     return r;
   };
-  if (!thread.wiki || !thread.relPath) {
+  // `wiki === ""` is the default root (the WIKI_DIR override, or a registry with
+  // no default): what the engine stores when the pane names no wiki. Sent as no
+  // wiki, it resolves the same way the pane's request did.
+  if (thread.wiki === undefined || !thread.relPath) {
     return refused({ refused: true, status: 409, body: { error: "this wiki thread has no page to discuss", reason: "no-page" } });
   }
   // The pane's body rules (the question's bound among them), as the pane would send it.
-  const body = parseDiscussBody({ wiki: thread.wiki, relPath: thread.relPath, question: opts.text, discussionId: thread.id, mode: "explore" });
+  const body = parseDiscussBody({ wiki: thread.wiki || undefined, relPath: thread.relPath, question: opts.text, discussionId: thread.id, mode: "explore" });
   if (typeof body === "string") return refused({ refused: true, status: 400, body: { error: body } });
   const started = await opts.engine.start({ role: opts.role, threadUser: thread.userId, mirror: opts.mirror ?? chatWikiMirror(), body });
   if (started.refused) return refused(started);
