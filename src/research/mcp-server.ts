@@ -10,6 +10,8 @@ import {
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { persistThreadCitations } from "./thread-citations.ts";
+import { authMode } from "../auth/policy.ts";
+import { liveWikis, registerWikiTools, type BotWiki } from "./wiki-tools.ts";
 
 const log = getLog("research", "mcp-server");
 
@@ -33,7 +35,7 @@ interface Session {
   server: McpServer;
 }
 
-interface BotEntry {
+export interface BotEntry {
   botName: string;
   knowledgeApiUrl: string;
   /** Resolved once at registration from the bot's .mcp.json KNOWLEDGE_COLLECTIONS.
@@ -43,6 +45,9 @@ interface BotEntry {
   connector?: ConnectorType;
   /** Per-bot override from `BotConfig.haikuBackend`. */
   haikuBackend?: HaikuBackend;
+  /** The wikis the wiki read tools reach (`botWikis`): read-only roots already
+   *  left out, and checked again on every call. Empty or absent: no wiki tools. */
+  wikis?: BotWiki[];
 }
 
 const TOOL_DESCRIPTION =
@@ -260,6 +265,11 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
       }
     },
   );
+
+  // Wiki read tools: only with MUNINN_AUTH=off (an MCP call has no reader to
+  // filter for), and only for a bot that has a wiki left after the read-only check.
+  const wikis = liveWikis(entry.wikis);
+  if (authMode() === "off" && wikis.length > 0) registerWikiTools(server, wikis);
 
   return server;
 }

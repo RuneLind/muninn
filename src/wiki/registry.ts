@@ -224,6 +224,24 @@ export function findWiki(
   return registry.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
 }
 
+/**
+ * The wikis a bot's wiki read tools reach: its own `wikiDir` entry, plus every
+ * `WIKI_EXTRA` entry pinned to it as synthesis bot (names compared ignoring
+ * case). A root `isReadonlyRoot` matches is left out: `WIKI_READONLY_ROOTS`
+ * promises it is never sent to a model.
+ */
+export function botWikis(
+  registry: readonly WikiRegistryEntry[],
+  botName: string,
+  isReadonlyRoot: (root: string) => boolean,
+): { name: string; root: string }[] {
+  const bot = botName.toLowerCase();
+  return registry
+    .filter((e) => (e.source === "bot" ? e.name.toLowerCase() === bot : e.synthesisBot?.toLowerCase() === bot))
+    .filter((e) => !isReadonlyRoot(e.root))
+    .map((e) => ({ name: e.name, root: e.root }));
+}
+
 /** Names of every registered wiki (bot + extra) — populates the reader's picker. */
 export function listWikis(registry: WikiRegistryEntry[]): string[] {
   return registry.map((e) => e.name);

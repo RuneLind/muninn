@@ -27,7 +27,8 @@ import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
-import { COPILOT_DISCUSS_TOOLS, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_CONTINUE_PATH, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+import { copilotNamedToolsSession } from "../../ai/connectors/copilot-sdk.ts";
+import { COPILOT_DISCUSS_TOOLS, copilotDiscussReach, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_CONTINUE_PATH, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 // Whether this disk folds case (APFS default): the case-only rename test needs one.
 const caseProbe = testTempDirSync(path.join(tmpdir(), "discuss-case-"));
@@ -488,6 +489,51 @@ describe("a turn", () => {
     expect(prompt).toContain("## The question is about the whole page");
     expect(prompt).toContain("yggdrasil-search");
     expect(prompt).not.toContain(agent);
+  });
+  test("Copilot on a bot whose .mcp.json declares research gets the wiki read tools, and the read section names the page's wiki; without it, neither", async () => {
+    const botDir = path.join(dir, "bots", "ivar");
+    await Bun.write(path.join(botDir, ".mcp.json"), JSON.stringify({ mcpServers: {
+      knowledge: { type: "http", url: "http://127.0.0.1:1/k" },
+      yggdrasil: { type: "http", url: "http://127.0.0.1:1/y" },
+      research: { type: "http", url: "http://127.0.0.1:1/mcp/ivar" },
+    } }));
+    const withResearch = (): BotConfig => ({ ...bot("copilot-sdk"), dir: botDir });
+    try {
+      // The page's wiki is pinned to the bot (the pin matched ignoring case), asked for in another case.
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra", synthesisBot: "IVAR" },
+        { name: "bare", root: bare, source: "extra" },
+      ]);
+      const pinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()] } });
+      await (await post(pinned.app, { wiki: "AGENT", relPath: "notes/harbour.md", question: "Where else?" })).text();
+      const tools = { ...COPILOT_DISCUSS_TOOLS, research: ["wiki_grep", "wiki_read", "wiki_history"] };
+      expect(pinned.calls.blocked[0]!.surface).toEqual({ mcpTools: tools });
+      expect(pinned.calls.opts[0]!.toolSurface).toEqual({ mcpTools: tools });
+      // The real session builder takes this surface for this bot.
+      expect(copilotNamedToolsSession(withResearch(), { mcpTools: tools }).availableTools).toContain("mcp:research-wiki_grep");
+      expect(pinned.calls.prompts[0]).toContain('research-wiki_grep for an exact key, id or a "where else" question');
+      expect(pinned.calls.prompts[0]).toContain('Pass wiki: "agent" to each.');
+
+      // A wiki not in the bot's list (the research-bot fallback reaches it): the tools, but no wiki named.
+      const unpinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()] } });
+      await (await post(unpinned.app, { wiki: "bare", relPath: "plans/ferry.mdx", question: "Where else?" })).text();
+      expect(unpinned.calls.opts[0]!.toolSurface).toEqual({ mcpTools: tools });
+      expect(unpinned.calls.prompts[0]).not.toContain("Pass wiki:");
+
+      // No research server in .mcp.json: the surface is unchanged, which the real session builder needs.
+      const plain = setup({ connector: "copilot-sdk" });
+      await (await post(plain.app, { wiki: "agent", relPath: "notes/harbour.md", question: "Where else?" })).text();
+      expect(plain.calls.opts[0]!.toolSurface).toEqual({ mcpTools: COPILOT_DISCUSS_TOOLS });
+      expect(plain.calls.prompts[0]).not.toContain("research-wiki_grep");
+      expect(() => copilotNamedToolsSession(bot("copilot-sdk"), { mcpTools: tools })).toThrow(/does not hold/);
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
   });
   test("the card is built once per discussion and cached by the page hash", async () => {
     const store = new MemStore();
@@ -973,5 +1019,19 @@ describe("«Continue in Claude Code» (P3)", () => {
     expect(ro.status).toBe(403);
     expect(((await ro.json()) as { readonly: boolean }).readonly).toBe(true);
     expect(store.rows[0]!.handedOverAt).toBeNull();
+  });
+});
+
+describe("copilotDiscussReach", () => {
+  const wikis = [{ name: "melosys", root: "/w/a" }, { name: "melosys-kode-wiki", root: "/w/b" }];
+  const withTools = { ...COPILOT_DISCUSS_TOOLS, research: ["wiki_grep", "wiki_read", "wiki_history"] };
+  test("research declared, auth off, a wiki: the three tools, and the page's wiki by its registered name", () => {
+    expect(copilotDiscussReach({ mcpServers: ["knowledge", "yggdrasil", "research"], botWikis: wikis, pageWiki: "Melosys-Kode-Wiki", authOff: true })).toEqual({ tools: withTools, wikiToolsWiki: "melosys-kode-wiki" });
+    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: wikis, pageWiki: "mimir", authOff: true })).toEqual({ tools: withTools });
+  });
+  test("no research server, an authenticating instance, or no wiki: the surface as before", () => {
+    expect(copilotDiscussReach({ mcpServers: ["knowledge", "yggdrasil"], botWikis: wikis, pageWiki: "melosys", authOff: true })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", authOff: false })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: [], pageWiki: "melosys", authOff: true })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
   });
 });

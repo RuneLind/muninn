@@ -15,7 +15,9 @@
  *  - claude-cli / claude-sdk: `{ readSearch }` over the wiki's snapshot and a
  *    snapshot of each repo in reach (`reposInReach`).
  *  - copilot-sdk: `{ mcpTools }` — the knowledge server's search and
- *    yggdrasil's listed tools ({@link COPILOT_DISCUSS_TOOLS}).
+ *    yggdrasil's listed tools ({@link COPILOT_DISCUSS_TOOLS}), plus the
+ *    research server's wiki read tools for a bot that declares it
+ *    ({@link copilotDiscussReach}).
  *  - any other connector is refused in the preflight.
  *
  * Preflight, every refusal JSON before the stream, in order: 403 role not
@@ -94,7 +96,11 @@ import { parseRepoRoots, realGit, type GitRun } from "../../wiki/decision-triage
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "../../wiki/plan-card.ts";
 import { planCardFromOutcome, runPlanCard } from "../../wiki/plan-card-run.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
-import { resolveWikiRequest } from "../../wiki/registry.ts";
+import { botWikis, resolveWikiRequest } from "../../wiki/registry.ts";
+import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
+import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
+import { authMode } from "../../auth/policy.ts";
+import { WIKI_TOOL_NAMES, type BotWiki } from "../../research/wiki-tools.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot } from "../../wiki/store.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
@@ -114,6 +120,27 @@ export const COPILOT_DISCUSS_TOOLS: Record<string, string[]> = {
   knowledge: ["search_knowledge"],
   yggdrasil: ["search", "file_outline", "symbol_context", "impact", "list_repos", "list_files"],
 };
+
+/**
+ * The Copilot surface for one bot and page: {@link COPILOT_DISCUSS_TOOLS}, plus
+ * `research: [wiki_grep, wiki_read, wiki_history]` when the bot's `.mcp.json`
+ * declares `research` (else `copilotNamedToolsSession` throws for a server the
+ * bot lacks), the instance runs with `MUNINN_AUTH=off` and the bot has a wiki
+ * (otherwise the server registers no wiki tool). `wikiToolsWiki` is the page's
+ * wiki as the tools name it, only when it is in the bot's list (case-insensitive).
+ */
+export function copilotDiscussReach(opts: {
+  mcpServers: readonly string[];
+  botWikis: readonly BotWiki[];
+  pageWiki: string;
+  authOff: boolean;
+}): { tools: Record<string, string[]>; wikiToolsWiki?: string } {
+  if (!opts.mcpServers.includes("research") || !opts.authOff || opts.botWikis.length === 0) return { tools: COPILOT_DISCUSS_TOOLS };
+  const tools = { ...COPILOT_DISCUSS_TOOLS, research: [...WIKI_TOOL_NAMES] };
+  const wanted = opts.pageWiki.trim().toLowerCase();
+  const hit = wanted ? opts.botWikis.find((w) => w.name.toLowerCase() === wanted) : undefined;
+  return hit ? { tools, wikiToolsWiki: hit.name } : { tools };
+}
 
 /** Turns this process runs at once, across every discussion. */
 export const DISCUSS_MAX_INFLIGHT = 4;
@@ -221,6 +248,8 @@ export interface DiscussRouteDeps {
   wikiSnapshot?: (dir: string) => Promise<Snapshot>;
   codeSnapshot?: (dir: string) => Promise<Snapshot>;
   git?: GitRun;
+  /** The bot's `.mcp.json` servers by name; default `parseMcpConfig`. */
+  mcpServers?: (botDir: string) => Record<string, unknown>;
   planCard?: typeof runPlanCard;
   planCardConfig?: () => PlanCardConfig;
   /** `DECISION_TRIAGE_REPO_ROOTS`'s raw value; default the config's. */
@@ -438,6 +467,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     bot: BotConfig;
     connector: ConnectorType;
     kind: SurfaceKind;
+    copilot: ReturnType<typeof copilotDiscussReach> | null;
     body: DiscussBody;
     location: unknown;
   }
@@ -482,7 +512,16 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     }
     // The pre-flight's surface: the real tool list, or a snapshot dir that
     // does not exist yet, so nothing is built before the run could start.
-    const probe: ToolSurface = kind === "mcpTools" ? { mcpTools: COPILOT_DISCUSS_TOOLS } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };
+    const copilot =
+      kind === "mcpTools"
+        ? copilotDiscussReach({
+            mcpServers: Object.keys((deps.mcpServers ?? parseMcpConfig)(bot.dir)),
+            botWikis: botWikis(getWikiRegistry(), bot.name, isReadonlyWikiRoot),
+            pageWiki: entry?.name ?? "",
+            authOff: authMode() === "off",
+          })
+        : null;
+    const probe: ToolSurface = copilot ? { mcpTools: copilot.tools } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };
     const refused = await blocker(connector, probe);
     if (refused) return c.json({ error: `the wiki agent cannot run on ${bot.name}: ${refused}`, reason: "surface" }, 503);
     if (kind === "readSearch") {
@@ -538,6 +577,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       bot,
       connector,
       kind,
+      copilot,
       body,
       location,
     };
@@ -618,7 +658,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         const mismatch = snapshotPageError(copy, p.pageHash);
         if (mismatch) throw new Error(mismatch);
       } else {
-        reach = { kind: "mcpTools", tools: COPILOT_DISCUSS_TOOLS };
+        const copilot = p.copilot ?? { tools: COPILOT_DISCUSS_TOOLS };
+        reach = { kind: "mcpTools", tools: copilot.tools, ...(copilot.wikiToolsWiki ? { wikiToolsWiki: copilot.wikiToolsWiki } : {}) };
         pagePath = p.relPath;
       }
 
