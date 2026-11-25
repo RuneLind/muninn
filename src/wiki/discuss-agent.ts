@@ -89,8 +89,8 @@ export const DISCUSS_EDIT_END_MARKER = "<!-- /discuss:edit -->";
  * The rules a turn gets for its mode, by a plain line scan (D8). A marker line
  * is one whose text, trimmed of leading and trailing whitespace, is exactly
  * {@link DISCUSS_EDIT_START_MARKER} or {@link DISCUSS_EDIT_END_MARKER}. There is
- * no markdown reading: a marker line inside a code fence, a list or a quote
- * counts like any other.
+ * no markdown reading: a marker line inside a code fence counts like any other.
+ * A line carrying a list or quote prefix (`- `, `> `) is not a marker line.
  *
  * - No marker line: the text unchanged in both modes.
  * - Well-formed (marker lines alternate start, end, …, ending on an end):

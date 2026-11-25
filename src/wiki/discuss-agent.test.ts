@@ -301,23 +301,26 @@ describe("rulesForMode: a plain line scan for start/end marker pairs (D8)", () =
     expect(run(S + "\n" + E)).toMatchObject({ explore: "", edit: "" });
   });
 
-  // Each: [name, rules, the 1-based line the warning names].
-  const MALFORMED: [string, string, number][] = [
-    ["a start with no end", lines("a", S, "x", "b"), 2],
-    ["an end with no start", lines("a", "x", E, "b"), 3],
-    ["a start inside an open pair", lines("a", S, "x", S, "y", E, "b"), 4],
-    ["an end after an end", lines("a", S, "x", E, "y", E, "b"), 6],
-    ["a good pair followed by a start with no end", lines(S, "x", E, "a", S, "b"), 5],
-    ["several faults in one file still warn once", lines(E, E, S, S), 1],
+  // Each: [name, rules, the 1-based lines the warning names]. The line-1 starts
+  // pin the open-pair sentinel against index 0 (review of dce19ccc).
+  const MALFORMED: [string, string, number[]][] = [
+    ["a start with no end", lines("a", S, "x", "b"), [2]],
+    ["an end with no start", lines("a", "x", E, "b"), [3]],
+    ["a start inside an open pair", lines("a", S, "x", S, "y", E, "b"), [4, 2]],
+    ["an end after an end", lines("a", S, "x", E, "y", E, "b"), [6]],
+    ["a good pair followed by a start with no end", lines(S, "x", E, "a", S, "b"), [5]],
+    ["several faults in one file still warn once", lines(E, E, S, S), [1]],
+    ["a start on line 1 with no end", lines(S, "secret", "b"), [1]],
+    ["a start inside a pair opened on line 1", lines(S, "leak", S, "y", E), [3, 1]],
   ];
-  for (const [name, rules, line] of MALFORMED) {
-    test(`malformed, ${name}: the whole text unchanged in both modes, one warning per call naming line ${line}`, () => {
+  for (const [name, rules, named] of MALFORMED) {
+    test(`malformed, ${name}: the whole text unchanged in both modes, one warning per call naming line ${named.join(" and ")}`, () => {
       const r = run(rules);
       expect(r.explore).toBe(rules);
       expect(r.edit).toBe(rules);
       expect(r.exploreWarns.length).toBe(1);
       expect(r.editWarns.length).toBe(1);
-      expect(r.exploreWarns[0]).toContain(`line ${line}`);
+      for (const line of named) expect(r.exploreWarns[0]).toContain(`line ${line} `);
       expect(r.editWarns[0]).toBe(r.exploreWarns[0]!);
     });
   }
