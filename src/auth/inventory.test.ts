@@ -1,12 +1,16 @@
 import { test, expect, describe } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { $ } from "bun";
+import { testTempDir } from "../test/temp-dir.ts";
 import {
   DISPOSITIONS,
   claimedIdBodyRows,
   claimedIdParamRows,
   corsRows,
   formatRows,
+  parserReadsUserId,
 } from "./inventory.ts";
 
 /**
@@ -67,6 +71,24 @@ describe("acceptance 12 - the claimed-id inventory is a command, not a number", 
     const rows = (await claimedIdParamRows()).map(key);
     expect(rows).toContain('src/chat/routes.ts | HEAD /reports/:botName/:userId/:issueKey');
     expect(rows).toContain('src/chat/routes.ts | HEAD /specs/:botName/:userId/:issueKey');
+  });
+
+  test("a userId a route reads through its body parser is derived and listed", async () => {
+    // `POST /api/wiki/discuss` reads the client's userId as `r.userId` inside
+    // `parseDiscussBody`, which no `body.userId` grep over the route files sees.
+    const row = "src/dashboard/routes/wiki-discuss.ts | parseDiscussBody(userId) in POST /api/wiki/discuss";
+    expect(formatRows(await claimedIdBodyRows())).toContain(row);
+    const listed = (await readFixture()).find((r) => key(r) === row);
+    expect(listed?.disposition).toBe("admin-zone");
+  });
+
+  test("a parser's userId counts through the parser it delegates to, and not in a comment", async () => {
+    const dir = await testTempDir(path.join(tmpdir(), "muninn-inventory-parsers-"));
+    await writeFile(path.join(dir, "outer.ts"), "export function parseOuterBody(raw) {\n  // userId is not read here\n  return parseInnerBody(raw);\n}\n");
+    await writeFile(path.join(dir, "inner.ts"), "export function parseInnerBody(raw) {\n  return { id: raw.userId };\n}\n");
+    await writeFile(path.join(dir, "quiet.ts"), "export function parseQuietBody(raw) {\n  // raw.userId is never read\n  return {};\n}\nconst userId = 1;\n");
+    expect(await parserReadsUserId("parseOuterBody", [dir])).toBe(true);
+    expect(await parserReadsUserId("parseQuietBody", [dir])).toBe(false);
   });
 
   test("no route file sets Access-Control-Allow-Origin by hand any more", async () => {

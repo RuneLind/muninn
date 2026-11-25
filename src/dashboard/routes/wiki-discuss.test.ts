@@ -19,6 +19,8 @@ import type { executeOneShot, OneShotOptions } from "../../ai/one-shot.ts";
 import { __setClaudeCliVersionForTest, type ToolSurface } from "../../ai/tool-surface.ts";
 import type { Snapshot } from "../../ai/snapshots.ts";
 import type { DiscussTurn, DiscussTurnFinish, DiscussTurnStart } from "../../db/wiki-discuss-turns.ts";
+import type { Thread } from "../../db/threads.ts";
+import type { DiscussThreadStore } from "../../wiki/discuss-engine.ts";
 import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
 import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import type { RunOutcome } from "../../wiki/plan-card-run.ts";
@@ -77,6 +79,10 @@ class MemStore implements DiscussStore {
       wiki: i.wiki,
       relPath: i.relPath,
       pageHash: i.pageHash,
+      traceKey: null,
+      threadId: i.threadId ?? null,
+      userMessageId: i.userMessage ? crypto.randomUUID() : null,
+      assistantMessageId: null,
       selection: i.selection,
       question: i.question,
       location: i.location,
@@ -100,7 +106,19 @@ class MemStore implements DiscussStore {
       editAppliedAt: null,
     };
     this.rows.push(row);
-    return { id: row.id, seq };
+    if (i.userMessage) this.messages.push({ id: row.userMessageId!, role: "user", content: i.userMessage.content, threadId: i.threadId! });
+    return { id: row.id, seq, userMessageId: row.userMessageId };
+  };
+  messages: { id: string; role: string; content: string; threadId: string }[] = [];
+  assistant = async (turnId: string, content: string) => {
+    const r = this.rows.find((x) => x.id === turnId);
+    if (!r?.threadId) return null;
+    const id = r.assistantMessageId ?? crypto.randomUUID();
+    const old = this.messages.find((m) => m.id === id);
+    if (old) old.content = content;
+    else this.messages.push({ id, role: "assistant", content, threadId: r.threadId });
+    r.assistantMessageId = id;
+    return id;
   };
   finish = async (id: string, f: DiscussTurnFinish) => {
     const r = this.rows.find((x) => x.id === id);
@@ -129,6 +147,21 @@ class MemStore implements DiscussStore {
     if (!r) return null;
     r.handedOverAt ??= Date.now();
     return r;
+  };
+}
+
+/** The wiki threads, in memory: one live thread per user, bot, wiki and page. */
+class MemThreads implements DiscussThreadStore {
+  rows: Thread[] = [];
+  get = async (id: string) => this.rows.find((t) => t.id === id) ?? null;
+  live = async (userId: string, botName: string, wiki: string, relPath: string) =>
+    this.rows.find((t) => t.userId === userId && t.botName === botName && t.wiki === wiki && t.relPath === relPath && t.closedAt === undefined) ?? null;
+  getOrCreate = async (userId: string, botName: string, wiki: string, relPath: string, nameFor: (suffix: string) => string) => {
+    const hit = await this.live(userId, botName, wiki, relPath);
+    if (hit) return hit;
+    const t: Thread = { id: crypto.randomUUID(), userId, botName, name: nameFor(""), isActive: false, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), kind: "wiki", wiki, relPath };
+    this.rows.push(t);
+    return t;
   };
 }
 
@@ -187,9 +220,10 @@ function copyTree(from: string, to: string): Promise<void> {
   return run;
 }
 
-function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof executeOneShot; store?: MemStore; deps?: Partial<DiscussRouteDeps>; role?: "user" | "admin" } = {}) {
+function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof executeOneShot; store?: MemStore; threads?: MemThreads; deps?: Partial<DiscussRouteDeps>; role?: "user" | "admin" } = {}) {
   const calls: Calls = { prompts: [], opts: [], bots: [], codeSnaps: [], wikiSnaps: [], planCards: 0, blocked: [] };
   const store = opts.store ?? new MemStore();
+  const threads = opts.threads ?? new MemThreads();
   const app = new Hono();
   if (opts.role) app.use(async (c, next) => { c.set("role" as never, opts.role as never); await next(); });
   const oneShot: typeof executeOneShot =
@@ -203,6 +237,10 @@ function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof exec
     });
   registerWikiDiscussRoute(app, { profile: "default", dashboardPort: 4321, claudeModel: "fallback-model", decisionTriageRepoRoots: null } as unknown as Config, {
     store,
+    threads,
+    chatUsers: async () => [{ id: "kari", name: "Kari" }],
+    defaultUser: async () => "kari",
+    mirror: null,
     continueStore: store,
     bots: () => [bot(opts.connector ?? "claude-sdk")],
     oneShot,
@@ -230,7 +268,7 @@ function setup(opts: { connector?: BotConfig["connector"]; oneShot?: typeof exec
     log: { info: () => {}, warn: () => {}, error: () => {} },
     ...opts.deps,
   });
-  return { app, calls, store };
+  return { app, calls, store, threads };
 }
 
 const post = (app: Hono, body: unknown, init: RequestInit = {}, type = "application/json") =>

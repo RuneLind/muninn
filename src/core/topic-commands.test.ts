@@ -7,7 +7,7 @@ import {
   formatThreadList,
   formatTimeAgo,
 } from "./topic-commands.ts";
-import { switchThread, listThreads } from "../db/threads.ts";
+import { switchThread, listThreads, getOrCreateWikiThread, getThreadById } from "../db/threads.ts";
 import { saveMessage } from "../db/messages.ts";
 import { makeMessage } from "../test/fixtures.ts";
 
@@ -56,6 +56,28 @@ describe("core/topic-commands", () => {
       expect(messages).toHaveLength(1);
       expect(messages[0]).toContain("Switched to topic: *work*");
       expect(messages[0]).toContain("2 messages");
+    });
+  });
+
+  describe("a wiki page's Discuss thread (kind 'wiki')", () => {
+    test("is left out of /topic and /topics, refused by /topic <name>, and skipped by /deltopic", async () => {
+      await switchThread("u1", "bot1", "work");
+      const wiki = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", () => "wiki: ferry timetable");
+      const list = mockReply();
+      await handleTopicCommand("u1", "bot1", "", list.reply);
+      await handleTopicsCommand("u1", "bot1", list.reply);
+      for (const m of list.messages) {
+        expect(m).toContain("work");
+        expect(m).not.toContain("ferry");
+      }
+      const sw = mockReply();
+      await handleTopicCommand("u1", "bot1", "wiki: ferry timetable", sw.reply);
+      expect(sw.messages[0]).toContain("wiki page's Discuss thread");
+      expect((await getThreadById(wiki.id))!.isActive).toBe(false);
+      const del = mockReply();
+      await handleDelTopicCommand("u1", "bot1", "wiki: ferry timetable", del.reply);
+      expect(del.messages[0]).toContain("Topic not found");
+      expect(await getThreadById(wiki.id)).not.toBeNull();
     });
   });
 
@@ -134,8 +156,8 @@ describe("core/topic-commands", () => {
   describe("formatThreadList", () => {
     test("formats active and inactive threads", () => {
       const threads = [
-        { id: "1", userId: "u1", botName: "bot1", name: "work", isActive: true, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 5 },
-        { id: "2", userId: "u1", botName: "bot1", name: "play", isActive: false, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0 },
+        { id: "1", userId: "u1", botName: "bot1", name: "work", isActive: true, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 5, kind: "chat" as const },
+        { id: "2", userId: "u1", botName: "bot1", name: "play", isActive: false, autoRespondPaused: false, createdAt: Date.now(), updatedAt: Date.now(), messageCount: 0, kind: "chat" as const },
       ];
       const result = formatThreadList(threads);
       expect(result).toContain("▶️ *work*");

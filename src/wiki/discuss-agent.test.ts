@@ -22,7 +22,12 @@ import {
   renderAgentSystemPrompt,
   renderAgentTurnPrompt,
   reposInReach,
+  rulesForMode,
+  stripProposedEdit,
+  wikiThreadName,
+  STORED_EDIT_MARKER,
 } from "./discuss-agent.ts";
+import { parseDiscussBody } from "./discuss-engine.ts";
 import { parseDiscussReaderConfig } from "./store.ts";
 
 let dir = "";
@@ -110,9 +115,12 @@ describe("the prompt", () => {
     expect(p).toContain("9: One line.");
     expect(p.endsWith("## Question\nQ?")).toBe(true);
   });
-  test("the system prompt carries the rules and no persona", () => {
+  test("the system prompt carries the rules and no persona, and frames a thread", () => {
     const s = renderAgentSystemPrompt("w", "Be brief.");
     expect(s).toContain("<wiki_rules>\nBe brief.\n</wiki_rules>");
+    expect(s).toContain("in a thread");
+    expect(s).toContain("The context pack describes this turn");
+    expect(s).not.toContain("one turn at a time");
   });
   test("earlier turns are bounded to the newest few", () => {
     const earlier = Array.from({ length: 9 }, (_, i) => ({ question: `q${i}`, selection: null, answer: `a${i}`, endState: "done" }));
@@ -170,5 +178,180 @@ describe("extractProposedEdit: the fences an answer really has", () => {
     const e = extractProposedEdit(`${cited}\`\`\`\`json\n\`\`\`\n${two}\n\`\`\`\`\n`);
     expect(e?.edits.map((x) => x.new)).toEqual(["b", "d"]);
     expect(e?.overLimit).toBe(true);
+  });
+});
+
+describe("Discuss v2: the stored answer, the thread name and the body", () => {
+  test("the stored answer replaces the block extractProposedEdit reads with the marker line; an answer with none is unchanged", () => {
+    const answer = 'Wrong.\n\n```json\n{"edits": [{"old": "a", "new": "b"}]}\n```\n\nRead: x';
+    expect(extractProposedEdit(answer)).not.toBeNull();
+    expect(stripProposedEdit(answer)).toBe(`Wrong.\n\n${STORED_EDIT_MARKER}\n\nRead: x`);
+    const plain = "Fine.\n\n```ts\nconst a = 1;\n```";
+    expect(stripProposedEdit(plain)).toBe(plain);
+  });
+  test("the thread name: `wiki: <title>` lowercased, cut to 50 units with its suffix, never splitting a pair", () => {
+    expect(wikiThreadName("Ferry   Timetable", "")).toBe("wiki: ferry timetable");
+    expect(wikiThreadName("x".repeat(60), " #ab12")).toBe(`wiki: ${"x".repeat(38)} #ab12`);
+    expect(wikiThreadName("😀".repeat(30), "").length).toBeLessThanOrEqual(50);
+  });
+  test("parseDiscussBody reads mode and userId and refuses a bad one", () => {
+    const base = { relPath: "a.md", question: "q" };
+    expect(parseDiscussBody({ ...base, mode: "edit", userId: "kari" })).toMatchObject({ mode: "edit", userId: "kari" });
+    expect(parseDiscussBody({ ...base, mode: "write" })).toBeString();
+    expect(parseDiscussBody({ ...base, userId: "" })).toBeString();
+    expect(parseDiscussBody({ ...base, userId: 7 })).toBeString();
+  });
+});
+
+describe("rulesForMode: a plain line scan for start/end marker pairs (D8)", () => {
+  const S = "<!-- discuss:edit -->";
+  const E = "<!-- /discuss:edit -->";
+  const lines = (...ls: string[]) => ls.join("\n");
+  /** Both modes plus the warnings each call made. */
+  const run = (rules: string) => {
+    const exploreWarns: string[] = [];
+    const editWarns: string[] = [];
+    const explore = rulesForMode(rules, "explore", (m) => exploreWarns.push(m));
+    const edit = rulesForMode(rules, "edit", (m) => editWarns.push(m));
+    return { explore, edit, exploreWarns, editWarns };
+  };
+
+  test("the exported markers are the start and end lines", async () => {
+    const mod = await import("./discuss-agent.ts");
+    expect((mod as Record<string, unknown>).DISCUSS_EDIT_START_MARKER).toBe(S);
+    expect((mod as Record<string, unknown>).DISCUSS_EDIT_END_MARKER).toBe(E);
+  });
+
+  test("no marker line: the text comes back unchanged in both modes, CRLF included, with no warning", () => {
+    for (const plain of ["# A\n\n## Changing the page\n- edits\n", "a\r\nb\r\n", "", "\n"]) {
+      const r = run(plain);
+      expect(r.explore).toBe(plain);
+      expect(r.edit).toBe(plain);
+      expect(r.exploreWarns).toEqual([]);
+      expect(r.editWarns).toEqual([]);
+    }
+  });
+
+  test("one pair: Explore drops the start line through the end line; Edit drops only the two marker lines", () => {
+    const rules = lines("# Agent", "", "## Answering", "- First.", "", S, "## Changing the page", "- One edit.", E, "", "## Language", "- Reply.");
+    const r = run(rules);
+    expect(r.explore).toBe(lines("# Agent", "", "## Answering", "- First.", "", "", "## Language", "- Reply."));
+    expect(r.edit).toBe(lines("# Agent", "", "## Answering", "- First.", "", "## Changing the page", "- One edit.", "", "## Language", "- Reply."));
+    expect(r.exploreWarns).toEqual([]);
+    expect(r.editWarns).toEqual([]);
+  });
+
+  test("two pairs: each is dropped in Explore, and only the four marker lines in Edit", () => {
+    const r = run(lines("a", S, "e1", E, "b", S, "e2", "e2b", E, "c"));
+    expect(r.explore).toBe(lines("a", "b", "c"));
+    expect(r.edit).toBe(lines("a", "e1", "b", "e2", "e2b", "c"));
+    expect(r.exploreWarns.length + r.editWarns.length).toBe(0);
+  });
+
+  test("a pair's content is opaque: headings, fences, a thematic break and Setext lines go with it", () => {
+    const body = ["## Edit", "```md", "## inner", "```", "---", "Setext", "===", "> quote", "    indented"];
+    const r = run(lines("# T", S, ...body, E, "## B", "b"));
+    expect(r.explore).toBe(lines("# T", "## B", "b"));
+    expect(r.edit).toBe(lines("# T", ...body, "## B", "b"));
+  });
+
+  test("no markdown awareness: a marker line inside a code fence is still a marker", () => {
+    const r = run(lines("a", "```", S, "```", "x", E, "b"));
+    expect(r.explore).toBe(lines("a", "```", "b"));
+    expect(r.edit).toBe(lines("a", "```", "```", "x", "b"));
+  });
+
+  test("frontmatter and a paragraph with --- above a start marker stay in Explore", () => {
+    const top = ["---", "title: Rules", "---", "# Title", "Intro paragraph", "---"];
+    const r = run(lines(...top, S, "## Changing the page", "edit rule", E, "## After", "after"));
+    expect(r.explore).toBe(lines(...top, "## After", "after"));
+    expect(r.edit).toBe(lines(...top, "## Changing the page", "edit rule", "## After", "after"));
+  });
+
+  test("leading and trailing whitespace around a marker is trimmed, so an indented marker under a paragraph counts", () => {
+    const r = run(lines("para", `    ${S}`, "x", `\t${E} \t`, "y", `  ${S}  `, "z", ` ${E}`));
+    expect(r.explore).toBe(lines("para", "y"));
+    expect(r.edit).toBe(lines("para", "x", "y", "z"));
+    expect(r.exploreWarns.length + r.editWarns.length).toBe(0);
+  });
+
+  test("a line that only contains a marker among other text is not a marker", () => {
+    for (const near of [`${S} x`, `x ${E}`, "<!--discuss:edit-->", "<!-- DISCUSS:EDIT -->", `> ${S}`, `- ${S}`, "<!-- discuss:edit  -->"]) {
+      const rules = lines("a", near, "b");
+      const r = run(rules);
+      expect(r.explore).toBe(rules);
+      expect(r.edit).toBe(rules);
+      expect(r.exploreWarns.length + r.editWarns.length).toBe(0);
+    }
+  });
+
+  test("CRLF and lone-CR input is normalised to \\n before the scan", () => {
+    const crlf = run(["a", S, "x", E, "b", ""].join("\r\n"));
+    expect(crlf.explore).toBe("a\nb\n");
+    expect(crlf.edit).toBe("a\nx\nb\n");
+    const cr = run(["a", S, "x", E, "b"].join("\r"));
+    expect(cr.explore).toBe("a\nb");
+    expect(cr.edit).toBe("a\nx\nb");
+  });
+
+  test("trailing newline: a file ending in \\n gives back text ending in \\n, also when the end marker is its last line", () => {
+    expect(run("a\n" + S + "\nx\n" + E + "\nb\n")).toMatchObject({ explore: "a\nb\n", edit: "a\nx\nb\n" });
+    expect(run("a\n" + S + "\nx\n" + E + "\n")).toMatchObject({ explore: "a\n", edit: "a\nx\n" });
+    expect(run("a\n" + S + "\nx\n" + E)).toMatchObject({ explore: "a", edit: "a\nx" });
+    expect(run(S + "\n" + E)).toMatchObject({ explore: "", edit: "" });
+  });
+
+  // Each: [name, rules, the 1-based lines the warning names]. The line-1 starts
+  // pin the open-pair sentinel against index 0 (review of dce19ccc).
+  const MALFORMED: [string, string, number[]][] = [
+    ["a start with no end", lines("a", S, "x", "b"), [2]],
+    ["an end with no start", lines("a", "x", E, "b"), [3]],
+    ["a start inside an open pair", lines("a", S, "x", S, "y", E, "b"), [4, 2]],
+    ["an end after an end", lines("a", S, "x", E, "y", E, "b"), [6]],
+    ["a good pair followed by a start with no end", lines(S, "x", E, "a", S, "b"), [5]],
+    ["several faults in one file still warn once", lines(E, E, S, S), [1]],
+    ["a start on line 1 with no end", lines(S, "secret", "b"), [1]],
+    ["a start inside a pair opened on line 1", lines(S, "leak", S, "y", E), [3, 1]],
+  ];
+  for (const [name, rules, named] of MALFORMED) {
+    test(`malformed, ${name}: the whole text unchanged in both modes, one warning per call naming line ${named.join(" and ")}`, () => {
+      const r = run(rules);
+      expect(r.explore).toBe(rules);
+      expect(r.edit).toBe(rules);
+      expect(r.exploreWarns.length).toBe(1);
+      expect(r.editWarns.length).toBe(1);
+      for (const line of named) expect(r.exploreWarns[0]).toContain(`line ${line} `);
+      expect(r.editWarns[0]).toBe(r.exploreWarns[0]!);
+    });
+  }
+
+  test("malformed CRLF input comes back exactly as given, \\r\\n included", () => {
+    const rules = ["a", S, "x"].join("\r\n");
+    const r = run(rules);
+    expect(r.explore).toBe(rules);
+    expect(r.edit).toBe(rules);
+    expect(r.exploreWarns.length).toBe(1);
+  });
+
+  test("a malformed file with no warn callback does not throw", () => {
+    expect(rulesForMode(lines("a", S), "explore")).toBe(lines("a", S));
+    expect(rulesForMode(lines(E, "a"), "edit")).toBe(lines(E, "a"));
+  });
+
+  test("performance: 16 KiB of short Setext-like lines, 10k `>` lines and one 10k-deep `>` line scan well under 100 ms", () => {
+    const setext = "a\n=\n-\n".repeat(Math.ceil((16 * 1024) / 6));
+    const quotes = Array.from({ length: 10_000 }, (_, i) => ">".repeat(1 + (i % 50))).join("\n");
+    const deep = ">".repeat(10_000);
+    const big = [setext, quotes, deep, S, "edit only", E, "tail"].join("\n");
+    const plain = [setext, quotes, deep, "tail"].join("\n");
+    const t0 = performance.now();
+    const explore = rulesForMode(big, "explore");
+    const edit = rulesForMode(big, "edit");
+    const unmarked = rulesForMode(plain, "explore");
+    const ms = performance.now() - t0;
+    expect(explore).toBe(plain);
+    expect(edit).toBe([setext, quotes, deep, "edit only", "tail"].join("\n"));
+    expect(unmarked).toBe(plain);
+    expect(ms).toBeLessThan(100);
   });
 });

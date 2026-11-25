@@ -60,6 +60,8 @@ function app(store: DiscussStore): Hono {
     oneShot: async () => ({ result: "It opens at six.", costUsd: 0, toolCalls: [] }) as never,
     surfaceBlocker: async () => null,
     log: { info: () => {}, warn: () => {}, error: () => {} },
+    defaultUser: async () => "kari",
+    mirror: null,
   });
   return a;
 }
@@ -104,6 +106,8 @@ test("a live turn whose snapshots outlast the stale bound still blocks its discu
     oneShot: async () => ({ result: "At six.", costUsd: 0, toolCalls: [] }) as never,
     surfaceBlocker: async () => null,
     log: quiet,
+    defaultUser: async () => "kari",
+    mirror: null,
   });
   const live = await post(a, { ...page, discussionId, question: "Still six?" });
   expect(live.status).toBe(200);
@@ -138,6 +142,8 @@ test("a running turn whose heartbeat stopped is closed as abandoned by the next 
     },
     surfaceBlocker: async () => null,
     log: quiet,
+    defaultUser: async () => "kari",
+    mirror: null,
   });
   const res = await post(a, { ...page, discussionId, question: "After the crash?" });
   expect(res.status).toBe(200);
@@ -188,6 +194,8 @@ test("two POSTs on one done discussion that both read it before inserting: one s
     },
     surfaceBlocker: async () => null,
     log: { info: () => {}, warn: () => {}, error: () => {} },
+    defaultUser: async () => "kari",
+    mirror: null,
   });
   const [r1, r2] = await Promise.all([post(a, { ...page, discussionId, question: "Still?" }), post(a, { ...page, discussionId, question: "Really?" })]);
   expect([r1.status, r2.status].sort()).toEqual([200, 409]);

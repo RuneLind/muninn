@@ -244,6 +244,7 @@ import {
   findThreadByName,
   getThreadById,
   updateThreadConnector,
+  type ThreadKind,
 } from "../../db/threads.ts";
 import { getConnector, listConnectorOptions } from "../../db/connectors.ts";
 import { isValidUuid, readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
@@ -540,7 +541,7 @@ export interface AskChatDeps {
     userId: string,
     botName: string,
     name: string,
-  ) => Promise<{ id: string; name: string; description?: string } | null>;
+  ) => Promise<{ id: string; name: string; description?: string; kind?: ThreadKind } | null>;
   createThread: (
     userId: string,
     botName: string,
@@ -584,6 +585,8 @@ export interface AskChatDeps {
     /** Carries the article tag on an article thread — a "Send there →" naming a
      *  thread that isn't this article's must not be seeded. */
     description?: string;
+    /** `wiki` ⇒ a page's Discuss thread, which is never seeded (D7). */
+    kind?: ThreadKind;
   } | null>;
   /** Stamp a connector on an EXISTING thread — only ever called when that thread
    *  carries none, so an established thread keeps the model it has been using. */
@@ -622,6 +625,14 @@ let askChatDeps: AskChatDeps = defaultAskChatDeps;
 /** How many `-2`, `-3`… disambiguators a `forceNew` escalation walks before
  *  giving up (bounded — each step is a `findThreadByName` round-trip). */
 const ASK_CHAT_NAME_ATTEMPTS = 50;
+
+/** The 409 for a thread that is a wiki page's Discuss thread (Discuss v2, D7):
+ *  never seeded, never handed back; the client's `nameTaken` path offers only a
+ *  new thread. */
+const wikiThreadTaken = {
+  nameTaken: true,
+  error: "That thread is a wiki page's discussion — open it from the page's Discuss tab, or start a new thread.",
+} as const;
 
 /** Test-only: override (pass a partial) or reset (no arg) the ask→chat deps. */
 export function __setAskChatDepsForTest(over?: Partial<AskChatDeps>): void {
@@ -4591,6 +4602,10 @@ export function registerWikiToolRoutes(
             400,
           );
         }
+        // A wiki page's Discuss thread runs on the Discuss engine, never the chat
+        // pipeline (D7): no connector stamp, no seed. `nameTaken` so the client
+        // offers only "Start new thread".
+        if (thread.kind === "wiki") return c.json(wikiThreadTaken, 409);
         // Article mode re-verifies the thread's IDENTITY here, not just its
         // ownership: the id came back from a name collision, and a name is not an
         // article (13 colliding title groups over 30 mimir+jarvis pages; a plain
@@ -4697,6 +4712,10 @@ export function registerWikiToolRoutes(
       // 409 whose only offered action is a new thread — "Send there →" on an
       // unrelated thread seeds a question about page A into a conversation about
       // something else entirely.
+      // A wiki page's Discuss thread is never handed back for "Send there →".
+      if (existing && !body.forceNew && existing.kind === "wiki") {
+        return c.json({ ...wikiThreadTaken, existingThreadName: existing.name, userId: chatUser.id, botName: botConfig.name }, 409);
+      }
       if (
         article &&
         existing &&

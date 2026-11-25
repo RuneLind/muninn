@@ -17,6 +17,7 @@ import { clampLine, passageWhere } from "./discuss-prompt.ts";
 import { parseEditList, type EditListResult } from "./integrate-edits.ts";
 import type { RepoRoots } from "./decision-triage/git.ts";
 import { sameWikiRoot } from "./readonly.ts";
+import { truncateUnits } from "./ask-chat.ts";
 
 /** The rules file, at the wiki root beside `.wiki-reader.json` (D3). */
 export const WIKI_AGENT_RULES_FILE = ".wiki-agent.md";
@@ -65,6 +66,81 @@ export async function readWikiAgentRules(wikiRoot: string): Promise<RulesRead> {
   } catch (err) {
     return { state: "unreadable", error: (err as Error).message };
   }
+}
+
+/** The refusal for a `.wiki-agent.md` that exists but the agent does not accept (422 too large, 503 unreadable or not a file); null for `ok` and `absent`, which each caller answers itself. Shared by the Discuss engine and Apply. */
+export function wikiAgentRulesRefusal(rules: RulesRead): { status: 422 | 503; body: { error: string; reason: "rules-too-large" | "rules-unreadable" } } | null {
+  if (rules.state === "ok" || rules.state === "absent") return null;
+  if (rules.state === "too-large") {
+    return { status: 422, body: { error: `the wiki's .wiki-agent.md is ${rules.bytes} bytes, over the ${WIKI_AGENT_RULES_MAX_BYTES}-byte bound`, reason: "rules-too-large" } };
+  }
+  return { status: 503, body: { error: "the wiki's .wiki-agent.md cannot be read", reason: "rules-unreadable" } };
+}
+
+/** A turn's mode: Explore answers; Edit may propose an edit to the page. */
+export type DiscussMode = "explore" | "edit";
+
+/** The line that opens a rules file's Edit-only part (D8). */
+export const DISCUSS_EDIT_START_MARKER = "<!-- discuss:edit -->";
+/** The line that closes a rules file's Edit-only part (D8). */
+export const DISCUSS_EDIT_END_MARKER = "<!-- /discuss:edit -->";
+
+/**
+ * The rules a turn gets for its mode, by a plain line scan (D8). A marker line
+ * is one whose text, trimmed of leading and trailing whitespace, is exactly
+ * {@link DISCUSS_EDIT_START_MARKER} or {@link DISCUSS_EDIT_END_MARKER}. There is
+ * no markdown reading: a marker line inside a code fence counts like any other.
+ * A line carrying a list or quote prefix (`- `, `> `) is not a marker line.
+ *
+ * - No marker line: the text unchanged in both modes.
+ * - Well-formed (marker lines alternate start, end, …, ending on an end):
+ *   Explore drops every line from each start through its end; Edit drops only
+ *   the marker lines. The result is the CR/CRLF-normalised text; lines are
+ *   removed whole, nothing else is trimmed or collapsed.
+ * - Anything else: the text unchanged in both modes, marker lines included,
+ *   and `warn` called once with the first faulty marker's line.
+ */
+export function rulesForMode(rules: string, mode: DiscussMode, warn?: (msg: string) => void): string {
+  const lines = rules.replace(/\r\n?/g, "\n").split("\n");
+  const kinds = lines.map((l) => {
+    const t = l.trim();
+    return t === DISCUSS_EDIT_START_MARKER ? "start" : t === DISCUSS_EDIT_END_MARKER ? "end" : null;
+  });
+  let open = -1;
+  let fault: string | null = null;
+  let markers = 0;
+  for (let i = 0; i < kinds.length && fault === null; i++) {
+    const k = kinds[i];
+    if (k === null) continue;
+    markers++;
+    if (k === "start" && open >= 0) fault = `a second ${DISCUSS_EDIT_START_MARKER} at line ${i + 1} before the one at line ${open + 1} is closed`;
+    else if (k === "end" && open < 0) fault = `${DISCUSS_EDIT_END_MARKER} at line ${i + 1} has no ${DISCUSS_EDIT_START_MARKER} before it`;
+    else open = k === "start" ? i : -1;
+  }
+  if (fault === null && open >= 0) fault = `${DISCUSS_EDIT_START_MARKER} at line ${open + 1} has no ${DISCUSS_EDIT_END_MARKER} after it`;
+  if (markers === 0) return rules;
+  if (fault !== null) {
+    warn?.(`the rules file's Edit-only markers do not pair up (${fault}): sent whole in both modes`);
+    return rules;
+  }
+  const out: string[] = [];
+  let inside = false;
+  for (let i = 0; i < lines.length; i++) {
+    const k = kinds[i];
+    if (k !== null) inside = k === "start";
+    else if (mode === "edit" || !inside) out.push(lines[i]!);
+  }
+  return out.join("\n");
+}
+
+/** The name prefix of a wiki thread, counted in its 50-unit bound. */
+export const WIKI_THREAD_NAME_PREFIX = "Wiki: ";
+
+/** A page's wiki thread name: `wiki: <title>` lowercased, the title cut to
+ *  fit `max` units with the suffix (`getOrCreateWikiThread`'s `nameFor`). */
+export function wikiThreadName(title: string, suffix: string, max = 50): string {
+  const flat = title.replace(/\s+/g, " ").trim().toLowerCase() || "page";
+  return `${WIKI_THREAD_NAME_PREFIX.toLowerCase()}${truncateUnits(flat, max - WIKI_THREAD_NAME_PREFIX.length - suffix.length).trimEnd()}${suffix}`;
 }
 
 /**
@@ -169,11 +245,12 @@ export interface EarlierTurn {
   endState: string;
 }
 
-/** The system prompt: a fixed frame and the wiki's own rules. No persona. */
+/** The system prompt: a fixed frame and the wiki's own rules (for the turn's
+ *  mode, {@link rulesForMode}). No persona. */
 export function renderAgentSystemPrompt(wiki: string, rules: string): string {
   return [
-    `You are the wiki agent behind Discuss in muninn's wiki reader. You answer questions about one page of the "${wiki}" wiki, one turn at a time.`,
-    "The turn tells you what you can read and holds the context pack: the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
+    `You are the wiki agent behind Discuss in muninn's wiki reader. You discuss one page of the "${wiki}" wiki with the reader, in a thread.`,
+    "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
     "The wiki's own rules follow. They decide how you answer.",
     "",
     "<wiki_rules>",
@@ -307,8 +384,15 @@ export interface ProposedEdit extends EditListResult {
  * else; an unclosed fence runs to the end. CRLF reads as LF.
  */
 export function fencedBlocks(text: string): { info: string; body: string }[] {
+  return fencedBlockSpans(text).map(({ info, body }) => ({ info, body }));
+}
+
+/** {@link fencedBlocks} with each block's line span in the CRLF-normalized
+ *  text: `from` is the opening fence's line, `to` the closing fence's (the
+ *  last line for an unclosed fence). */
+function fencedBlockSpans(text: string): { info: string; body: string; from: number; to: number }[] {
   const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const out: { info: string; body: string }[] = [];
+  const out: { info: string; body: string; from: number; to: number }[] = [];
   for (let i = 0; i < lines.length; i++) {
     const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]!);
     if (!open) continue;
@@ -320,7 +404,7 @@ export function fencedBlocks(text: string): { info: string; body: string }[] {
     const body: string[] = [];
     let j = i + 1;
     for (; j < lines.length && !closer.test(lines[j]!); j++) body.push(lines[j]!);
-    out.push({ info, body: body.join("\n") });
+    out.push({ info, body: body.join("\n"), from: i, to: Math.min(j, lines.length - 1) });
     i = j;
   }
   return out;
@@ -333,10 +417,28 @@ export function fencedBlocks(text: string): { info: string; body: string }[] {
  * stored turn carries it; P4 applies it.
  */
 export function extractProposedEdit(answer: string): ProposedEdit | null {
-  for (const { body } of fencedBlocks(answer).reverse()) {
+  return proposedEditBlock(answer)?.edit ?? null;
+}
+
+function proposedEditBlock(answer: string): { edit: ProposedEdit; from: number; to: number } | null {
+  for (const { body, from, to } of fencedBlockSpans(answer).reverse()) {
     if (!/"edits"\s*:/.test(body)) continue;
     const parsed = parseEditList(body);
-    if (parsed && parsed.edits.length + parsed.dropped.length > 0) return { ...parsed, overLimit: parsed.edits.length > 1 };
+    if (parsed && parsed.edits.length + parsed.dropped.length > 0) return { edit: { ...parsed, overLimit: parsed.edits.length > 1 }, from, to };
   }
   return null;
+}
+
+/** The one line a thread's stored assistant message carries in place of the
+ *  proposed edit's JSON block: the edit itself is the ledger row's. */
+export const STORED_EDIT_MARKER = "_(Proposed edit: preview and apply it in the page's Discuss tab.)_";
+
+/** The answer as a thread's message stores it: the block
+ *  {@link extractProposedEdit} reads, replaced by {@link STORED_EDIT_MARKER};
+ *  an answer with no edit unchanged. */
+export function stripProposedEdit(answer: string): string {
+  const block = proposedEditBlock(answer);
+  if (!block) return answer;
+  const lines = answer.replace(/\r\n?/g, "\n").split("\n");
+  return [...lines.slice(0, block.from), STORED_EDIT_MARKER, ...lines.slice(block.to + 1)].join("\n");
 }

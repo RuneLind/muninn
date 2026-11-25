@@ -55,6 +55,7 @@ import { WIKI_LOCK_BASENAME } from "../../wiki/lockfile.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import { __setAuthPolicyForTest } from "../../auth/policy.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { WikiThreadRefused } from "../../db/threads.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -2764,6 +2765,8 @@ describe("POST /api/wiki/ask/chat", () => {
   let existingThreadNames: string[];
   /** Descriptions of the threads above, by name — the article-identity tag. */
   let threadDescriptionsByName: Record<string, string | undefined>;
+  /** Names held by a wiki page's Discuss thread (`kind = 'wiki'`, Discuss v2). */
+  let wikiThreadNames: string[];
   let users: { id: string; name: string }[];
   let bots: string[];
   let defaultUser: string | null;
@@ -2771,7 +2774,7 @@ describe("POST /api/wiki/ask/chat", () => {
   let connectorRows: { id: string; name: string; connectorType: string }[];
   let threadsById: Record<
     string,
-    { id: string; userId: string; botName: string; connectorId?: string; description?: string }
+    { id: string; userId: string; botName: string; connectorId?: string; description?: string; kind?: "chat" | "wiki" }
   >;
   let livePending: string[];
   let connectorStamps: { threadId: string; connectorId: string | null }[];
@@ -2788,9 +2791,11 @@ describe("POST /api/wiki/ask/chat", () => {
     // what says whether a name collision is this article's own thread or an
     // unrelated thread that merely owns the name.
     findThreadByName: async (_userId: string, _botName: string, name: string) =>
-      existingThreadNames.includes(name)
-        ? { id: "existing-thread", name, description: threadDescriptionsByName[name] }
-        : null,
+      wikiThreadNames.includes(name)
+        ? { id: "wiki-thread", name, kind: "wiki" as const, wiki: "jarviswiki", relPath: "A Concept.md" }
+        : existingThreadNames.includes(name)
+          ? { id: "existing-thread", name, description: threadDescriptionsByName[name] }
+          : null,
     hasPendingMessage: (threadId: string) => livePending.includes(threadId),
     setPendingMessageIfAbsent: (threadId: string, text: string) => {
       if (livePending.includes(threadId)) return false;
@@ -2801,8 +2806,10 @@ describe("POST /api/wiki/ask/chat", () => {
     getConnector: async (id: string) => (connectorRows.find((r) => r.id === id) ?? null) as never,
     getThreadById: async (id: string) => threadsById[id] ?? null,
     updateThreadConnector: async (threadId: string, connectorId: string | null) => {
-      connectorStamps.push({ threadId, connectorId });
       const row = threadsById[threadId];
+      // The real one refuses a wiki thread (its connector is the wiki's, D6).
+      if (row?.kind === "wiki") throw new WikiThreadRefused("carry a connector");
+      connectorStamps.push({ threadId, connectorId });
       if (row) row.connectorId = connectorId ?? undefined;
       return true;
     },
@@ -2856,6 +2863,7 @@ describe("POST /api/wiki/ask/chat", () => {
     pending = [];
     existingThreadNames = [];
     threadDescriptionsByName = {};
+    wikiThreadNames = [];
     users = [{ id: "user-1", name: "rune" }];
     bots = ["jarviswiki", "melosys"];
     defaultUser = null;
@@ -3003,6 +3011,26 @@ describe("POST /api/wiki/ask/chat", () => {
     expect(created[0]!.name).not.toBe("how does the gardener cluster summaries?");
     expect(created[0]!.name.length).toBeLessThanOrEqual(50);
     expect(/-\d{4}-\d{2}-\d{2}-\d{4}$/.test(created[0]!.name)).toBe(true);
+  });
+
+  test("a typed name held by a wiki Discuss thread is nameTaken, never handed back; forceNew makes a chat thread", async () => {
+    wikiThreadNames = ["wiki: ferry timetable"];
+    const conflict = await post(askBody({ threadName: "wiki: ferry timetable" }));
+    expect(conflict.status).toBe(409);
+    const data = (await conflict.json()) as { nameTaken?: boolean; threadExists?: boolean; existingThreadId?: string; chatUrl?: string };
+    expect(data.nameTaken).toBe(true);
+    expect(data.threadExists).toBeUndefined();
+    expect(data.existingThreadId).toBeUndefined();
+    expect(data.chatUrl).toBeUndefined();
+    expect(created).toHaveLength(0);
+    expect(pending).toHaveLength(0);
+
+    // The recovery the client offers (Start new thread) walks the suffixes past it.
+    const forced = await post(askBody({ threadName: "wiki: ferry timetable", forceNew: true }));
+    expect(forced.status).toBe(200);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.name).not.toBe("wiki: ferry timetable");
+    expect(pending).toEqual([{ threadId: "thread-1", text: expect.any(String) }]);
   });
 
   test("400 for a standalone wiki — no owning bot to escalate into", async () => {
@@ -3610,6 +3638,24 @@ describe("POST /api/wiki/ask/chat", () => {
       threadsById[THREAD]!.botName = "melosys";
       expect((await post(askBody({ existingThreadId: THREAD }))).status).toBe(400);
       expect(pending).toHaveLength(0);
+    });
+
+    test("a wiki page's Discuss thread is a 409 before any connector stamp or seed", async () => {
+      // Discuss v2 (PR 3): a `kind = 'wiki'` thread runs on the Discuss engine;
+      // a chat-pipeline seed queued on it would be fed to `processMessage`.
+      threadsById[THREAD]!.kind = "wiki";
+      for (const over of [{}, { connectorId: CONNECTOR_UUID }]) {
+        const res = await post(askBody({ existingThreadId: THREAD, ...over }));
+        expect(res.status).toBe(409);
+        const data = (await res.json()) as { nameTaken?: boolean; error: string; threadId?: string; chatUrl?: string };
+        expect(data.nameTaken).toBe(true);
+        expect(data.error).toContain("Discuss tab");
+        expect(data.threadId).toBeUndefined();
+        expect(data.chatUrl).toBeUndefined();
+      }
+      expect(connectorStamps).toEqual([]);
+      expect(pending).toHaveLength(0);
+      expect(created).toHaveLength(0);
     });
 
     test("400 for an unknown or malformed thread id", async () => {

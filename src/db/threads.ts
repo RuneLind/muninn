@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type postgres from "postgres";
 import { getDb } from "./client.ts";
 
@@ -22,6 +23,26 @@ export interface Thread {
   connectorName?: string;
   connectorType?: string;
   connectorModel?: string;
+  /** `wiki` for a wiki page's Discuss thread (migration 094): runs on the
+   *  Discuss engine only, never through the chat pipeline (D7). */
+  kind: ThreadKind;
+  /** A wiki thread's wiki, and its page or trace key (exactly one of the two). */
+  wiki?: string;
+  relPath?: string;
+  traceKey?: string;
+  /** «Start over» closed the wiki thread; null while it is live. */
+  closedAt?: number;
+}
+
+export type ThreadKind = "chat" | "wiki";
+
+/** A wiki thread was asked to do what only a chat thread does (switch to it,
+ *  stamp a connector on it, delete it by `/deltopic`). */
+export class WikiThreadRefused extends Error {
+  constructor(what: string) {
+    super(`a wiki page's Discuss thread cannot ${what}; open it from the page's Discuss tab`);
+    this.name = "WikiThreadRefused";
+  }
 }
 
 function rowToThread(r: Record<string, unknown>): Thread {
@@ -41,6 +62,11 @@ function rowToThread(r: Record<string, unknown>): Thread {
     connectorName: (r.connector_name as string) ?? undefined,
     connectorType: (r.connector_type as string) ?? undefined,
     connectorModel: (r.connector_model as string) ?? undefined,
+    kind: r.kind === "wiki" ? "wiki" : "chat",
+    wiki: (r.wiki as string | null) ?? undefined,
+    relPath: (r.rel_path as string | null) ?? undefined,
+    traceKey: (r.trace_key as string | null) ?? undefined,
+    closedAt: r.closed_at ? new Date(r.closed_at as string).getTime() : undefined,
   };
 }
 
@@ -96,10 +122,15 @@ export async function getThreadById(threadId: string): Promise<Thread | null> {
   return row ? rowToThread(row) : null;
 }
 
-/** Update a thread's connector_id. Pass null to clear. Returns false if thread not found. */
+/** Update a thread's connector_id. Pass null to clear. Returns false if thread
+ *  not found. Throws {@link WikiThreadRefused} on a wiki thread: its bot and
+ *  connector are the wiki's (`resolveWikiSynthesisBot`, D6), never a stamp. */
 export async function updateThreadConnector(threadId: string, connectorId: string | null): Promise<boolean> {
   const sql = getDb();
-  const result = await sql`UPDATE threads SET connector_id = ${connectorId} WHERE id = ${threadId}`;
+  const [row] = await sql`SELECT kind FROM threads WHERE id = ${threadId}`;
+  if (!row) return false;
+  if (row.kind === "wiki") throw new WikiThreadRefused("carry a connector");
+  const result = await sql`UPDATE threads SET connector_id = ${connectorId} WHERE id = ${threadId} AND kind <> 'wiki'`;
   return result.count > 0;
 }
 
@@ -163,10 +194,16 @@ export async function createThread(userId: string, botName: string, name: string
       updated_at = now(),
       description = COALESCE(EXCLUDED.description, threads.description),
       connector_id = COALESCE(EXCLUDED.connector_id, threads.connector_id)
+    WHERE threads.kind <> 'wiki'
     RETURNING *
   `;
-  return rowToThread(row!);
+  // The conflict's WHERE skips a wiki thread of that name: nothing comes back.
+  if (!row) throw new WikiThreadRefused("be reused as a chat thread");
+  return rowToThread(row);
 }
+
+/** How many INSERTs `switchThread` tries when the name's holder keeps vanishing. */
+const SWITCH_INSERT_ATTEMPTS = 3;
 
 /** Switch to a thread by name, creating it if it doesn't exist. Returns the thread. */
 export async function switchThread(userId: string, botName: string, name: string): Promise<Thread> {
@@ -186,30 +223,53 @@ export async function switchThread(userId: string, botName: string, name: string
   return await sql.begin(async (_tx) => {
     const tx = _tx as unknown as Sql;
 
+    // A wiki thread is never the active thread: refuse before deactivating anything.
+    const wikiHoldsName = async () => {
+      const [wiki] = await tx`
+        SELECT 1 FROM threads
+        WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind = 'wiki'
+      `;
+      return !!wiki;
+    };
+    if (await wikiHoldsName()) throw new WikiThreadRefused("be switched to");
+
     // Deactivate current thread
     await tx`
       UPDATE threads SET is_active = false
       WHERE user_id = ${userId} AND bot_name = ${botName} AND is_active = true
     `;
 
-    // Get or create the target thread
-    const [existing] = await tx`
-      SELECT * FROM threads
-      WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized}
-    `;
-
-    if (existing) {
-      await tx`UPDATE threads SET is_active = true WHERE id = ${existing.id}`;
+    // Get or create the target thread. A wiki thread created since the check
+    // above is never selected or activated (the schema refuses it too).
+    const activate = async (): Promise<Thread | null> => {
+      const [existing] = await tx`
+        SELECT * FROM threads
+        WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind <> 'wiki'
+      `;
+      if (!existing) return null;
+      await tx`UPDATE threads SET is_active = true WHERE id = ${existing.id} AND kind <> 'wiki'`;
       return rowToThread({ ...existing, is_active: true });
-    }
+    };
+    const found = await activate();
+    if (found) return found;
 
-    // Create new thread
-    const [row] = await tx`
-      INSERT INTO threads (user_id, bot_name, name, is_active)
-      VALUES (${userId}, ${botName}, ${normalized}, true)
-      RETURNING *
-    `;
-    return rowToThread(row!);
+    // Create new thread. A concurrent request that took the name first: its
+    // chat thread is switched to, its wiki thread refused. A chat thread that
+    // took the name and was deleted again before the re-select holds nothing:
+    // insert again, a bounded number of times.
+    for (let attempt = 0; attempt < SWITCH_INSERT_ATTEMPTS; attempt++) {
+      const [row] = await tx`
+        INSERT INTO threads (user_id, bot_name, name, is_active)
+        VALUES (${userId}, ${botName}, ${normalized}, true)
+        ON CONFLICT (user_id, bot_name, name) DO NOTHING
+        RETURNING *
+      `;
+      if (row) return rowToThread(row);
+      const taken = await activate();
+      if (taken) return taken;
+      if (await wikiHoldsName()) throw new WikiThreadRefused("be switched to");
+    }
+    throw new Error(`topic "${normalized}" was created and deleted by other requests while switching; try again`);
   });
 }
 
@@ -345,7 +405,11 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
 
 /** Cascade-delete a thread's memories → messages → thread row within a tx, then
  *  re-activate the "main" thread if the deleted one was active. The FK from
- *  memories → messages has no ON DELETE cascade, so the order matters. */
+ *  memories → messages has no ON DELETE cascade, so the order matters. The
+ *  caller holds the thread row `FOR UPDATE` (lock order: thread, then a wiki
+ *  turn's row — `src/db/wiki-discuss-turns.ts`): a wiki turn storing a message
+ *  on it waits, so no message lands after the message delete and loses its
+ *  thread to the row's `ON DELETE SET NULL`. */
 async function cascadeDeleteThread(
   tx: Sql,
   threadId: string,
@@ -385,10 +449,11 @@ export async function deleteThread(userId: string, botName: string, name: string
   return await sql.begin(async (_tx) => {
     const tx = _tx as unknown as Sql;
 
-    // Find the thread
+    // Find the thread. A wiki thread is skipped: `/deltopic` names chat topics only.
     const [target] = await tx`
       SELECT id, is_active FROM threads
-      WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized}
+      WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind <> 'wiki'
+      FOR UPDATE
     `;
 
     if (!target) return false;
@@ -408,7 +473,7 @@ export async function deleteThreadById(threadId: string): Promise<Thread | null>
     const tx = _tx as unknown as Sql;
 
     const [target] = await tx`
-      SELECT * FROM threads WHERE id = ${threadId}
+      SELECT * FROM threads WHERE id = ${threadId} FOR UPDATE
     `;
 
     if (!target) return null;
@@ -420,4 +485,76 @@ export async function deleteThreadById(threadId: string): Promise<Thread | null>
 
     return thread;
   });
+}
+
+/** The longest thread name `createThread` and `switchThread` accept. */
+export const THREAD_NAME_MAX = 50;
+
+/** The live wiki thread of a page, or null. */
+export async function getLiveWikiThread(userId: string, botName: string, wiki: string, relPath: string): Promise<Thread | null> {
+  const [row] = await getDb()`
+    SELECT * FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND kind = 'wiki'
+      AND wiki = ${wiki} AND rel_path = ${relPath} AND closed_at IS NULL
+  `;
+  return row ? rowToThread(row) : null;
+}
+
+/** A page's closed wiki threads, newest first («Earlier discussions»). */
+export async function listClosedWikiThreads(userId: string, botName: string, wiki: string, relPath: string): Promise<Thread[]> {
+  const rows = await getDb()`
+    SELECT * FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND kind = 'wiki'
+      AND wiki = ${wiki} AND rel_path = ${relPath} AND closed_at IS NOT NULL
+    ORDER BY closed_at DESC
+  `;
+  return rows.map(rowToThread);
+}
+
+/**
+ * The page's live wiki thread, created when there is none (Discuss v2). Never
+ * active and never switched to. Not built on `createThread`, whose
+ * `ON CONFLICT … DO UPDATE` would hand back any thread of the same name: its
+ * own `INSERT … ON CONFLICT DO NOTHING`, and on no row first the live thread
+ * on the partial key (a concurrent request created it, so both get the same
+ * thread), and only when there is none a retry with a short id suffix (a chat
+ * thread or a closed wiki thread holds the name). `nameFor(suffix)` returns the
+ * name for a suffix, at most {@link THREAD_NAME_MAX} units; it is stored
+ * lowercased, as `/topic` expects.
+ */
+export async function getOrCreateWikiThread(
+  userId: string,
+  botName: string,
+  wiki: string,
+  relPath: string,
+  nameFor: (suffix: string) => string,
+): Promise<Thread> {
+  const sql = getDb();
+  const live = await getLiveWikiThread(userId, botName, wiki, relPath);
+  if (live) return live;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const suffix = attempt === 0 ? "" : ` #${randomBytes(2).toString("hex")}`;
+    const name = nameFor(suffix).toLowerCase().trim();
+    if (!name || name.length > THREAD_NAME_MAX || /[\n\r\t]/.test(name)) throw new Error(`bad wiki thread name ${JSON.stringify(name)}`);
+    const [row] = await sql`
+      INSERT INTO threads (user_id, bot_name, name, is_active, kind, wiki, rel_path)
+      VALUES (${userId}, ${botName}, ${name}, false, 'wiki', ${wiki}, ${relPath})
+      ON CONFLICT DO NOTHING
+      RETURNING *
+    `;
+    if (row) return rowToThread(row);
+    const again = await getLiveWikiThread(userId, botName, wiki, relPath);
+    if (again) return again;
+  }
+  throw new Error(`could not create a wiki thread for ${wiki}/${relPath}`);
+}
+
+/** «Start over»: close a live wiki thread. True when it was live. */
+export async function closeWikiThread(threadId: string): Promise<boolean> {
+  const rows = await getDb()`
+    UPDATE threads SET closed_at = now()
+    WHERE id = ${threadId} AND kind = 'wiki' AND closed_at IS NULL
+    RETURNING id
+  `;
+  return rows.length > 0;
 }

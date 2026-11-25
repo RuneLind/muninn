@@ -82,7 +82,21 @@ CREATE TABLE threads (
   auto_respond_paused BOOLEAN NOT NULL DEFAULT false,
   pause_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- A wiki page's Discuss thread (migration 094, Discuss v2): `kind = 'wiki'`
+  -- with its wiki and a page (`rel_path`) or a trace (`trace_key`); «Start
+  -- over» sets `closed_at`.
+  kind TEXT NOT NULL DEFAULT 'chat',
+  wiki TEXT,
+  rel_path TEXT,
+  trace_key TEXT,
+  closed_at TIMESTAMPTZ,
+  CONSTRAINT threads_kind_check CHECK (kind IN ('chat', 'wiki')),
+  CONSTRAINT threads_wiki_key_check CHECK (
+    kind <> 'wiki' OR (wiki IS NOT NULL AND ((rel_path IS NULL) <> (trace_key IS NULL)))
+  ),
+  -- A wiki thread is never the active thread (the chat pipeline refuses one).
+  CONSTRAINT threads_wiki_not_active_check CHECK (NOT (kind = 'wiki' AND is_active))
 );
 
 -- Only one active thread per user+bot
@@ -93,6 +107,12 @@ CREATE UNIQUE INDEX idx_threads_active ON threads(user_id, bot_name)
 CREATE UNIQUE INDEX idx_threads_name ON threads(user_id, bot_name, name);
 
 CREATE INDEX idx_threads_user_bot ON threads(user_id, bot_name, updated_at DESC);
+
+-- One live wiki thread per user, bot and page (or trace).
+CREATE UNIQUE INDEX idx_threads_wiki_page ON threads (user_id, bot_name, wiki, rel_path)
+  WHERE kind = 'wiki' AND closed_at IS NULL;
+CREATE UNIQUE INDEX idx_threads_wiki_trace ON threads (user_id, bot_name, wiki, trace_key)
+  WHERE kind = 'wiki' AND closed_at IS NULL;
 
 CREATE OR REPLACE FUNCTION update_threads_updated_at()
 RETURNS TRIGGER AS $$
@@ -1032,8 +1052,8 @@ CREATE TABLE wiki_discuss_turns (
   discussion_id  UUID NOT NULL,
   seq            INTEGER NOT NULL,
   wiki           TEXT NOT NULL,
-  rel_path       TEXT NOT NULL,
-  page_hash      TEXT NOT NULL,
+  rel_path       TEXT,
+  page_hash      TEXT,
   selection      TEXT,
   question       TEXT NOT NULL,
   location       JSONB,
@@ -1055,11 +1075,19 @@ CREATE TABLE wiki_discuss_turns (
   finished_at    TIMESTAMPTZ,
   -- When the reader took the turn on to Claude Code (P3, migration 091).
   handed_over_at TIMESTAMPTZ,
-  UNIQUE (discussion_id, seq)
+  -- Discuss v2 (migration 094): the wiki thread the turn ran on (deleting the
+  -- thread deletes its turns), the two messages it stored, and a trace turn's key.
+  thread_id      UUID REFERENCES threads(id) ON DELETE CASCADE,
+  user_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+  assistant_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
+  trace_key      TEXT,
+  UNIQUE (discussion_id, seq),
+  CONSTRAINT wiki_discuss_turns_key_check CHECK (rel_path IS NOT NULL OR trace_key IS NOT NULL)
 );
 
 CREATE INDEX idx_wiki_discuss_turns_page ON wiki_discuss_turns (wiki, rel_path, created_at DESC);
 CREATE INDEX idx_wiki_discuss_turns_running ON wiki_discuss_turns (heartbeat_at) WHERE end_state = 'running';
+CREATE INDEX idx_wiki_discuss_turns_thread ON wiki_discuss_turns (thread_id) WHERE thread_id IS NOT NULL;
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

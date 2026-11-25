@@ -12,7 +12,16 @@ import {
   deleteThreadById,
   getOrCreateSlackThread,
   getAllThreadsForBot,
+  getOrCreateWikiThread,
+  closeWikiThread,
+  listClosedWikiThreads,
+  createThread,
+  updateThreadConnector,
+  WikiThreadRefused,
 } from "./threads.ts";
+import { getDb } from "./client.ts";
+import { startDiscussTurn } from "./wiki-discuss-turns.ts";
+import { wikiThreadName } from "../wiki/discuss-agent.ts";
 import { saveMemory, getMemoriesForUser } from "./memories.ts";
 
 setupTestDb();
@@ -454,5 +463,149 @@ describe("threads", () => {
       expect(workMsgs).toHaveLength(1);
       expect(workMsgs[0]!.text).toBe("work msg");
     });
+  });
+});
+
+describe("wiki threads (kind 'wiki', migration 094)", () => {
+  const nameFor = (suffix: string) => `wiki: ferry timetable${suffix}`;
+
+  test("getOrCreateWikiThread: never active, lowercased name, and one live thread for two requests at once", async () => {
+    await switchThread("u1", "bot1", "work");
+    const [a, b] = await Promise.all([
+      getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", (s) => `Wiki: Ferry Timetable${s}`),
+      getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", (s) => `Wiki: Ferry Timetable${s}`),
+    ]);
+    expect(a.id).toBe(b.id);
+    expect(a.kind).toBe("wiki");
+    expect(a.name).toBe("wiki: ferry timetable");
+    expect(a.isActive).toBe(false);
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("work");
+    const [n] = await getDb()`SELECT count(*)::int AS n FROM threads WHERE kind = 'wiki'`;
+    expect(n!.n).toBe(1);
+  });
+
+  test("a name a chat thread or a closed wiki thread holds gets a short id suffix; the title is cut to fit 50 units", async () => {
+    await createThread("u1", "bot1", "wiki: ferry timetable");
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    expect(t.name).toMatch(/^wiki: ferry timetable #[0-9a-f]{4}$/);
+    expect(await closeWikiThread(t.id)).toBe(true);
+    expect(await closeWikiThread(t.id)).toBe(false);
+    const again = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    expect(again.id).not.toBe(t.id);
+    expect((await listClosedWikiThreads("u1", "bot1", "mimir", "plans/ferry.mdx")).map((x) => x.id)).toEqual([t.id]);
+    const long = "A".repeat(80);
+    const names = [wikiThreadName(long, ""), wikiThreadName(long, " #abcd")];
+    expect(names.map((x) => x.length)).toEqual([50, 50]);
+    expect(names[1]!.endsWith(" #abcd")).toBe(true);
+  });
+
+  test("switchThread, updateThreadConnector and createThread refuse a wiki thread; listThreads returns it with its kind", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    await expect(switchThread("u1", "bot1", t.name)).rejects.toBeInstanceOf(WikiThreadRefused);
+    await expect(updateThreadConnector(t.id, null)).rejects.toBeInstanceOf(WikiThreadRefused);
+    await expect(createThread("u1", "bot1", t.name)).rejects.toBeInstanceOf(WikiThreadRefused);
+    expect((await listThreads("u1", "bot1")).find((x) => x.id === t.id)?.kind).toBe("wiki");
+    expect(await deleteThread("u1", "bot1", t.name)).toBe(false);
+  });
+
+  test("deleting a wiki thread by id deletes its ledger rows (CASCADE) and its messages", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    const turn = await startDiscussTurn(
+      { discussionId: t.id, threadId: t.id, wiki: "mimir", relPath: "plans/ferry.mdx", pageHash: "h", selection: null, question: "q", location: null, botName: "bot1", connector: "claude-sdk", model: null, surface: {}, userMessage: { userId: "u1", botName: "bot1", content: "q" } },
+      { staleRunningMs: 60_000 },
+    );
+    expect(turn.userMessageId).not.toBeNull();
+    expect(await deleteThreadById(t.id)).not.toBeNull();
+    const [n] = await getDb()`SELECT (SELECT count(*) FROM wiki_discuss_turns)::int AS turns, (SELECT count(*) FROM messages)::int AS messages`;
+    expect(n).toEqual({ turns: 0, messages: 0 });
+  });
+
+  test("a switch racing the wiki thread's creation for its name never makes the wiki thread active", async () => {
+    await switchThread("u1", "bot1", "work");
+    let refused = 0;
+    for (let i = 0; i < 60; i++) {
+      const [sw, wt] = await Promise.allSettled([
+        switchThread("u1", "bot1", `wiki: race ${i}`),
+        getOrCreateWikiThread("u1", "bot1", "mimir", `plans/race-${i}.mdx`, (s) => `wiki: race ${i}${s}`),
+      ]);
+      expect(wt.status).toBe("fulfilled");
+      if (sw.status === "rejected") {
+        expect(sw.reason).toBeInstanceOf(WikiThreadRefused);
+        refused++;
+      }
+      const active = await getActiveThread("u1", "bot1");
+      expect(active?.kind).toBe("chat");
+    }
+    // The race was run: some switches met the wiki thread and were refused.
+    expect(refused).toBeGreaterThan(0);
+  });
+
+  /**
+   * The chat thread that took the name between `switchThread`'s first look and
+   * its INSERT is deleted before the re-select. Two statement triggers stage it
+   * inside the switch's own INSERT, deterministically: BEFORE plants a chat row
+   * of the name (so the INSERT conflicts), AFTER deletes it (so the re-select
+   * finds nothing). `plants` bounds how many of the switch's INSERTs are staged.
+   */
+  async function withDeletedChatRace(plants: number, run: () => Promise<void>) {
+    const db = getDb();
+    await db`CREATE TABLE race_ctl (remaining int NOT NULL)`;
+    await db`INSERT INTO race_ctl VALUES (${plants})`;
+    await db.unsafe(`
+      CREATE FUNCTION race_plant() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF pg_trigger_depth() = 1 AND (SELECT remaining FROM race_ctl) > 0 THEN
+          UPDATE race_ctl SET remaining = remaining - 1;
+          INSERT INTO threads (user_id, bot_name, name, description, is_active)
+          VALUES ('u1', 'bot1', 'racing topic', 'doomed', false);
+        END IF;
+        RETURN NULL;
+      END $$;
+      CREATE FUNCTION race_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF pg_trigger_depth() = 1 THEN DELETE FROM threads WHERE description = 'doomed'; END IF;
+        RETURN NULL;
+      END $$;
+      CREATE TRIGGER race_plant BEFORE INSERT ON threads FOR EACH STATEMENT EXECUTE FUNCTION race_plant();
+      CREATE TRIGGER race_delete AFTER INSERT ON threads FOR EACH STATEMENT EXECUTE FUNCTION race_delete();
+    `);
+    try {
+      await run();
+    } finally {
+      await db.unsafe(`
+        DROP TRIGGER race_plant ON threads; DROP TRIGGER race_delete ON threads;
+        DROP FUNCTION race_plant(); DROP FUNCTION race_delete(); DROP TABLE race_ctl;
+      `);
+    }
+  }
+
+  test("a chat thread deleted between the switch's INSERT and its re-select: the switch creates the thread, no wiki thread blamed", async () => {
+    await switchThread("u1", "bot1", "work");
+    await withDeletedChatRace(1, async () => {
+      const t = await switchThread("u1", "bot1", "racing topic");
+      expect(t.name).toBe("racing topic");
+      expect(t.kind).toBe("chat");
+      expect(t.isActive).toBe(true);
+    });
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("racing topic");
+    const rows = await getDb()`SELECT description FROM threads WHERE name = 'racing topic'`;
+    expect(rows.map((r) => r.description)).toEqual([null]);
+  });
+
+  test("a name that keeps vanishing: a bounded retry, then an error that claims no wiki thread, and nothing deactivated", async () => {
+    await switchThread("u1", "bot1", "work");
+    await withDeletedChatRace(1000, async () => {
+      const err = await switchThread("u1", "bot1", "racing topic").then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(WikiThreadRefused);
+      expect((err as Error).message).not.toContain("wiki");
+    });
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("work");
+  });
+
+  test("the schema refuses a wiki thread marked active", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    const err = await getDb()`UPDATE threads SET is_active = true WHERE id = ${t.id}`.then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ code: "23514" });
   });
 });

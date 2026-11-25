@@ -13,7 +13,7 @@ import { loadMcpConfig } from "../../ai/mcp-tool-caller.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import { setPendingMessage } from "../../chat/pending-messages.ts";
-import { createThread, findThreadByName } from "../../db/threads.ts";
+import { createThread, findThreadByName, WikiThreadRefused, type Thread } from "../../db/threads.ts";
 import { birthDevRun } from "../../db/dev-runs.ts";
 import { isValidUuid } from "../routes/route-utils.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
@@ -40,6 +40,16 @@ export interface ResearchRouteDeps {
   /** The saved summary fact check a `factcheck=` follow-up names. */
   getFactcheck: (collection: string, docId: string) => Promise<SummaryFactcheck | null>;
   stream: typeof streamResearchSSE;
+}
+
+/** The 409 for a name a wiki page's Discuss thread holds: no thread id, so the
+ *  extension shows `error` instead of its "reuse" dialog. */
+function wikiThreadTaken(name: string) {
+  return {
+    nameTaken: true,
+    existingThreadName: name,
+    error: `Thread "${name}" is a wiki page's discussion and cannot be opened in chat — open it from the page's Discuss tab.`,
+  };
 }
 
 const defaultResearchRouteDeps: ResearchRouteDeps = { getFactcheck: getSummaryFactcheck, stream: streamResearchSSE };
@@ -302,6 +312,12 @@ export function registerResearchRoutes(
     // Check if thread with this name already exists (unless forceNew requested)
     const normalizedTitle = title.toLowerCase().trim();
     const existingThread = await findThreadByName(chatUser.id, botConfig.name, normalizedTitle);
+    // A wiki page's Discuss thread runs on the Discuss engine, never the chat
+    // pipeline (Discuss v2, D7): its id is never handed back for /chat to open.
+    // The extension shows `error`; `forceNew` still gets a suffixed chat thread.
+    if (existingThread?.kind === "wiki" && !body.forceNew) {
+      return c.json({ ...wikiThreadTaken(existingThread.name), userId: chatUser.id, botName: botConfig.name }, 409);
+    }
     if (existingThread && !body.forceNew) {
       return c.json({
         threadExists: true,
@@ -336,7 +352,16 @@ export function registerResearchRoutes(
     const connectorId = body.connectorId && isValidUuid(body.connectorId) ? body.connectorId : undefined;
 
     // Create a dedicated thread for this research
-    const thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
+    let thread: Thread;
+    try {
+      thread = await createThread(chatUser.id, botConfig.name, threadTitle, body.description, connectorId);
+    } catch (err) {
+      // A wiki thread took the name since the look above, or holds the suffixed one.
+      if (err instanceof WikiThreadRefused) {
+        return c.json({ ...wikiThreadTaken(threadTitle.toLowerCase().trim()), userId: chatUser.id, botName: botConfig.name }, 409);
+      }
+      throw err;
+    }
 
     // Birth the dev_run that spans the whole research → build → verify arc
     // (spec-driven dev loop, Phase 0). issue_key = the Jira key (from the title)

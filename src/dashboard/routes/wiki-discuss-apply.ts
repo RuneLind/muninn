@@ -19,7 +19,7 @@
  * 403 `readonly` a read-only root · 404 `no-agent` (422 `rules-too-large`,
  * 503 `rules-unreadable` as the discuss route answers) · 409 `not-done` the turn
  * did not end done · 409 `superseded` a newer turn of the discussion exists ·
- * 409 `applied` already applied · 404 no page · 409 `refused` (`code`
+ * 409 `applied` already applied · 409 `no-page` a trace turn · 404 no page · 409 `refused` (`code`
  * `not-writable`) a page `writeWikiPage` refuses · 409 unreadable · 409 `stale`
  * the page changed since the preview's base hash · 409 `refused` the edit
  * cannot apply (its `code` names why) · 409 `changed` the preview hash no longer
@@ -41,7 +41,7 @@ import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { getDiscussTurn, listDiscussTurns, markDiscussEditApplied, releaseDiscussEditClaim, type DiscussTurn } from "../../db/wiki-discuss-turns.ts";
 import { heldBy, heldMessage, staleProposalStore } from "../../gardener/stale-proposals.ts";
 import { sha256, todayOslo } from "../../utils/date-hash.ts";
-import { readWikiAgentRules } from "../../wiki/discuss-agent.ts";
+import { readWikiAgentRules, wikiAgentRulesRefusal } from "../../wiki/discuss-agent.ts";
 import { resolveDiscussEdit, type DiscussEditPlan } from "../../wiki/discuss-apply.ts";
 import { commitWikiChange, pageHasUncommittedChanges, type CommitWikiResult } from "../../wiki/commit.ts";
 import { checkPageText, pageTextFiles, type LintFinding } from "../../wiki/lint.ts";
@@ -55,7 +55,6 @@ import { plainSnippet } from "../../wiki/find-everywhere.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import type { DecisionCloseGuards } from "./wiki-decision-inbox.ts";
-import { wikiAgentRulesRefusal } from "./wiki-discuss.ts";
 
 const log = getLog("dashboard", "wiki-discuss-apply");
 
@@ -168,6 +167,9 @@ export function registerWikiDiscussApplyRoute(app: Hono, config: Config, guards:
     const newest = (await deps.turns.list(turn.discussionId)).reduce((m, t) => Math.max(m, t.seq), turn.seq);
     if (newest > turn.seq) return c.json({ error: `a newer turn (${newest}) of this discussion exists; only the newest turn's edit applies`, reason: "superseded" }, 409);
     if (turn.editAppliedAt !== null) return c.json({ error: "this edit is already applied", reason: "applied" }, 409);
+
+    // A trace turn (Discuss v2, PR 6) has no page: nothing to edit.
+    if (turn.relPath === null) return c.json({ error: "this turn is about a trace, not a page; there is no page to edit", reason: "no-page" }, 409);
 
     const index = await getWikiIndex({ root: entry.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 503);

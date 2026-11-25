@@ -155,13 +155,17 @@ function cut(text: string, max: number): string {
  * is over {@link CONTINUE_PROMPT_MAX}, the oldest turns' answers go first, then
  * the oldest turns; the handed-over turn always stays. Pure.
  */
-export function renderContinuePrompt(input: { path: string; turns: ContinueTurn[] }): string {
-  const head = [
-    "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
-    "",
-    `Page: ${input.path}`,
-    "",
-  ];
+export function renderContinuePrompt(input: { path: string | null; turns: ContinueTurn[] }): string {
+  // A trace turn (Discuss v2, PR 6) has no page: the prompt names none.
+  const head =
+    input.path === null
+      ? ["I discussed this with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the code and pages it names before you answer.", ""]
+      : [
+          "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+          "",
+          `Page: ${input.path}`,
+          "",
+        ];
   const tail = ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
   const block = (t: ContinueTurn, withAnswer: boolean): string[] => [
     `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : " (about the whole page):"}`,

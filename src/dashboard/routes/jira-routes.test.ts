@@ -68,10 +68,15 @@ const ALL_UP = [
   okServer("research", ["research_knowledge"]),
 ];
 let mcpServers: unknown[] = ALL_UP;
+/** How many times the route probed MCP: a refusal before the probe leaves it at 0. */
+let mcpProbes = 0;
 const realMcp = await import("../../ai/mcp-status.ts");
 mock.module("../../ai/mcp-status.ts", () => ({
   ...realMcp,
-  getMcpStatus: async () => mcpServers,
+  getMcpStatus: async () => {
+    mcpProbes++;
+    return mcpServers;
+  },
 }));
 
 /**
@@ -84,7 +89,7 @@ mock.module("../../ai/mcp-status.ts", () => ({
  * uuid cast-error behaviour, because the from-thread route's 404 depends on
  * catching a bad id BEFORE postgres sees it.
  */
-interface ThreadRow { id: string; userId: string; botName: string; name: string; connectorId?: string }
+interface ThreadRow { id: string; userId: string; botName: string; name: string; connectorId?: string; kind?: "chat" | "wiki"; wiki?: string; relPath?: string }
 const threads = new Map<string, ThreadRow>();
 const realThreads = await import("../../db/threads.ts");
 mock.module("../../db/threads.ts", () => ({
@@ -370,6 +375,7 @@ beforeEach(() => {
   __setJiraThreadTurnForTest(scriptedThreadTurn());
   discovered = [FAKE_BOT];
   mcpServers = ALL_UP;
+  mcpProbes = 0;
   // The key index reaches huginn; every test here serves the same listing.
   globalThis.fetch = (async (url: unknown) => {
     if (String(url).includes("/api/collection/jira-issues/documents")) {
@@ -1026,6 +1032,22 @@ describe("POST /api/jira/draft/from-thread", () => {
     const body = await res.json();
     expect(body.error).toContain("jarvis");
     expect(body.error).toContain("melosys");
+  });
+
+  test("a wiki page's Discuss thread is a 409 before the MCP probe, the flight lock and any row", async () => {
+    // Discuss v2 (PR 3): a `kind = 'wiki'` thread runs on the Discuss engine,
+    // never the chat pipeline, so a draft turn in it must be refused up front —
+    // not left to `processMessage`'s backstop, which fails a row already written.
+    threads.set(THREAD_ID, { ...THREAD, kind: "wiki", wiki: "mimir", relPath: "a.md" });
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "ingen" });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("Discuss");
+    expect(mcpProbes).toBe(0);
+    expect(rows.size).toBe(0);
+    expect(threadTurns).toHaveLength(0);
+    // The flight slot was never taken: a chat thread under the same id runs.
+    threads.set(THREAD_ID, THREAD);
+    expect((await post({ threadId: THREAD_ID, template: "bug", depth: "ingen" })).status).toBe(200);
   });
 
   test("body-shape refusals are 400s in Norwegian, before anything is created", async () => {

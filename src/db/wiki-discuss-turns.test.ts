@@ -7,8 +7,11 @@
  * mark, the card and the hand-over mark (migration 091). Invented pages only.
  */
 import { describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
+import { getRecentMessages, getSimMessages } from "./messages.ts";
+import { deleteThreadById, ensureDefaultThread } from "./threads.ts";
 import {
   DiscussTurnConflict,
   finishDiscussTurn,
@@ -199,5 +202,199 @@ describe("wiki_discuss_turns", () => {
     expect((await markDiscussTurnHandedOver(a.id))?.handedOverAt).toBe(first!.handedOverAt);
     expect((await getDiscussTurn(b.id))?.handedOverAt).toBeNull();
     expect(await markDiscussTurnHandedOver(crypto.randomUUID())).toBeNull();
+  });
+});
+
+describe("wiki thread turns (migration 094)", () => {
+  async function thread(): Promise<string> {
+    const [t] = await getDb()`INSERT INTO threads (user_id, bot_name, name, kind, wiki, rel_path) VALUES ('kari', 'ivar', 'wiki: ferry', 'wiki', 'invented', 'plans/ferry.mdx') RETURNING id`;
+    return t!.id as string;
+  }
+  const threadStart = (threadId: string): DiscussTurnStart => ({
+    ...start(threadId),
+    threadId,
+    userMessage: { userId: "kari", botName: "ivar", content: "> The summer route adds a stop.\n\nWhich stop?" },
+  });
+
+  test("the user message is stored in the insert's transaction, and a refused insert stores none", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await expect(startDiscussTurn(threadStart(tid))).rejects.toBeInstanceOf(DiscussTurnConflict);
+    const msgs = await getDb()`SELECT id, role, source, platform, thread_id FROM messages`;
+    expect(msgs).toHaveLength(1);
+    expect({ ...msgs[0] }).toEqual({ id: a.userMessageId, role: "user", source: "wiki", platform: "web", thread_id: tid });
+    expect((await getDiscussTurn(a.id))!.userMessageId).toBe(a.userMessageId);
+  });
+
+  test("the sweep closes an abandoned thread turn with an «(unfinished)» assistant message; the turn coming back rewrites that message", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([a.id]);
+    const row = (await getDiscussTurn(a.id))!;
+    expect(row.endState).toBe("abandoned");
+    expect(row.assistantMessageId).not.toBeNull();
+    const [m] = await getDb()`SELECT content, role, source FROM messages WHERE id = ${row.assistantMessageId}`;
+    expect({ ...m }).toEqual({ content: turns.UNFINISHED_MARK, role: "assistant", source: "wiki" });
+    // A sweep again writes nothing more.
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([]);
+    // The stalled turn comes back: its own answer replaces the unfinished one.
+    expect(await done(a.id)).toBe(true);
+    expect(await turns.storeDiscussAssistantMessage(a.id, "An answer.")).toBe(row.assistantMessageId);
+    const all = await getDb()`SELECT content FROM messages WHERE role = 'assistant'`;
+    expect(all.map((r) => r.content)).toEqual(["An answer."]);
+  });
+
+  test("a one-shot turn (no thread) gets no message from the sweep or the store", async () => {
+    const a = await startDiscussTurn(start(crypto.randomUUID()));
+    await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    expect(await turns.closeAbandonedDiscussTurns(60_000)).toEqual([a.id]);
+    expect(await turns.storeDiscussAssistantMessage(a.id, "x")).toBeNull();
+    const [n] = await getDb()`SELECT count(*)::int AS n FROM messages`;
+    expect(n!.n).toBe(0);
+    expect((await turns.listPageOneShotTurns("invented", "plans/ferry.mdx")).map((t) => t.id)).toEqual([a.id]);
+  });
+
+  test("a thread's messages read joined to their ledger rows; a deleted message leaves the row with its id cleared", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    const aid = await turns.storeDiscussAssistantMessage(a.id, "An answer.");
+    const read = await turns.listThreadMessagesWithTurns(tid);
+    expect(read.map((m) => `${m.role}:${m.turn?.id === a.id}`)).toEqual(["user:true", "assistant:true"]);
+    await getDb()`DELETE FROM messages WHERE id = ${aid}`;
+    expect((await getDiscussTurn(a.id))!.assistantMessageId).toBeNull();
+  });
+
+  test("history not scoped by thread leaves the wiki thread's rows out; the thread's own history keeps them", async () => {
+    const tid = await thread();
+    await startDiscussTurn(threadStart(tid));
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES ('kari', 'ivar', 'user', 'a chat line', 'web')`;
+    expect((await getRecentMessages("kari", 20, "ivar")).map((m) => m.text)).toEqual(["a chat line"]);
+    expect((await getRecentMessages("kari", 20)).map((m) => m.text)).toEqual(["a chat line"]);
+    expect((await getRecentMessages("kari", 20, "ivar", tid, { excludeProactive: true })).map((m) => m.role)).toEqual(["user"]);
+  });
+
+  /** Wait until `n` backends of this database wait on a lock. */
+  async function lockWaiters(n: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      const [row] = await getDb()`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+      if ((row!.n as number) >= n) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`fewer than ${n} backends waited on a lock`);
+  }
+
+  /** A transaction that runs `lock` and holds it until `release()`. */
+  async function hold(lock: (tx: never) => Promise<unknown>): Promise<{ release: () => void; done: Promise<unknown> }> {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const done = getDb().begin(async (tx) => {
+      await lock(tx as never);
+      locked();
+      await released;
+    });
+    await isLocked;
+    return { release, done };
+  }
+
+  const wikiOrphans = async () =>
+    (await getDb()`SELECT content FROM messages WHERE source = 'wiki' AND thread_id IS NULL`).map((r) => r.content as string);
+
+  test("deleting the thread while a turn stores its answer leaves no wiki message without a thread", async () => {
+    const main = await ensureDefaultThread("kari", "ivar");
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    // Pause the store past its first statement: its message insert waits on the thread row.
+    const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM threads WHERE id = ${tid} FOR UPDATE`);
+    const store = turns.storeDiscussAssistantMessage(a.id, "WIKI ANSWER").catch((e: unknown) => e);
+    await lockWaiters(1);
+    const del = deleteThreadById(tid);
+    await lockWaiters(2);
+    holder.release();
+    await holder.done;
+    expect(await store).not.toBeInstanceOf(Error);
+    expect((await del)?.id).toBe(tid);
+    expect(await wikiOrphans()).toEqual([]);
+    expect((await getRecentMessages("kari", 20, "ivar", main)).map((m) => m.text)).toEqual([]);
+  });
+
+  test("a store or a sweep that meets a delete already holding the thread waits for it: no deadlock, no message left without a thread", async () => {
+    for (const kind of ["store", "sweep"] as const) {
+      const tid = await thread();
+      const a = await startDiscussTurn(threadStart(tid));
+      if (kind === "store") await done(a.id);
+      else await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+      // Pause the delete inside its message delete: it waits on the question's row.
+      const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM messages WHERE id = ${a.userMessageId} FOR UPDATE`);
+      const del = deleteThreadById(tid).catch((e: unknown) => e);
+      await lockWaiters(1);
+      const racer = (kind === "store" ? turns.storeDiscussAssistantMessage(a.id, "WIKI ANSWER") : turns.closeAbandonedDiscussTurns(STALE_MS)).catch((e: unknown) => e);
+      await Promise.race([racer, lockWaiters(2)]);
+      holder.release();
+      await holder.done;
+      expect(await racer).not.toBeInstanceOf(Error);
+      expect(((await del) as { id?: string } | null)?.id).toBe(tid);
+      expect(await wikiOrphans()).toEqual([]);
+    }
+  });
+
+  test("deleting the thread while the next turn starts leaves no wiki message without a thread", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    // Pause the delete inside its message delete: it waits on the first question's row.
+    const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM messages WHERE id = ${a.userMessageId} FOR UPDATE`);
+    const del = deleteThreadById(tid);
+    await lockWaiters(1);
+    const next = startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "WIKI QUESTION" } }).catch((e: unknown) => e);
+    // Either the start finishes (no lock order) or it waits behind the delete.
+    await Promise.race([next, lockWaiters(2)]);
+    holder.release();
+    await holder.done;
+    // The thread is gone when the start goes on: its turn insert fails on the foreign key, never on a deadlock.
+    const outcome = await next;
+    if (outcome instanceof Error) expect((outcome as { code?: string }).code).toBe("23503");
+    expect((await del)?.id).toBe(tid);
+    expect(await wikiOrphans()).toEqual([]);
+  });
+
+  test("main's history leaves out a wiki message that lost its thread", async () => {
+    const main = await ensureDefaultThread("kari", "ivar");
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, source, platform) VALUES ('kari', 'ivar', 'assistant', 'WIKI ANSWER', 'wiki', 'web')`;
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES ('kari', 'ivar', 'user', 'an old chat line', 'web')`;
+    expect((await getRecentMessages("kari", 20, "ivar", main)).map((m) => m.text)).toEqual(["an old chat line"]);
+  });
+
+  test("a turn closed as abandoned by the next start reads before the next question, in the thread and in /chat", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "Q1" } });
+    // The first turn started 20 minutes ago and last showed life 10 minutes ago.
+    await getDb()`UPDATE wiki_discuss_turns SET created_at = now() - interval '20 minutes', heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    await getDb()`UPDATE messages SET created_at = now() - interval '20 minutes' WHERE id = ${a.userMessageId}`;
+    await startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "Q2" } });
+    const order = ["Q1", turns.UNFINISHED_MARK, "Q2"];
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(order);
+    expect((await getSimMessages("kari", "ivar", "web", 50, tid, true)).map((m) => m.content)).toEqual(order);
+    // The thread reads in turn order whatever the times say: the same time for both.
+    await getDb()`UPDATE messages SET created_at = (SELECT created_at FROM messages WHERE content = 'Q2') WHERE content = ${turns.UNFINISHED_MARK}`;
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(order);
+    // The stalled turn comes back: its answer takes the unfinished message's place.
+    expect(await done(a.id)).toBe(true);
+    await turns.storeDiscussAssistantMessage(a.id, "A1");
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(["Q1", "A1", "Q2"]);
+  });
+
+  test("/chat reads two messages with the same time in one order: the user's first", async () => {
+    const tid = await thread();
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform, thread_id, created_at)
+      VALUES ('kari', 'ivar', 'user', 'question', 'web', ${tid}, '2026-11-25T10:00:00Z'),
+             ('kari', 'ivar', 'assistant', 'answer', 'web', ${tid}, '2026-11-25T10:00:00Z')`;
+    for (let i = 0; i < 5; i++) {
+      expect((await getSimMessages("kari", "ivar", "web", 50, tid, true)).map((m) => m.content)).toEqual(["question", "answer"]);
+    }
   });
 });

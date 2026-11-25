@@ -1,5 +1,5 @@
 import type { Thread } from "../db/threads.ts";
-import { switchThread, listThreads, getActiveThread, deleteThread, getThreadMessageCount } from "../db/threads.ts";
+import { switchThread, listThreads, getActiveThread, deleteThread, getThreadMessageCount, WikiThreadRefused } from "../db/threads.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("core", "topics");
@@ -12,7 +12,7 @@ export async function handleTopicCommand(
 ): Promise<void> {
   if (!arg) {
     const active = await getActiveThread(userId, botName);
-    const threads = await listThreads(userId, botName);
+    const threads = await chatTopics(userId, botName);
 
     if (threads.length === 0) {
       await reply("No topics yet. Messages go to the *main* topic by default.\n\nUse `/topic name` to create and switch.");
@@ -26,7 +26,16 @@ export async function handleTopicCommand(
     return;
   }
 
-  const thread = await switchThread(userId, botName, arg);
+  let thread: Thread;
+  try {
+    thread = await switchThread(userId, botName, arg);
+  } catch (err) {
+    if (err instanceof WikiThreadRefused) {
+      await reply("That name belongs to a wiki page's Discuss thread, which runs from the page in the wiki reader. Pick another topic name.");
+      return;
+    }
+    throw err;
+  }
   const count = await getThreadMessageCount(thread.id);
 
   log.info("User {userId} switched to topic \"{topic}\" ({count} msgs)", { userId, topic: thread.name, count });
@@ -41,7 +50,7 @@ export async function handleTopicCommand(
 export async function handleTopicsCommand(
   userId: string, botName: string, reply: Reply,
 ): Promise<void> {
-  const threads = await listThreads(userId, botName);
+  const threads = await chatTopics(userId, botName);
 
   if (threads.length === 0) {
     await reply("No topics yet. Use `/topic name` to create one.");
@@ -72,6 +81,12 @@ export async function handleDelTopicCommand(
   } else {
     await reply(`Topic not found: \`${arg}\``);
   }
+}
+
+/** The user's chat topics: a wiki page's Discuss thread (`kind = 'wiki'`) is
+ *  left out, since it runs from the page and never becomes the active topic. */
+async function chatTopics(userId: string, botName: string): Promise<Thread[]> {
+  return (await listThreads(userId, botName)).filter((t) => t.kind !== "wiki");
 }
 
 export function formatThreadList(threads: Thread[]): string {

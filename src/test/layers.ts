@@ -51,6 +51,7 @@ export const LAYER_MAP: readonly (readonly [prefix: string, layer: Layer])[] = [
   // callers. Still the knowledge side for scripts/boundary-crossing.ts, which reads src/wiki/ by path.
   ["src/wiki/decision-triage/", "features"],
   ["src/wiki/digest.ts", "features"],
+  ["src/wiki/discuss-engine.ts", "features"], // Discuss's fenced one-shot; both entry points (pane, /chat) call it
   ["src/wiki/integrate-oneshot.ts", "features"],
   ["src/wiki/stale-confirm.ts", "features"],
   ["src/wiki/stale-fix-verdicts.ts", "features"], // imports stale-confirm's verdict keys; only routes import it
