@@ -154,7 +154,13 @@ export interface PackRepo {
  *  snapshots, or a list of named MCP tools. */
 export type AgentReach =
   | { kind: "readSearch"; wikiSnapshot: string; repos: PackRepo[]; missed: RepoMissed[]; own: string[] }
-  | { kind: "mcpTools"; tools: Record<string, string[]> };
+  | {
+      kind: "mcpTools";
+      tools: Record<string, string[]>;
+      /** The `wiki` value the research server's wiki read tools take for this
+       *  page's wiki; absent when that wiki is not in the bot's list. */
+      wikiToolsWiki?: string;
+    };
 
 export interface EarlierTurn {
   question: string;
@@ -190,6 +196,11 @@ function readSection(reach: AgentReach, pack: ContextPack): string[] {
       "## What you can read",
       `The context pack below, and these tools only: ${tools.join(", ")}.`,
       "The knowledge server's search finds other pages of this wiki and the team's documents. yggdrasil's tools reach the indexed code: search finds it, file_outline lists a file's symbols, symbol_context shows a symbol's source and its callers.",
+      ...(reach.wikiToolsWiki && reach.tools.research?.includes("wiki_grep")
+        ? [
+            `This wiki's own files: use research-wiki_grep for an exact key, id or a "where else" question (it finds every tracked file that holds it), research-wiki_read to read a file it returned, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`,
+          ]
+        : []),
       "Cite code as `repo/path:line` from what a tool returned, and a page line as `" + pack.relPath + ":LINE`.",
     ];
   }

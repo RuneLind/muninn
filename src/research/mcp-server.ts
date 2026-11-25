@@ -10,6 +10,8 @@ import {
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import { persistThreadCitations } from "./thread-citations.ts";
+import { authMode } from "../auth/policy.ts";
+import { liveWikis, registerWikiTools, type BotWiki } from "./wiki-tools.ts";
 
 const log = getLog("research", "mcp-server");
 
@@ -33,7 +35,7 @@ interface Session {
   server: McpServer;
 }
 
-interface BotEntry {
+export interface BotEntry {
   botName: string;
   knowledgeApiUrl: string;
   /** Resolved once at registration from the bot's .mcp.json KNOWLEDGE_COLLECTIONS.
@@ -43,6 +45,9 @@ interface BotEntry {
   connector?: ConnectorType;
   /** Per-bot override from `BotConfig.haikuBackend`. */
   haikuBackend?: HaikuBackend;
+  /** The wikis the wiki read tools reach (`botWikis`): read-only roots already
+   *  left out, and checked again on every call. Empty or absent: no wiki tools. */
+  wikis?: BotWiki[];
 }
 
 const TOOL_DESCRIPTION =
@@ -77,6 +82,15 @@ export class ResearchMcpServer {
 
   unregisterBot(botName: string): void {
     this.bots.delete(botName);
+  }
+
+  /** Whether this process answers `/mcp/<botName>` with the wiki read tools
+   *  right now: started, and the bot's entry passes the rule its session is
+   *  built by (`wikiToolsServed`). Copilot Discuss lists them only then (`copilotDiscussReach`): a
+   *  session missing a listed tool refuses the whole turn. */
+  servesWikiTools(botName: string): boolean {
+    const entry = this.bots.get(botName);
+    return this.isRunning && entry !== undefined && wikiToolsServed(entry);
   }
 
   start(): void {
@@ -261,7 +275,16 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
     },
   );
 
+  // Wiki read tools: only with MUNINN_AUTH=off (an MCP call has no reader to
+  // filter for), and only for a bot that has a wiki left after the read-only check.
+  if (wikiToolsServed(entry)) registerWikiTools(server, liveWikis(entry.wikis));
+
   return server;
+}
+
+/** The one rule for whether a bot's session gets the wiki read tools. */
+function wikiToolsServed(entry: BotEntry): boolean {
+  return authMode() === "off" && liveWikis(entry.wikis).length > 0;
 }
 
 export const researchMcpServer = new ResearchMcpServer();

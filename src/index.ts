@@ -30,7 +30,9 @@ import { startStaleConfirmLoop, stopStaleConfirmLoop } from "./wiki/stale-confir
 import { startWorkMapLoop, stopWorkMapLoop } from "./wiki/work-map/loop.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { installUncaughtBackstop } from "./startup/uncaught-backstop.ts";
-import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
+import { isReadonlyWikiRoot, isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
+import { getWikiRegistry } from "./wiki/registry-memo.ts";
+import { botWikis } from "./wiki/registry.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
 import { createIntrospector } from "./auth/introspect.ts";
@@ -347,6 +349,14 @@ if (workMapWikis.length) {
 // .mcp.json — bots without it just don't see the tool.
 try {
   researchMcpServer.start();
+  // The wiki read tools' wikis per bot; a registry that fails to build gives
+  // every bot none rather than stopping the research tool.
+  let wikiRegistry: ReturnType<typeof getWikiRegistry> = [];
+  try {
+    wikiRegistry = getWikiRegistry();
+  } catch (err) {
+    log.warn("Wiki registry unavailable; no bot gets wiki read tools: {error}", { error: err instanceof Error ? err.message : String(err) });
+  }
   for (const bot of allBotConfigs) {
     researchMcpServer.registerBot({
       botName: bot.name,
@@ -354,6 +364,7 @@ try {
       defaultCollections: bot.defaultKnowledgeCollections,
       connector: bot.connector,
       haikuBackend: bot.haikuBackend,
+      wikis: botWikis(wikiRegistry, bot.name, isReadonlyWikiRoot),
     });
   }
 } catch (err) {

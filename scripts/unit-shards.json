@@ -107,6 +107,7 @@
       "src/dashboard/indexing-overview.test.ts",
       "src/dashboard/indexing-detail.test.ts",
       "src/research/mcp-server.test.ts",
+      "src/research/wiki-tools.test.ts",
       "src/research/huginn-hits.test.ts",
       "src/research/thread-citations.test.ts",
       "src/research/answer.test.ts",
