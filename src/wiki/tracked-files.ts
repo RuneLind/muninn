@@ -8,14 +8,34 @@
  * through `realGit` (its own process group, a byte and line bound, a timeout)
  * with `core.quotePath=false` and NUL-separated output, so æøå and em dashes
  * come back verbatim.
+ *
+ * No git config may change what these return: the user's and the system's
+ * files are not read at all, and the repo's own `.git/config` is outvoted by
+ * `-c` on each key that would widen the search or change the output's shape.
  */
 
-import { realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { cutLine, realGit, type GitResult, type GitRun } from "./decision-triage/git.ts";
 import { isWikiWriteArtifact } from "./lockfile.ts";
 
-const QUOTE_OFF = ["-c", "core.quotePath=false"] as const;
+/** `-c` beats every config file. fallbackToNoIndex would grep untracked files
+ *  outside a repo, submodule.recurse text a read refuses, column and fullName
+ *  break the parse and the root-relative paths, logOutputEncoding the subjects. */
+const PINNED_CONFIG = [
+  "-c", "core.quotePath=false",
+  "-c", "grep.fallbackToNoIndex=false",
+  "-c", "submodule.recurse=false",
+  "-c", "grep.column=false",
+  "-c", "grep.fullName=false",
+  "-c", "i18n.logOutputEncoding=UTF-8",
+] as const;
+const NO_USER_CONFIG = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } as const;
+
+/** `git` with the config pinned. */
+function pinned(git: GitRun): GitRun {
+  return (cwd, args, opts = {}) => git(cwd, [...PINNED_CONFIG, ...args], { ...opts, env: { ...opts.env, ...NO_USER_CONFIG } });
+}
 
 export interface TrackedOpts {
   git?: GitRun;
@@ -31,8 +51,8 @@ function gitError(res: GitResult, what: string): string {
 
 /** The wiki's tracked files, root-relative, sorted as git lists them. */
 export async function trackedFiles(root: string, opts: TrackedOpts = {}): Promise<TrackedFilesResult> {
-  const git = opts.git ?? realGit;
-  const res = await git(root, [...QUOTE_OFF, "ls-files", "-z", "--", "."]);
+  const git = pinned(opts.git ?? realGit);
+  const res = await git(root, ["ls-files", "-z", "--", "."]);
   if (!res.ok || res.capped) return { ok: false, error: res.capped ? "git ls-files output ran past its bound" : gitError(res, "git ls-files") };
   const files = res.stdout.split("\0").filter((f) => f !== "" && !isWikiWriteArtifact(path.posix.basename(f)));
   return { ok: true, files };
@@ -54,7 +74,8 @@ export interface GrepHit {
 }
 
 export interface GrepOpts extends TrackedOpts {
-  /** Extended regex (`-E`); otherwise the pattern is a fixed string (`-F`). */
+  /** A Perl-compatible regex (`-P`), or an extended one (`-E`) on a git built
+   *  without PCRE; otherwise the pattern is a fixed string (`-F`). */
   regex?: boolean;
   /** Search only tracked files this glob selects (see {@link globMatches}). */
   glob?: string;
@@ -70,8 +91,15 @@ export type GrepResult =
       totalLines: number;
       totalFiles: number;
       atLeast: boolean;
+      /** With `regex`: the engine that ran. `ere` only when this git has no PCRE, so `\b`, `\d`, `\w` and `\s` matched nothing. */
+      regexEngine?: "pcre" | "ere";
     }
   | { ok: false; error: string };
+
+/** UTF-8, so a regex matches by character: under git's C locale `.` and `[æø]` meet one byte of æ. A fixed string stays byte-exact. */
+const GREP_LOCALE = { LC_ALL: "C.UTF-8" } as const;
+/** Git's own message, anchored: a bad pattern's error quotes the pattern after `fatal: -e option,`, so a pattern holding these words cannot pass for it. */
+const isNoPcre = (res: GitResult) => !res.ok && res.exitCode !== 1 && /^fatal: cannot use Perl-compatible regexes/m.test(res.stderr ?? "");
 
 export const GREP_DEFAULT_MAX = 100;
 export const GREP_MAX_RESULTS = 500;
@@ -123,11 +151,13 @@ function parseGrep(stdout: string): GrepHit[] {
 export async function grepTracked(root: string, pattern: string, opts: GrepOpts = {}): Promise<GrepResult> {
   if (pattern === "") return { ok: false, error: "the pattern is empty" };
   if (pattern.includes("\n") || pattern.includes("\0")) return { ok: false, error: "the pattern may not hold a newline or NUL" };
-  const git = opts.git ?? realGit;
+  const rawGit = opts.git ?? realGit;
+  const git = pinned(rawGit);
   const max = Math.min(Math.max(1, Math.floor(opts.max ?? GREP_DEFAULT_MAX)), GREP_MAX_RESULTS);
+  let engine: "pcre" | "ere" | undefined = opts.regex ? "pcre" : undefined;
   let pathspecs: string[][];
   if (opts.glob) {
-    const listed = await trackedFiles(root, { git });
+    const listed = await trackedFiles(root, { git: rawGit });
     if (!listed.ok) return listed;
     const selected = listed.files.filter((f) => globMatches(opts.glob!, f));
     if (selected.length === 0) return { ok: true, hits: [], totalLines: 0, totalFiles: 0, atLeast: false };
@@ -142,7 +172,15 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
       atLeast = true;
       break;
     }
-    const res = await git(root, [...QUOTE_OFF, "grep", "--null", "-n", "-I", "--no-color", opts.regex ? "-E" : "-F", "-e", pattern, "--", ...chunk], { maxLines: budget });
+    const run = () => {
+      const mode = engine === "pcre" ? "-P" : engine === "ere" ? "-E" : "-F";
+      return git(root, ["grep", "--no-recurse-submodules", "--null", "-n", "-I", "--no-color", mode, "-e", pattern, "--", ...chunk], { maxLines: budget, env: GREP_LOCALE });
+    };
+    let res = await run();
+    if (engine === "pcre" && isNoPcre(res)) {
+      engine = "ere";
+      res = await run();
+    }
     // Exit 1 with nothing on stderr is git grep's «no match», not a failure.
     if (!res.ok && !(res.exitCode === 1 && !res.stderr)) return { ok: false, error: gitError(res, "git grep") };
     let hits = parseGrep(res.stdout);
@@ -164,6 +202,7 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
     totalLines: kept.length,
     totalFiles: new Set(kept.map((h) => h.relPath)).size,
     atLeast,
+    ...(engine ? { regexEngine: engine } : {}),
   };
 }
 
@@ -194,11 +233,11 @@ export async function historyFor(root: string, term: string, opts: TrackedOpts &
   if (term === "") return { ok: false, error: "the term is empty" };
   if (term.includes("\0")) return { ok: false, error: "the term may not hold a NUL" };
   if (opts.path !== undefined && !isSafeRelPath(opts.path)) return { ok: false, error: "the path must be relative to the wiki root, without `..`" };
-  const git = opts.git ?? realGit;
+  const git = pinned(opts.git ?? realGit);
   const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? HISTORY_DEFAULT_LIMIT)), HISTORY_MAX_LIMIT);
   const res = await git(
     root,
-    [...QUOTE_OFF, "log", "--relative", "-z", `-S${term}`, `--max-count=${limit}`, "--format=%x1e%H%x1f%aI%x1f%an%x1f%s", "--name-only", "--", opts.path ?? "."],
+    ["log", "--no-show-signature", "--no-color", "--relative", "-z", `-S${term}`, `--max-count=${limit}`, "--format=%x1e%H%x1f%aI%x1f%an%x1f%s", "--name-only", "--", opts.path ?? "."],
     { timeoutMs: HISTORY_TIMEOUT_MS },
   );
   if (!res.ok) return { ok: false, error: gitError(res, "git log") };
@@ -240,8 +279,9 @@ function normalizeRel(rel: string): string {
 
 /**
  * Read one tracked file of the wiki, numbered. Served only when the path is in
- * {@link trackedFiles} and its realpath stays under the root's realpath: that
- * rules out `../`, a symlink out of the wiki, `.git`, ignored and untracked files.
+ * {@link trackedFiles}, its realpath stays under the root's realpath and no
+ * part of it under the root is a symlink: that rules out `../`, any symlink,
+ * `.git`, ignored and untracked files.
  */
 export async function readTracked(root: string, relPath: string, opts: TrackedOpts & { offset?: number; limit?: number } = {}): Promise<ReadResult> {
   const rel = normalizeRel(relPath);
@@ -258,6 +298,13 @@ export async function readTracked(root: string, relPath: string, opts: TrackedOp
     return { ok: false, error: `cannot read ${rel}: it does not exist on disk` };
   }
   if (!real.startsWith(realRoot + path.sep)) return { ok: false, error: `not a path in this wiki: ${rel} leads outside it` };
+  // A link that stays inside can still reach an ignored file or `.git`, so no part under the root may be one.
+  const parts = rel.split("/");
+  for (let i = 1; i <= parts.length; i++) {
+    const st = await lstat(path.join(root, ...parts.slice(0, i))).catch(() => null);
+    if (!st) return { ok: false, error: `cannot read ${rel}: it does not exist on disk` };
+    if (st.isSymbolicLink()) return { ok: false, error: `not served: ${parts.slice(0, i).join("/")} is a symlink` };
+  }
   const st = await stat(real).catch(() => null);
   if (!st?.isFile()) return { ok: false, error: `not a file: ${rel}` };
   if (st.size > READ_FILE_MAX_BYTES) return { ok: false, error: `${rel} is ${st.size} bytes, too large to read` };

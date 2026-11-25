@@ -11,12 +11,12 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { __setAuthPolicyForTest } from "../auth/policy.ts";
-import { realGit } from "../wiki/decision-triage/git.ts";
+import { realGit, type GitRun } from "../wiki/decision-triage/git.ts";
 import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import { botWikis, type WikiRegistryEntry } from "../wiki/registry.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 import { ResearchMcpServer } from "./mcp-server.ts";
-import { resolveToolWiki } from "./wiki-tools.ts";
+import { resolveToolWiki, wikiGrepTool } from "./wiki-tools.ts";
 
 let base = "";
 let one = "";
@@ -94,6 +94,23 @@ describe("botWikis", () => {
     expect(resolveToolWiki(w, undefined)).toBe('name the wiki: `wiki` is required when this bot has more than one wiki. Allowed: "harbour", "Quay-Wiki".');
     expect(resolveToolWiki([w[0]!], undefined)).toEqual(w[0]!);
     expect(resolveToolWiki(w, "nope")).toBe('unknown wiki "nope". Allowed: "harbour", "Quay-Wiki".');
+  });
+});
+
+describe("wikiGrepTool", () => {
+  test("wiki_grep on a git without PCRE says the regex ran as ERE, with hits and without", async () => {
+    const noPcre: GitRun = async (cwd, args, opts) =>
+      args.includes("-P") ? { ok: false, stdout: "", stderr: "fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE", exitCode: 128 } : realGit(cwd, args, opts);
+    const wikis = [{ name: "quay", root: two }];
+    const hit = textOf(await wikiGrepTool(wikis, { pattern: "CASE-[0-9]", regex: true }, { git: noPcre, isReadonlyRoot: () => false }));
+    expect(hit).toContain("1 matching line(s)");
+    expect(hit).toContain("no PCRE");
+    const miss = textOf(await wikiGrepTool(wikis, { pattern: "\\bCASE-\\d\\b", regex: true }, { git: noPcre, isReadonlyRoot: () => false }));
+    expect(miss).toContain("No tracked file");
+    expect(miss).toContain("\\b, \\d, \\w and \\s match nothing");
+    const pcre = textOf(await wikiGrepTool(wikis, { pattern: "\\bCASE-\\d\\b", regex: true }, { isReadonlyRoot: () => false }));
+    expect(pcre).toContain("1 matching line(s)");
+    expect(pcre).not.toContain("no PCRE");
   });
 });
 

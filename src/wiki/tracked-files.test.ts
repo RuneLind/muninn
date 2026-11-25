@@ -5,6 +5,7 @@
  * out-of-glob hits sort before the cap. Invented content only.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -215,5 +216,180 @@ describe("readTracked", () => {
     expect(isSafeRelPath("a/../b.md")).toBe(false);
     expect(isSafeRelPath("")).toBe(false);
     expect(isSafeRelPath("/a")).toBe(false);
+  });
+});
+
+describe("regex mode", () => {
+  test("is PCRE: \\b and \\d work", async () => {
+    const res = await grepTracked(wiki, "\\bKEY-\\d\\b", { regex: true });
+    expect(res.ok && res.hits.length).toBe(4);
+  });
+  test("matches by character, so a class or a dot meets a non-ASCII letter", async () => {
+    const cls = await grepTracked(wiki, "st[åa]r", { regex: true });
+    expect(cls.ok && cls.hits.map((h) => h.relPath)).toEqual([NB]);
+    const dot = await grepTracked(wiki, "med æ.å", { regex: true });
+    expect(dot.ok && dot.hits.map((h) => h.relPath)).toEqual([NB]);
+  });
+  test("a non-ASCII fixed string still matches byte for byte", async () => {
+    const res = await grepTracked(wiki, "står her — med", {});
+    expect(res.ok && res.hits.map((h) => h.relPath)).toEqual([NB]);
+  });
+  test("a git without PCRE falls back to an extended regex and says so", async () => {
+    const seen: string[] = [];
+    const noPcre: GitRun = async (cwd, args, opts) => {
+      if (args.includes("grep")) {
+        seen.push(args.includes("-P") ? "-P" : args.includes("-E") ? "-E" : "?");
+        if (args.includes("-P")) return { ok: false, stdout: "", stderr: "fatal: cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE", exitCode: 128 };
+      }
+      return realGit(cwd, args, opts);
+    };
+    const res = await grepTracked(wiki, "KEY-[0-9]", { regex: true, git: noPcre });
+    expect(res).toMatchObject({ ok: true, totalLines: 4, regexEngine: "ere" });
+    expect(seen).toEqual(["-P", "-E"]);
+    const pcre = await grepTracked(wiki, "KEY-[0-9]", { regex: true });
+    expect(pcre).toMatchObject({ ok: true, regexEngine: "pcre" });
+  });
+  test("a bad pattern that names PCRE is an error, not a fall back", async () => {
+    const res = await grepTracked(wiki, "Perl-compatible regexes PCRE(", { regex: true });
+    expect(res.ok).toBe(false);
+    expect(!res.ok && res.error).toContain("missing closing parenthesis");
+  });
+});
+
+describe("readTracked and symlinks inside the wiki", () => {
+  let sroot = "";
+  beforeAll(async () => {
+    sroot = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-sym-"))), "w");
+    await mkdir(path.join(sroot, "d"), { recursive: true });
+    await mkdir(path.join(sroot, "p"), { recursive: true });
+    await git(sroot, "init", "-q", "-b", "main");
+    await writeFile(path.join(sroot, ".gitignore"), ".env\nq/\n");
+    await writeFile(path.join(sroot, ".env"), "SECRET=hunter2\n");
+    await writeFile(path.join(sroot, "plain.md"), "plain\n");
+    await writeFile(path.join(sroot, "p/x.md"), "tracked x\n");
+    await symlink(".env", path.join(sroot, "notes.md"));
+    await symlink("../.env", path.join(sroot, "d/inner.md"));
+    await symlink(".git/config", path.join(sroot, "cfg.md"));
+    await git(sroot, "add", "-A");
+    await git(sroot, "commit", "-q", "-m", "links");
+    // A tracked file whose parent directory became a symlink into an ignored folder.
+    await mkdir(path.join(sroot, "q"));
+    await writeFile(path.join(sroot, "q/x.md"), "SECRET via a parent link\n");
+    await rm(path.join(sroot, "p"), { recursive: true });
+    await symlink("q", path.join(sroot, "p"));
+  });
+  test.each(["notes.md", "d/inner.md", "cfg.md", "p/x.md"])("a tracked symlink to an ignored file, .git or through a linked parent is refused: %s", async (p) => {
+    const res = await readTracked(sroot, p);
+    expect({ ok: res.ok, secret: res.ok && /SECRET|\[core\]/.test(res.text) }).toEqual({ ok: false, secret: false });
+    expect(!res.ok && res.error).toContain("symlink");
+  });
+  test("a plain tracked file beside them still reads", async () => {
+    expect(await readTracked(sroot, "plain.md")).toMatchObject({ ok: true, text: "1: plain" });
+  });
+});
+
+/**
+ * A user's global config and a repo's own `.git/config` can flip keys that change
+ * what git grep searches or prints. The global one is injected as `HOME` through
+ * a wrapping runner; the commits are ssh-signed so `log.showSignature` has
+ * something to print.
+ */
+describe("git config cannot change what the reads return", () => {
+  const sshKeygen = Bun.which("ssh-keygen");
+  let base = "";
+  let crepo = "";
+  let cwiki = "";
+  let fakeHome = "";
+  const clean = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  async function cgit(cwd: string, ...args: string[]) {
+    const res = await realGit(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], { env: clean });
+    if (!res.ok) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+  }
+  const withHome: GitRun = (cwd, args, opts = {}) => realGit(cwd, args, { ...opts, env: { ...opts.env, HOME: fakeHome } });
+  const BAD = "[grep]\n\tcolumn = true\n\tfullName = true\n\tfallbackToNoIndex = true\n[submodule]\n\trecurse = true\n[log]\n\tshowSignature = true\n";
+  const BAD_LOCAL = `${BAD}[i18n]\n\tlogOutputEncoding = ISO-8859-1\n`;
+
+  beforeAll(async () => {
+    if (!sshKeygen) return;
+    base = await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-cfg-")));
+    crepo = path.join(base, "repo");
+    cwiki = path.join(crepo, "w");
+    fakeHome = path.join(base, "home");
+    const sub = path.join(base, "subsrc");
+    await mkdir(path.join(cwiki), { recursive: true });
+    await mkdir(sub);
+    await mkdir(fakeHome);
+    execFileSync(sshKeygen, ["-q", "-t", "ed25519", "-N", "", "-f", path.join(base, "key")]);
+    await cgit(sub, "init", "-q", "-b", "main");
+    await writeFile(path.join(sub, "x.md"), "KEY-2 inside the submodule\n");
+    await cgit(sub, "add", "-A");
+    await cgit(sub, "commit", "-q", "-m", "sub");
+    await cgit(crepo, "init", "-q", "-b", "main");
+    await cgit(crepo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "w/sub");
+    await cgit(crepo, "commit", "-q", "-m", "submodule");
+    const sign = ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, "key.pub")}`, "commit", "-q", "-S"];
+    await writeFile(path.join(cwiki, "a.md"), "KEY-2 æ\n");
+    await cgit(crepo, "add", "-A");
+    await cgit(crepo, ...sign, "-m", "første: KEY-2");
+    await writeFile(path.join(cwiki, "b.md"), "KEY-2 i b\n");
+    await cgit(crepo, "add", "-A");
+    await cgit(crepo, ...sign, "-m", "andre: KEY-2 i b");
+    await writeFile(path.join(base, ".env"), "KEY-2 SECRET\n");
+  });
+
+  const expectedHits = [
+    { relPath: "a.md", line: 1, text: "KEY-2 æ" },
+    { relPath: "b.md", line: 1, text: "KEY-2 i b" },
+  ];
+  const expectedHistory = [
+    { subject: "andre: KEY-2 i b", files: ["b.md"] },
+    { subject: "første: KEY-2", files: ["a.md"] },
+  ];
+  const shape = (res: Awaited<ReturnType<typeof historyFor>>) => (res.ok ? res.commits.map((c) => ({ subject: c.subject, files: c.files })) : res.error);
+
+  // `core.attributesFile` is global-only here: no `-c` names it, so only dropping the
+  // user's config keeps grep -I from reading every .md as binary.
+  async function badGlobal() {
+    await writeFile(path.join(base, "attrs"), "*.md binary\n");
+    await writeFile(path.join(fakeHome, ".gitconfig"), `${BAD}[i18n]\n\tlogOutputEncoding = ISO-8859-1\n[core]\n\tattributesFile = ${path.join(base, "attrs")}\n`);
+  }
+  async function badLocal(fn: () => Promise<void>) {
+    await writeFile(path.join(fakeHome, ".gitconfig"), "");
+    const cfg = path.join(crepo, ".git", "config");
+    const before = await Bun.file(cfg).text();
+    try {
+      await writeFile(cfg, before + BAD_LOCAL);
+      await fn();
+    } finally {
+      await writeFile(cfg, before);
+    }
+  }
+
+  test.skipIf(!sshKeygen)("global config: grep's paths and text are unchanged", async () => {
+    await badGlobal();
+    const grep = await grepTracked(cwiki, "KEY-2", { git: withHome });
+    expect(grep.ok && grep.hits).toEqual(expectedHits);
+    const re = await grepTracked(cwiki, "KEY-[0-9]", { git: withHome, regex: true });
+    expect(re.ok && re.hits).toEqual(expectedHits);
+  });
+  test.skipIf(!sshKeygen)("global config: history is unchanged", async () => {
+    await badGlobal();
+    expect(shape(await historyFor(cwiki, "KEY-2", { git: withHome }))).toEqual(expectedHistory);
+  });
+  test.skipIf(!sshKeygen)("global config: outside any repo grep still fails rather than searching untracked files", async () => {
+    await badGlobal();
+    const noRepo = await grepTracked(base, "KEY-2", { git: withHome });
+    expect(noRepo.ok ? noRepo.hits.map((h) => h.text) : "refused").toBe("refused");
+  });
+  test.skipIf(!sshKeygen)("repo config: grep's paths and text are unchanged", async () => {
+    await badLocal(async () => {
+      const grep = await grepTracked(cwiki, "KEY-2", { git: withHome });
+      expect(grep.ok && grep.hits).toEqual(expectedHits);
+    });
+  });
+  test.skipIf(!sshKeygen)("repo config: history is unchanged", async () => {
+    await badLocal(async () => {
+      expect(shape(await historyFor(cwiki, "KEY-2", { git: withHome }))).toEqual(expectedHistory);
+    });
   });
 });

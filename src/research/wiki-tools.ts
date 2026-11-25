@@ -69,9 +69,11 @@ export async function wikiGrepTool(
   const res = await grepTracked(w.root, args.pattern, { git: deps.git, regex: args.regex, glob: args.glob, max: args.maxResults });
   if (!res.ok) return fail(`wiki_grep on "${w.name}": ${res.error}`);
   const scope = args.glob ? ` (files matching ${args.glob})` : "";
-  if (res.hits.length === 0) return text(`No tracked file in "${w.name}"${scope} has a line matching ${JSON.stringify(args.pattern)}.`);
+  const ere =
+    res.regexEngine === "ere" ? "\n(This git has no PCRE: the pattern was read as an extended regex, where \\b, \\d, \\w and \\s match nothing. Use [0-9], [[:space:]] and the like.)" : "";
+  if (res.hits.length === 0) return text(`No tracked file in "${w.name}"${scope} has a line matching ${JSON.stringify(args.pattern)}.${ere}`);
   const atLeast = res.atLeast ? "at least " : "";
-  const lines = [`${atLeast}${res.totalLines} matching line(s) in ${atLeast}${res.totalFiles} file(s) of "${w.name}"${scope}:`];
+  const lines = [`${atLeast}${res.totalLines} matching line(s) in ${atLeast}${res.totalFiles} file(s) of "${w.name}"${scope}:${ere}`];
   for (const h of res.hits) lines.push(`${h.relPath}:${h.line}: ${h.text}`);
   const pastLines = res.totalLines - res.hits.length;
   if (pastLines > 0) {
@@ -132,7 +134,7 @@ export function registerWikiTools(server: McpServer, wikis: readonly BotWiki[], 
     {
       wiki: WIKI_ARG(wikis),
       pattern: z.string().min(1).describe("The text to find. A fixed string, unless regex is true."),
-      regex: z.boolean().optional().describe("Read the pattern as an extended regular expression."),
+      regex: z.boolean().optional().describe("Read the pattern as a Perl-compatible regular expression (PCRE: \\b, \\d, \\w, \\s work), matched by character, so æøå are one character each."),
       glob: z.string().optional().describe("Search only files this glob selects, e.g. `plans/**` or `*.csv` (without a `/` it matches the file name at any depth)."),
       maxResults: z.number().int().positive().max(GREP_MAX_RESULTS).optional().describe(`Lines returned (default ${GREP_DEFAULT_MAX}); the rest are counted.`),
     },
