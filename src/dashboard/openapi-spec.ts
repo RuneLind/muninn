@@ -834,7 +834,7 @@ export const spec = {
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { threadId: { type: "string" }, conversationId: { type: "string" }, chatUrl: { type: "string" } } } } } },
           "400": { description: "Missing userId or user not found", content: { "application/json": { schema: { type: "object", properties: { error: { type: "string" }, needsUser: { type: "boolean" }, users: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } } } } } } } },
-          "409": { description: "Thread already exists", content: { "application/json": { schema: { type: "object", properties: { threadExists: { type: "boolean" }, existingThreadId: { type: "string" }, existingThreadName: { type: "string" }, userId: { type: "string" }, botName: { type: "string" } } } } } },
+          "409": { description: "Thread already exists (`threadExists`, with its id), or the name is a wiki page's Discuss thread (`nameTaken` with an `error`, no id)", content: { "application/json": { schema: { type: "object", properties: { threadExists: { type: "boolean" }, existingThreadId: { type: "string" }, nameTaken: { type: "boolean" }, error: { type: "string" }, existingThreadName: { type: "string" }, userId: { type: "string" }, botName: { type: "string" } } } } } },
           "500": errorResponse,
         },
       },

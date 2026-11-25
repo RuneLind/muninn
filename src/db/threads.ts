@@ -202,6 +202,9 @@ export async function createThread(userId: string, botName: string, name: string
   return rowToThread(row);
 }
 
+/** How many INSERTs `switchThread` tries when the name's holder keeps vanishing. */
+const SWITCH_INSERT_ATTEMPTS = 3;
+
 /** Switch to a thread by name, creating it if it doesn't exist. Returns the thread. */
 export async function switchThread(userId: string, botName: string, name: string): Promise<Thread> {
   const sql = getDb();
@@ -221,11 +224,14 @@ export async function switchThread(userId: string, botName: string, name: string
     const tx = _tx as unknown as Sql;
 
     // A wiki thread is never the active thread: refuse before deactivating anything.
-    const [wiki] = await tx`
-      SELECT 1 FROM threads
-      WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind = 'wiki'
-    `;
-    if (wiki) throw new WikiThreadRefused("be switched to");
+    const wikiHoldsName = async () => {
+      const [wiki] = await tx`
+        SELECT 1 FROM threads
+        WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind = 'wiki'
+      `;
+      return !!wiki;
+    };
+    if (await wikiHoldsName()) throw new WikiThreadRefused("be switched to");
 
     // Deactivate current thread
     await tx`
@@ -248,17 +254,22 @@ export async function switchThread(userId: string, botName: string, name: string
     if (found) return found;
 
     // Create new thread. A concurrent request that took the name first: its
-    // chat thread is switched to, its wiki thread refused.
-    const [row] = await tx`
-      INSERT INTO threads (user_id, bot_name, name, is_active)
-      VALUES (${userId}, ${botName}, ${normalized}, true)
-      ON CONFLICT (user_id, bot_name, name) DO NOTHING
-      RETURNING *
-    `;
-    if (row) return rowToThread(row);
-    const taken = await activate();
-    if (taken) return taken;
-    throw new WikiThreadRefused("be switched to");
+    // chat thread is switched to, its wiki thread refused. A chat thread that
+    // took the name and was deleted again before the re-select holds nothing:
+    // insert again, a bounded number of times.
+    for (let attempt = 0; attempt < SWITCH_INSERT_ATTEMPTS; attempt++) {
+      const [row] = await tx`
+        INSERT INTO threads (user_id, bot_name, name, is_active)
+        VALUES (${userId}, ${botName}, ${normalized}, true)
+        ON CONFLICT (user_id, bot_name, name) DO NOTHING
+        RETURNING *
+      `;
+      if (row) return rowToThread(row);
+      const taken = await activate();
+      if (taken) return taken;
+      if (await wikiHoldsName()) throw new WikiThreadRefused("be switched to");
+    }
+    throw new Error(`topic "${normalized}" was created and deleted by other requests while switching; try again`);
   });
 }
 

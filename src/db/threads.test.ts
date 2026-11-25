@@ -540,6 +540,69 @@ describe("wiki threads (kind 'wiki', migration 094)", () => {
     expect(refused).toBeGreaterThan(0);
   });
 
+  /**
+   * The chat thread that took the name between `switchThread`'s first look and
+   * its INSERT is deleted before the re-select. Two statement triggers stage it
+   * inside the switch's own INSERT, deterministically: BEFORE plants a chat row
+   * of the name (so the INSERT conflicts), AFTER deletes it (so the re-select
+   * finds nothing). `plants` bounds how many of the switch's INSERTs are staged.
+   */
+  async function withDeletedChatRace(plants: number, run: () => Promise<void>) {
+    const db = getDb();
+    await db`CREATE TABLE race_ctl (remaining int NOT NULL)`;
+    await db`INSERT INTO race_ctl VALUES (${plants})`;
+    await db.unsafe(`
+      CREATE FUNCTION race_plant() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF pg_trigger_depth() = 1 AND (SELECT remaining FROM race_ctl) > 0 THEN
+          UPDATE race_ctl SET remaining = remaining - 1;
+          INSERT INTO threads (user_id, bot_name, name, description, is_active)
+          VALUES ('u1', 'bot1', 'racing topic', 'doomed', false);
+        END IF;
+        RETURN NULL;
+      END $$;
+      CREATE FUNCTION race_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF pg_trigger_depth() = 1 THEN DELETE FROM threads WHERE description = 'doomed'; END IF;
+        RETURN NULL;
+      END $$;
+      CREATE TRIGGER race_plant BEFORE INSERT ON threads FOR EACH STATEMENT EXECUTE FUNCTION race_plant();
+      CREATE TRIGGER race_delete AFTER INSERT ON threads FOR EACH STATEMENT EXECUTE FUNCTION race_delete();
+    `);
+    try {
+      await run();
+    } finally {
+      await db.unsafe(`
+        DROP TRIGGER race_plant ON threads; DROP TRIGGER race_delete ON threads;
+        DROP FUNCTION race_plant(); DROP FUNCTION race_delete(); DROP TABLE race_ctl;
+      `);
+    }
+  }
+
+  test("a chat thread deleted between the switch's INSERT and its re-select: the switch creates the thread, no wiki thread blamed", async () => {
+    await switchThread("u1", "bot1", "work");
+    await withDeletedChatRace(1, async () => {
+      const t = await switchThread("u1", "bot1", "racing topic");
+      expect(t.name).toBe("racing topic");
+      expect(t.kind).toBe("chat");
+      expect(t.isActive).toBe(true);
+    });
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("racing topic");
+    const rows = await getDb()`SELECT description FROM threads WHERE name = 'racing topic'`;
+    expect(rows.map((r) => r.description)).toEqual([null]);
+  });
+
+  test("a name that keeps vanishing: a bounded retry, then an error that claims no wiki thread, and nothing deactivated", async () => {
+    await switchThread("u1", "bot1", "work");
+    await withDeletedChatRace(1000, async () => {
+      const err = await switchThread("u1", "bot1", "racing topic").then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(WikiThreadRefused);
+      expect((err as Error).message).not.toContain("wiki");
+    });
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("work");
+  });
+
   test("the schema refuses a wiki thread marked active", async () => {
     const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
     const err = await getDb()`UPDATE threads SET is_active = true WHERE id = ${t.id}`.then(() => null, (e: unknown) => e);

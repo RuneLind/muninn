@@ -66,6 +66,7 @@ When clicked on a Jira page:
    - **Success** — opens the returned `chatUrl` in a new tab
    - **`needsUser`** — shows a user picker (when multiple users exist and no `userId` configured)
    - **`threadExists`** — asks whether to reuse the existing thread or create a new one with a timestamp suffix
+   - **`nameTaken`** — the name is a wiki page's Discuss thread, which never opens in chat; shows the server's `error`
 5. Opens the Muninn chat page with the thread pre-loaded
 
 ### Background (`background.js`)
@@ -91,6 +92,7 @@ Responses:
 - `200` — `{ threadId, conversationId, chatUrl }`
 - `400` — `{ needsUser: true, users: [{ id, name }] }` — pick a user
 - `409` — `{ threadExists: true, existingThreadId, existingThreadName }` — thread already exists
+- `409` — `{ nameTaken: true, error, existingThreadName }` — a wiki page's Discuss thread holds the name; no thread id
 
 ## Supported Jira instances
 

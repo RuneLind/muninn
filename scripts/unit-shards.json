@@ -311,7 +311,8 @@
       "src/dashboard/routes/wiki-discuss-db.test.ts",
       "src/dashboard/routes/wiki-discuss-apply-db.test.ts",
       "src/dashboard/views/discover-boot/discover-page-summarize.test.ts",
-      "src/dashboard/routes/wiki-threads-db.test.ts"
+      "src/dashboard/routes/wiki-threads-db.test.ts",
+      "src/dashboard/routes/research-chat-wiki-thread-db.test.ts"
     ]
   ]
 }
