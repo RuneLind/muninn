@@ -2108,7 +2108,13 @@ function activateExplain(sel: string, heading: string): void {
     explainPage: explainMeta?.title || getCurrentName()!,
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
   };
-  const url = buildExplainUrl({
+  runAskStream(explainUrlFor(sel, heading, askHistoryParam()), turn);
+}
+
+/** The classic Explain's URL for the open page: here, and in the selection
+ *  menu's inline card where the page's thread cannot take the turn. */
+function explainUrlFor(sel: string, heading: string, history?: string): string {
+  return buildExplainUrl({
     sel,
     page: getCurrentName()!,
     // relPath beside the name — the route resolves it first. Without it, Explain
@@ -2116,9 +2122,8 @@ function activateExplain(sel: string, heading: string): void {
     ...(currentRelPath ? { relPath: currentRelPath } : {}),
     wiki: WIKI,
     ctx: heading,
-    history: askHistoryParam(),
+    ...(history ? { history } : {}),
   });
-  runAskStream(url, turn);
 }
 
 /** Fact-check a selection (`sel` mode), from the selection menu. The answer
@@ -3254,6 +3259,7 @@ export function boot(): { dispose(): void } {
     pageType: () => currentArticle?.type ?? null,
     graphId: GRAPH_SECTION_ID,
     explainClassic: activateExplain,
+    explainUrl: (sel, heading) => explainUrlFor(sel, heading),
     factcheck: activateFactcheckSel,
     hrefFor: pageUrlByRelPath,
   });

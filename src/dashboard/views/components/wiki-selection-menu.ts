@@ -15,11 +15,15 @@
  *   thread, sent through the pane's own entry (`startInlineTurn`): the same
  *   turn record the pane draws, so it is never a second copy, and the pane
  *   need not be open. Its card repaints on `onDiscussChange` and links to the
- *   turn in the pane. Without an agent (and on an explainer) it is the
- *   classic Explain, an Ask turn in the article pane.
+ *   turn in the pane. Where the thread cannot take it (the selection is no
+ *   passage, or a turn of the discussion is still running) the card streams
+ *   the classic `/api/wiki/explain` answer instead. Without an agent (and on
+ *   an explainer) it is the classic Explain, an Ask turn in the article pane.
  * - «Where else» and «History» read `GET /api/wiki/mentions` (no model), for
  *   a selection the route accepts as a key (one line, 3–80 characters); a key
  *   found in the selection gets its own chip, which opens its «Where else».
+ *   An answer is reused for {@link MENTIONS_FRESH_MS} at most, never one with
+ *   a PR row still being refreshed, and a page render drops them all.
  * - «Fact check» is the existing selection fact check; «Add to Oppfølging»
  *   (a page with an `Oppfølging` heading and an agent) is an Edit turn whose
  *   proposed-edit card and Apply are the pane's.
@@ -32,6 +36,8 @@
  */
 
 import { copyText } from "./copy-path.ts";
+import { makeSseFrameParser } from "./client-runtime.ts";
+import { enhanceConfidenceHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
@@ -81,6 +87,8 @@ export interface SelectionMenuDeps {
   graphId: string;
   /** The classic Explain (an Ask turn in the article pane) and the selection fact check. */
   explainClassic(sel: string, heading: string): void;
+  /** The classic Explain's `/api/wiki/explain` URL, for an inline card. */
+  explainUrl(sel: string, heading: string): string;
   factcheck(sel: string, heading: string): void;
   hrefFor(relPath: string): string;
 }
@@ -98,8 +106,13 @@ let deps: SelectionMenuDeps | null = null;
 let shown: Shown | null = null;
 /** The page's reader flags (`setSelectionMenuPage`). */
 let page: { mentions: boolean; trackerProjects: string[]; kinds: KeyKind[] } = { mentions: false, trackerProjects: [], kinds: [] };
-/** One mentions answer per wiki and key, for this session. */
-const mentionsCache = new Map<string, Promise<{ ok: true; body: MentionsBody } | { ok: false; message: string }>>();
+type MentionsAnswer = { ok: true; body: MentionsBody } | { ok: false; message: string };
+/** How long a mentions answer is reused: «Where else» then «History» on one
+ *  key is one request, and a commit made elsewhere shows within this. */
+export const MENTIONS_FRESH_MS = 30_000;
+/** Mentions answers per wiki and key: `at` null while the request is in
+ *  flight (asks share it), else when it answered. */
+const mentionsCache = new Map<string, { p: Promise<MentionsAnswer>; at: number | null }>();
 /** The markup each turn card body was drawn from. */
 const drawnBody = new WeakMap<Element, string>();
 let repositionQueued = false;
@@ -155,6 +168,9 @@ export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjec
     trackerProjects: Array.isArray(reader?.trackerProjects) ? (reader.trackerProjects as unknown[]).filter((p): p is string => typeof p === "string") : [],
     kinds: keyKindsFrom(reader?.keyKinds),
   };
+  // The page rendered again (navigation, a reload, an Apply's commit): what
+  // the files and history say may have moved.
+  mentionsCache.clear();
 }
 
 function article(): HTMLElement | null {
@@ -311,7 +327,7 @@ function activate(act: SelAction, key: string | null): void {
   switch (act) {
     case "explain":
       if (s.explainer || !discussAgentOn()) deps.explainClassic(s.text, s.heading);
-      else threadCard("explain", s, EXPLAIN_QUESTION, "explore");
+      else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why) => classicExplainCard(s, why));
       return;
     case "follow":
       threadCard("follow", s, FOLLOW_QUESTION, "edit");
@@ -342,9 +358,15 @@ function placeCard(s: Shown, html: string): HTMLElement | null {
   tpl.innerHTML = html;
   const card = tpl.content.firstElementChild as HTMLElement | null;
   if (!card) return null;
-  if (s.range && a && a.contains(selectionEndNode(s.range, a))) {
+  const endNode = s.range ? (a ? selectionEndNode(s.range, a) : s.range.endContainer) : null;
+  // In the article pane but not in the page's text (its head): under that part.
+  let outside: Node | null = endNode && wrap?.contains(endNode) && !a?.contains(endNode) ? endNode : null;
+  while (outside && outside.parentNode !== wrap) outside = outside.parentNode;
+  if (s.range && a && endNode && a.contains(endNode)) {
     const at = inlineCardAnchor(s.range, a);
     at.parent.insertBefore(card, at.before);
+  } else if (outside && wrap) {
+    wrap.insertBefore(card, outside.nextSibling);
   } else {
     const frame = document.querySelector(".wiki-explainer-frame");
     if (frame?.parentNode) frame.parentNode.insertBefore(card, frame);
@@ -355,22 +377,78 @@ function placeCard(s: Shown, html: string): HTMLElement | null {
   return card;
 }
 
-/** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread. */
-function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit"): void {
+/** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread.
+ *  `fallback` runs instead of an error card, with the reason, when the
+ *  selection is no passage or a turn of the discussion is still running. */
+function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit", fallback?: (why: string) => void): void {
   const live = window.getSelection();
   const passage = live && s.range ? readSelectionPassage(live) : null;
   if (!passage) {
+    if (fallback) return fallback("outside the page's text, so not in its discussion");
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">This selection cannot be sent as a passage of the page: select it again inside the page's text.</div>`, null));
     return;
   }
   const p = { selection: passage.selection, before: passage.before, after: passage.after, atStart: passage.atStart, atEnd: passage.atEnd, heading: passage.heading, ...(passage.edge ? { edge: passage.edge } : {}) };
   const r = startInlineTurn(question, p, passage.range, mode);
+  if ("refused" in r && r.busy && fallback) return fallback("the page's discussion is busy, so not in it");
   if ("refused" in r) {
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
   const card = placeCard(s, inlineCardHtml(kind, "a turn in this page's discussion", "", r.key));
   if (card) paintTurnCard(card);
+}
+
+/** Explain where the page's thread cannot take the turn: the classic
+ *  `/api/wiki/explain` stream, painted into an inline card (D3) rather than in
+ *  place of the page. Not a turn of the discussion; `why` is its sub line. A
+ *  card that leaves the page (replaced, a render) aborts its stream. */
+function classicExplainCard(s: Shown, why: string): void {
+  const d = deps;
+  if (!d) return;
+  const card = placeCard(s, inlineCardHtml("explain", why, `<div class="wiki-discuss-status"><span class="spinner"></span><span>Searching the wiki…</span></div>`, null));
+  const body = card?.querySelector(".wiki-sel-card-body");
+  if (!card || !body) return;
+  const ctl = new AbortController();
+  let text = "";
+  let ended = false;
+  const fail = (msg: string) => {
+    ended = true;
+    body.innerHTML = `<div class="wiki-discuss-error" role="alert">${escText(msg)}</div>`;
+  };
+  const parser = makeSseFrameParser((f) => {
+    if (!card.isConnected) return ctl.abort();
+    let m: Record<string, unknown> = {};
+    try {
+      m = JSON.parse(f.data) as Record<string, unknown>;
+    } catch {
+      /* a frame with no JSON carries nothing here */
+    }
+    if (f.event === "delta" && typeof m.text === "string") text += m.text;
+    else if (f.event === "done") {
+      ended = true;
+      if (typeof m.answer === "string" && m.answer) text = m.answer;
+    } else if (f.event === "answer_html" && typeof m.html === "string" && m.html) {
+      ended = true;
+      body.innerHTML = enhanceConfidenceHtml(m.html);
+      return;
+    } else if (f.event === "app_error") return fail(typeof m.message === "string" && m.message ? m.message : "Something went wrong.");
+    else return;
+    body.innerHTML = renderStreamingBody(text);
+  });
+  void (async () => {
+    try {
+      const res = await fetch(d.explainUrl(s.text, s.heading), { signal: ctl.signal, headers: { Accept: "text/event-stream" } });
+      if (!res.ok || !res.body) return fail(`The explanation failed (${res.status}).`);
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      for (let r = await reader.read(); !r.done; r = await reader.read()) parser.push(dec.decode(r.value, { stream: true }));
+      parser.end();
+      if (!ended && card.isConnected) fail("The explanation ended before its answer.");
+    } catch {
+      if (!ctl.signal.aborted && card.isConnected) fail("The explanation failed: the server did not answer.");
+    }
+  })();
 }
 
 function escText(s: string): string {
@@ -395,26 +473,28 @@ function paintTurnCards(): void {
   for (const card of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn]`))) paintTurnCard(card);
 }
 
-function fetchMentions(wiki: string, key: string): Promise<{ ok: true; body: MentionsBody } | { ok: false; message: string }> {
+function fetchMentions(wiki: string, key: string): Promise<MentionsAnswer> {
   const k = `${wiki}\n${key}`;
-  let p = mentionsCache.get(k);
-  if (!p) {
-    p = (async () => {
-      try {
-        const res = await fetch(`${MENTIONS_PATH}?${new URLSearchParams({ wiki, key }).toString()}`, { headers: { Accept: "application/json" } });
-        const data = (await res.json().catch(() => null)) as (MentionsBody & { error?: string }) | null;
-        if (res.ok && data && Array.isArray(data.files)) return { ok: true as const, body: data };
-        return { ok: false as const, message: data?.error ? `The search failed: ${data.error} (${res.status}).` : `The search failed (${res.status}).` };
-      } catch {
-        return { ok: false as const, message: "The search failed: the server did not answer." };
-      }
-    })();
-    mentionsCache.set(k, p);
-    // A failure is not kept: the next ask tries again.
-    void p.then((r) => {
-      if (!r.ok) mentionsCache.delete(k);
-    });
-  }
+  const hit = mentionsCache.get(k);
+  if (hit && (hit.at === null || Date.now() - hit.at < MENTIONS_FRESH_MS)) return hit.p;
+  const p = (async (): Promise<MentionsAnswer> => {
+    try {
+      const res = await fetch(`${MENTIONS_PATH}?${new URLSearchParams({ wiki, key }).toString()}`, { headers: { Accept: "application/json" } });
+      const data = (await res.json().catch(() => null)) as (MentionsBody & { error?: string }) | null;
+      if (res.ok && data && Array.isArray(data.files)) return { ok: true as const, body: data };
+      return { ok: false as const, message: data?.error ? `The search failed: ${data.error} (${res.status}).` : `The search failed (${res.status}).` };
+    } catch {
+      return { ok: false as const, message: "The search failed: the server did not answer." };
+    }
+  })();
+  const entry: { p: Promise<MentionsAnswer>; at: number | null } = { p, at: null };
+  mentionsCache.set(k, entry);
+  // Neither a failure nor a PR row the route is still refreshing is kept: the next ask asks again.
+  void p.then((r) => {
+    if (mentionsCache.get(k) !== entry) return;
+    if (r.ok && !r.body.prs.some((pr) => pr.stale)) entry.at = Date.now();
+    else mentionsCache.delete(k);
+  });
   return p;
 }
 

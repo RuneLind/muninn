@@ -17,6 +17,14 @@
  *   Apply that renders the page again (written, commit failed, or a lost answer
  *   the check finds written) opens it on the applied turn, which the render
  *   then focuses; an outcome with no render stays on the card.
+ * - «Where else»/«History» answers (fix round 1 batch 3, F7): one with a PR row
+ *   the route is refreshing (`stale: true`) is asked again, any answer is
+ *   reused only within `MENTIONS_FRESH_MS`, and a page render (an Apply's)
+ *   drops them.
+ * - Explain where the thread cannot take the turn (F9): a second Explain
+ *   while the first streams, and a selection in the article head, stream the
+ *   classic `/api/wiki/explain` answer into their inline card instead of an
+ *   error card (never in place of the page); «Add to Oppfølging» is still refused.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -26,7 +34,7 @@ import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { initSelectionMenu, setSelectionMenuPage } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, initSelectionMenu, setSelectionMenuPage } from "../components/wiki-selection-menu.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -48,6 +56,11 @@ let applyAnswer: () => Response = () => json({ ok: true, committed: true });
 /** Answers for the preview requests that follow, before the default preview. */
 const checkAnswers: (() => Response)[] = [];
 const gateway = () => new Response("Bad Gateway", { status: 502 });
+/** Every `GET /api/wiki/mentions` key asked, and whether its PR row is still being refreshed. */
+const mentionsAsked: string[] = [];
+let mentionsStale = false;
+/** Every classic `/api/wiki/explain` stream the menu opened. */
+const explainAsked: URL[] = [];
 const EDIT_OLD = "The morning route adds a stop.";
 const EDIT_NEW = "The morning route adds two stops.";
 
@@ -75,6 +88,21 @@ beforeAll(() => {
       if (body.preview === true && checkAnswers.length) return checkAnswers.shift()!();
       if (body.preview === true) return json({ ok: true, before: EDIT_OLD, after: EDIT_NEW, beforeCtx: "", afterCtx: "", fromLine: 9, toLine: 9, baseHash: "b1", previewHash: "p1" });
       return applyAnswer();
+    }
+    if (url.startsWith("/api/wiki/mentions?")) {
+      const key = new URL(url, "http://x").searchParams.get("key")!;
+      mentionsAsked.push(key);
+      return json({
+        key, kind: "case", files: [{ relPath: REL, title: "Ferry", lines: [{ n: 9, text: NIGHT }] }], commits: [], log: [],
+        prs: [{ repo: "o/r", number: 7, state: mentionsStale ? "unknown" : "merged", mergedAt: null, url: "https://github.com/o/r/pull/7", stale: mentionsStale }],
+        totalLines: 1, totalFiles: 1, totalsAtLeast: false, truncated: false,
+      });
+    }
+    if (url.startsWith("/api/wiki/explain?")) {
+      const u = new URL(url, "http://x");
+      explainAsked.push(u);
+      const frames = `event: delta\ndata: {"text":"CLASSIC "}\n\nevent: done\ndata: ${JSON.stringify({ answer: `CLASSIC for ${u.searchParams.get("sel")}` })}\n\nevent: end\ndata: {}\n\n`;
+      return new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }
     if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
@@ -109,6 +137,7 @@ beforeAll(() => {
     pageType: () => "plan",
     graphId: "wikiGraph",
     explainClassic: (sel) => classic.push(sel),
+    explainUrl: (sel, heading) => `/api/wiki/explain?${new URLSearchParams({ sel, ctx: heading }).toString()}`,
     factcheck: () => {},
     hrefFor: (r) => `/wiki?relPath=${r}`,
   });
@@ -141,9 +170,9 @@ function renderPage(morning = EDIT_OLD): void {
   setSelectionMenuPage({ mentions: true, keyKinds: [{ name: "case", pattern: "MEL-\\d+" }] });
 }
 
-/** Select `text` in the article and release the mouse there. */
-async function selectText(text: string): Promise<void> {
-  const article = document.querySelector(".wiki-article")!;
+/** Select `text` in the article (or under `within`) and release the mouse there. */
+async function selectText(text: string, within = ".wiki-article"): Promise<void> {
+  const article = document.querySelector(within)!;
   const walker = document.createTreeWalker(article, 4);
   for (let t = walker.nextNode(); t; t = walker.nextNode()) {
     const i = (t.textContent ?? "").indexOf(text);
@@ -438,4 +467,133 @@ test("a lost Apply the check cannot settle stays on the inline card; its «Check
   const done = document.querySelector(`#discussBody [data-turn-key="${key}"] [data-edit-state="applied"] .wiki-discuss-edit-done`);
   expect(done?.textContent).toBe(LOST_APPLY_APPLIED);
   expect(document.activeElement).toBe(done);
+});
+
+/** A press on an action and the release that follows it (which the bar takes as its own). */
+function act(el: Element): void {
+  press(el);
+  document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+}
+
+/** «Where else» on the selected `MEL-12`, its card answered. */
+async function whereElse(): Promise<Element> {
+  await selectText("MEL-12");
+  act(barEl().querySelector('[data-selact="where"]')!);
+  await settle();
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="where"]')!;
+  expect(card.querySelector(`[data-sel-file="${REL}"]`)).toBeTruthy();
+  return card;
+}
+
+test("«Where else» with a PR row the route is still refreshing is not kept: the next ask asks again", async () => {
+  renderPage();
+  mentionsAsked.length = 0;
+  mentionsStale = true;
+  try {
+    const card = await whereElse();
+    expect(card.querySelector(".wiki-sel-pr-state")!.textContent).toBe("not known yet");
+    await whereElse();
+  } finally {
+    mentionsStale = false;
+  }
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12"]);
+  // Refreshed: its answer is reused, «History» on the key included.
+  const card = await whereElse();
+  expect(card.querySelector(".wiki-sel-pr-state")!.textContent).toBe("merged");
+  await selectText("MEL-12");
+  act(barEl().querySelector('[data-selact="history"]')!);
+  await settle();
+  expect(document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="history"]')).toBeTruthy();
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12", "MEL-12"]);
+});
+
+test("a mentions answer is reused only within its freshness window", async () => {
+  renderPage();
+  mentionsAsked.length = 0;
+  await whereElse();
+  await whereElse();
+  expect(mentionsAsked).toEqual(["MEL-12"]);
+  const realNow = Date.now;
+  Date.now = () => realNow() + MENTIONS_FRESH_MS + 1;
+  try {
+    await whereElse();
+  } finally {
+    Date.now = realNow;
+  }
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12"]);
+});
+
+test("«Where else» after an Apply renders the page again asks the route again", async () => {
+  renderPage();
+  mentionsAsked.length = 0;
+  await whereElse();
+  const card = await followCardWithEdit("turn-10", 10);
+  const before = reloads;
+  (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+  await settle();
+  expect(reloads).toBe(before + 1);
+  setDiscussAgentEnabled(true);
+  await whereElse();
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12"]);
+  // A plain render (navigation, an in-place reload) drops it too.
+  renderPage();
+  await whereElse();
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12", "MEL-12"]);
+});
+
+test("Explain while the first inline Explain streams: the classic stream in its own card, no refusal; «Add to Oppfølging» is still refused", async () => {
+  renderPage();
+  classic.length = 0;
+  explainAsked.length = 0;
+  const before = posts.length;
+  await selectText(NIGHT);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(posts.length).toBe(before + 1);
+  push!("turn", { turnId: "turn-11", seq: 11, discussionId: "thread-1" });
+  await settle();
+  // The second selection, its Explain pressed while turn 11 streams.
+  await selectText(EDIT_OLD);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual([EDIT_OLD]);
+  expect(posts.length).toBe(before + 1);
+  // In a card under its paragraph, not in place of the page (the Ask path).
+  expect(classic).toEqual([]);
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+  expect(card.hasAttribute("data-sel-turn")).toBe(false);
+  expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toContain("busy");
+  expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain(`CLASSIC for ${EDIT_OLD}`);
+  expect(card.querySelector(".wiki-discuss-error")).toBeNull();
+  expect(card.previousSibling?.textContent).toBe(EDIT_OLD);
+  // An Edit turn has no classic path: it says the discussion is busy.
+  await selectText(EDIT_OLD);
+  act(barEl().querySelector('[data-selact="follow"]')!);
+  await settle();
+  expect(document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="follow"] .wiki-discuss-error')?.textContent).toContain("still running");
+  expect(explainAsked.length).toBe(1);
+  push!("done", { answer: "ok", proposedEdit: null });
+  close!();
+  await settle();
+});
+
+test("Explain on a selection in the article head (no passage of the page): the classic stream in a card under the head", async () => {
+  renderPage();
+  classic.length = 0;
+  explainAsked.length = 0;
+  const before = posts.length;
+  document.querySelector(".wiki-article")!.insertAdjacentHTML("beforebegin", `<div class="wiki-article-head"><h1>The ferry plan head</h1></div>`);
+  await selectText("The ferry plan head", ".wiki-article-head");
+  expect(barEl().style.display).toBe("flex");
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual(["The ferry plan head"]);
+  expect(posts.length).toBe(before);
+  expect(classic).toEqual([]);
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+  expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toContain("outside the page's text");
+  expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("CLASSIC for The ferry plan head");
+  // Right under the head, before the article.
+  expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+  expect(card.nextElementSibling?.className).toBe("wiki-article");
 });

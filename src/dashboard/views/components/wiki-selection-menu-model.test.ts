@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import {
+  NOT_AS_WRITTEN,
   detectKeys,
   followHeading,
   historyHtml,
@@ -237,6 +238,25 @@ describe("the mentions cards", () => {
   });
   test("«Where else» with nothing found says so", () => {
     expect(whereElseHtml(body({ files: [], log: [] }), { currentRelPath: null, hrefFor: (r) => r })).toContain("is named nowhere");
+  });
+  // Fix round 1 batch 3, F8: the route greps each source line for the phrase as
+  // written, and the selection is the rendered text, so a phrase that wraps in
+  // the source (`The ferry leaves\nfrom the north quay.`) or carries markup there
+  // (`The **berth** list`) is not found although it is on the open page.
+  test("a free phrase the route did not find is «not found as written», with why: never «named nowhere»", () => {
+    const html = whereElseHtml(body({ key: "The berth list is long.", kind: null, files: [], log: [], prs: [] }), { currentRelPath: "plans/a.mdx", hrefFor: (r) => r });
+    expect(html).not.toContain("named nowhere");
+    expect(html).toContain("«The berth list is long.» is not found as written");
+    expect(html).toContain(NOT_AS_WRITTEN);
+  });
+  test("a free phrase found elsewhere but not in the open page's source: the page is said to be not listed, and why", () => {
+    const opts = { currentRelPath: "plans/here.mdx", hrefFor: (r: string) => r };
+    const phrase = body({ key: "the ferry leaves", kind: null });
+    expect(whereElseHtml(phrase, opts)).toContain(`This page is not listed: its source does not have the phrase as written. ${NOT_AS_WRITTEN}`);
+    // Listed, or a key, or a list cut short: no such line.
+    expect(whereElseHtml(phrase, { ...opts, currentRelPath: "plans/a.mdx" })).not.toContain("This page is not listed");
+    expect(whereElseHtml(body(), opts)).not.toContain("This page is not listed");
+    expect(whereElseHtml(body({ kind: null, truncated: true }), opts)).not.toContain("This page is not listed");
   });
   test("«History»: commits and log lines newest first, escaped", () => {
     const doc = new Window().document;

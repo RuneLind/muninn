@@ -253,7 +253,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // actions left out of the bar): 962,255 (327,162 gzipped), so the pin moves to 962,300.
 // PR 5 fix round 1 batch 2 (an inline card's Apply and «Change the wording» show the Discuss tab, the
 // card let through the DecisionLog fold): 962,365 (327,251 gzipped), so the pin moves to 962,400.
-const WIKI_CLIENT_MAX_BYTES = 962_400;
+// PR 5 fix round 1 batch 3 (the classic Explain streamed into an inline card where the thread cannot
+// take the turn, the mentions answers' freshness window): 964,800 (328,019 gzipped), so the pin moves to 964,900.
+const WIKI_CLIENT_MAX_BYTES = 964_900;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

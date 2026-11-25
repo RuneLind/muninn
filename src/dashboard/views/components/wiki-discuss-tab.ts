@@ -310,13 +310,14 @@ export function askInDiscuss(question: string, passage: DiscussPassage | null, s
  * through the pane's own entry with `mode` for this turn only (the toggle is
  * left as the reader set it), and the pane is not opened. The card draws it
  * through {@link discussTurnForCard} and repaints on {@link onDiscussChange}.
- * A refusal before the request says why, in the words the panel uses.
+ * A refusal before the request says why, in the words the panel uses;
+ * `busy` marks the one a caller may route elsewhere (a turn still running).
  */
-export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string } {
+export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string; busy?: true } {
   if (!enabled) return { refused: "This wiki has no wiki agent here." };
   if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
-  if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended." };
+  if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended.", busy: true };
   const key = startTurn(question, passage, selected, null, { mode, openPane: false });
   return key ? { key } : { refused: "The turn could not start here." };
 }

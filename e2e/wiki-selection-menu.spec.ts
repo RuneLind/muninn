@@ -29,6 +29,11 @@
  * does (a row with a hand-written edit, the discuss POST answered in the
  * page); the preview and Apply are the real routes. Apply writes the page, so
  * its test runs last.
+ *
+ * Fix round 1 batch 3: «Where else» on a phrase that wraps or carries markup
+ * in the source never says «named nowhere» (F8); a page render drops the
+ * mentions answers (F7); Explain where the thread cannot take the turn (a
+ * turn still running, the article head) is the classic Explain (F9).
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -59,6 +64,12 @@ const RULES = ["# Rules", "", "Answer the question first.", "", "<!-- discuss:ed
 const ANSWER = "EXPLAIN-ANSWER: the night route keeps its timetable for this case.";
 const DECISIONS = "plans/decisions.mdx";
 const FLAT = "Use the flat file";
+const FOLLOW_OLD_TEXT = "The morning route adds a stop.";
+const QUAY = "plans/quay.mdx";
+const WRAPPED = "The ferry leaves from the north quay.";
+const MARKED = "The berth list is long.";
+// One phrase wraps across two source lines, one carries bold in the source.
+const PAGE_QUAY = ["---", "title: Quay plan", "---", "", "# Quay plan", "", "The ferry leaves", "from the north quay.", "", "The **berth** list is long.", ""].join("\n");
 const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
 
 let server: ChildProcess | undefined;
@@ -122,6 +133,7 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }), "utf8");
   await writeFile(path.join(root, OTHER), PAGE_NO_FOLLOW, "utf8");
   await writeFile(path.join(root, DECISIONS), PAGE_DECISIONS, "utf8");
+  await writeFile(path.join(root, QUAY), PAGE_QUAY, "utf8");
   await writeFile(path.join(root, "log.md"), `# Log\n\n## [2026-11-04] note | Q-3\n\n- ${KEY} is outside the data fix.\n`, "utf8");
   const init = spawnSync("git", ["init", "-q", "-b", "main", root], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
@@ -210,32 +222,39 @@ const menu = (page: Page) => page.locator("#wikiSelMenu");
 
 async function openPage(page: Page, rel = REL): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
-  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route." };
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long." };
   await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
-/** The client rects of `text`'s first copy in the article: its first and last line. */
+/** The client rects of `text`'s first copy in the article (across inline
+ *  markup's text nodes): its first and last line. */
 async function textBox(page: Page, text: string): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
   return page.evaluate((text) => {
     const article = document.querySelector("#articleWrap .wiki-article")!;
     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    const nodes: { t: Text; at: number }[] = [];
+    let all = "";
     for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
-      const i = t.data.indexOf(text);
-      if (i === -1) continue;
-      const r = document.createRange();
-      r.setStart(t, i);
-      r.setEnd(t, i + text.length);
-      const rects = r.getClientRects();
-      const a = rects[0]!;
-      const b = rects[rects.length - 1]!;
-      return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 1, y1: b.top + b.height / 2 };
+      nodes.push({ t, at: all.length });
+      all += t.data;
     }
-    throw new Error(`no text ${text}`);
+    const i = all.indexOf(text);
+    if (i === -1) throw new Error(`no text ${text}`);
+    const find = (n: number, end: boolean) => nodes.findLast((x) => (end ? x.at < n : x.at <= n))!;
+    const s = find(i, false);
+    const e = find(i + text.length, true);
+    const r = document.createRange();
+    r.setStart(s.t, i - s.at);
+    r.setEnd(e.t, i + text.length - e.at);
+    const rects = r.getClientRects();
+    const a = rects[0]!;
+    const b = rects[rects.length - 1]!;
+    return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 1, y1: b.top + b.height / 2 };
   }, text);
 }
 
-/** A real mouse drag over `text`. */
-async function dragSelect(page: Page, text: string): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
+/** A real mouse drag over `text` (as the DOM holds it); the selection reads `selected`. */
+async function dragSelect(page: Page, text: string, selected = text): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
   // A press inside a live selection drags it instead of starting a new one.
   await page.evaluate(() => getSelection()!.removeAllRanges());
   const at = await textBox(page, text);
@@ -243,7 +262,7 @@ async function dragSelect(page: Page, text: string): Promise<{ x0: number; y0: n
   await page.mouse.down();
   await page.mouse.move(at.x1, at.y1, { steps: 8 });
   await page.mouse.up();
-  expect(await page.evaluate(() => getSelection()!.toString())).toBe(text);
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(selected);
   return at;
 }
 
@@ -490,6 +509,99 @@ test("a «Where else» card on a collapsed DecisionLog item is shown, in All and
   await page.evaluate(() => document.querySelector("#articleWrap .wiki-article")!.classList.replace("lens-all", "lens-overview"));
   await expect(card).toBeVisible();
   await expect(item.locator(".dl-rest")).toBeHidden();
+});
+
+test("«Where else» on a phrase that wraps or carries bold in the source: never «named nowhere»", async ({ page }) => {
+  await openPage(page, QUAY);
+  // The wrapped phrase keeps its source line break in the DOM; the selection reads a space.
+  for (const [phrase, dom] of [[MARKED, MARKED], [WRAPPED, WRAPPED.replace("leaves ", "leaves\n")]] as const) {
+    await dragSelect(page, dom, phrase);
+    const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/mentions?"));
+    await bar(page).locator('[data-selact="where"]').click();
+    const body = (await (await answered).json()) as { files: unknown[]; kind: string | null };
+    // The route finds neither as written: the source has `**berth**`, and a line break.
+    expect([phrase, body.files.length, body.kind]).toEqual([phrase, 0, null]);
+    const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+    await expect(card.locator(".wiki-sel-empty")).toContainText(`«${phrase}» is not found as written`);
+    await expect(card).not.toContainText("named nowhere");
+  }
+  await shot(page, "11-where-else-not-as-written");
+});
+
+test("a page render drops the mentions answers: «Where else» after navigating asks the route again", async ({ page }) => {
+  const asked: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/api/wiki/mentions?")) asked.push(new URL(r.url()).searchParams.get("key")!);
+  });
+  await openPage(page);
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  for (let i = 0; i < 2; i++) {
+    await dragSelect(page, KEY);
+    await bar(page).locator('[data-selact="where"]').click();
+    await expect(card.locator(".wiki-sel-file")).toHaveCount(4);
+  }
+  // On one render, within the freshness window: one request.
+  expect(asked).toEqual([KEY]);
+  // A page row opens the other page (a render), and its row back here (another).
+  await card.locator(`[data-sel-file="${OTHER}"] a`).click();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("The pier opens at six.");
+  await dragSelect(page, KEY);
+  await bar(page).locator('[data-selact="where"]').click();
+  await expect(card.locator(".wiki-sel-file")).toHaveCount(4);
+  expect(asked).toEqual([KEY, KEY]);
+});
+
+test("Explain where the page's thread cannot take the turn streams the classic answer into its own card: a turn still running, the article head", async ({ page }) => {
+  const discussPosts: string[] = [];
+  // The first inline turn never answers: it stays live.
+  await page.route("**/api/wiki/discuss", (route) => {
+    discussPosts.push(route.request().postData() ?? "");
+  });
+  const explains: URL[] = [];
+  await page.route("**/api/wiki/explain?**", (route) => {
+    const u = new URL(route.request().url());
+    explains.push(u);
+    const body = `event: delta\ndata: {"text":"CLASSIC "}\n\nevent: done\ndata: ${JSON.stringify({ answer: `CLASSIC-ANSWER for ${u.searchParams.get("sel")}` })}\n\nevent: end\ndata: {}\n\n`;
+    return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  await openPage(page);
+  await dragSelect(page, NIGHT);
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => discussPosts.length).toBe(1);
+  const threadCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+  await expect(threadCard).toBeVisible();
+
+  // A second Explain while it runs: answered in its own card, not refused, the page kept.
+  await dragSelect(page, FOLLOW_OLD_TEXT);
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => explains.length).toBe(1);
+  expect(explains[0]!.searchParams.get("sel")).toBe(FOLLOW_OLD_TEXT);
+  expect(explains[0]!.searchParams.get("relPath")).toBe(REL);
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])');
+  await expect(card.locator(".wiki-sel-card-body")).toContainText(`CLASSIC-ANSWER for ${FOLLOW_OLD_TEXT}`);
+  await expect(card.locator(".wiki-sel-card-sub")).toContainText("busy");
+  await expect(page.locator("#articleWrap .wiki-sel-card .wiki-discuss-error")).toHaveCount(0);
+  await expect(page.locator("#articleWrap .wiki-article-head h1")).toHaveText("Ferry plan");
+  await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).not.toHaveClass(/active/);
+  await shot(page, "12-explain-busy-classic-card");
+  expect(discussPosts.length).toBe(1);
+
+  // The article head is in the article pane, not in the page's text: the same, under the head.
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const h = (await page.locator("#articleWrap .wiki-article-head h1").boundingBox())!;
+  await page.mouse.move(h.x + 1, h.y + h.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(h.x + h.width - 1, h.y + h.height / 2, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => getSelection()!.toString().trim())).toBe("Ferry plan");
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => explains.length).toBe(2);
+  expect(explains[1]!.searchParams.get("sel")).toBe("Ferry plan");
+  await expect(card.locator(".wiki-sel-card-body")).toContainText("CLASSIC-ANSWER for Ferry plan");
+  await expect(card.locator(".wiki-sel-card-sub")).toContainText("outside the page's text");
+  expect(await card.evaluate((c) => c.previousElementSibling?.classList.contains("wiki-article-head"))).toBe(true);
+  await expect(page.locator("#articleWrap .wiki-sel-card .wiki-discuss-error")).toHaveCount(0);
+  expect(discussPosts.length).toBe(1);
 });
 
 const FOLLOW_OLD = "The morning route adds a stop.";

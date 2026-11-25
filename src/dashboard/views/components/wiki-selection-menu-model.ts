@@ -289,11 +289,22 @@ function prsHtml(b: MentionsBody): string {
   );
 }
 
+/** Why a free phrase (no key kind) can be missed: the route greps each
+ *  source line for it as written, and the selection is the rendered text. */
+export const NOT_AS_WRITTEN = "The search matches one source line at a time, as written: a phrase that wraps across lines, or carries formatting or a link in the source, is not found.";
+
 /** «Where else»: each file that names the key, with its line numbers and its
  *  first line; the open page marked; then the log.md lines and the PRs. A page
- *  row's link carries `data-relpath`, so the shell's nav delegate opens it. */
+ *  row's link carries `data-relpath`, so the shell's nav delegate opens it.
+ *  A free phrase is on the open page (it was selected there), so its card
+ *  never says it is named nowhere, nor lets the page's absence pass unsaid. */
 export function whereElseHtml(b: MentionsBody, opts: { currentRelPath: string | null; hrefFor: (relPath: string) => string }): string {
-  if (b.files.length === 0 && b.log.length === 0) return `<div class="wiki-sel-empty">«${esc(b.key)}» is named nowhere in the wiki's tracked files.</div>`;
+  const phrase = b.kind === null;
+  if (b.files.length === 0 && b.log.length === 0) {
+    return phrase
+      ? `<div class="wiki-sel-empty">«${esc(b.key)}» is not found as written in the wiki's tracked files. ${esc(NOT_AS_WRITTEN)}</div>`
+      : `<div class="wiki-sel-empty">«${esc(b.key)}» is named nowhere in the wiki's tracked files.</div>`;
+  }
   const total = `${b.totalLines}${b.totalsAtLeast ? "+" : ""} line${b.totalLines === 1 ? "" : "s"} in ${b.totalFiles}${b.totalsAtLeast ? "+" : ""} file${b.totalFiles === 1 ? "" : "s"}`;
   const rows = b.files
     .map((f) => {
@@ -313,7 +324,11 @@ export function whereElseHtml(b: MentionsBody, opts: { currentRelPath: string | 
   const log = b.log.length
     ? `<div class="wiki-sel-log">log.md: ${b.log.length} line${b.log.length === 1 ? "" : "s"}${b.log[0]?.date ? ` (${esc(day(b.log.at(-1)!.date))} → ${esc(day(b.log[0]!.date))})` : ""}</div>`
     : "";
-  return `<div class="wiki-sel-meta">${esc(total)}${b.truncated ? " · not all listed" : ""}</div><ul class="wiki-sel-files">${rows}</ul>${log}${prsHtml(b)}`;
+  const hereMissing =
+    phrase && !b.truncated && opts.currentRelPath !== null && !b.files.some((f) => f.relPath === opts.currentRelPath)
+      ? `<div class="wiki-sel-empty">This page is not listed: its source does not have the phrase as written. ${esc(NOT_AS_WRITTEN)}</div>`
+      : "";
+  return `<div class="wiki-sel-meta">${esc(total)}${b.truncated ? " · not all listed" : ""}</div><ul class="wiki-sel-files">${rows}</ul>${hereMissing}${log}${prsHtml(b)}`;
 }
 
 /** «History»: the commits and the log.md lines as one timeline, newest first,
