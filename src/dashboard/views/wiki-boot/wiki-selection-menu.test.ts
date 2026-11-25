@@ -20,7 +20,8 @@
  * - «Where else»/«History» answers (fix round 1 batch 3, F7): one with a PR row
  *   the route is refreshing (`stale: true`) is asked again, any answer is
  *   reused only within `MENTIONS_FRESH_MS`, and a page render (an Apply's)
- *   drops them.
+ *   drops them; an ask while one is in flight shares it, and a late answer
+ *   from before a render never drops the newer ask's.
  * - Explain where the thread cannot take the turn (F9): a second Explain
  *   while the first streams, and a selection in the article head, stream the
  *   classic `/api/wiki/explain` answer into their inline card instead of an
@@ -59,8 +60,15 @@ const gateway = () => new Response("Bad Gateway", { status: 502 });
 /** Every `GET /api/wiki/mentions` key asked, and whether its PR row is still being refreshed. */
 const mentionsAsked: string[] = [];
 let mentionsStale = false;
+/** While set, a mentions request waits for it (an answer in flight). */
+let mentionsGate: Promise<void> | null = null;
+/** The next mentions request fails (500). */
+let mentionsFailNext = false;
 /** Every classic `/api/wiki/explain` stream the menu opened. */
 const explainAsked: URL[] = [];
+/** While set, an explain stream's frames are pushed by the test (`explainCtl`). */
+let explainManual = false;
+let explainCtl: { push: (event: string, data: unknown) => void; close: () => void; signal: AbortSignal | null } | null = null;
 const EDIT_OLD = "The morning route adds a stop.";
 const EDIT_NEW = "The morning route adds two stops.";
 
@@ -92,6 +100,11 @@ beforeAll(() => {
     if (url.startsWith("/api/wiki/mentions?")) {
       const key = new URL(url, "http://x").searchParams.get("key")!;
       mentionsAsked.push(key);
+      const gate = mentionsGate;
+      const fail = mentionsFailNext;
+      mentionsFailNext = false;
+      if (gate) await gate;
+      if (fail) return json({ error: "boom" }, 500);
       return json({
         key, kind: "case", files: [{ relPath: REL, title: "Ferry", lines: [{ n: 9, text: NIGHT }] }], commits: [], log: [],
         prs: [{ repo: "o/r", number: 7, state: mentionsStale ? "unknown" : "merged", mergedAt: null, url: "https://github.com/o/r/pull/7", stale: mentionsStale }],
@@ -101,6 +114,13 @@ beforeAll(() => {
     if (url.startsWith("/api/wiki/explain?")) {
       const u = new URL(url, "http://x");
       explainAsked.push(u);
+      if (explainManual) {
+        const enc = new TextEncoder();
+        let ctl!: ReadableStreamDefaultController<Uint8Array>;
+        const stream = new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) });
+        explainCtl = { push: (event, data) => ctl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)), close: () => ctl.close(), signal: init?.signal ?? null };
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
       const frames = `event: delta\ndata: {"text":"CLASSIC "}\n\nevent: done\ndata: ${JSON.stringify({ answer: `CLASSIC for ${u.searchParams.get("sel")}` })}\n\nevent: end\ndata: {}\n\n`;
       return new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }
@@ -541,6 +561,61 @@ test("«Where else» after an Apply renders the page again asks the route again"
   expect(mentionsAsked).toEqual(["MEL-12", "MEL-12", "MEL-12"]);
 });
 
+/** A gate a mentions request waits on, and its release. */
+function hold(): () => void {
+  let release!: () => void;
+  mentionsGate = new Promise((r) => (release = r));
+  return release;
+}
+
+test("an ask while the key's answer is in flight shares it: «Where else» then «History», one request", async () => {
+  renderPage();
+  mentionsAsked.length = 0;
+  const release = hold();
+  try {
+    await selectText("MEL-12");
+    act(barEl().querySelector('[data-selact="where"]')!);
+    await settle();
+    await selectText("MEL-12");
+    act(barEl().querySelector('[data-selact="history"]')!);
+    await settle();
+    expect(mentionsAsked).toEqual(["MEL-12"]);
+  } finally {
+    mentionsGate = null;
+    release();
+  }
+  await settle();
+  expect(document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="history"] .wiki-sel-empty')?.textContent).toContain("No commit or log.md entry");
+});
+
+test("a failed answer from before a render does not drop the newer ask in flight", async () => {
+  renderPage();
+  mentionsAsked.length = 0;
+  const releaseOld = hold();
+  mentionsFailNext = true;
+  await whereElseStart();
+  // The page renders again while the old ask waits; a new ask goes out.
+  renderPage();
+  const releaseNew = hold();
+  await whereElseStart();
+  releaseOld();
+  await settle();
+  // The old one failed: the new one, still in flight, is shared by the next ask.
+  await whereElseStart();
+  mentionsGate = null;
+  releaseNew();
+  await settle();
+  expect(mentionsAsked).toEqual(["MEL-12", "MEL-12"]);
+  expect(document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="where"] [data-sel-file]')).toBeTruthy();
+});
+
+/** «Where else» on `MEL-12`, without waiting for its answer. */
+async function whereElseStart(): Promise<void> {
+  await selectText("MEL-12");
+  act(barEl().querySelector('[data-selact="where"]')!);
+  await flush();
+}
+
 test("Explain while the first inline Explain streams: the classic stream in its own card, no refusal; «Add to Oppfølging» is still refused", async () => {
   renderPage();
   classic.length = 0;
@@ -596,4 +671,43 @@ test("Explain on a selection in the article head (no passage of the page): the c
   // Right under the head, before the article.
   expect(card.previousElementSibling?.className).toBe("wiki-article-head");
   expect(card.nextElementSibling?.className).toBe("wiki-article");
+});
+
+test("the classic card's stream: a delta paints at once, an app_error shows its message, an end with no answer says so, a replaced card aborts", async () => {
+  renderPage();
+  document.querySelector(".wiki-article")!.insertAdjacentHTML("beforebegin", `<div class="wiki-article-head"><h1>The ferry plan head</h1></div>`);
+  const explainHead = async () => {
+    await selectText("The ferry plan head", ".wiki-article-head");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+  };
+  const body = () => document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"] .wiki-sel-card-body')!;
+  explainManual = true;
+  try {
+    await explainHead();
+    explainCtl!.push("delta", { text: "PARTIAL so far" });
+    await settle();
+    expect(body().textContent).toContain("PARTIAL so far");
+    // Another card replaces it: its next frame aborts the request.
+    const first = explainCtl!;
+    await whereElse();
+    expect(first.signal?.aborted).toBe(false);
+    first.push("delta", { text: " more" });
+    await settle();
+    expect(first.signal?.aborted).toBe(true);
+
+    await explainHead();
+    explainCtl!.push("app_error", { message: "The research bot is down." });
+    await settle();
+    expect(body().querySelector(".wiki-discuss-error")?.textContent).toBe("The research bot is down.");
+    explainCtl!.close();
+
+    await explainHead();
+    explainCtl!.push("delta", { text: "half" });
+    explainCtl!.close();
+    await settle();
+    expect(body().querySelector(".wiki-discuss-error")?.textContent).toBe("The explanation ended before its answer.");
+  } finally {
+    explainManual = false;
+  }
 });

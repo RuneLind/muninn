@@ -257,6 +257,8 @@ describe("the mentions cards", () => {
     expect(whereElseHtml(phrase, { ...opts, currentRelPath: "plans/a.mdx" })).not.toContain("This page is not listed");
     expect(whereElseHtml(body(), opts)).not.toContain("This page is not listed");
     expect(whereElseHtml(body({ kind: null, truncated: true }), opts)).not.toContain("This page is not listed");
+    // No open page to speak of (off a page): no such line.
+    expect(whereElseHtml(phrase, { ...opts, currentRelPath: null })).not.toContain("This page is not listed");
   });
   test("«History»: commits and log lines newest first, escaped", () => {
     const doc = new Window().document;
