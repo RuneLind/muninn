@@ -328,6 +328,22 @@ describe("readTracked and symlinks inside the wiki", () => {
   });
 });
 
+describe("readTracked on an empty tracked file", () => {
+  test("has no lines: totalLines 0, no text, nothing more", async () => {
+    const eroot = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-empty-"))), "w");
+    await mkdir(eroot, { recursive: true });
+    await git(eroot, "init", "-q", "-b", "main");
+    await writeFile(path.join(eroot, "empty.md"), "");
+    await writeFile(path.join(eroot, "one.md"), "only\n");
+    await git(eroot, "add", "-A");
+    await git(eroot, "commit", "-q", "-m", "empty");
+    expect(await readTracked(eroot, "empty.md")).toEqual({ ok: true, relPath: "empty.md", text: "", fromLine: 1, toLine: 0, totalLines: 0, more: false });
+    // A one-line file keeps its one line.
+    expect(await readTracked(eroot, "one.md")).toEqual({ ok: true, relPath: "one.md", text: "1: only", fromLine: 1, toLine: 1, totalLines: 1, more: false });
+    await rm(path.dirname(eroot), { recursive: true, force: true });
+  });
+});
+
 /**
  * A user's global config and a repo's own `.git/config` can flip keys that change
  * what git grep searches or prints. The global one is injected as `HOME` through

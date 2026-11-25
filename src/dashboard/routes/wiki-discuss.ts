@@ -99,7 +99,9 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { botWikis, resolveWikiRequest } from "../../wiki/registry.ts";
 import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
+import { botExcludesMcpTool } from "../../ai/connectors/copilot-sdk.ts";
 import { authMode } from "../../auth/policy.ts";
+import { researchMcpServer } from "../../research/mcp-server.ts";
 import { WIKI_TOOL_NAMES, type BotWiki } from "../../research/wiki-tools.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot } from "../../wiki/store.ts";
 import { requireJsonRequest } from "./json-request.ts";
@@ -125,17 +127,24 @@ export const COPILOT_DISCUSS_TOOLS: Record<string, string[]> = {
  * The Copilot surface for one bot and page: {@link COPILOT_DISCUSS_TOOLS}, plus
  * `research: [wiki_grep, wiki_read, wiki_history]` when the bot's `.mcp.json`
  * declares `research` (else `copilotNamedToolsSession` throws for a server the
- * bot lacks), the instance runs with `MUNINN_AUTH=off` and the bot has a wiki
- * (otherwise the server registers no wiki tool). `wikiToolsWiki` is the page's
- * wiki as the tools name it, only when it is in the bot's list (case-insensitive).
+ * bot lacks), its `excludedTools` deny none of the three (else it throws for
+ * the denied one), this process's research server serves them for the bot
+ * (`researchServes`: else the session is built without them and
+ * `assertSessionHoldsOnly` refuses the turn), the instance runs with
+ * `MUNINN_AUTH=off` and the bot has a wiki. All three or none: the prompt
+ * describes them as a set. `wikiToolsWiki` is the page's wiki as the tools
+ * name it, only when it is in the bot's list (case-insensitive).
  */
 export function copilotDiscussReach(opts: {
   mcpServers: readonly string[];
   botWikis: readonly BotWiki[];
   pageWiki: string;
   authOff: boolean;
+  researchServes: boolean;
+  excludedTools: string[] | undefined;
 }): { tools: Record<string, string[]>; wikiToolsWiki?: string } {
-  if (!opts.mcpServers.includes("research") || !opts.authOff || opts.botWikis.length === 0) return { tools: COPILOT_DISCUSS_TOOLS };
+  const denied = WIKI_TOOL_NAMES.some((tool) => botExcludesMcpTool(opts.excludedTools, "research", tool));
+  if (!opts.mcpServers.includes("research") || !opts.researchServes || denied || !opts.authOff || opts.botWikis.length === 0) return { tools: COPILOT_DISCUSS_TOOLS };
   const tools = { ...COPILOT_DISCUSS_TOOLS, research: [...WIKI_TOOL_NAMES] };
   const wanted = opts.pageWiki.trim().toLowerCase();
   const hit = wanted ? opts.botWikis.find((w) => w.name.toLowerCase() === wanted) : undefined;
@@ -250,6 +259,9 @@ export interface DiscussRouteDeps {
   git?: GitRun;
   /** The bot's `.mcp.json` servers by name; default `parseMcpConfig`. */
   mcpServers?: (botDir: string) => Record<string, unknown>;
+  /** Whether this process's research MCP server serves the wiki read tools
+   *  for the bot; default `researchMcpServer.servesWikiTools`. */
+  researchWikiTools?: (botName: string) => boolean;
   planCard?: typeof runPlanCard;
   planCardConfig?: () => PlanCardConfig;
   /** `DECISION_TRIAGE_REPO_ROOTS`'s raw value; default the config's. */
@@ -287,6 +299,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   const store = deps.store ?? dbStore;
   const oneShot = deps.oneShot ?? executeOneShot;
   const blocker = deps.surfaceBlocker ?? toolSurfaceBlocker;
+  const researchWikiTools = deps.researchWikiTools ?? ((name: string) => researchMcpServer.servesWikiTools(name));
   const git = deps.git ?? realGit;
   const timeoutMs = deps.timeoutMs ?? DISCUSS_TURN_TIMEOUT_MS;
   const heartbeatMs = deps.heartbeatMs ?? DISCUSS_HEARTBEAT_MS;
@@ -519,6 +532,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
             botWikis: botWikis(getWikiRegistry(), bot.name, isReadonlyWikiRoot),
             pageWiki: entry?.name ?? "",
             authOff: authMode() === "off",
+            researchServes: researchWikiTools(bot.name),
+            excludedTools: bot.excludedTools,
           })
         : null;
     const probe: ToolSurface = copilot ? { mcpTools: copilot.tools } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };

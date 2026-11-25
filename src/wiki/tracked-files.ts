@@ -344,7 +344,8 @@ export async function readTracked(root: string, relPath: string, opts: TrackedOp
   const bytes = new Uint8Array(await Bun.file(real).arrayBuffer());
   if (bytes.subarray(0, 8000).includes(0)) return { ok: false, error: `${rel} is a binary file` };
   const lines = new TextDecoder().decode(bytes).split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  // A last newline ends a line rather than opening one, and an empty file has none.
+  if (lines[lines.length - 1] === "") lines.pop();
   const totalLines = lines.length;
   const fromLine = Math.max(1, Math.floor(opts.offset ?? 1));
   const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? READ_MAX_LINES)), READ_MAX_LINES);

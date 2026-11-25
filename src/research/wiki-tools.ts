@@ -95,6 +95,7 @@ export async function wikiReadTool(
   if (typeof w === "string") return fail(w);
   const res = await readTracked(w.root, args.path, { git: deps.git, offset: args.offset, limit: args.limit });
   if (!res.ok) return fail(`wiki_read on "${w.name}": ${res.error}`);
+  if (res.totalLines === 0) return text(`${res.relPath} (wiki "${w.name}") is empty: it has no lines.`);
   if (res.toLine < res.fromLine) return text(`${res.relPath} has ${res.totalLines} line(s); offset ${res.fromLine} is past its end.`);
   const head = `${res.relPath} (wiki "${w.name}"), lines ${res.fromLine}–${res.toLine} of ${res.totalLines}:`;
   const tail = res.more ? `\n… more: call wiki_read again with offset=${res.toLine + 1}.` : "";

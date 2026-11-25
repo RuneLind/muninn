@@ -504,7 +504,7 @@ describe("a turn", () => {
         { name: "agent", root: agent, source: "extra", synthesisBot: "IVAR" },
         { name: "bare", root: bare, source: "extra" },
       ]);
-      const pinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()] } });
+      const pinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()], researchWikiTools: () => true } });
       await (await post(pinned.app, { wiki: "AGENT", relPath: "notes/harbour.md", question: "Where else?" })).text();
       const tools = { ...COPILOT_DISCUSS_TOOLS, research: ["wiki_grep", "wiki_read", "wiki_history"] };
       expect(pinned.calls.blocked[0]!.surface).toEqual({ mcpTools: tools });
@@ -515,7 +515,7 @@ describe("a turn", () => {
       expect(pinned.calls.prompts[0]).toContain('Pass wiki: "agent" to each.');
 
       // A wiki not in the bot's list (the research-bot fallback reaches it): the tools, but no wiki named.
-      const unpinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()] } });
+      const unpinned = setup({ connector: "copilot-sdk", deps: { bots: () => [withResearch()], researchWikiTools: () => true } });
       await (await post(unpinned.app, { wiki: "bare", relPath: "plans/ferry.mdx", question: "Where else?" })).text();
       expect(unpinned.calls.opts[0]!.toolSurface).toEqual({ mcpTools: tools });
       expect(unpinned.calls.prompts[0]).not.toContain("Pass wiki:");
@@ -534,6 +534,56 @@ describe("a turn", () => {
       ]);
       __resetWikiCacheForTest();
     }
+  });
+  /** A Copilot turn on a bot whose `.mcp.json` declares research, its page's wiki pinned to it: the surface it ran on, its prompt, and the bot names the research gate was asked about. */
+  async function researchTurn(excludedTools: string[] | undefined, serves: boolean) {
+    const botDir = path.join(dir, "bots", "ivar-gate");
+    await Bun.write(path.join(botDir, ".mcp.json"), JSON.stringify({ mcpServers: {
+      knowledge: { type: "http", url: "http://127.0.0.1:1/k" },
+      yggdrasil: { type: "http", url: "http://127.0.0.1:1/y" },
+      research: { type: "http", url: "http://127.0.0.1:1/mcp/ivar" },
+    } }));
+    const b: BotConfig = { ...bot("copilot-sdk"), dir: botDir, ...(excludedTools ? { excludedTools } : {}) };
+    const asked: string[] = [];
+    __setWikiRegistryForTest([
+      { name: "agent", root: agent, source: "extra", synthesisBot: "ivar" },
+      { name: "bare", root: bare, source: "extra" },
+    ]);
+    try {
+      const s = setup({ connector: "copilot-sdk", deps: { bots: () => [b], researchWikiTools: (name: string) => (asked.push(name), serves) } });
+      await (await post(s.app, { wiki: "agent", relPath: "notes/harbour.md", question: "Where else?" })).text();
+      const surface = s.calls.opts[0]!.toolSurface as { mcpTools: Record<string, string[]> };
+      expect(s.calls.blocked[0]!.surface).toEqual(surface);
+      return { bot: b, surface, prompt: s.calls.prompts[0]!, asked };
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+      __resetWikiCacheForTest();
+    }
+  }
+  test.each([[["mcp__research"]], [["research-*"]], [["mcp:research-wiki_history"]], [["mcp__research__wiki_grep"]]])(
+    "Copilot on a bot whose config.json excludes the research server or one wiki tool (%p): no research entry, and the real session builder takes the surface",
+    async (excludedTools) => {
+      const t = await researchTurn(excludedTools, true);
+      // Before the fix the builder threw here ("which ivar's config.json excludes"): every turn refused.
+      expect(() => copilotNamedToolsSession(t.bot, t.surface)).not.toThrow();
+      expect(t.surface).toEqual({ mcpTools: COPILOT_DISCUSS_TOOLS });
+      expect(t.prompt).not.toContain("research-wiki");
+    },
+  );
+  test("Copilot on a bot whose .mcp.json declares research while this process's research server does not serve its wiki tools: no research entry", async () => {
+    const off = await researchTurn(undefined, false);
+    expect(off.surface).toEqual({ mcpTools: COPILOT_DISCUSS_TOOLS });
+    expect(off.asked).toEqual(["ivar"]);
+    expect(() => copilotNamedToolsSession(off.bot, off.surface)).not.toThrow();
+    expect(off.prompt).not.toContain("research-wiki");
+    // Serving, and nothing excluded: the three tools.
+    const on = await researchTurn(undefined, true);
+    expect(on.surface).toEqual({ mcpTools: { ...COPILOT_DISCUSS_TOOLS, research: ["wiki_grep", "wiki_read", "wiki_history"] } });
+    expect(copilotNamedToolsSession(on.bot, on.surface).availableTools).toContain("mcp:research-wiki_history");
   });
   test("the card is built once per discussion and cached by the page hash", async () => {
     const store = new MemStore();
@@ -1025,13 +1075,19 @@ describe("«Continue in Claude Code» (P3)", () => {
 describe("copilotDiscussReach", () => {
   const wikis = [{ name: "melosys", root: "/w/a" }, { name: "melosys-kode-wiki", root: "/w/b" }];
   const withTools = { ...COPILOT_DISCUSS_TOOLS, research: ["wiki_grep", "wiki_read", "wiki_history"] };
-  test("research declared, auth off, a wiki: the three tools, and the page's wiki by its registered name", () => {
-    expect(copilotDiscussReach({ mcpServers: ["knowledge", "yggdrasil", "research"], botWikis: wikis, pageWiki: "Melosys-Kode-Wiki", authOff: true })).toEqual({ tools: withTools, wikiToolsWiki: "melosys-kode-wiki" });
-    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: wikis, pageWiki: "mimir", authOff: true })).toEqual({ tools: withTools });
+  const on = { authOff: true, researchServes: true, excludedTools: undefined };
+  test("research declared and served, auth off, a wiki, nothing excluded: the three tools, and the page's wiki by its registered name", () => {
+    expect(copilotDiscussReach({ ...on, mcpServers: ["knowledge", "yggdrasil", "research"], botWikis: wikis, pageWiki: "Melosys-Kode-Wiki" })).toEqual({ tools: withTools, wikiToolsWiki: "melosys-kode-wiki" });
+    expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "mimir" })).toEqual({ tools: withTools });
+    expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "mimir", excludedTools: ["mcp__yggdrasil", "research_knowledge"] })).toEqual({ tools: withTools });
   });
-  test("no research server, an authenticating instance, or no wiki: the surface as before", () => {
-    expect(copilotDiscussReach({ mcpServers: ["knowledge", "yggdrasil"], botWikis: wikis, pageWiki: "melosys", authOff: true })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
-    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", authOff: false })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
-    expect(copilotDiscussReach({ mcpServers: ["research"], botWikis: [], pageWiki: "melosys", authOff: true })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+  test("no research server, an authenticating instance, no wiki, a research server this process does not serve, or an excluded wiki tool: the surface as before", () => {
+    expect(copilotDiscussReach({ ...on, mcpServers: ["knowledge", "yggdrasil"], botWikis: wikis, pageWiki: "melosys" })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", authOff: false })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: [], pageWiki: "melosys" })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", researchServes: false })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
+    for (const excludedTools of [["mcp__research"], ["research-*"], ["mcp:*"], ["research-wiki_read"], ["mcp__research__wiki_*"]]) {
+      expect({ excludedTools, r: copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", excludedTools }) }).toEqual({ excludedTools, r: { tools: COPILOT_DISCUSS_TOOLS } });
+    }
   });
 });

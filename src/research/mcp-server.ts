@@ -84,6 +84,15 @@ export class ResearchMcpServer {
     this.bots.delete(botName);
   }
 
+  /** Whether this process answers `/mcp/<botName>` with the wiki read tools
+   *  right now: started, and the bot's entry passes the rule its session is
+   *  built by (`wikiToolsServed`). Copilot Discuss lists them only then (`copilotDiscussReach`): a
+   *  session missing a listed tool refuses the whole turn. */
+  servesWikiTools(botName: string): boolean {
+    const entry = this.bots.get(botName);
+    return this.isRunning && entry !== undefined && wikiToolsServed(entry);
+  }
+
   start(): void {
     if (this.httpServer) return;
     const port = this.portOverride ?? researchMcpPort();
@@ -268,10 +277,14 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
 
   // Wiki read tools: only with MUNINN_AUTH=off (an MCP call has no reader to
   // filter for), and only for a bot that has a wiki left after the read-only check.
-  const wikis = liveWikis(entry.wikis);
-  if (authMode() === "off" && wikis.length > 0) registerWikiTools(server, wikis);
+  if (wikiToolsServed(entry)) registerWikiTools(server, liveWikis(entry.wikis));
 
   return server;
+}
+
+/** The one rule for whether a bot's session gets the wiki read tools. */
+function wikiToolsServed(entry: BotEntry): boolean {
+  return authMode() === "off" && liveWikis(entry.wikis).length > 0;
 }
 
 export const researchMcpServer = new ResearchMcpServer();

@@ -16,7 +16,7 @@ import { __setReadonlyWikiRootsForTest } from "../wiki/readonly.ts";
 import { botWikis, type WikiRegistryEntry } from "../wiki/registry.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 import { ResearchMcpServer } from "./mcp-server.ts";
-import { resolveToolWiki, wikiGrepTool, wikiHistoryTool } from "./wiki-tools.ts";
+import { resolveToolWiki, wikiGrepTool, wikiHistoryTool, wikiReadTool } from "./wiki-tools.ts";
 
 let base = "";
 let one = "";
@@ -121,6 +121,34 @@ describe("wikiGrepTool", () => {
     expect(none.isError).toBe(true);
     expect(textOf(none)).toContain('glob "*.MD" selects no tracked file');
     expect(textOf(none)).toContain("plans/**");
+  });
+});
+
+describe("ResearchMcpServer.servesWikiTools", () => {
+  test("true only while running, with MUNINN_AUTH=off and a live wiki registered for that bot", async () => {
+    expect(server.servesWikiTools("harbour")).toBe(true);
+    expect(server.servesWikiTools("HARBOUR")).toBe(false); // the URL's bot name is exact
+    expect(server.servesWikiTools("plain")).toBe(false);
+    expect(server.servesWikiTools("nobody")).toBe(false);
+    __setReadonlyWikiRootsForTest([two]);
+    expect(server.servesWikiTools("solo")).toBe(false);
+    __setReadonlyWikiRootsForTest();
+    __setAuthPolicyForTest({ mode: "entra", authenticating: true });
+    expect(server.servesWikiTools("harbour")).toBe(false);
+    __setAuthPolicyForTest(null);
+    const idle = new ResearchMcpServer(0);
+    idle.registerBot({ botName: "harbour", knowledgeApiUrl: "http://127.0.0.1:1", wikis: [{ name: "harbour", root: one }] });
+    expect(idle.servesWikiTools("harbour")).toBe(false);
+  });
+});
+
+describe("wikiReadTool", () => {
+  test("an empty tracked file is reported as empty, not as one line", async () => {
+    const root = path.join(base, "empty-wiki");
+    await makeWiki(root, { "empty.md": "", "a.md": "x\n" });
+    const res = await wikiReadTool([{ name: "harbour", root }], { path: "empty.md" }, { isReadonlyRoot: () => false });
+    expect(res.isError).toBeFalsy();
+    expect(textOf(res)).toBe('empty.md (wiki "harbour") is empty: it has no lines.');
   });
 });
 
