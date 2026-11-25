@@ -55,7 +55,6 @@ export const BATCH_MAX_BYTES = 40_000;
  *  route degrades to `{ digest: null, error }` on timeout. */
 export const DIGEST_TIMEOUT_MS = 45_000;
 
-
 /** The digest returned to the route + persisted by a future scheduler. `bullets`
  *  is markdown (page mentions already marked as `[[wikilinks]]`); the route
  *  renders it to HTML at response time so the stored form stays plain markdown. */
