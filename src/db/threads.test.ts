@@ -519,4 +519,30 @@ describe("wiki threads (kind 'wiki', migration 094)", () => {
     const [n] = await getDb()`SELECT (SELECT count(*) FROM wiki_discuss_turns)::int AS turns, (SELECT count(*) FROM messages)::int AS messages`;
     expect(n).toEqual({ turns: 0, messages: 0 });
   });
+
+  test("a switch racing the wiki thread's creation for its name never makes the wiki thread active", async () => {
+    await switchThread("u1", "bot1", "work");
+    let refused = 0;
+    for (let i = 0; i < 60; i++) {
+      const [sw, wt] = await Promise.allSettled([
+        switchThread("u1", "bot1", `wiki: race ${i}`),
+        getOrCreateWikiThread("u1", "bot1", "mimir", `plans/race-${i}.mdx`, (s) => `wiki: race ${i}${s}`),
+      ]);
+      expect(wt.status).toBe("fulfilled");
+      if (sw.status === "rejected") {
+        expect(sw.reason).toBeInstanceOf(WikiThreadRefused);
+        refused++;
+      }
+      const active = await getActiveThread("u1", "bot1");
+      expect(active?.kind).toBe("chat");
+    }
+    // The race was run: some switches met the wiki thread and were refused.
+    expect(refused).toBeGreaterThan(0);
+  });
+
+  test("the schema refuses a wiki thread marked active", async () => {
+    const t = await getOrCreateWikiThread("u1", "bot1", "mimir", "plans/ferry.mdx", nameFor);
+    const err = await getDb()`UPDATE threads SET is_active = true WHERE id = ${t.id}`.then(() => null, (e: unknown) => e);
+    expect(err).toMatchObject({ code: "23514" });
+  });
 });

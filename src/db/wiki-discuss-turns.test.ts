@@ -7,9 +7,11 @@
  * mark, the card and the hand-over mark (migration 091). Invented pages only.
  */
 import { describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
-import { getRecentMessages } from "./messages.ts";
+import { getRecentMessages, getSimMessages } from "./messages.ts";
+import { deleteThreadById, ensureDefaultThread } from "./threads.ts";
 import {
   DiscussTurnConflict,
   finishDiscussTurn,
@@ -271,5 +273,128 @@ describe("wiki thread turns (migration 094)", () => {
     expect((await getRecentMessages("kari", 20, "ivar")).map((m) => m.text)).toEqual(["a chat line"]);
     expect((await getRecentMessages("kari", 20)).map((m) => m.text)).toEqual(["a chat line"]);
     expect((await getRecentMessages("kari", 20, "ivar", tid, { excludeProactive: true })).map((m) => m.role)).toEqual(["user"]);
+  });
+
+  /** Wait until `n` backends of this database wait on a lock. */
+  async function lockWaiters(n: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      const [row] = await getDb()`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+      if ((row!.n as number) >= n) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`fewer than ${n} backends waited on a lock`);
+  }
+
+  /** A transaction that runs `lock` and holds it until `release()`. */
+  async function hold(lock: (tx: never) => Promise<unknown>): Promise<{ release: () => void; done: Promise<unknown> }> {
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const done = getDb().begin(async (tx) => {
+      await lock(tx as never);
+      locked();
+      await released;
+    });
+    await isLocked;
+    return { release, done };
+  }
+
+  const wikiOrphans = async () =>
+    (await getDb()`SELECT content FROM messages WHERE source = 'wiki' AND thread_id IS NULL`).map((r) => r.content as string);
+
+  test("deleting the thread while a turn stores its answer leaves no wiki message without a thread", async () => {
+    const main = await ensureDefaultThread("kari", "ivar");
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    // Pause the store past its first statement: its message insert waits on the thread row.
+    const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM threads WHERE id = ${tid} FOR UPDATE`);
+    const store = turns.storeDiscussAssistantMessage(a.id, "WIKI ANSWER").catch((e: unknown) => e);
+    await lockWaiters(1);
+    const del = deleteThreadById(tid);
+    await lockWaiters(2);
+    holder.release();
+    await holder.done;
+    expect(await store).not.toBeInstanceOf(Error);
+    expect((await del)?.id).toBe(tid);
+    expect(await wikiOrphans()).toEqual([]);
+    expect((await getRecentMessages("kari", 20, "ivar", main)).map((m) => m.text)).toEqual([]);
+  });
+
+  test("a store or a sweep that meets a delete already holding the thread waits for it: no deadlock, no message left without a thread", async () => {
+    for (const kind of ["store", "sweep"] as const) {
+      const tid = await thread();
+      const a = await startDiscussTurn(threadStart(tid));
+      if (kind === "store") await done(a.id);
+      else await getDb()`UPDATE wiki_discuss_turns SET heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+      // Pause the delete inside its message delete: it waits on the question's row.
+      const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM messages WHERE id = ${a.userMessageId} FOR UPDATE`);
+      const del = deleteThreadById(tid).catch((e: unknown) => e);
+      await lockWaiters(1);
+      const racer = (kind === "store" ? turns.storeDiscussAssistantMessage(a.id, "WIKI ANSWER") : turns.closeAbandonedDiscussTurns(STALE_MS)).catch((e: unknown) => e);
+      await Promise.race([racer, lockWaiters(2)]);
+      holder.release();
+      await holder.done;
+      expect(await racer).not.toBeInstanceOf(Error);
+      expect(((await del) as { id?: string } | null)?.id).toBe(tid);
+      expect(await wikiOrphans()).toEqual([]);
+    }
+  });
+
+  test("deleting the thread while the next turn starts leaves no wiki message without a thread", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn(threadStart(tid));
+    await done(a.id);
+    // Pause the delete inside its message delete: it waits on the first question's row.
+    const holder = await hold((tx: postgres.Sql) => tx`SELECT 1 FROM messages WHERE id = ${a.userMessageId} FOR UPDATE`);
+    const del = deleteThreadById(tid);
+    await lockWaiters(1);
+    const next = startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "WIKI QUESTION" } }).catch((e: unknown) => e);
+    // Either the start finishes (no lock order) or it waits behind the delete.
+    await Promise.race([next, lockWaiters(2)]);
+    holder.release();
+    await holder.done;
+    // The thread is gone when the start goes on: its turn insert fails on the foreign key, never on a deadlock.
+    const outcome = await next;
+    if (outcome instanceof Error) expect((outcome as { code?: string }).code).toBe("23503");
+    expect((await del)?.id).toBe(tid);
+    expect(await wikiOrphans()).toEqual([]);
+  });
+
+  test("main's history leaves out a wiki message that lost its thread", async () => {
+    const main = await ensureDefaultThread("kari", "ivar");
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, source, platform) VALUES ('kari', 'ivar', 'assistant', 'WIKI ANSWER', 'wiki', 'web')`;
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES ('kari', 'ivar', 'user', 'an old chat line', 'web')`;
+    expect((await getRecentMessages("kari", 20, "ivar", main)).map((m) => m.text)).toEqual(["an old chat line"]);
+  });
+
+  test("a turn closed as abandoned by the next start reads before the next question, in the thread and in /chat", async () => {
+    const tid = await thread();
+    const a = await startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "Q1" } });
+    // The first turn started 20 minutes ago and last showed life 10 minutes ago.
+    await getDb()`UPDATE wiki_discuss_turns SET created_at = now() - interval '20 minutes', heartbeat_at = now() - interval '10 minutes' WHERE id = ${a.id}`;
+    await getDb()`UPDATE messages SET created_at = now() - interval '20 minutes' WHERE id = ${a.userMessageId}`;
+    await startDiscussTurn({ ...threadStart(tid), userMessage: { userId: "kari", botName: "ivar", content: "Q2" } });
+    const order = ["Q1", turns.UNFINISHED_MARK, "Q2"];
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(order);
+    expect((await getSimMessages("kari", "ivar", "web", 50, tid, true)).map((m) => m.content)).toEqual(order);
+    // The thread reads in turn order whatever the times say: the same time for both.
+    await getDb()`UPDATE messages SET created_at = (SELECT created_at FROM messages WHERE content = 'Q2') WHERE content = ${turns.UNFINISHED_MARK}`;
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(order);
+    // The stalled turn comes back: its answer takes the unfinished message's place.
+    expect(await done(a.id)).toBe(true);
+    await turns.storeDiscussAssistantMessage(a.id, "A1");
+    expect((await turns.listThreadMessagesWithTurns(tid)).map((m) => m.content)).toEqual(["Q1", "A1", "Q2"]);
+  });
+
+  test("/chat reads two messages with the same time in one order: the user's first", async () => {
+    const tid = await thread();
+    await getDb()`INSERT INTO messages (user_id, bot_name, role, content, platform, thread_id, created_at)
+      VALUES ('kari', 'ivar', 'user', 'question', 'web', ${tid}, '2026-11-25T10:00:00Z'),
+             ('kari', 'ivar', 'assistant', 'answer', 'web', ${tid}, '2026-11-25T10:00:00Z')`;
+    for (let i = 0; i < 5; i++) {
+      expect((await getSimMessages("kari", "ivar", "web", 50, tid, true)).map((m) => m.content)).toEqual(["question", "answer"]);
+    }
   });
 });

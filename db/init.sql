@@ -94,7 +94,9 @@ CREATE TABLE threads (
   CONSTRAINT threads_kind_check CHECK (kind IN ('chat', 'wiki')),
   CONSTRAINT threads_wiki_key_check CHECK (
     kind <> 'wiki' OR (wiki IS NOT NULL AND ((rel_path IS NULL) <> (trace_key IS NULL)))
-  )
+  ),
+  -- A wiki thread is never the active thread (the chat pipeline refuses one).
+  CONSTRAINT threads_wiki_not_active_check CHECK (NOT (kind = 'wiki' AND is_active))
 );
 
 -- Only one active thread per user+bot

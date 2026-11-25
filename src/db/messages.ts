@@ -151,14 +151,15 @@ export async function getRecentMessages(
       throw new Error("getRecentMessages: botName is required when threadId is provided");
     }
     // Thread-scoped: only include pre-migration messages (thread_id IS NULL) for the "main"
-    // thread — other threads should only see their own messages.
+    // thread — other threads should only see their own messages. A wiki thread's
+    // row that lost its thread (`source 'wiki'`) never joins main's history.
     rows = await sql`
       SELECT id, user_id, username, role, content, cost_usd, duration_ms, model, input_tokens, output_tokens, created_at
       FROM messages
       WHERE user_id = ${userId} AND bot_name = ${botName}
         AND (
           thread_id = ${threadId}
-          OR (thread_id IS NULL AND EXISTS (
+          OR (thread_id IS NULL AND source IS DISTINCT FROM ${WIKI_THREAD_SOURCE} AND EXISTS (
             SELECT 1 FROM threads t WHERE t.id = ${threadId} AND t.name = 'main'
           ))
         )
@@ -317,7 +318,8 @@ export async function getSimMessages(
       AND bot_name = ${botName}
       ${platformFilter}
       ${threadFilter}
-    ORDER BY created_at DESC
+    -- Ties (two rows of one transaction) read the same way every time, the user's first.
+    ORDER BY created_at DESC, (role = 'user') ASC, id DESC
     LIMIT ${limit}
   `;
   return rows

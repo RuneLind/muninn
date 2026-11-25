@@ -14,6 +14,10 @@ ALTER TABLE threads DROP CONSTRAINT IF EXISTS threads_wiki_key_check;
 ALTER TABLE threads ADD CONSTRAINT threads_wiki_key_check CHECK (
   kind <> 'wiki' OR (wiki IS NOT NULL AND ((rel_path IS NULL) <> (trace_key IS NULL)))
 );
+-- A wiki thread is never the active thread: every chat turn resolves the
+-- active thread, and the chat pipeline refuses a wiki one (D7).
+ALTER TABLE threads DROP CONSTRAINT IF EXISTS threads_wiki_not_active_check;
+ALTER TABLE threads ADD CONSTRAINT threads_wiki_not_active_check CHECK (NOT (kind = 'wiki' AND is_active));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_wiki_page ON threads (user_id, bot_name, wiki, rel_path)
   WHERE kind = 'wiki' AND closed_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_threads_wiki_trace ON threads (user_id, bot_name, wiki, trace_key)

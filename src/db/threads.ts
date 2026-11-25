@@ -233,24 +233,32 @@ export async function switchThread(userId: string, botName: string, name: string
       WHERE user_id = ${userId} AND bot_name = ${botName} AND is_active = true
     `;
 
-    // Get or create the target thread
-    const [existing] = await tx`
-      SELECT * FROM threads
-      WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized}
-    `;
-
-    if (existing) {
-      await tx`UPDATE threads SET is_active = true WHERE id = ${existing.id}`;
+    // Get or create the target thread. A wiki thread created since the check
+    // above is never selected or activated (the schema refuses it too).
+    const activate = async (): Promise<Thread | null> => {
+      const [existing] = await tx`
+        SELECT * FROM threads
+        WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind <> 'wiki'
+      `;
+      if (!existing) return null;
+      await tx`UPDATE threads SET is_active = true WHERE id = ${existing.id} AND kind <> 'wiki'`;
       return rowToThread({ ...existing, is_active: true });
-    }
+    };
+    const found = await activate();
+    if (found) return found;
 
-    // Create new thread
+    // Create new thread. A concurrent request that took the name first: its
+    // chat thread is switched to, its wiki thread refused.
     const [row] = await tx`
       INSERT INTO threads (user_id, bot_name, name, is_active)
       VALUES (${userId}, ${botName}, ${normalized}, true)
+      ON CONFLICT (user_id, bot_name, name) DO NOTHING
       RETURNING *
     `;
-    return rowToThread(row!);
+    if (row) return rowToThread(row);
+    const taken = await activate();
+    if (taken) return taken;
+    throw new WikiThreadRefused("be switched to");
   });
 }
 
@@ -386,7 +394,11 @@ export async function getAllThreadsForBot(botName?: string): Promise<(Thread & {
 
 /** Cascade-delete a thread's memories → messages → thread row within a tx, then
  *  re-activate the "main" thread if the deleted one was active. The FK from
- *  memories → messages has no ON DELETE cascade, so the order matters. */
+ *  memories → messages has no ON DELETE cascade, so the order matters. The
+ *  caller holds the thread row `FOR UPDATE` (lock order: thread, then a wiki
+ *  turn's row — `src/db/wiki-discuss-turns.ts`): a wiki turn storing a message
+ *  on it waits, so no message lands after the message delete and loses its
+ *  thread to the row's `ON DELETE SET NULL`. */
 async function cascadeDeleteThread(
   tx: Sql,
   threadId: string,
@@ -430,6 +442,7 @@ export async function deleteThread(userId: string, botName: string, name: string
     const [target] = await tx`
       SELECT id, is_active FROM threads
       WHERE user_id = ${userId} AND bot_name = ${botName} AND name = ${normalized} AND kind <> 'wiki'
+      FOR UPDATE
     `;
 
     if (!target) return false;
@@ -449,7 +462,7 @@ export async function deleteThreadById(threadId: string): Promise<Thread | null>
     const tx = _tx as unknown as Sql;
 
     const [target] = await tx`
-      SELECT * FROM threads WHERE id = ${threadId}
+      SELECT * FROM threads WHERE id = ${threadId} FOR UPDATE
     `;
 
     if (!target) return null;

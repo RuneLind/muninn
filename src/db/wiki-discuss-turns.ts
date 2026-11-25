@@ -176,17 +176,44 @@ export function unfinishedMessage(answer: string): string {
   return answer.trim() ? `${answer.trimEnd()}\n\n${UNFINISHED_MARK}` : UNFINISHED_MARK;
 }
 
+/**
+ * Lock order, everywhere a thread turn and its thread are both locked: the
+ * thread row first, then the turn row. The delete takes the thread `FOR UPDATE`
+ * (`src/db/threads.ts`, `cascadeDeleteThread`) before its message delete locks
+ * turn rows (their message ids go `SET NULL`); a turn path takes the thread
+ * `FOR KEY SHARE` before it locks or inserts a turn row or inserts a message.
+ * So a message is stored either before the delete, which then deletes it, or
+ * not at all (the thread is gone), never after the message delete, where the
+ * thread's `ON DELETE SET NULL` would leave it with no thread. `KEY SHARE` is
+ * what the message's foreign key takes anyway: it waits only on a delete.
+ * Returns the ids of the threads that still exist.
+ */
+async function lockThreads(sql: Sql, threadIds: string[]): Promise<string[]> {
+  if (threadIds.length === 0) return [];
+  const rows = await sql`SELECT id FROM threads WHERE id = ANY(${threadIds}::uuid[]) ORDER BY id FOR KEY SHARE`;
+  return rows.map((r) => r.id as string);
+}
+
 async function closeAbandoned(sql: Sql, staleRunningMs: number, discussionId?: string): Promise<string[]> {
+  const stale = sql`end_state = 'running'
+      AND heartbeat_at < now() - ${staleRunningMs}::double precision * interval '1 millisecond'
+      ${discussionId === undefined ? sql`` : sql`AND discussion_id = ${discussionId}`}`;
+  // The threads first (lock order above); a turn whose thread is gone is left
+  // to the delete's CASCADE.
+  const candidates = await sql`SELECT DISTINCT thread_id FROM wiki_discuss_turns WHERE ${stale} AND thread_id IS NOT NULL`;
+  const threads = await lockThreads(sql, candidates.map((r) => r.thread_id as string));
   const rows = await sql`
     UPDATE wiki_discuss_turns SET end_state = 'abandoned', error = ${ABANDONED_ERROR}, finished_at = now()
-    WHERE end_state = 'running'
-      AND heartbeat_at < now() - ${staleRunningMs}::double precision * interval '1 millisecond'
-      ${discussionId === undefined ? sql`` : sql`AND discussion_id = ${discussionId}`}
+    WHERE ${stale} AND (thread_id IS NULL OR thread_id = ANY(${threads}::uuid[]))
     RETURNING id, thread_id, answer, assistant_message_id`;
   // A thread turn gets its «(unfinished)» assistant message, so /chat shows
-  // the turn ended; a turn that comes back later rewrites that message.
+  // the turn ended; a turn that comes back later rewrites that message. It is
+  // dated at the turn's last heartbeat, so it reads before the next turn's
+  // question even when that turn's start is the transaction sweeping it.
   for (const r of rows) {
-    if (r.thread_id && !r.assistant_message_id) await writeAssistantMessage(sql, r.id as string, unfinishedMessage((r.answer as string) ?? ""), {});
+    if (r.thread_id && !r.assistant_message_id) {
+      await writeAssistantMessage(sql, r.id as string, unfinishedMessage((r.answer as string) ?? ""), {}, { atHeartbeat: true });
+    }
   }
   return rows.map((r) => r.id as string);
 }
@@ -199,9 +226,19 @@ export interface AssistantMessageMeta {
 
 /** Insert the turn's assistant message on its thread, or rewrite the one it
  *  has; sets `assistant_message_id`. Null when the turn has no thread (or the
- *  thread, and with it the turn, is gone). Call inside a transaction that
- *  holds the turn row, or let {@link storeDiscussAssistantMessage} take one. */
-async function writeAssistantMessage(sql: Sql, turnId: string, content: string, meta: AssistantMessageMeta): Promise<string | null> {
+ *  thread, and with it the turn, is gone). Call inside a transaction; it
+ *  locks the thread, then the turn row (the lock order above).
+ *  `atHeartbeat` dates a new message at the turn's last heartbeat. */
+async function writeAssistantMessage(
+  sql: Sql,
+  turnId: string,
+  content: string,
+  meta: AssistantMessageMeta,
+  opts: { atHeartbeat?: boolean } = {},
+): Promise<string | null> {
+  const [ref] = await sql`SELECT thread_id FROM wiki_discuss_turns WHERE id = ${turnId}`;
+  if (!ref?.thread_id) return null;
+  if ((await lockThreads(sql, [ref.thread_id as string])).length === 0) return null;
   const [turn] = await sql`
     SELECT w.assistant_message_id, w.thread_id, t.user_id, t.bot_name
     FROM wiki_discuss_turns w JOIN threads t ON t.id = w.thread_id
@@ -217,9 +254,11 @@ async function writeAssistantMessage(sql: Sql, turnId: string, content: string, 
     if (updated) return updated.id as string;
   }
   const [msg] = await sql`
-    INSERT INTO messages (user_id, bot_name, role, content, model, cost_usd, duration_ms, source, platform, thread_id)
-    VALUES (${turn.user_id as string}, ${turn.bot_name as string}, 'assistant', ${content}, ${meta.model ?? null},
-            ${meta.costUsd ?? null}, ${meta.durationMs ?? null}, 'wiki', 'web', ${turn.thread_id as string})
+    INSERT INTO messages (user_id, bot_name, role, content, model, cost_usd, duration_ms, source, platform, thread_id, created_at)
+    SELECT ${turn.user_id as string}, ${turn.bot_name as string}, 'assistant', ${content}, ${meta.model ?? null},
+           ${meta.costUsd ?? null}, ${meta.durationMs ?? null}, 'wiki', 'web', ${turn.thread_id as string},
+           ${opts.atHeartbeat ? sql`w.heartbeat_at` : sql`now()`}
+    FROM wiki_discuss_turns w WHERE w.id = ${turnId}
     RETURNING id`;
   await sql`UPDATE wiki_discuss_turns SET assistant_message_id = ${msg!.id as string} WHERE id = ${turnId}`;
   return msg!.id as string;
@@ -245,6 +284,9 @@ export async function startDiscussTurn(input: DiscussTurnStart, opts: { staleRun
   try {
     const row = await sql.begin(async (_tx) => {
       const tx = _tx as unknown as Sql;
+      // The thread first (lock order above). A thread deleted meanwhile is
+      // not locked, and the turn's insert then fails on its foreign key.
+      if (input.threadId) await lockThreads(tx, [input.threadId]);
       await closeAbandoned(tx, opts.staleRunningMs, input.discussionId);
       const [inserted] = await tx`
         INSERT INTO wiki_discuss_turns
@@ -380,14 +422,16 @@ export interface ThreadMessageWithTurn {
   turn: DiscussTurn | null;
 }
 
-/** A wiki thread's messages, oldest first, each joined to its ledger row. */
+/** A wiki thread's messages, oldest first, each joined to its ledger row:
+ *  in turn order, a turn's question before its answer (a sweep's message and
+ *  the next question can share a time); a message with no turn last. */
 export async function listThreadMessagesWithTurns(threadId: string): Promise<ThreadMessageWithTurn[]> {
   const rows = await getDb()`
     SELECT m.id AS m_id, m.role AS m_role, m.content AS m_content, m.created_at AS m_created_at, w.*
     FROM messages m
     LEFT JOIN wiki_discuss_turns w ON w.thread_id = m.thread_id AND (w.user_message_id = m.id OR w.assistant_message_id = m.id)
     WHERE m.thread_id = ${threadId}
-    ORDER BY m.created_at, m.role DESC`;
+    ORDER BY w.seq NULLS LAST, (m.role = 'user') DESC, m.created_at, m.id`;
   return rows.map((r) => ({
     id: r.m_id as string,
     role: r.m_role as ThreadMessageWithTurn["role"],
