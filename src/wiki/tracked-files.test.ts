@@ -229,6 +229,95 @@ describe("a wildcard-free glob is anchored at the wiki root", () => {
   });
 });
 
+/**
+ * Every glob spelling, enumerated (class check after three fix rounds that each
+ * found one more shape). A glob is prefix + lead(body) + suffix:
+ *  - prefix: the root-prefix grammar `(./|/)*` (none, `./`, `./` twice, `./`
+ *    then `/`, `/`, `//`, `/` then `./`) and two that are NOT root prefixes, a
+ *    space and `./ /`: whitespace is never trimmed, so those match literally.
+ *  - lead: `!` and each Bun.Glob wildcard opener (`*`, `?`, `[`, `{`) put at the
+ *    body's first character, or the body as is.
+ *  - body: top-level folder, nested folder (also spelled with an inner `//`),
+ *    root file, nested file (also with `//`), and a missing name.
+ *  - suffix: none, `/`, `//`, `/**`.
+ * 9 × 6 × 7 × 4 = 1512 cases, plus 8 spellings of the whole wiki: 1520.
+ * The expected selection comes from `reference` below, a segment-based model of
+ * the rule written apart from the production code.
+ */
+describe("glob spellings, enumerated", () => {
+  const FILES = ["README.md", "plans/a.md", "plans/deep/c.md", "x/plans/d.md", "x/README.md", "plans.md", "plansx/f.md"];
+  const PREFIXES = ["", "./", "././", ".//", "/", "//", "/./", " ", "./ /"];
+  const LEADS: Record<string, (body: string) => string> = {
+    literal: (b) => b,
+    "!": (b) => `!${b}`,
+    "*": (b) => `*${b.slice(1)}`,
+    "?": (b) => `?${b.slice(1)}`,
+    "[": (b) => `[${b[0]}]${b.slice(1)}`,
+    "{": (b) => {
+      const i = b.indexOf("/");
+      return i === -1 ? `{${b},zz}` : `{${b.slice(0, i)},zz}${b.slice(i)}`;
+    },
+  };
+  const BODIES = ["plans", "x/plans", "x//plans", "README.md", "plans/a.md", "plans//a.md", "nope"];
+  const SUFFIXES = ["", "/", "//", "/**"];
+  const WHOLE = [".", "./", "/", "//", ".//", "././", "/./", "./."];
+  const CASES: string[] = [...WHOLE];
+  for (const p of PREFIXES) for (const lead of Object.values(LEADS)) for (const b of BODIES) for (const s of SUFFIXES) CASES.push(p + lead(b) + s);
+
+  /** The intended rule: drop empty segments (leading, trailing and doubled `/`) and leading `.` segments; nothing left is the whole wiki; a leading `!` is refused; a wildcard is a Bun.Glob from the root that, without `/`, also matches the file name; anything else is a file or folder path from the root. */
+  function reference(raw: string): "negation" | string[] {
+    const segs = raw.split("/").filter((s) => s !== "");
+    while (segs[0] === ".") segs.shift();
+    const g = segs.join("/");
+    if (g === "") return [...FILES];
+    if (g.startsWith("!")) return "negation";
+    if (/[*?[{]/.test(g)) {
+      const glob = new Bun.Glob(g);
+      return FILES.filter((f) => glob.match(f) || (!g.includes("/") && glob.match(path.posix.basename(f))));
+    }
+    return FILES.filter((f) => f === g || f.startsWith(`${g}/`));
+  }
+
+  let eroot = "";
+  beforeAll(async () => {
+    eroot = await realpath(await testTempDir(path.join(tmpdir(), "muninn-tracked-enum-")));
+    for (const rel of FILES) {
+      await mkdir(path.dirname(path.join(eroot, rel)), { recursive: true });
+      await writeFile(path.join(eroot, rel), "ENUM-1\n");
+    }
+    await git(eroot, "init", "-q", "-b", "main");
+    await git(eroot, "add", "-A");
+    await git(eroot, "commit", "-q", "-m", "enum");
+  });
+  afterAll(async () => {
+    await rm(eroot, { recursive: true, force: true });
+  });
+
+  test(`every one of the ${CASES.length} spellings selects what the reference rule selects`, async () => {
+    expect(CASES.length).toBe(1520);
+    const failures: unknown[] = [];
+    const check = async (glob: string) => {
+      const want = reference(glob);
+      const res = await grepTracked(eroot, "ENUM-1", { glob, max: 500 });
+      const got = res.ok ? [...new Set(res.hits.map((h) => h.relPath))].sort() : res.error;
+      // (a) a leading ! after normalization is refused as negation.
+      if (want === "negation") {
+        if (res.ok || !res.error.includes("negation")) failures.push({ glob, want: "negation error", got });
+        return;
+      }
+      // (c) an empty selection is an error, never a search that found nothing.
+      if (want.length === 0) {
+        if (res.ok || !res.error.includes("selects no tracked file")) failures.push({ glob, want: "«selects no tracked file»", got });
+        return;
+      }
+      // (b) otherwise exactly the reference selection.
+      if (!res.ok || JSON.stringify(got) !== JSON.stringify([...want].sort())) failures.push({ glob, want: [...want].sort(), got });
+    };
+    for (let i = 0; i < CASES.length; i += 16) await Promise.all(CASES.slice(i, i + 16).map(check));
+    expect(failures).toEqual([]);
+  }, 120_000);
+});
+
 describe("historyFor", () => {
   test("lists the commits that changed the term's count, newest first, with root-relative files", async () => {
     const res = await historyFor(wiki, "KEY-1");

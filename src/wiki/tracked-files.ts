@@ -61,24 +61,43 @@ export async function trackedFiles(root: string, opts: TrackedOpts = {}): Promis
 /** `*`, `?`, `[` and `{` are what Bun.Glob treats as wildcards. */
 const hasWildcard = (glob: string) => /[*?[{]/.test(glob);
 
+export type NormalizedGlob = { ok: true; kind: "all" | "path" | "pattern"; value: string } | { ok: false; error: string };
+
 /**
- * Does `glob` select `relPath`? Case-sensitive; a leading `./` is dropped. A
- * glob without a wildcard is a path from the wiki root: `plans` and `plans/`
- * select the root folder `plans` (never `x/plans`), `plans/x.md` the file, `.`
- * everything. A glob with one is matched from the root, and without `/` also
- * against the basename at any depth (`*.csv` finds `plans/x/Q-3.csv`). A
- * leading `!` (Bun.Glob negation) is refused by {@link grepTracked}.
+ * The one reading of a caller's glob; nothing else looks at the raw string.
+ * Doubled `/` collapse, any run of leading `./` and `/` goes, and so do
+ * trailing `/`. Whitespace is kept, so a stray space matches literally (and
+ * then selects nothing). Left empty or `.`: the whole wiki. A leading `!`
+ * (Bun.Glob negation) is refused. A wildcard makes a Bun.Glob pattern; anything
+ * else is a file or folder path from the root.
  */
-export function globMatches(glob: string, relPath: string): boolean {
-  const g = glob.replace(/^(\.\/)+/, "");
-  if (!hasWildcard(g)) {
-    const p = g.replace(/\/+$/, "");
-    if (p === "" || p === ".") return true;
-    return relPath === p || relPath.startsWith(`${p}/`);
+export function normalizeGlob(raw: string): NormalizedGlob {
+  const value = raw.replace(/\/{2,}/g, "/").replace(/^(?:\.?\/)+/, "").replace(/\/+$/, "");
+  if (value === "" || value === ".") return { ok: true, kind: "all", value: "." };
+  if (value.startsWith("!")) {
+    const read = value === raw ? "" : ` (read as ${JSON.stringify(value)})`;
+    return { ok: false, error: `glob ${JSON.stringify(raw)}${read} starts with !: negation is not supported; name the folder or files to search instead` };
   }
-  const bg = new Bun.Glob(g);
-  if (bg.match(relPath)) return true;
-  return !g.includes("/") && bg.match(path.posix.basename(relPath));
+  return { ok: true, kind: hasWildcard(value) ? "pattern" : "path", value };
+}
+
+/**
+ * Does the normalized glob select `relPath`? Case-sensitive. A path selects
+ * the file or folder of that name at the root: `plans` is the root folder
+ * `plans` (never `x/plans`). A pattern is matched from the root, and without
+ * `/` also against the basename at any depth (`*.csv` finds `plans/x/Q-3.csv`).
+ */
+function selects(g: Extract<NormalizedGlob, { ok: true }>, relPath: string): boolean {
+  if (g.kind === "all") return true;
+  if (g.kind === "path") return relPath === g.value || relPath.startsWith(`${g.value}/`);
+  const bg = new Bun.Glob(g.value);
+  return bg.match(relPath) || (!g.value.includes("/") && bg.match(path.posix.basename(relPath)));
+}
+
+/** Does `glob` select `relPath` ({@link normalizeGlob}, then {@link selects})? A refused glob selects nothing. */
+export function globMatches(glob: string, relPath: string): boolean {
+  const g = normalizeGlob(glob);
+  return g.ok && selects(g, relPath);
 }
 
 export interface GrepHit {
@@ -92,7 +111,7 @@ export interface GrepOpts extends TrackedOpts {
   /** A Perl-compatible regex (`-P`), or an extended one (`-E`) on a git built
    *  without PCRE; otherwise the pattern is a fixed string (`-F`). */
   regex?: boolean;
-  /** Search only tracked files this glob selects (see {@link globMatches}). */
+  /** Search only tracked files this glob selects (see {@link normalizeGlob}). */
   glob?: string;
   /** Hits returned; the rest are only counted. */
   max?: number;
@@ -171,12 +190,13 @@ export async function grepTracked(root: string, pattern: string, opts: GrepOpts 
   const max = Math.min(Math.max(1, Math.floor(opts.max ?? GREP_DEFAULT_MAX)), GREP_MAX_RESULTS);
   let engine: "pcre" | "ere" | undefined = opts.regex ? "pcre" : undefined;
   let pathspecs: string[][];
-  if (opts.glob) {
-    // Bun.Glob reads a leading `!` as negation, which the literal-path branch cannot.
-    if (opts.glob.startsWith("!")) return { ok: false, error: `glob ${JSON.stringify(opts.glob)} starts with !: negation is not supported; name the folder or files to search instead` };
+  const glob = opts.glob ? normalizeGlob(opts.glob) : undefined;
+  if (glob && !glob.ok) return glob;
+  // The whole wiki is the no-glob search.
+  if (glob && glob.kind !== "all") {
     const listed = await trackedFiles(root, { git: rawGit });
     if (!listed.ok) return listed;
-    const selected = listed.files.filter((f) => globMatches(opts.glob!, f));
+    const selected = listed.files.filter((f) => selects(glob, f));
     // Never a zero-hit search: that reads as «the key is nowhere».
     if (selected.length === 0) {
       return { ok: false, error: `glob ${JSON.stringify(opts.glob)} selects no tracked file (globs match wiki-root-relative paths, case-sensitively, from the root: plans or plans/** is the top-level folder plans, a nested one needs its path or **/name/**)` };
