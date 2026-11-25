@@ -209,7 +209,8 @@ test.beforeAll(async () => {
 
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
   // Discuss v2 (PR 3): a turn runs on the page's wiki thread, which needs a
-  // user; until the pane sends one (PR 4) it is the bot's default chat user.
+  // user. The pane sends one only once a thread holds it (PR 4), so a page's
+  // first turn runs on the bot's default chat user.
   await sql!`INSERT INTO users (id, username, platform) VALUES ('e2e-discuss-user', 'E2E Discuss', 'web') ON CONFLICT (id) DO NOTHING`;
   await sql!`INSERT INTO bot_default_user (bot_name, user_id) VALUES ('discussbot', 'e2e-discuss-user') ON CONFLICT (bot_name) DO UPDATE SET user_id = EXCLUDED.user_id`;
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -426,8 +427,9 @@ function holdNextDiscussStream(page: Page): Promise<void> {
 }
 
 test.describe("Wiki reader: the Discuss tab", () => {
-  // Each test starts its own discussion, as v1's tab did: a fresh ask now
-  // continues the page's live wiki thread, so close those first («Start over»).
+  // Each test starts its own discussion: the pane reads the page's live wiki
+  // thread back (Discuss v2 PR 4), so a thread an earlier test left would show
+  // its turns here and take the next ask. Close those first, as «Start over» does.
   test.beforeEach(async () => {
     await sql!`UPDATE threads SET closed_at = now() WHERE kind = 'wiki' AND closed_at IS NULL`;
   });

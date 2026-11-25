@@ -11,10 +11,55 @@
 //   Helpers: escapeHtml, escapeAttr, timeAgo
 //   Funcs:   loadThreadMessages, updateInspector, syncConnectorDropdown,
 //            clearChat, scrollToBottom, setChatStatusText
+//
+// Defines for the other scripts (threadKindScript): findThread, isWikiThread,
+// isClosedWikiThread, wikiAnswerForThread.
+
+import { EARLIER_EDIT_NOTE, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
+
+/**
+ * What /chat knows of a thread's kind, over the IIFE's `threads`: a wiki
+ * page's Discuss thread (`kind = 'wiki'`, Discuss v2) runs on the Discuss
+ * engine only, so the connector selector, the stamp and «Lag Jira-sak» stay out
+ * of it, and a closed one is read-only. Its own export so a harness can load it
+ * without the rest of the thread manager.
+ */
+export function threadKindScript(): string {
+  return `
+  function findThread(threadId) {
+    if (!threadId) return null;
+    for (var i = 0; i < threads.length; i++) {
+      if (threads[i].id === threadId) return threads[i];
+    }
+    return null;
+  }
+  function isWikiThread(threadId) {
+    var t = findThread(threadId);
+    return !!t && t.kind === 'wiki';
+  }
+  function isClosedWikiThread(threadId) {
+    var t = findThread(threadId);
+    return !!t && t.kind === 'wiki' && !!t.closedAt;
+  }
+  // A stored wiki answer carries the edit marker in place of its edit block,
+  // pointing to the page's Discuss tab. A closed thread has no Apply there, so
+  // its answers say what «Earlier discussions» says. With html set, the text
+  // is formatWebHtml output (a web conversation's assistant row); else markdown.
+  var WIKI_STORED_EDIT_MARKER = ${JSON.stringify(STORED_EDIT_MARKER)};
+  var WIKI_EARLIER_EDIT_NOTE = ${JSON.stringify(EARLIER_EDIT_NOTE)};
+  function wikiAnswerForThread(threadId, text, html) {
+    if (typeof text !== 'string' || !isClosedWikiThread(threadId)) return text;
+    var marker = html ? formatWebHtml(WIKI_STORED_EDIT_MARKER) : WIKI_STORED_EDIT_MARKER;
+    if (text.indexOf(marker) === -1) return text;
+    return text.split(marker).join(html ? formatWebHtml(WIKI_EARLIER_EDIT_NOTE) : WIKI_EARLIER_EDIT_NOTE);
+  }
+  `;
+}
 
 /** Returns all thread manager functions as a browser-compatible JS string. */
 export function threadManagerScript(): string {
   return `
+  ${threadKindScript()}
   // ── Thread modal DOM refs ───────────────────────────────────────────────
 
   var threadModal = document.getElementById('threadModalBackdrop');
@@ -126,6 +171,7 @@ export function threadManagerScript(): string {
     } catch {
       threads = [];
     }
+    if (autoSelectThreadId) await lookUpLinkedThread(autoSelectThreadId);
 
     // DB sorts by COALESCE(last_activity, created_at) DESC — most recent
     // activity on top, new threads without messages sort by creation time.
@@ -140,15 +186,31 @@ export function threadManagerScript(): string {
     if (autoSelectThreadId) {
       selectThread(autoSelectThreadId);
     } else if (!activeThreadId) {
-      // Select the most recently active thread (first in the list, already sorted by activity)
+      // Select the most recently active thread (first in the list, already sorted by
+      // activity), a chat thread before a wiki page's Discuss thread
+      var firstChat = threads.find(function(t) { return t.kind !== 'wiki'; });
       if (threads.length > 0) {
-        selectThread(threads[0].id);
+        selectThread((firstChat || threads[0]).id);
       } else {
         renderThreadList();
       }
     } else {
       renderThreadList();
     }
+  }
+
+  // A deep link can name a wiki thread the list leaves out (closed by «Start
+  // over»). Looked up by id, it joins \`threads\` so isWikiThread knows it;
+  // renderThreadList never lists a closed one. A chat thread the list leaves
+  // out (\`slack:\`) stays unknown, as before.
+  async function lookUpLinkedThread(threadId) {
+    if (findThread(threadId)) return;
+    try {
+      var res = await authedFetch('/chat/threads/' + encodeURIComponent(threadId));
+      if (!res.ok) return;
+      var data = await res.json();
+      if (data && data.thread && data.thread.id === threadId && data.thread.kind === 'wiki') threads.push(data.thread);
+    } catch {}
   }
 
   function renderThreadList() {
@@ -159,7 +221,13 @@ export function threadManagerScript(): string {
 
     var currentBot = bots.find(function(b) { return b.name === selectedBot; });
 
-    threadList.innerHTML = threads.map(function(t) {
+    // A wiki page's Discuss threads (Discuss v2) go under their own «Wiki»
+    // heading after the chat threads; a closed one is never listed (the server
+    // leaves it out, and this filter backs that up).
+    var chatThreads = threads.filter(function(t) { return t.kind !== 'wiki'; });
+    var wikiThreads = threads.filter(function(t) { return t.kind === 'wiki' && !t.closedAt; });
+
+    function threadItemHtml(t) {
       var isActive = t.id && t.id === activeThreadId;
       var isPeer = t.name && t.name.indexOf('peer:') === 0;
       var isPaused = isPeer && t.autoRespondPaused === true;
@@ -176,6 +244,7 @@ export function threadManagerScript(): string {
         : '';
 
       var classes = 'thread-item'
+        + (t.kind === 'wiki' ? ' wiki' : '')
         + (isActive ? ' active' : '')
         + (isPeer ? ' peer' : '')
         + (isPaused ? ' paused' : '');
@@ -190,7 +259,13 @@ export function threadManagerScript(): string {
         + (t.description ? '<div class="thread-item-desc">' + escapeHtml(t.description) + '</div>' : '')
         + (chips ? '<div class="thread-item-chips">' + chips + '</div>' : '')
         + '</div>';
-    }).join('');
+    }
+
+    threadList.innerHTML = chatThreads.map(threadItemHtml).join('')
+      + (wikiThreads.length
+        ? '<div class="thread-group-label" title="Discuss threads of wiki pages: each runs on its wiki agent">Wiki</div>'
+          + wikiThreads.map(threadItemHtml).join('')
+        : '');
 
     threadList.querySelectorAll('.thread-item').forEach(function(el) {
       el.onclick = function() {
@@ -246,6 +321,8 @@ export function threadManagerScript(): string {
       var hdrBot = bots.find(function(b) { return b.name === selectedBot; });
       headerThreadName = 'peer:' + peerDisplayName(headerThreadName, hdrBot);
     }
+    var closedWiki = isClosedWikiThread(threadId);
+    if (closedWiki) headerThreadName += ' (closed)';
     chatHeader.querySelector('.chat-title').textContent =
       (selectedUsername || 'user') + ' \\u00b7 ' + selectedBot + ' \\u00b7 ' + headerThreadName;
     document.getElementById('chatDescription').textContent = threadDesc;
@@ -255,9 +332,12 @@ export function threadManagerScript(): string {
     // Highlight in sidebar
     renderThreadList();
 
-    // Enable input
-    chatInput.disabled = false;
-    chatSend.disabled = false;
+    // Enable input; a closed wiki thread is read-only (its page starts a new one)
+    chatInput.disabled = closedWiki;
+    chatSend.disabled = closedWiki;
+    chatInput.placeholder = closedWiki
+      ? "Closed with Start over: the page's Discuss tab starts a new discussion."
+      : 'Type a message...';
 
     // Load messages
     loadThreadMessages(threadId);

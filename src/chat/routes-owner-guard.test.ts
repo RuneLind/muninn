@@ -213,6 +213,7 @@ describe("resource guards on the conversation routes", () => {
       path: `/dev-run/by-thread/${FOREIGN_THREAD_ID}`,
       miss: { error: "No dev_run for thread" }, status: 404,
     },
+    { name: "GET /threads/:id", path: `/threads/${FOREIGN_THREAD_ID}`, miss: { error: "Thread not found" }, status: 404 },
     {
       name: "DELETE /threads/:id", path: `/threads/${FOREIGN_THREAD_ID}`, init: { method: "DELETE" },
       miss: { error: "Thread not found or is the main thread" }, status: 404,

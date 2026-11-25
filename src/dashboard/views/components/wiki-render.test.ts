@@ -235,7 +235,18 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // A2 rebased on A4 (#893): 928,661, so the pin moves to 928,800.
 // 2026-11-22, architecture review B5 (F11: the unavailable stale-count state on every surface), rebased on A2: 929,616,
 // so the pin moves to 929,800.
-const WIKI_CLIENT_MAX_BYTES = 929_800;
+// 2026-11-25, Discuss v2 PR 4 (the pane on the page's thread: the thread read, the bar, the user
+// picker, «Earlier discussions»): 938,812 (318,825 gzipped), so the pin moves to 939,000.
+// PR 4 fix round 1 batch 1 (the thread read's generation guard, the «Earlier discussions»
+// left-out hints): 939,350 (318,989 gzipped), so the pin moves to 939,500.
+// PR 4 fix round 1 batch 2 (the wiki's bot kept from a refusal, a failed Start over or Delete kept
+// apart from the read's error): 939,536 (319,026 gzipped), so the pin moves to 939,600.
+// PR 4 fix round 1 batch 3 («Earlier discussions» replaces the stored edit marker): 939,725
+// (319,086 gzipped), so the pin moves to 939,800.
+// PR 4 fix round 2 (an old one-shot turn's edit block found as the server finds it, which
+// brings `extractJson` and the fence reader into the bundle): 941,764 (319,985 gzipped),
+// so the pin moves to 941,800.
+const WIKI_CLIENT_MAX_BYTES = 941_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

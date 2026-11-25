@@ -32,12 +32,13 @@ import { getLog } from "../../logging.ts";
 import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
 import {
   getDiscussTurn,
+  listClosedThreadMessages,
   listDiscussTurns,
   listPageOneShotTurns,
   listThreadMessagesWithTurns,
   markDiscussTurnHandedOver,
 } from "../../db/wiki-discuss-turns.ts";
-import { closeWikiThread, getLiveWikiThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
+import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
@@ -52,7 +53,7 @@ import {
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { resolveWikiRequest } from "../../wiki/registry.ts";
 import { getWikiIndex, readWikiText, resolveWikiRoot } from "../../wiki/store.ts";
-import { chatWikiMirror, chatUsersFor } from "../../chat/wiki-mirror.ts";
+import { chatWikiMirror, chatUsersFor, publishWikiRefusal } from "../../chat/wiki-mirror.ts";
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { egressRefusal } from "./wiki-egress.ts";
@@ -82,6 +83,13 @@ export const WIKI_DISCUSS_CONTINUE_PATH = "/api/wiki/discuss/continue";
 export const WIKI_DISCUSS_THREAD_PATH = "/api/wiki/discuss/thread";
 /** «Start over»: `{threadId}` closes the live thread. */
 export const WIKI_DISCUSS_THREAD_CLOSE_PATH = "/api/wiki/discuss/thread/close";
+/** «Earlier discussions» bounds on the thread read: the newest closed threads,
+ *  and the first messages of each (30 turns). A count bound, not a size bound:
+ *  answers have no length cap. On the dev DB (2026-11-25, 4 turns) answers
+ *  averaged 1,457 chars, which puts a full read near 10 × 30 × 1.5k ≈ 0.5 MB
+ *  of answers, questions not counted. The payload says what it leaves out. */
+export const DISCUSS_EARLIER_THREADS_MAX = 10;
+export const DISCUSS_EARLIER_MESSAGES_MAX = 60;
 
 export interface DiscussRouteDeps extends DiscussEngineDeps {
   /** The engine; default a new one over these deps, or the process's shared
@@ -89,6 +97,9 @@ export interface DiscussRouteDeps extends DiscussEngineDeps {
   engine?: DiscussEngine;
   /** The /chat mirror; default `chatWikiMirror()`, null for none. */
   mirror?: DiscussMirrorFactory | null;
+  /** Publishes a pane refusal on its thread to /chat (PR 4); default
+   *  `publishWikiRefusal` when `mirror` is the default too, else none. */
+  refusalMirror?: ((threadId: string, message: string) => Promise<void>) | null;
   /** The continue route's reads and its one write; default the DB's. */
   continueStore?: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; handedOver: typeof markDiscussTurnHandedOver };
 }
@@ -99,6 +110,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   const engine =
     deps.engine ?? (Object.keys(deps).length === 0 ? sharedDiscussEngine(config, { chatUsers }) : createDiscussEngine(config, { ...deps, chatUsers }));
   const mirror = deps.mirror === undefined ? chatWikiMirror() : deps.mirror;
+  const refusalMirror = deps.refusalMirror !== undefined ? deps.refusalMirror : deps.mirror === undefined ? publishWikiRefusal : null;
 
   const admin = async (c: Context, next: Next) => {
     if ((c.get("role") ?? "admin") !== "admin") return c.json({ error: "Discuss's wiki agent is for admins" }, 403);
@@ -126,7 +138,17 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     if (typeof body === "string") return c.json({ error: body }, 400);
 
     const started = await engine.start({ role: c.get("role") ?? "admin", body, ...(mirror ? { mirror } : {}) });
-    if (started.refused) return c.json(started.body, started.status);
+    if (started.refused) {
+      // A popped-out /chat on this thread shows the refusal as /chat's own
+      // entry does (a transient error event; nothing is stored). Only one the
+      // engine marks as about the requester's own thread (`ownThread`: busy or
+      // closed, after the thread was checked as theirs on this bot and page);
+      // never one raised before that check, whose text the request controls.
+      if (refusalMirror && started.ownThread) {
+        await refusalMirror(started.ownThread, started.body.error).catch((err) => log.warn("discuss refusal mirror failed: {error}", { error: String(err) }));
+      }
+      return c.json(started.body, started.status);
+    }
 
     try {
       return streamSSE(c, async (stream) => {
@@ -206,8 +228,10 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
 
   // The page's wiki thread (PR 4's pane reads it): the live thread, its
   // messages each joined to its ledger row (so an edit card has its turn id),
-  // the page's closed threads («Earlier discussions») and its old one-shot
-  // turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
+  // the page's closed threads («Earlier discussions»: the newest
+  // DISCUSS_EARLIER_THREADS_MAX, each with its first DISCUSS_EARLIER_MESSAGES_MAX
+  // messages and its total, `closedTotal` counting them all) and its old
+  // one-shot turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
   // prologue. Refusals: 403 role · 400 query · 404 unknown wiki or page · 503
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
   app.get("/api/wiki/discuss/thread", admin, async (c) => {
@@ -226,17 +250,38 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       if ("refused" in who) return c.json(who.body, who.status);
       const wikiName = entry?.name ?? "";
       const thread = await getLiveWikiThread(who.userId, bot.name, wikiName, meta.relPath);
-      const [messages, closed, oneShot] = await Promise.all([
+      const [messages, closed, closedTotal, oneShot] = await Promise.all([
         thread ? listThreadMessagesWithTurns(thread.id) : Promise.resolve([]),
-        listClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath),
+        listClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath, DISCUSS_EARLIER_THREADS_MAX),
+        countClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath),
         listPageOneShotTurns(wikiName, meta.relPath),
       ]);
+      // «Earlier discussions» shows each closed thread's exchanges, read-only
+      // (PR 4): role and content only, bounded, with each thread's total.
+      const closedMessages = await listClosedThreadMessages(
+        closed.map((t) => t.id),
+        DISCUSS_EARLIER_MESSAGES_MAX,
+      );
+      // A turn's ledger row goes out once, on the first of its two messages
+      // (the tab builds a turn from the row, whichever message carries it).
+      const sent = new Set<string>();
+      const live = messages.map((m) => {
+        if (!m.turn || !sent.has(m.turn.id)) {
+          if (m.turn) sent.add(m.turn.id);
+          return m;
+        }
+        return { ...m, turn: null };
+      });
       return c.json({
         userId: who.userId,
         bot: bot.name,
         thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null,
-        messages,
-        closed: closed.map((t) => ({ id: t.id, name: t.name, createdAt: t.createdAt, closedAt: t.closedAt ?? null })),
+        messages: live,
+        closed: closed.map((t) => {
+          const m = closedMessages.get(t.id) ?? { messages: [], total: 0 };
+          return { id: t.id, name: t.name, createdAt: t.createdAt, closedAt: t.closedAt ?? null, messages: m.messages, messageTotal: m.total };
+        }),
+        closedTotal,
         oneShot,
       });
     } catch (err) {

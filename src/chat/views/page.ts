@@ -1025,6 +1025,14 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    if (event.type === 'transient_error') {
+      if (event.conversationId !== activeConvId) return;
+      var teThreadId = event.threadId || null;
+      if (activeThreadId && teThreadId !== activeThreadId) return;
+      showChatTransientError(event.message || 'The turn could not run.');
+      return;
+    }
+
     if (event.type === 'mcp_status') {
       // Cache by bot name; only render if it matches the selected bot
       mcpStatusByBot[event.botName] = event.servers;
@@ -1119,6 +1127,9 @@ const CHAT_SCRIPT = `
   var pendingConnector = null;
   async function sendMessage() {
     if (!activeConvId || !activeThreadId || !chatInput.value.trim()) return;
+    // A closed wiki thread is read-only (selectThread disables the box): a
+    // programmatic send leaves the text where it is.
+    if (isClosedWikiThread(activeThreadId)) return;
 
     // Dismiss research action buttons when sending any message
     var researchActions = chatMessages.querySelector('.research-actions');
@@ -1132,6 +1143,10 @@ const CHAT_SCRIPT = `
     }
 
     var text = chatInput.value.trim();
+    var typed = chatInput.value;
+    var sentThreadId = activeThreadId;
+    var wikiSend = isWikiThread(activeThreadId);
+    clearChatTransientError();
     chatInput.value = '';
     chatInput.style.height = 'auto';
     var payload = { text: text, threadId: activeThreadId };
@@ -1142,11 +1157,53 @@ const CHAT_SCRIPT = `
     if (getSkipExtractions()) {
       payload.skipExtractions = true;
     }
-    await authedFetch('/chat/conversations/' + activeConvId + '/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    var sendRes = null;
+    try {
+      sendRes = await authedFetch('/chat/conversations/' + activeConvId + '/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch {}
+    // A wiki page's Discuss thread refuses a send it cannot run (a turn still
+    // running, the thread closed, egress, a role): nothing was stored, so the
+    // typed text comes back to the box and the refusal shows in the thread.
+    // The server also publishes it as a transient_error event, which lands in
+    // the same slot.
+    if (wikiSend && (!sendRes || !sendRes.ok)) {
+      var refusal = 'The message was not sent.';
+      if (sendRes) {
+        try {
+          var errBody = await sendRes.json();
+          if (errBody && typeof errBody.error === 'string') refusal = errBody.error;
+        } catch {}
+      } else {
+        refusal = 'The message was not sent: the server did not answer.';
+      }
+      if (activeThreadId === sentThreadId && !chatInput.value) chatInput.value = typed;
+      if (activeThreadId === sentThreadId) showChatTransientError(refusal);
+    }
+  }
+
+  // The one notice a refused send (or a turn that failed) leaves in the active
+  // thread: a transient_error event, or the send's own refusal. Never stored;
+  // the next send or a thread switch clears it.
+  function showChatTransientError(message) {
+    var el = document.getElementById('chatTransientError');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'chatTransientError';
+      el.className = 'chat-transient-error';
+      el.setAttribute('role', 'alert');
+    }
+    el.textContent = message;
+    chatMessages.appendChild(el);
+    scrollToBottom();
+  }
+
+  function clearChatTransientError() {
+    var el = document.getElementById('chatTransientError');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
   // Load messages filtered by thread from DB
@@ -1357,13 +1414,15 @@ const CHAT_SCRIPT = `
       // meta ever names — harmless, and it keeps one rule for both paths.
       if (msg.id) div.dataset.clientId = msg.id;
       body.className = 'msg-body' + platformClass;
+      // A closed wiki thread's edit marker points to an Apply that is gone (threadKindScript).
+      var botText = wikiAnswerForThread(msg.threadId || activeThreadId, msg.text, isWeb);
       if (isWeb || isTg) {
-        body.innerHTML = sanitizeHtml(msg.text, isWeb);
+        body.innerHTML = sanitizeHtml(botText, isWeb);
         if (isWeb) { enhanceCodeTabs(body); enhanceCodeBlocks(body); }
         augmentIndexLinks(body);
         augmentIssueLinks(body);
       } else {
-        body.innerHTML = renderSlackMrkdwn(msg.text);
+        body.innerHTML = renderSlackMrkdwn(botText);
       }
       headName = selectedBot;
       dotColor = avatarColor(selectedBot);

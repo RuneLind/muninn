@@ -61,6 +61,8 @@ async function harness(opts: {
   selectedBot?: string;
   jiraBot?: string | null;
   activeThreadId?: string | null;
+  /** The active thread is a wiki page's Discuss thread (`isWikiThread`, `threadKindScript` in thread-manager.ts). */
+  wikiThread?: boolean;
   templatesResponse?: { ok: boolean; body: unknown };
   /** One entry per `/api/jira/templates` call; the last one repeats. */
   templatesResponses?: { ok: boolean; body: unknown }[];
@@ -184,7 +186,8 @@ async function harness(opts: {
     "var jiraEntryVisible = ctx.pure.jiraEntryVisible;" +
     `var selectedBot = ${JSON.stringify(opts.selectedBot ?? "melosys")};` +
     `var activeThreadId = ${JSON.stringify(opts.activeThreadId === undefined ? "t-1" : opts.activeThreadId)};` +
-    "function scrollToBottom(){}";
+    "function scrollToBottom(){}" +
+    `function isWikiThread(){ return ${opts.wikiThread === true}; }`;
 
   const made = new Function(
     "ctx",
@@ -262,6 +265,10 @@ describe("the control on a finalized bot message", () => {
     const noThread = await harness({ activeThreadId: null });
     noThread.attach();
     expect(noThread.rowHtml()).toBe("");
+    // A wiki page's Discuss thread (Discuss v2 PR 4): the route answers 409, so no control.
+    const wiki = await harness({ wikiThread: true });
+    wiki.attach();
+    expect(wiki.rowHtml()).toBe("");
   });
 });
 

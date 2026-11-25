@@ -313,9 +313,16 @@ export interface DiscussRefusal {
   refused: true;
   status: 400 | 403 | 404 | 409 | 422 | 429 | 500 | 503;
   body: { error: string; reason?: string; [key: string]: unknown };
+  /** Set only on a refusal about the state of the requester's own thread,
+   *  raised after that thread was checked as theirs (same bot and page): a
+   *  turn still running on it (`busy`) or it was closed (`closed`). The pane's
+   *  entry mirrors only these to /chat (PR 4); every other refusal, any raised
+   *  before the thread is checked among them, carries none. */
+  ownThread?: string;
 }
 
-const refuse = (status: DiscussRefusal["status"], body: DiscussRefusal["body"]): DiscussRefusal => ({ refused: true, status, body });
+const refuse = (status: DiscussRefusal["status"], body: DiscussRefusal["body"], ownThread?: string): DiscussRefusal =>
+  ownThread ? { refused: true, status, body, ownThread } : { refused: true, status, body };
 
 /** The /chat mirror of one turn: built by each entry point for the thread's
  *  user and bot (the engine never imports chat state). Every call is
@@ -525,7 +532,11 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         return refuse(404, { error: "no live wiki discussion with that id (an old discussion stays read-only; ask without it to start the page's thread)", reason: "unknown-discussion" });
       }
       if (thread.wiki !== wikiName || thread.relPath !== meta.relPath) return refuse(409, { error: "that discussion is about another page", reason: "other-page" });
-      if (thread.closedAt !== undefined) return refuse(409, { error: "that discussion was closed (Start over); ask without it to start a new one", reason: "closed" });
+      if (thread.closedAt !== undefined) {
+        // Answered first for everyone, as before; marked as the requester's own only when it is.
+        const own = thread.userId === userId && thread.botName === bot.name;
+        return refuse(409, { error: "that discussion was closed (Start over); ask without it to start a new one", reason: "closed" }, own ? thread.id : undefined);
+      }
       if (thread.userId !== userId) return refuse(409, { error: "that discussion belongs to another user", reason: "other-user" });
       if (thread.botName !== bot.name) {
         return refuse(409, { error: `that discussion ran on ${thread.botName}, and the wiki now answers on ${bot.name}; start over`, reason: "other-bot" });
@@ -536,7 +547,8 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     const earlier = thread ? await store.list(thread.id) : [];
     const last = earlier[earlier.length - 1];
     if (last && last.endState === "running" && Date.now() - last.heartbeatAt < staleRunningMs) {
-      return refuse(409, { error: "the discussion's last turn is still running", reason: "busy" });
+      // `thread` is the requester's: checked above, or found by their user, bot and page.
+      return refuse(409, { error: "the discussion's last turn is still running", reason: "busy" }, thread?.id);
     }
 
     const pageHash = sha256(raw);
@@ -638,7 +650,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       );
     } catch (err) {
       release();
-      if (err instanceof DiscussTurnConflict) return refuse(409, { error: err.message, reason: "busy" });
+      if (err instanceof DiscussTurnConflict) return refuse(409, { error: err.message, reason: "busy" }, p.thread?.id);
       log.error("discuss turn insert failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return refuse(500, { error: "could not store the turn" });
     }

@@ -25,6 +25,7 @@ import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
+import { STORED_EDIT_MARKER, extractProposedEdit, stripProposedEdit } from "../../../wiki/discuss-agent.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
 
@@ -72,23 +73,16 @@ describe("a turn moved by the stream", () => {
 });
 
 describe("a dropped stream's words", () => {
-  // The tab keeps discussions in memory only and no route lists a
-  // discussion's turns back, so a reload shows an empty tab.
-  test("never promise that a reload brings the turn back", () => {
+  // Discuss v2 (PR 4): the tab reads the page's thread on a page load, so a
+  // reload shows the stored turn once it has ended.
+  test("point at a reload, which reads the turn back from the page's thread", () => {
     const withId = newTurn("t1", "q", null);
     applyDiscussFrame(withId, "turn", { turnId: "a", seq: 1 });
     streamClosed(withId);
     const noId = newTurn("t2", "q", null);
     streamClosed(noId);
-    for (const t of [withId, noId]) {
-      expect(t.message).not.toMatch(/reload the page later|reload the page to read/i);
-      expect(t.message).toContain("this tab cannot show it");
-    }
-    // With a turn id the turn offers «Continue in Claude Code», which builds
-    // its prompt from the stored turn once it has ended.
-    expect(withId.message).toContain("«Continue in Claude Code»");
+    for (const t of [withId, noId]) expect(t.message).toMatch(/reload the page/i);
     expect(discussTurnHtml(withId)).toContain('data-discuss-continue="t1"');
-    // Without one there is no such button, so the words do not name it.
     expect(noId.message).not.toContain("Continue in Claude Code");
     expect(discussTurnHtml(noId)).not.toContain("data-discuss-continue");
   });
@@ -1057,5 +1051,177 @@ describe("«Change the wording» and the reader's draft", () => {
     expect(discussState.rewordDraft(P.trimEnd())).toBe(P.trimEnd());
     expect(discussState.rewordDraft(`${P.trimEnd()}shorter`)).toBe(`${P.trimEnd()}shorter`);
     expect(discussState.rewordDraft(`  ${P}shorter`)).toBe(`  ${P}shorter`);
+  });
+});
+
+// ── Discuss v2 PR 4: the page's thread read back ─────────────────────────
+
+const stored = (o: Partial<discussState.StoredDiscussTurn> & { id: string; seq: number }): discussState.StoredDiscussTurn => ({
+  discussionId: "th-1",
+  selection: null,
+  question: `q${o.seq}`,
+  answer: `a${o.seq}`,
+  endState: "done",
+  error: null,
+  toolCalls: [],
+  proposedEdit: null,
+  editAppliedAt: null,
+  createdAt: 1_700_000_000_000 + o.seq,
+  ...o,
+});
+const pair = (t: discussState.StoredDiscussTurn): discussState.StoredThreadMessage[] => [
+  { id: `u-${t.id}`, role: "user", content: t.question, createdAt: t.createdAt, turn: t },
+  { id: `a-${t.id}`, role: "assistant", content: t.answer, createdAt: t.createdAt, turn: t },
+];
+
+describe("the page's thread read back (Discuss v2 PR 4)", () => {
+  test("each turn once, in seq order, keyed by its turn id, with its tools, passage and edit", () => {
+    const t2 = stored({ id: "r2", seq: 2, selection: "The pier.", toolCalls: [{ name: "Read", input: "notes/a.md" }], proposedEdit: { edits: [] } });
+    const t1 = stored({ id: "r1", seq: 1 });
+    const turns = discussState.turnsFromThread([...pair(t2), ...pair(t1), { id: "x", role: "assistant", content: "orphan", createdAt: 0, turn: null }]);
+    expect(turns.map((t) => [t.key, t.turnId, t.seq, t.state])).toEqual([
+      ["s:r1", "r1", 1, "done"],
+      ["s:r2", "r2", 2, "done"],
+    ]);
+    expect(turns[1]!.passage?.selection).toBe("The pier.");
+    expect(turns[1]!.tools).toEqual(["Read notes/a.md"]);
+    expect(turns[1]!.proposedEdit).toBe(true);
+    expect(turns[0]!.proposedEdit).toBe(false);
+  });
+
+  test("an applied edit reads as applied; a running turn is not live here; a failed one says so", () => {
+    const applied = discussState.turnFromStored(stored({ id: "r1", seq: 1, proposedEdit: { edits: [] }, editAppliedAt: 5 }));
+    expect(applied.edit?.state).toBe("applied");
+    const running = discussState.turnFromStored(stored({ id: "r2", seq: 2, endState: "running", answer: "" }));
+    expect(running.state).toBe("dropped");
+    expect(discussState.turnLive(running)).toBe(false);
+    expect(running.message).toContain("still running");
+    const failed = discussState.turnFromStored(stored({ id: "r3", seq: 3, endState: "timeout", error: "deadline" }));
+    expect(failed.state).toBe("timeout");
+    expect(failed.message).toContain("deadline");
+  });
+
+  test("merge adds the read's turns, keeps the tab's own copy of a turn, and never drops one", () => {
+    const own = newTurn("t1", "q1", null);
+    applyDiscussFrame(own, "turn", { turnId: "r1", seq: 1, discussionId: "th-1" });
+    applyDiscussFrame(own, "done", { answer: "streamed" });
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: null, turns: [own] };
+    discussState.mergeThreadTurns(d, "th-1", discussState.turnsFromThread([...pair(stored({ id: "r1", seq: 1 })), ...pair(stored({ id: "r2", seq: 2 }))]));
+    expect(d.discussionId).toBe("th-1");
+    expect(d.turns.map((t) => t.key)).toEqual(["t1", "s:r2"]);
+    expect(d.turns[0]!.text).toBe("streamed");
+  });
+
+  test("while a turn is being sent, a running turn the read lists is left for the turn event; that event drops any read-back copy", () => {
+    const sending = newTurn("t9", "q", null);
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "th-1", turns: [sending] };
+    discussState.mergeThreadTurns(d, "th-1", discussState.turnsFromThread(pair(stored({ id: "r5", seq: 5, endState: "running", answer: "" }))));
+    expect(d.turns.map((t) => t.key)).toEqual(["t9"]);
+    // A read that landed after the turn event but listed it anyway (done meanwhile):
+    d.turns.push(discussState.turnFromStored(stored({ id: "r5", seq: 5 })));
+    applyDiscussFrame(sending, "turn", { turnId: "r5", seq: 5 });
+    discussState.dropStoredCopy(d, sending);
+    expect(d.turns.map((t) => t.key)).toEqual(["t9"]);
+  });
+
+  test("pop out names the bot, the thread and the user, with src=wiki; nothing until all three are known", () => {
+    const d: DiscussionView = { wiki: "w", relPath: "p.md", discussionId: "th-1", turns: [], bot: "ivar", userId: "kari" };
+    const href = discussState.discussPopOutHref(d)!;
+    const q = new URL(href, "http://x").searchParams;
+    expect(href.startsWith("/chat?")).toBe(true);
+    expect([q.get("bot"), q.get("thread"), q.get("user"), q.get("src")]).toEqual(["ivar", "th-1", "kari", "wiki"]);
+    expect(discussState.discussPopOutHref({ ...d, userId: null })).toBeNull();
+    expect(discussState.discussPopOutHref({ ...d, discussionId: null })).toBeNull();
+  });
+
+  test("Earlier discussions: collapsed, a closed thread's exchanges with Delete, one-shot turns grouped by discussion, all escaped, no live-turn markup", () => {
+    expect(discussState.discussEarlierHtml(null)).toBe("");
+    expect(discussState.discussEarlierHtml({ closed: [], oneShot: [] })).toBe("");
+    const html = discussState.discussEarlierHtml({
+      closed: [{ id: "c1", name: "wiki: <harbour>", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r1", seq: 1, question: "Why <b>?" })) }],
+      oneShot: [stored({ id: "o2", seq: 2, discussionId: "d-old" }), stored({ id: "o1", seq: 1, discussionId: "d-old", question: "First old?" })],
+    });
+    expect(html.startsWith("<details class=\"wiki-discuss-earlier\">")).toBe(true);
+    expect(html).not.toContain("<details class=\"wiki-discuss-earlier\" open");
+    expect(html).toContain("Earlier discussions (2)");
+    expect(html).toContain('data-discuss-delete-thread="c1"');
+    expect(html).toContain("wiki: &lt;harbour&gt;");
+    expect(html).toContain("Why &lt;b&gt;?");
+    expect(html).toContain('data-earlier-oneshot="d-old"');
+    expect(html.indexOf("First old?")).toBeLessThan(html.indexOf(">q2<"));
+    expect(html).not.toContain("wiki-discuss-turn\"");
+    expect(html).not.toContain("data-discuss-continue");
+  });
+
+  test("Earlier discussions says what the read left out: closed threads past its bound, and a thread's later messages", () => {
+    const msgs = pair(stored({ id: "r1", seq: 1 }));
+    const html = discussState.discussEarlierHtml({
+      closed: [
+        { id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 5 },
+        { id: "c2", name: "two", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 2 },
+      ],
+      closedTotal: 14,
+      oneShot: [],
+    });
+    expect(html).toContain("Earlier discussions (14)");
+    expect(html).toContain("Showing the 2 most recently closed of 14 discussions");
+    expect(html).toContain("3 later messages not shown.");
+    expect(html.match(/not shown/g)).toHaveLength(1);
+    // Nothing left out: no hint.
+    const all = discussState.discussEarlierHtml({ closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: msgs, messageTotal: 2 }], closedTotal: 1, oneShot: [] });
+    expect(all).toContain("Earlier discussions (1)");
+    expect(all).not.toContain("Showing the");
+    expect(all).not.toContain("not shown");
+  });
+
+  test("Earlier discussions: a turn that proposed an edit says so without sending the reader to an Apply it has not got", () => {
+    // As each is stored: a closed thread's message carries the marker
+    // (`stripProposedEdit`), an old one-shot turn the ledger's raw answer with
+    // its fenced edit block.
+    const edit = '{"edits": [{"old": "The harbour opens at six.", "new": "The harbour opens at seven.", "reason": "timetable"}]}';
+    const raw = `The page says six.\n\n\`\`\`json\n${edit}\n\`\`\`\n\nRead: notes/a.md`;
+    expect(stripProposedEdit(raw)).toContain(STORED_EDIT_MARKER);
+    const html = discussState.discussEarlierHtml({
+      closed: [{ id: "c1", name: "one", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r1", seq: 1, answer: stripProposedEdit(raw) })) }],
+      oneShot: [stored({ id: "o1", seq: 1, discussionId: "d-old", answer: raw })],
+    });
+    expect(html).not.toContain("preview and apply");
+    expect(html).not.toContain("Discuss tab");
+    expect(html).not.toContain("edits");
+    expect(html).not.toContain("opens at seven");
+    expect(html.match(/This answer proposed an edit; an earlier discussion cannot apply it\./g)).toHaveLength(2);
+    const oneShot = html.slice(html.indexOf('data-earlier-oneshot="d-old"'));
+    expect(oneShot).toContain("This answer proposed an edit; an earlier discussion cannot apply it.");
+    expect(oneShot).toContain("The page says six.");
+    expect(oneShot).toContain("Read: notes/a.md");
+    // The rest of the answer stays.
+    expect(html).toContain("The page says six.");
+    expect(html).toContain("Read: notes/a.md");
+    // The server's own detection: a json block that is no edit list stays as it is.
+    const notEdit = 'Here is the shape:\n\n```json\n{"edits": []}\n```';
+    expect(extractProposedEdit(notEdit)).toBeNull();
+    const kept = discussState.discussEarlierHtml({ closed: [], oneShot: [stored({ id: "o2", seq: 1, discussionId: "d-two", answer: notEdit })] });
+    expect(kept).toContain("edits");
+    expect(kept).not.toContain("earlier discussion cannot apply");
+    // Matched exactly: a sentence that only resembles the marker is left alone.
+    const near = discussState.discussEarlierHtml({
+      closed: [{ id: "c2", name: "two", createdAt: 1, closedAt: 2, messages: pair(stored({ id: "r2", seq: 1, answer: "Proposed edit: preview and apply it in the page's Discuss tab." })) }],
+      oneShot: [],
+    });
+    expect(near).toContain("Proposed edit: preview and apply it in the page");
+    expect(near).not.toContain("earlier discussion cannot apply");
+  });
+
+  test("the user picker lists the users the route named, escaped; with none it says what to do", () => {
+    const html = discussState.discussUserPickHtml({ users: [{ id: "kari", name: "Kari <K>" }], message: "Pick one." });
+    expect(html).toContain('<option value="kari">Kari &lt;K&gt; (kari)</option>');
+    expect(html).toContain("data-discuss-pick-user");
+    expect(discussState.discussUserPickHtml({ users: [], message: "None." })).not.toContain("<select");
+    expect(discussState.discussUserPickHtml(null)).toBe("");
+  });
+
+  test("a closed, another user's or another bot's thread, and a missing user, each name what to do", () => {
+    for (const reason of ["closed", "other-user", "other-bot"]) expect(discussRefusalMessage(409, { error: "that discussion was closed", reason })).toContain("reload the page");
+    expect(discussRefusalMessage(422, { error: "x", reason: "no-user" })).toContain("pick one");
   });
 });

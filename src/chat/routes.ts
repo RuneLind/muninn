@@ -437,15 +437,29 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config, opts: 
     }
   });
 
-  // List threads for a user+bot (excludes slack: threads)
+  // List threads for a user+bot (excludes slack: threads, and a wiki page's
+  // Discuss thread once «Start over» closed it: it lives on in the page's
+  // «Earlier discussions»; the client groups the open ones under «Wiki»)
   app.get("/threads/:userId/:botName", async (c) => {
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return own.response;
     const userId = own.userId!;
     const botName = c.req.param("botName");
     const allThreads = await listThreads(userId, botName);
-    const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
+    const threads = allThreads.filter((t) => !t.name.startsWith("slack:") && !(t.kind === "wiki" && t.closedAt !== undefined));
     return c.json({ threads });
+  });
+
+  // One thread by id: a deep link (`/chat?thread=…`) can name one the list
+  // leaves out (a closed wiki thread), and the client needs its kind.
+  app.get("/threads/:id", async (c) => {
+    const id = c.req.param("id");
+    if (!isValidUuid(id)) return c.json({ error: "Thread not found" }, 404);
+    const owned = await requireOwnedResource(c, "thread", id);
+    if (!owned.ok) return c.json({ error: "Thread not found" }, 404);
+    const thread = await getThreadById(id);
+    if (!thread) return c.json({ error: "Thread not found" }, 404);
+    return c.json({ thread });
   });
 
   // Update a thread's connector

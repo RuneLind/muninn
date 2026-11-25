@@ -24,3 +24,13 @@ export const HANDOFF_HEADING_MAX = 200;
 /** The whole request body's bound, in bytes: the selection at four UTF-8
  *  bytes a character, with room for the rest. */
 export const HANDOFF_BODY_MAX = 128 * 1024;
+
+/** The one line a thread's stored assistant message carries in place of the
+ *  proposed edit's JSON block: the edit itself is the ledger row's. Here, not
+ *  in `discuss-agent.ts`, so the reader bundle can match it exactly
+ *  («Earlier discussions» replaces it: a closed thread has no Apply). */
+export const STORED_EDIT_MARKER = "_(Proposed edit: preview and apply it in the page's Discuss tab.)_";
+/** What an answer shows in place of its proposed edit where nothing can apply
+ *  it: «Earlier discussions» (a closed thread's {@link STORED_EDIT_MARKER}, an
+ *  old one-shot turn's edit block) and /chat on a closed wiki thread. */
+export const EARLIER_EDIT_NOTE = "_(This answer proposed an edit; an earlier discussion cannot apply it.)_";

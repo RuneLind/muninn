@@ -85,8 +85,8 @@ import {
   FACTCHECK_SENTINEL_END,
   findLiveSentinelBlocks,
 } from "./factcheck-context.ts";
-import { extractJson } from "../utils/json-extract.ts";
 import {
+  editListShape,
   factWrapperForms,
   fenceLineStates,
   fencedLineMask,
@@ -446,23 +446,11 @@ function coerceEditShape(o: Record<string, unknown>): IntegrateEdit {
  * DELETION of the anchored sentence.
  */
 export function parseEditList(raw: string): EditListResult | null {
-  if (!raw || typeof raw !== "string") return null;
-  let parsed: unknown;
-  try {
-    parsed = extractJson<unknown>(raw);
-  } catch {
-    return null;
-  }
-  let rawEdits: unknown;
-  let note: string | undefined;
-  if (Array.isArray(parsed)) {
-    rawEdits = parsed;
-  } else if (parsed && typeof parsed === "object") {
-    const obj = parsed as Record<string, unknown>;
-    rawEdits = obj.edits;
-    if (typeof obj.note === "string" && obj.note.trim()) note = obj.note.trim();
-  }
-  if (!Array.isArray(rawEdits)) return null;
+  // The shape step is shared with the reader bundle (Discuss's edit-block detection).
+  const shape = editListShape(raw);
+  if (!shape) return null;
+  const rawEdits = shape.items;
+  const note = shape.note;
 
   const edits: IntegrateEdit[] = [];
   const dropped: DroppedEdit[] = [];

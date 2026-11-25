@@ -427,6 +427,8 @@ export const E2E_PORTS = {
   "wiki-discuss-tab": 3253,
   // Discuss P4: the proposed edit's diff card and Apply, on a git wiki with no remote.
   "wiki-discuss-apply": 3254,
+  // Discuss v2 PR 4: the pane on the page's thread, a follow-up, Edit → Apply, pop out to /chat.
+  "wiki-discuss-thread": 3256,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
   // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.

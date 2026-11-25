@@ -33,7 +33,8 @@ const { Hono } = await import("hono");
 const { setupTestDb } = await import("../../test/setup-db.ts");
 const { getDb } = await import("../../db/client.ts");
 const { getThreadById, switchThread, updateThreadConnector, WikiThreadRefused } = await import("../../db/threads.ts");
-const { listDiscussTurns } = await import("../../db/wiki-discuss-turns.ts");
+const { DiscussTurnConflict, finishDiscussTurn, listClosedThreadMessages, listDiscussTurns, markDiscussReaderLeft, setDiscussTurnCard, startDiscussTurn, touchDiscussTurn } = await import("../../db/wiki-discuss-turns.ts");
+const { countClosedWikiThreads, listClosedWikiThreads } = await import("../../db/threads.ts");
 const { processMessage } = await import("../../core/message-processor.ts");
 const { chatState } = await import("../../chat/state.ts");
 const { createChatRoutes } = await import("../../chat/routes.ts");
@@ -48,6 +49,7 @@ import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { OneShotOptions } from "../../ai/one-shot.ts";
 import type { ChatEvent } from "../../chat/state.ts";
+import type { DiscussEngineDeps } from "../../wiki/discuss-engine.ts";
 
 setupTestDb();
 
@@ -126,10 +128,11 @@ afterAll(async () => {
 });
 
 /** One engine behind both entry points, as in the process. */
-function apps() {
+function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari" }], extra: Partial<DiscussEngineDeps> = {}) {
   const engine = createDiscussEngine(config, {
+    ...extra,
     bots: () => [ivar],
-    chatUsers: async () => [{ id: "kari", name: "Kari" }],
+    chatUsers: async () => users,
     defaultUser: async () => "kari",
     surfaceBlocker: async () => null,
     // A fresh snapshot directory per turn: a copy of the wiki as it is now.
@@ -147,7 +150,7 @@ function apps() {
     log: quiet,
   });
   const app = new Hono();
-  registerWikiDiscussRoute(app, config, { engine, log: quiet });
+  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar] });
   registerWikiDiscussApplyRoute(app, config, { readonlyRefusal: () => null, egressRefusal: () => null });
   app.route("/chat", createChatRoutes([ivar], config, { discussEngine: engine }));
   return app;
@@ -369,4 +372,281 @@ test("the default root (WIKI_DIR, no wiki named): the pane stores wiki '' and a 
     else process.env.WIKI_DIR = prev;
     __resetWikiCacheForTest();
   }
+});
+
+// ── PR 4: the pane on the thread ─────────────────────────────────────────
+
+test("a pane refusal on the page's thread reaches /chat as a transient event; one naming no live thread of this page does not", async () => {
+  const app = apps();
+  const evs = await frames(await pane(app, { question: "When?" }));
+  const threadId = evs[0]!.data.threadId as string;
+  await getDb()`UPDATE threads SET closed_at = now() WHERE id = ${threadId}`;
+  const conv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "kari" });
+  events = [];
+  const closed = await pane(app, { question: "Again?", discussionId: threadId });
+  expect(closed.status).toBe(409);
+  expect(((await closed.json()) as { reason: string }).reason).toBe("closed");
+  const mirrored = events.filter((e) => e.type === "transient_error");
+  expect(mirrored).toHaveLength(1);
+  expect(mirrored[0]).toMatchObject({ type: "transient_error", conversationId: conv.id, threadId });
+  events = [];
+  const unknown = await pane(app, { question: "Again?", discussionId: crypto.randomUUID() });
+  expect(unknown.status).toBe(404);
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+});
+
+test("the thread read gives each closed thread its messages, and /chat's thread list hides a closed wiki thread but lists an open one", async () => {
+  const app = apps();
+  const first = (await frames(await pane(app, { question: "When does it open?" })))[0]!.data.threadId as string;
+  await app.request("/api/wiki/discuss/thread/close", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: first }) });
+  const second = (await frames(await pane(app, { question: "And on Sundays?" })))[0]!.data.threadId as string;
+  expect(second).not.toBe(first);
+
+  const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as {
+    thread: { id: string };
+    messages: { role: string }[];
+    closed: { id: string; messages: { role: string; content: string; turn: { question: string } | null }[] }[];
+  };
+  expect(read.thread.id).toBe(second);
+  expect(read.closed.map((t) => t.id)).toEqual([first]);
+  expect(read.closed[0]!.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+  expect(read.closed[0]!.messages[0]!.content).toBe("When does it open?");
+  expect(read.closed[0]!.messages[1]!.content).toBe("It opens at six.");
+
+  const list = (await (await app.request("/chat/threads/kari/ivar")).json()) as { threads: { id: string; kind: string }[] };
+  const ids = list.threads.map((t) => t.id);
+  expect(ids).toContain(second);
+  expect(ids).not.toContain(first);
+  expect(list.threads.find((t) => t.id === second)?.kind).toBe("wiki");
+});
+
+// ── PR 4 fix round 1 batch 1 ─────────────────────────────────────────────
+
+test("a pane refusal is mirrored only to the thread's owner asking on that thread: another user's request naming it, or one refused before the thread is checked, reaches no /chat", async () => {
+  const app = apps([
+    { id: "ola", name: "Ola" },
+    { id: "kari", name: "Kari" },
+  ]);
+  const olaThread = (await frames(await pane(app, { question: "When?", userId: "ola" })))[0]!.data.threadId as string;
+  expect((await getThreadById(olaThread))!.userId).toBe("ola");
+  const olaConv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "ola" });
+  const errorsFor = (convId: string) => events.filter((e) => e.type === "transient_error" && e.conversationId === convId);
+
+  // Another user's pane names ola's thread: refused before the thread is checked.
+  events = [];
+  const badPage = await pane(app, { question: "Hi", userId: "kari", discussionId: olaThread, relPath: "notes/<b>nope</b> CLICK evil.example.com" });
+  expect(badPage.status).toBe(404);
+  const badUser = await pane(app, { question: "Hi", userId: "Your session expired, re-login at evil.example", discussionId: olaThread });
+  expect(((await badUser.json()) as { reason: string }).reason).toBe("unknown-user");
+  // The owner's own request refused before the thread is checked is not mirrored either.
+  const ownBadPage = await pane(app, { question: "Hi", userId: "ola", discussionId: olaThread, relPath: "notes/missing.md" });
+  expect(ownBadPage.status).toBe(404);
+  // ola's thread closed: another user naming it is refused (closed), not mirrored.
+  await getDb()`UPDATE threads SET closed_at = now() WHERE id = ${olaThread}`;
+  const closedByKari = await pane(app, { question: "Hi", userId: "kari", discussionId: olaThread });
+  expect(((await closedByKari.json()) as { reason: string }).reason).toBe("closed");
+  expect(errorsFor(olaConv.id)).toEqual([]);
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+
+  // The owner's own refusal on her own thread still reaches her /chat.
+  const closedByOla = await pane(app, { question: "Again?", userId: "ola", discussionId: olaThread });
+  expect(((await closedByOla.json()) as { reason: string }).reason).toBe("closed");
+  expect(errorsFor(olaConv.id)).toHaveLength(1);
+  expect(errorsFor(olaConv.id)[0]).toMatchObject({ threadId: olaThread });
+
+  // With no /chat conversation in memory, the mirror creates none.
+  chatState.deleteConversation(olaConv.id);
+  events = [];
+  await pane(app, { question: "Again?", userId: "ola", discussionId: olaThread });
+  expect(events.filter((e) => e.type === "conversation_created")).toEqual([]);
+  // …and publishes nothing: no /chat tab is showing the thread.
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+  expect(chatState.getConversation(olaConv.id)).toBeUndefined();
+});
+
+test("the owner's busy refusal on her own thread is mirrored to her /chat; another user naming it is not", async () => {
+  const app = apps([
+    { id: "ola", name: "Ola" },
+    { id: "kari", name: "Kari" },
+  ]);
+  const olaThread = (await frames(await pane(app, { question: "When?", userId: "ola" })))[0]!.data.threadId as string;
+  const olaConv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "ola" });
+  // Its last turn reads as still running.
+  await getDb()`UPDATE wiki_discuss_turns SET end_state = 'running', heartbeat_at = now() WHERE thread_id = ${olaThread}`;
+  events = [];
+  const byKari = await pane(app, { question: "Hi", userId: "kari", discussionId: olaThread });
+  expect(((await byKari.json()) as { reason: string }).reason).toBe("other-user");
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+  const byOla = await pane(app, { question: "Again?", userId: "ola", discussionId: olaThread });
+  expect(byOla.status).toBe(409);
+  expect(((await byOla.json()) as { reason: string }).reason).toBe("busy");
+  const mirrored = events.filter((e) => e.type === "transient_error");
+  expect(mirrored).toHaveLength(1);
+  expect(mirrored[0]).toMatchObject({ conversationId: olaConv.id, threadId: olaThread });
+});
+
+test("the thread read bounds «Earlier discussions»: the 10 newest closed threads, the first 60 messages of each, totals for what is left out, and each ledger row sent once", async () => {
+  const app = apps();
+  const live = (await frames(await pane(app, { question: "When?" })))[0]!.data.threadId as string;
+  await frames(await pane(app, { question: "And then?", discussionId: live }));
+  const db = getDb();
+  const closedIds: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    const [t] = await db`
+      INSERT INTO threads (user_id, bot_name, name, kind, wiki, rel_path, closed_at)
+      VALUES ('kari', 'ivar', ${`wiki: harbour note ${i}`}, 'wiki', 'harbour', 'notes/harbour.md', now() - ${`${i} minutes`}::interval)
+      RETURNING id`;
+    closedIds.push(t!.id as string);
+  }
+  // The newest closed thread holds 35 turns (70 messages).
+  const big = closedIds[0]!;
+  for (let seq = 1; seq <= 35; seq++) {
+    const [u] = await db`INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id, created_at) VALUES ('kari', 'ivar', 'user', ${`q${seq}`}, 'wiki', 'web', ${big}, now() + ${`${seq * 2} seconds`}::interval) RETURNING id`;
+    const [a] = await db`INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id, created_at) VALUES ('kari', 'ivar', 'assistant', ${`a${seq}`}, 'wiki', 'web', ${big}, now() + ${`${seq * 2 + 1} seconds`}::interval) RETURNING id`;
+    await db`
+      INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, rel_path, question, answer, end_state, bot_name, connector, thread_id, user_message_id, assistant_message_id)
+      VALUES (${big}, ${seq}, 'harbour', 'notes/harbour.md', ${`q${seq}`}, ${`a${seq}`}, 'done', 'ivar', 'claude-sdk', ${big}, ${u!.id as string}, ${a!.id as string})`;
+  }
+
+  const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as {
+    messages: { id: string; turn: { id: string } | null }[];
+    closed: { id: string; messages: Record<string, unknown>[]; messageTotal?: number }[];
+    closedTotal?: number;
+  };
+  expect(read.closed.map((t) => t.id)).toEqual(closedIds.slice(0, 10));
+  expect(read.closedTotal).toBe(12);
+  const first = read.closed[0]!;
+  expect(first.messages).toHaveLength(60);
+  expect(first.messageTotal).toBe(70);
+  expect(first.messages.slice(0, 2).map((m) => m.content)).toEqual(["q1", "a1"]);
+  expect(first.messages[59]!.content).toBe("a30");
+  // «Earlier discussions» reads role and content: no ledger row goes out for a closed thread.
+  expect(first.messages.some((m) => "turn" in m)).toBe(false);
+  expect(read.closed[1]!.messageTotal).toBe(0);
+  // The live thread: each turn's ledger row once, on one of its two messages.
+  expect(read.messages).toHaveLength(4);
+  const withTurn = read.messages.filter((m) => m.turn);
+  expect(withTurn).toHaveLength(2);
+  expect(new Set(withTurn.map((m) => m.turn!.id)).size).toBe(2);
+});
+
+// ── PR 4 fix round 1 batch 2 ─────────────────────────────────────────────
+
+test("a closed wiki thread the /chat list leaves out is found by id with its kind and closedAt, so a deep link knows what it is", async () => {
+  const app = apps();
+  const id = (await frames(await pane(app, { question: "When does it open?" })))[0]!.data.threadId as string;
+  await app.request("/api/wiki/discuss/thread/close", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: id }) });
+  const list = (await (await app.request("/chat/threads/kari/ivar")).json()) as { threads: { id: string }[] };
+  expect(list.threads.map((t) => t.id)).not.toContain(id);
+  const res = await app.request(`/chat/threads/${id}`);
+  expect(res.status).toBe(200);
+  const { thread } = (await res.json()) as { thread: { id: string; kind: string; closedAt?: number; botName: string } };
+  expect(thread).toMatchObject({ id, kind: "wiki", botName: "ivar" });
+  expect(typeof thread.closedAt).toBe("number");
+  expect((await app.request(`/chat/threads/${crypto.randomUUID()}`)).status).toBe(404);
+  expect((await app.request("/chat/threads/not-a-uuid")).status).toBe(404);
+});
+
+// ── PR 4 fix round 2: test-only pins ─────────────────────────────────────
+
+async function closedThread(userId: string, botName: string, relPath: string, minutesAgo: number): Promise<string> {
+  const [t] = await getDb()`
+    INSERT INTO threads (user_id, bot_name, name, kind, wiki, rel_path, closed_at)
+    VALUES (${userId}, ${botName}, ${`wiki: ${relPath} ${minutesAgo}`}, 'wiki', 'harbour', ${relPath}, now() - ${`${minutesAgo} minutes`}::interval)
+    RETURNING id`;
+  return t!.id as string;
+}
+
+async function message(threadId: string, role: "user" | "assistant", content: string, at: string, id?: string): Promise<string> {
+  const [m] = id
+    ? await getDb()`INSERT INTO messages (id, user_id, bot_name, role, content, source, platform, thread_id, created_at) VALUES (${id}, 'kari', 'ivar', ${role}, ${content}, 'wiki', 'web', ${threadId}, ${at}::timestamptz) RETURNING id`
+    : await getDb()`INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id, created_at) VALUES ('kari', 'ivar', ${role}, ${content}, 'wiki', 'web', ${threadId}, ${at}::timestamptz) RETURNING id`;
+  return m!.id as string;
+}
+
+test("closed threads' messages are capped and counted per thread, not across them", async () => {
+  const a = await closedThread("kari", "ivar", "notes/harbour.md", 1);
+  const b = await closedThread("kari", "ivar", "notes/harbour.md", 2);
+  // One role, no ledger rows: time alone orders them.
+  for (let i = 1; i <= 5; i++) await message(a, "user", `a${i}`, `2026-01-01T00:00:0${i}Z`);
+  for (let i = 1; i <= 4; i++) await message(b, "user", `b${i}`, `2026-01-01T00:00:0${i}Z`);
+  const got = await listClosedThreadMessages([a, b], 3);
+  expect(got.get(a)!.messages.map((m) => m.content)).toEqual(["a1", "a2", "a3"]);
+  expect(got.get(a)!.total).toBe(5);
+  expect(got.get(b)!.messages.map((m) => m.content)).toEqual(["b1", "b2", "b3"]);
+  expect(got.get(b)!.total).toBe(4);
+});
+
+test("a closed thread's turn reads question before answer even when the answer row sorts first by time and id", async () => {
+  const t = await closedThread("kari", "ivar", "notes/harbour.md", 1);
+  const at = "2026-01-01T00:00:00Z";
+  // Same time, and the assistant row's id sorts first: only the role tie-break puts the question first.
+  const a = await message(t, "assistant", "It opens at six.", at, "00000000-0000-4000-8000-000000000001");
+  const u = await message(t, "user", "When?", at, "00000000-0000-4000-8000-000000000002");
+  await getDb()`
+    INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, rel_path, question, answer, end_state, bot_name, connector, thread_id, user_message_id, assistant_message_id)
+    VALUES (${t}, 1, 'harbour', 'notes/harbour.md', 'When?', 'It opens at six.', 'done', 'ivar', 'claude-sdk', ${t}, ${u}, ${a})`;
+  const got = await listClosedThreadMessages([t], 10);
+  expect(got.get(t)!.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+});
+
+test("the closed-thread count is the page's and the listing the user's", async () => {
+  const mine = await closedThread("kari", "ivar", "notes/harbour.md", 1);
+  await closedThread("kari", "ivar", "notes/other.md", 2);
+  await getDb()`INSERT INTO users (id, username, platform) VALUES ('ola', 'Ola', 'web') ON CONFLICT (id) DO NOTHING`;
+  await closedThread("ola", "ivar", "notes/harbour.md", 3);
+  expect(await countClosedWikiThreads("kari", "ivar", "harbour", "notes/harbour.md")).toBe(1);
+  expect((await listClosedWikiThreads("kari", "ivar", "harbour", "notes/harbour.md")).map((t) => t.id)).toEqual([mine]);
+});
+
+test("a closed refusal on the requester's own thread of ANOTHER bot is not mirrored to that bot's /chat", async () => {
+  const app = apps();
+  const other = await closedThread("kari", "rolf", "notes/harbour.md", 1);
+  const rolfConv = await chatState.findOrCreateBotConversation({ botName: "rolf", userId: "kari" });
+  events = [];
+  const res = await pane(app, { question: "Again?", discussionId: other });
+  expect(res.status).toBe(409);
+  expect(((await res.json()) as { reason: string }).reason).toBe("closed");
+  expect(events.filter((e) => e.type === "transient_error")).toEqual([]);
+  chatState.deleteConversation(rolfConv.id);
+});
+
+test("a busy refusal on the live thread found by user, bot and page (no discussionId) is mirrored with that thread's id", async () => {
+  const app = apps();
+  const live = (await frames(await pane(app, { question: "When?" })))[0]!.data.threadId as string;
+  const conv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "kari" });
+  await getDb()`UPDATE wiki_discuss_turns SET end_state = 'running', heartbeat_at = now() WHERE thread_id = ${live}`;
+  events = [];
+  const res = await pane(app, { question: "Again?" });
+  expect(((await res.json()) as { reason: string }).reason).toBe("busy");
+  const mirrored = events.filter((e) => e.type === "transient_error");
+  expect(mirrored).toHaveLength(1);
+  expect(mirrored[0]).toMatchObject({ conversationId: conv.id, threadId: live });
+});
+
+test("a concurrent-turn conflict on the requester's existing thread is mirrored with its id", async () => {
+  let conflict = false;
+  const app = apps(undefined, {
+    store: {
+      start: async (...args: Parameters<typeof startDiscussTurn>) => {
+        if (conflict) throw new DiscussTurnConflict(args[0].discussionId);
+        return startDiscussTurn(...args);
+      },
+      finish: finishDiscussTurn,
+      readerLeft: markDiscussReaderLeft,
+      setCard: setDiscussTurnCard,
+      list: listDiscussTurns,
+      heartbeat: touchDiscussTurn,
+    },
+  });
+  const live = (await frames(await pane(app, { question: "When?" })))[0]!.data.threadId as string;
+  const conv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "kari" });
+  conflict = true;
+  events = [];
+  const res = await pane(app, { question: "Again?", discussionId: live });
+  expect(res.status).toBe(409);
+  expect(((await res.json()) as { reason: string }).reason).toBe("busy");
+  const mirrored = events.filter((e) => e.type === "transient_error");
+  expect(mirrored).toHaveLength(1);
+  expect(mirrored[0]).toMatchObject({ conversationId: conv.id, threadId: live });
 });

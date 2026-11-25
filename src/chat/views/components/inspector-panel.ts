@@ -227,7 +227,8 @@ export function devRunEventIcon(kind: string): string {
  *  JS string (the pure helpers ship separately via inspectorPanelClientScript).
  *  Injected INSIDE the CHAT_SCRIPT IIFE — has access to IIFE-scoped variables
  *  (selectedUserId, selectedBot, activeConvId, conversations, threads, connectors,
- *   bots, lastResponseMeta, inspectorContent, inspectorContext, inspectorToolUsage, etc.). */
+ *   bots, lastResponseMeta, inspectorContent, inspectorContext, inspectorToolUsage, etc.),
+ *  and to findThread/isWikiThread (threadKindScript, thread-manager.ts). */
 export function inspectorPanelScript(): string {
   return `
   // ── Pure helpers ──────────────────────────────────────────────────────
@@ -598,6 +599,20 @@ export function inspectorPanelScript(): string {
       .finally(function() { mcpStatusRefreshing = false; });
   }
 
+  // In place of Memories/Goals/Tasks on a wiki thread: what it is, and its page.
+  function renderWikiThreadContext(t) {
+    var label = (t.wiki || '') + (t.relPath ? ': ' + t.relPath : t.traceKey ? ': ' + t.traceKey : '');
+    var where = t.relPath
+      ? '<a href="/wiki?wiki=' + encodeURIComponent(t.wiki || '') + '&relPath=' + encodeURIComponent(t.relPath) + '">' + escapeHtml(label) + '</a>'
+      : escapeHtml(label);
+    inspectorContext.innerHTML =
+      '<div class="ins-section">'
+        + '<div class="ins-section-title">Wiki discussion</div>'
+        + '<div class="ins-empty-hint">Discussion of a wiki page: no personal context (memories, goals, tasks) reaches it, and no extractions run.</div>'
+        + '<div class="ins-mini-item">' + where + '</div>'
+      + '</div>';
+  }
+
   function loadInspectorContext(userId, botName) {
     var bp = encodeURIComponent(botName);
     var up = encodeURIComponent(userId);
@@ -850,10 +865,15 @@ export function inspectorPanelScript(): string {
       renderLastResponseCard(lastResponseMeta[activeConvId]);
     }
 
-    var contextKey = selectedUserId + ':' + selectedBot;
+    // A wiki page's Discuss thread (D7) gets no personal context: its turn never
+    // sees memories, goals or tasks and runs no extractor. The key carries the
+    // thread's kind, so a switch either way rebuilds the section.
+    var wikiThread = isWikiThread(activeThreadId) ? findThread(activeThreadId) : null;
+    var contextKey = selectedUserId + ':' + selectedBot + (wikiThread ? ':wiki:' + wikiThread.id : '');
     if (inspectorContextKey !== contextKey) {
       inspectorContextKey = contextKey;
-      loadInspectorContext(selectedUserId, selectedBot);
+      if (wikiThread) renderWikiThreadContext(wikiThread);
+      else loadInspectorContext(selectedUserId, selectedBot);
     }
     // Always reload per-thread stats (tool usage + context usage)
     loadToolUsageStats();
