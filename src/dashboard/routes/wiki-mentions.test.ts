@@ -351,6 +351,17 @@ describe("GET /api/wiki/mentions", () => {
     }
   });
 
+  test("a repo failure from the caches wins over read-only as the reason", async () => {
+    const failing = appWith({ gh: () => ({ runGh: async () => ({ exitCode: 4, stdout: "", stderr: "gh auth login" }), disabled: () => false }) });
+    await get(failing.app, `wiki=${WIKI}&key=CASE-8`); // acme-api fails
+    await __mentionPrsSettledForTest(WIKI);
+    const { app } = appWith({ isReadonlyRoot: () => true });
+    const body = (await (await get(app, `wiki=${WIKI}&key=CASE-7`)).json()) as MentionsBody;
+    const failed = body.prs.find((p) => p.number === 12)!;
+    expect([failed.state, failed.stale, failed.reason]).toEqual(["not-checked", false, "auth"]);
+    expect(body.prs.find((p) => p.number === 40)!.reason).toBe("read-only");
+  });
+
   test("kind: a tracker project's key is the tracker's, a keys pattern names its own, else null", async () => {
     const { app } = appWith();
     const kind = async (key: string) => ((await (await get(app, `wiki=${WIKI}&key=${key}`)).json()) as MentionsBody).kind;

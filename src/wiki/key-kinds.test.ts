@@ -52,6 +52,7 @@ describe("parseKeyKinds keeps only patterns in the key grammar", () => {
     "x{0,33}", // a count over 32
     "\\d{0,32}".repeat(8) + "x", // bounded atoms that can trade digits: 49.9 s on an 80-character key
     "a?a", // an optional atom before one that matches the same character
+    "a?b?a", // ... checked past optional atoms up to the first one that must match
     "[A-Z]{2,10}[A-Z0-9]-\\d+",
   ];
   for (const pattern of refused) {
