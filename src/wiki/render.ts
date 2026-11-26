@@ -50,6 +50,7 @@ import { sha256 } from "../utils/date-hash.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
 import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
 import { NAV_ANCHOR_ATTR } from "./core/cross-ref.ts";
+import { anchorSlug } from "../format/query-block.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -100,15 +101,16 @@ export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string, 
 }
 
 /** A wikilink target split at its first `#`: the page part resolves, the rest
- *  is an anchor on that page, lower-cased like every anchor the renderer and
- *  the reader write. A bare `[[#x]]` has no page part and stays whole.
+ *  is an anchor on that page, slugged as a Fold id, Query card or case row is
+ *  (`anchorSlug`: NFC, lower case, spaces to `-`; an existing slug stays as it
+ *  is). A bare `[[#x]]` has no page part and stays whole.
  *  Backslashes go first, as `wikilinkTarget` drops them: a pipe table escapes
  *  the label's pipe (`[[p#r1\|R1]]`), which left `p#r1\` as the target. */
 function splitWikilinkAnchor(raw: string): { page: string; anchor?: string } {
   const target = raw.replace(/\\/g, "");
   const hash = target.indexOf("#");
   if (hash <= 0) return { page: target };
-  const anchor = target.slice(hash + 1).trim().toLowerCase();
+  const anchor = anchorSlug(target.slice(hash + 1));
   return { page: target.slice(0, hash), ...(anchor ? { anchor } : {}) };
 }
 
@@ -206,7 +208,7 @@ export function renderWikiHtml(
         // link on mimir opened jarvis) and the page (the stem re-resolved to
         // whichever registered first).
         wikiPageAnchor(meta, text, opts?.wiki, anchor)
-      : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
+      : `<span class="wiki-link-missing" title="No page named ${escapeHtml(page.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);
     return `\x00WIKIPAGELINK${idx}\x00`;

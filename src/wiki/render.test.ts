@@ -43,8 +43,8 @@ describe("renderWikiHtml", () => {
     expect(html).toContain(
       '<a href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link" data-wiki-page="Claude Code" data-relpath="concepts/Claude Code.md" data-anchor="alpha-r11">R11</a>',
     );
-    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#kj%C3%B8re%20plan"');
-    expect(html).toContain('data-anchor="kjøre plan">Claude Code#Kjøre plan</a>');
+    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#kj%C3%B8re-plan"');
+    expect(html).toContain('data-anchor="kjøre-plan">Claude Code#Kjøre plan</a>');
     expect(html).not.toContain("wiki-link-missing");
   });
 
@@ -53,6 +53,18 @@ describe("renderWikiHtml", () => {
     expect(html).toContain('relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link"');
     expect(html).toContain('data-anchor="alpha-r11">R11</a>');
     expect(html).toContain('data-anchor="d7">Claude Code#D7</a>');
+  });
+
+  test("the anchor is slugged as a Fold id is: NFC, spaces to hyphens, an existing slug unchanged", () => {
+    const nfd = "Kjo\u0308re Plan";
+    const html = renderWikiHtml(`[[Claude Code#${nfd}|a]] [[Claude Code#runde-3--kveld|b]]`, resolve);
+    expect(html).toContain('data-anchor="kjöre-plan">a</a>');
+    expect(html).toContain('data-anchor="runde-3--kveld">b</a>');
+  });
+
+  test("in a pipe table, a missing page's title carries no backslash", () => {
+    const html = renderWikiHtml("| a |\n|---|\n| [[Nope\\|x]] |\n", resolve);
+    expect(html).toContain('<span class="wiki-link-missing" title="No page named Nope">x</span>');
   });
 
   test("in a pipe table, the escaped pipe's backslash stays out of the page and the anchor", () => {
