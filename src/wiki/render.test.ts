@@ -43,23 +43,22 @@ describe("renderWikiHtml", () => {
     expect(html).toContain(
       '<a href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link" data-wiki-page="Claude Code" data-relpath="concepts/Claude Code.md" data-anchor="alpha-r11">R11</a>',
     );
-    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#kj%C3%B8re-plan"');
-    expect(html).toContain('data-anchor="kjøre-plan">Claude Code#Kjøre plan</a>');
+    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#Kj%C3%B8re%20plan"');
+    expect(html).toContain('data-anchor="Kjøre plan">Claude Code#Kjøre plan</a>');
     expect(html).not.toContain("wiki-link-missing");
   });
 
-  test("the anchor is lower case, as every anchor the renderer writes is", () => {
-    const html = renderWikiHtml("[[Claude Code#Alpha-R11|R11]] og [[Claude Code#D7]]", resolve);
-    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link"');
-    expect(html).toContain('data-anchor="alpha-r11">R11</a>');
-    expect(html).toContain('data-anchor="d7">Claude Code#D7</a>');
+  test("the anchor goes on as written: the reader resolves it against the page's ids", () => {
+    // Exact ids that are no slug (`-next-steps`, `qcard-o1.2`) and source text alike.
+    const html = renderWikiHtml("[[Claude Code#-next-steps|a]] [[Claude Code#qcard-o1.2|b]] [[Claude Code#Alpha-R11|c]]", resolve);
+    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#-next-steps" class="wiki-link"');
+    expect(html).toContain('data-anchor="-next-steps">a</a>');
+    expect(html).toContain('data-anchor="qcard-o1.2">b</a>');
+    expect(html).toContain('data-anchor="Alpha-R11">c</a>');
   });
 
-  test("the anchor is slugged as a Fold id is: NFC, spaces to hyphens, an existing slug unchanged", () => {
-    const nfd = "Kjo\u0308re Plan";
-    const html = renderWikiHtml(`[[Claude Code#${nfd}|a]] [[Claude Code#runde-3--kveld|b]]`, resolve);
-    expect(html).toContain('data-anchor="kjöre-plan">a</a>');
-    expect(html).toContain('data-anchor="runde-3--kveld">b</a>');
+  test("a missing page's title names the page part alone", () => {
+    expect(renderWikiHtml("[[Nope#x]]", resolve)).toContain('title="No page named Nope"');
   });
 
   test("in a pipe table, a missing page's title carries no backslash", () => {

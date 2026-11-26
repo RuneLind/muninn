@@ -385,7 +385,7 @@ describe("linkRefs: a fragment link to a RunChecklist step", () => {
     article.className = "wiki-article";
     article.innerHTML = renderWikiHtml(
       [
-        "Se [R11 i alpha](#alpha-r11) og [noe annet](#ingen).",
+        "Se [R11 i alpha](#alpha-r11), [samme steg](#ALPHA-R11) og [noe annet](#ingen).",
         "",
         '<Fold id="alpha" title="service-a">',
         "",
@@ -415,7 +415,8 @@ describe("linkRefs: a fragment link to a RunChecklist step", () => {
       lent.forEach((k, i) => (g[k] = saved[i]));
     }
     const refs = [...article.querySelectorAll("a.wiki-ref")].map((a) => (a as unknown as HTMLElement).dataset.ref);
-    expect(refs).toEqual(["alpha-r11"]);
+    // An upper-case fragment joins too: the reveal's own lookup decides.
+    expect(refs).toEqual(["alpha-r11", "alpha-r11"]);
     expect(parts.label).toBe("R11");
     expect(parts.where).toBe("service-a");
     expect(parts.body.map((n) => n.textContent).join("")).toBe("R11 Release. Tag the release.");

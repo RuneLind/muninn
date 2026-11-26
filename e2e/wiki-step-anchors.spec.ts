@@ -55,7 +55,7 @@ const STEPS = [
   ...filler(60, "Andre"),
 ].join("\n");
 
-const OTHER = ["---", "title: Other page", "type: plan", "---", "", "# Other page", "", "Se [[plans/steps#alpha-r11|R11 i alpha]].", ""].join(
+const OTHER = ["---", "title: Other page", "type: plan", "---", "", "# Other page", "", "Se [[plans/steps#alpha-r11|R11 i alpha]]. Skrevet med store bokstaver: [[plans/steps#ALPHA-R11|R11 stor]].", ""].join(
   "\n",
 );
 
@@ -178,6 +178,15 @@ test.describe("Wiki reader: RunChecklist step and Fold anchors", () => {
     await link.click();
     await expect.poll(() => new URL(page.url()).searchParams.get("relPath")).toBe(STEPS_REL);
     expect(new URL(page.url()).hash).toBe("#alpha-r11");
+    await expectRevealed(page);
+    expectClean(seen);
+  });
+  test("a cross-page anchor written in another case lands through the reader's lookup", async ({ page }) => {
+    const seen = await open(page, OTHER_REL);
+    const link = page.locator(".wiki-article a.wiki-link", { hasText: "R11 stor" });
+    await expect(link).toHaveAttribute("data-anchor", "ALPHA-R11");
+    await link.click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("relPath")).toBe(STEPS_REL);
     await expectRevealed(page);
     expectClean(seen);
   });

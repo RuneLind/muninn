@@ -26,7 +26,7 @@
  *   the article, so the next page render takes them away.
  */
 
-import { HASH_FLASH_CLASS, RANGE_FLASH_HIGHLIGHT, revealHashTarget } from "./wiki-hash-target.ts";
+import { HASH_FLASH_CLASS, hashTarget, headingSlug, RANGE_FLASH_HIGHLIGHT, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
 import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
@@ -57,16 +57,8 @@ export const ID_NOUN_CLASS = "id-noun";
 export const REF_CLASS = "wiki-ref";
 export const BACK_CLASS = "wiki-ref-back";
 
-/** GitHub's heading slug: lowercase, punctuation dropped, each space a hyphen
- *  (so `Runde 3 — 18.08` gives `runde-3--1808`). Letters outside ASCII stay. */
-export function headingSlug(text: string): string {
-  return text
-    .normalize("NFC")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
-    .replace(/\s/g, "-");
-}
+/** GitHub's heading slug, defined beside the reveal that resolves to it. */
+export { headingSlug };
 
 export interface RefMatch {
   start: number;
@@ -297,8 +289,9 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
   // A server-rendered fragment link to a known kind of target joins in.
   root.querySelectorAll<HTMLAnchorElement>('a[href^="#"]:not(.dl-id):not(.query-id):not(.cb-id)').forEach((a) => {
     const id = decodeHash(a.getAttribute("href")!);
-    const target = id ? document.getElementById(id) : null;
-    if (target && root.contains(target) && target.matches(TARGET_KINDS)) {
+    // The reveal's own lookup, so a link joins exactly when its click would land.
+    const target = id ? hashTarget(root, id) : null;
+    if (target && target.matches(TARGET_KINDS)) {
       a.classList.add(REF_CLASS);
       a.dataset.ref = target.id;
     }

@@ -50,7 +50,6 @@ import { sha256 } from "../utils/date-hash.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
 import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
 import { NAV_ANCHOR_ATTR } from "./core/cross-ref.ts";
-import { anchorSlug } from "../format/query-block.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -101,16 +100,18 @@ export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string, 
 }
 
 /** A wikilink target split at its first `#`: the page part resolves, the rest
- *  is an anchor on that page, slugged as a Fold id, Query card or case row is
- *  (`anchorSlug`: NFC, lower case, spaces to `-`; an existing slug stays as it
- *  is). A bare `[[#x]]` has no page part and stays whole.
+ *  is an anchor on that page, passed on as written. The reader resolves it
+ *  against the ids the page has (`hashTarget`, `wiki-hash-target.ts`: as
+ *  written, lower case, then each id producer's slug), since only the page can
+ *  tell an exact id (`qcard-open 1`, `-next-steps`) from source text
+ *  (`Kjøre Plan`). A bare `[[#x]]` has no page part and stays whole.
  *  Backslashes go first, as `wikilinkTarget` drops them: a pipe table escapes
  *  the label's pipe (`[[p#r1\|R1]]`), which left `p#r1\` as the target. */
 function splitWikilinkAnchor(raw: string): { page: string; anchor?: string } {
   const target = raw.replace(/\\/g, "");
   const hash = target.indexOf("#");
   if (hash <= 0) return { page: target };
-  const anchor = anchorSlug(target.slice(hash + 1));
+  const anchor = target.slice(hash + 1).trim();
   return { page: target.slice(0, hash), ...(anchor ? { anchor } : {}) };
 }
 
