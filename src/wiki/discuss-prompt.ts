@@ -9,7 +9,8 @@
 
 import { HANDOFF_QUESTION_MAX } from "./discuss-bounds.ts";
 import { buildContextPack, type ContextPack, type PackInput } from "./discuss-pack.ts";
-import { ereEscape } from "./tracked-files.ts";
+import { MENTIONS_MAX_COMMITS, MENTIONS_MAX_LINES } from "./mentions.ts";
+import { ereEscape, GREP_LOCALE, HISTORY_WHOLE_KEY_SCAN, NO_USER_CONFIG, PINNED_CONFIG } from "./tracked-files.ts";
 
 export { HANDOFF_QUESTION_MAX };
 /** The whole prompt's bound, as the chat seeds' (`ASK_CHAT_SEED_MAX`). */
@@ -164,26 +165,69 @@ export interface ContinueTrace {
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /**
- * The «where it is mentioned» line of a trace's Continue prompt. A substring
- * key gets the payload's own searches (`-F`, `-S`), so they list what the
- * mentions do. A whole key has no git equivalent (git's pickaxe takes no PCRE,
- * and `-S --pickaxe-regex` undercounts two copies one character apart, so it
- * can miss a commit): the commands are the payload's candidate step, a `-G`
- * with its ERE under the C locale, and the line says they can list more.
- * Every command is scoped to the wiki (`-- .` from its root), and the grep
- * skips binary files (`-I`) as the payload does.
+ * One git command as the mentions payload runs it (`tracked-files.ts`
+ * through realGit): realGit's environment (`env -i` keeps only PATH and HOME,
+ * so no `GIT_DIR` or `GIT_CONFIG_PARAMETERS` of the agent's shell reaches git),
+ * no user or system config (`NO_USER_CONFIG`), the payload's `-c` pins
+ * (`PINNED_CONFIG`) over the repo's own `.git/config`, and realGit's
+ * `--no-pager --literal-pathspecs`. Without them the user's config could drop
+ * the root commit (`log.showRoot`), add renames (`diff.renames`), quote a
+ * non-ASCII path (`core.quotePath`, on by default) or print paths from the
+ * repo's top (`grep.fullName`). The table of keys is in
+ * `discuss-continue-prompt.test.ts`.
  */
-function traceWhereLine(trace: ContinueTrace): string {
-  const git = `git -C ${shellQuote(trace.root)}`;
+function payloadGit(root: string, locale: string, args: readonly string[]): string {
+  const env = ["env -i", 'PATH="$PATH"', 'HOME="$HOME"', `LC_ALL=${locale}`, ...Object.entries(NO_USER_CONFIG).map(([k, v]) => `${k}=${v}`)];
+  return [...env, "git --no-pager --literal-pathspecs -C", shellQuote(root), ...PINNED_CONFIG, ...args].join(" ");
+}
+
+/** Lines as a fenced code block whose fence no run of backticks in them can close. */
+function fenced(lines: readonly string[]): string {
+  const longest = Math.max(0, ...lines.flatMap((l) => (l.match(/`+/g) ?? []).map((run) => run.length)));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [`${fence}sh`, ...lines, fence].join("\n");
+}
+
+/** realGit's locale (`decision-triage/git.ts`): `git log` runs under it. */
+const GIT_LOCALE = "C";
+
+/**
+ * The «where it is mentioned» part of a trace's Continue prompt, its commands
+ * in a fenced block (a key may hold a backtick, which would end a code span).
+ * A substring key gets the payload's own searches (`grep -F` under its
+ * `C.UTF-8`, `log -S`), so they list what the mentions do up to the payload's
+ * caps. A whole key has no git equivalent: the payload greps the key as a
+ * fixed string and keeps the lines that hold it whole (`wholeKeyCount`), and
+ * git's pickaxe takes no PCRE (`-S --pickaxe-regex` undercounts two copies one
+ * character apart). So the commands are supersets: an ERE grep under the C
+ * locale, and the payload's own candidate step, `log -G` with its ERE. Every
+ * command is scoped to the wiki (`-- .` from its root), and the grep skips
+ * binary files (`-I`) as the payload does.
+ */
+function traceWhereLines(trace: ContinueTrace): string[] {
+  const grep = ["grep", "--no-recurse-submodules", "--no-color", "-n", "-I"];
+  const log = ["log", "--no-show-signature", "--no-color", "--no-decorate"];
+  const caps = `${MENTIONS_MAX_LINES} lines and ${MENTIONS_MAX_COMMITS} commits`;
   if (!trace.wholeKey) {
-    return `Where it is mentioned: \`${git} grep -n -I -F -e ${shellQuote(trace.key)} -- .\` lists the tracked files and lines that hold it, \`${git} log --oneline ${shellQuote(`-S${trace.key}`)} -- .\` the commits that changed how often it occurs, and ${trace.mentionsUrl} returns both with its log.md lines and the state of the PRs they name.`;
+    return [
+      `Where it is mentioned: the first command below lists the tracked files and lines that hold it, the second the commits that changed how often it occurs, as the answer of ${trace.mentionsUrl} does; that answer adds its log.md lines and the state of the PRs they name, and lists at most ${caps}, so for a busy key the commands list more.`,
+      fenced([
+        payloadGit(trace.root, GREP_LOCALE.LC_ALL, [...grep, "-F", "-e", shellQuote(trace.key), "--", "."]),
+        payloadGit(trace.root, GIT_LOCALE, [...log, "--relative", "--oneline", shellQuote(`-S${trace.key}`), "--", "."]),
+      ]),
+    ];
   }
   const ere = `(^|[^[:alnum:]])${ereEscape(trace.key)}([^[:alnum:]]|$)`;
-  return (
+  return [
     `Where it is mentioned: ${trace.mentionsUrl} returns the exact answer: the tracked files and lines that hold the key whole (no Unicode letter or digit right before or after it), the commits that changed how often it occurs, its log.md lines and the state of the PRs they name. ` +
-    `To look yourself, \`LC_ALL=C ${git} grep -n -I -E -e ${shellQuote(ere)} -- .\` lists candidate lines and \`LC_ALL=C ${git} log --oneline ${shellQuote(`-G${ere}`)} -- .\` candidate commits. ` +
-    "Both can list more than that answer: they read bytes, so a non-ASCII letter or digit right next to the key does not stop a match, and the log names every commit that edits a line holding the key, not only those that change how often it occurs."
-  );
+      "To look yourself, the first command below lists candidate lines and the second candidate commits:",
+    fenced([
+      payloadGit(trace.root, GIT_LOCALE, [...grep, "-E", "-e", shellQuote(ere), "--", "."]),
+      payloadGit(trace.root, GIT_LOCALE, [...log, "--no-ext-diff", "--no-textconv", "--relative", "--oneline", shellQuote(`-G${ere}`), "--", "."]),
+    ]),
+    "Both can list more than that answer: they read bytes, so a non-ASCII letter or digit right next to the key does not stop a match, and the log names every commit that edits a line holding the key, not only those that change how often it occurs. " +
+      `The answer also lists at most ${caps} and checks at most ${HISTORY_WHOLE_KEY_SCAN} candidate commits, so for a busy key they list more for that reason too.`,
+  ];
 }
 
 /**
@@ -204,7 +248,7 @@ export function renderContinuePrompt(input: { path: string | null; trace?: Conti
           "",
           `Key: ${trace.key}`,
           `Wiki: ${trace.wiki} (${trace.root})`,
-          traceWhereLine(trace),
+          ...traceWhereLines(trace),
           "",
         ]
       : input.path === null

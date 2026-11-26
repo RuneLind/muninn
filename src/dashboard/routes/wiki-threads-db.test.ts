@@ -742,8 +742,9 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     expect(prompt).toContain("Key: MEL-77");
     expect(prompt).toContain(`Wiki: harbour (${wiki})`);
     // No kind in this wiki: the mentions search MEL-77 as a substring, and so do the commands.
-    expect(prompt).toContain(`git -C '${wiki}' grep -n -I -F -e 'MEL-77' -- .`);
-    expect(prompt).toContain(`git -C '${wiki}' log --oneline '-SMEL-77' -- .`);
+    expect(prompt).toContain(`git --no-pager --literal-pathspecs -C '${wiki}' `);
+    expect(prompt).toContain(" grep --no-recurse-submodules --no-color -n -I -F -e 'MEL-77' -- .");
+    expect(prompt).toContain(" --relative --oneline '-SMEL-77' -- .");
     expect(prompt).toContain("/api/wiki/mentions?wiki=harbour&key=MEL-77");
     expect(prompt).not.toContain("Page:");
     expect(prompt).not.toContain("about the whole page");
@@ -752,7 +753,8 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
     __resetWikiCacheForTest();
     const whole = ((await (await app.request("/api/wiki/discuss/continue", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id }) })).json()) as { prompt: string }).prompt;
-    expect(whole).toContain(`LC_ALL=C git -C '${wiki}' grep -n -I -E -e '(^|[^[:alnum:]])MEL-77([^[:alnum:]]|$)' -- .`);
+    expect(whole).toContain(`LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git --no-pager --literal-pathspecs -C '${wiki}' `);
+    expect(whole).toContain(" -n -I -E -e '(^|[^[:alnum:]])MEL-77([^[:alnum:]]|$)' -- .");
     expect(whole).toContain("Both can list more than that answer");
     expect(whole).not.toContain("-F -e");
 

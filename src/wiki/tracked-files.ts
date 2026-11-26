@@ -22,8 +22,10 @@ import { isWikiWriteArtifact } from "./lockfile.ts";
 
 /** `-c` beats every config file. fallbackToNoIndex would grep untracked files
  *  outside a repo, submodule.recurse text a read refuses, column and fullName
- *  break the parse and the root-relative paths, logOutputEncoding the subjects. */
-const PINNED_CONFIG = [
+ *  break the parse and the root-relative paths, logOutputEncoding the subjects.
+ *  A trace's Continue prompt (`discuss-prompt.ts`) renders its git commands with
+ *  these and {@link NO_USER_CONFIG}, so they read the config the payload reads. */
+export const PINNED_CONFIG = [
   "-c", "core.quotePath=false",
   "-c", "grep.fallbackToNoIndex=false",
   "-c", "submodule.recurse=false",
@@ -31,7 +33,7 @@ const PINNED_CONFIG = [
   "-c", "grep.fullName=false",
   "-c", "i18n.logOutputEncoding=UTF-8",
 ] as const;
-const NO_USER_CONFIG = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } as const;
+export const NO_USER_CONFIG = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } as const;
 
 /** `git` with the config pinned. */
 function pinned(git: GitRun): GitRun {
@@ -138,7 +140,7 @@ export type GrepResult =
   | { ok: false; error: string };
 
 /** UTF-8, so a regex matches by character: under git's C locale `.` and `[æø]` meet one byte of æ. A fixed string stays byte-exact. */
-const GREP_LOCALE = { LC_ALL: "C.UTF-8" } as const;
+export const GREP_LOCALE = { LC_ALL: "C.UTF-8" } as const;
 /** Git's own message, anchored: a bad pattern's error quotes the pattern after `fatal: -e option,`, so a pattern holding these words cannot pass for it. */
 const isNoPcre = (res: GitResult) => !res.ok && res.exitCode !== 1 && /^fatal: cannot use Perl-compatible regexes/m.test(res.stderr ?? "");
 
