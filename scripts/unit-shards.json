@@ -315,7 +315,8 @@
       "src/dashboard/routes/wiki-threads-db.test.ts",
       "src/dashboard/routes/research-chat-wiki-thread-db.test.ts",
       "src/dashboard/views/wiki-boot/wiki-discuss-thread-race.test.ts",
-      "src/dashboard/views/wiki-boot/wiki-discuss-thread-actions.test.ts"
+      "src/dashboard/views/wiki-boot/wiki-discuss-thread-actions.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-selection-menu.test.ts"
     ]
   ]
 }

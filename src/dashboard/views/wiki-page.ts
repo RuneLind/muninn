@@ -12,6 +12,7 @@ import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 import { walkthroughStyles } from "./components/wiki-walkthrough-view.ts";
 import { stepDoneStyles } from "./components/wiki-step-done.ts";
 import { discussHandoffStyles } from "./components/wiki-discuss-handoff.ts";
+import { selectionMenuStyles } from "./components/wiki-selection-menu-model.ts";
 import { discussTabBodyHtml, discussTabStyles } from "./components/wiki-discuss-tab-view.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
@@ -2062,16 +2063,8 @@ function buildWikiPageCss(): string {
     .wiki-bc-fallback { text-decoration: underline dotted var(--text-muted); text-underline-offset: 2px; }
     .wiki-bc-nosession { font-style: italic; color: var(--text-muted); }
     .wiki-bc-touched { color: var(--text-muted); text-decoration: underline dotted; text-underline-offset: 2px; }
-    .wiki-bc-explain {
-      flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
-      background: var(--accent); color: var(--on-accent);
-      border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
-      font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
-    }
-    .wiki-bc-explain:hover { background: var(--accent-light); }
-    /* Fact check buttons — a quieter outline treatment so they read as a
-       secondary action next to the filled ✨ Explain. The whole-article variant
-       is always visible; the selection-gated one rides the same show/hide. */
+    /* The whole-page Fact check — a quieter outline treatment, always visible
+       (a selection's Fact check is the selection menu's, Discuss v2 PR 5). */
     /* …and "💬 Discuss" (chat) and "📤 Share" (a pasteable post) share that
        treatment: all three are article-level actions on the same breadcrumb row. */
     .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share, .wiki-bc-copy, .wiki-bc-answers {
@@ -3331,9 +3324,6 @@ function buildWikiPageCss(): string {
     @keyframes wikiAskSpin { to { transform: rotate(360deg); } }
     .wiki-ask-status.done .spinner { display: none; }
     .wiki-ask-status.error { color: var(--status-error); }
-    /* Select-to-Explain affordance now lives in the breadcrumb bar (see
-       .wiki-bc-explain below) — shown only while a selection exists, so there is
-       no permanently-dead button and no floating pill to position. */
     /* Answer rendered in the article pane — reuses .wiki-article typography. */
     .wiki-ask-article { margin-top: 4px; }
     .wiki-ask-cite {
@@ -3847,6 +3837,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${stepDoneStyles()}
     ${discussHandoffStyles()}
     ${discussTabStyles()}
+    ${selectionMenuStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${mirrorStatusStyles()}

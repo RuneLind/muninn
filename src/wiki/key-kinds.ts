@@ -76,7 +76,7 @@ export function parseKeyKinds(raw: unknown): { kinds: KeyKind[]; warnings: strin
  * its projects, else the first `keys` entry whose pattern matches the whole key,
  * else null. Trackers first, so a `keys` entry cannot rename a Jira key.
  */
-export function classifyKey(key: string, trackers: readonly TrackerConfig[], kinds: readonly KeyKind[]): string | null {
+export function classifyKey(key: string, trackers: readonly Pick<TrackerConfig, "id" | "projects">[], kinds: readonly Pick<KeyKind, "whole" | "name">[]): string | null {
   const m = /^([A-Z][A-Z0-9]{1,15})-\d{1,8}$/.exec(key);
   if (m) for (const t of trackers) if (t.projects.includes(m[1]!)) return t.id;
   for (const k of kinds) if (k.whole.test(key)) return k.name;

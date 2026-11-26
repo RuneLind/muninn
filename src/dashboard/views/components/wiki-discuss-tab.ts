@@ -106,6 +106,7 @@ import {
 } from "./wiki-discuss-state.ts";
 import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_POPOUT_ID, DISCUSS_START_OVER_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
+import { SEL_CARD_CLASS, hasBox } from "./wiki-selection-menu-model.ts";
 
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
@@ -185,7 +186,8 @@ let followAfterPress = false;
  *  pane stood (the bar and «Earlier discussions» sit above the turns, so a
  *  short pane can start past the follow margin). */
 let followSend = false;
-/** An Apply wrote this page while the tab was shown, and the page is rendered
+/** An Apply wrote this page while the tab was shown (an inline card's Apply
+ *  shows it first), and the page is rendered
  *  again: that render keeps the tab, then shows the reader the applied card and
  *  the changed passage. Cleared by the render, or by leaving the page. */
 let afterApply: { page: string; key: string } | null = null;
@@ -299,17 +301,78 @@ export function openDiscussTab(focus = false): void {
  *  when `passage` is null), in this page's discussion. False when nothing was
  *  sent (off, read-only, off a page, or a turn of the discussion still running). */
 export function askInDiscuss(question: string, passage: DiscussPassage | null, selected: Range | null = null): boolean {
-  return startTurn(question, passage, selected, null);
+  return startTurn(question, passage, selected, null) !== null;
 }
 
-function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): boolean {
-  if (!enabled || discussSendBlocked()) return false;
+/**
+ * The selection menu's turn (Discuss v2 PR 5, D3): one turn of this page's
+ * thread about `passage`, answered in an inline card under the paragraph.
+ * It is the same turn record the pane draws (one turn, never a copy), sent
+ * through the pane's own entry with `mode` for this turn only (the toggle is
+ * left as the reader set it), and the pane is not opened. The card draws it
+ * through {@link discussTurnForCard} and repaints on {@link onDiscussChange}.
+ * A refusal before the request says why, in the words the panel uses;
+ * `busy` marks the one a caller may route elsewhere (a turn still running, or
+ * an Apply with no outcome yet), `busyWhy` its words for that elsewhere.
+ * An Apply in flight, or one whose answer was lost and is not settled, holds
+ * off a new inline turn: that turn would become the current one, and the
+ * Apply's outcome (a refusal, «Check again») is offered on the current turn only.
+ */
+export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string; busy?: true; busyWhy?: string } {
+  if (!enabled) return { refused: "This wiki has no wiki agent here." };
+  if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
-  if (!d || !question.trim() || discussionLive(d)) return false;
+  if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended.", busy: true };
+  const unsettled = d ? currentTurn(d)?.edit : null;
+  if (unsettled?.state === "applying")
+    return { refused: "This page's discussion has an Apply still running: ask when it has ended.", busy: true, busyWhy: "an Apply in the page's discussion is still running, so not in it" };
+  if (unsettled?.retry === "lost")
+    return {
+      refused: "Apply's answer was lost, so whether it wrote is not known yet: settle it with «Check again» (or Discard) on its edit, in its card or the Discuss tab, then ask.",
+      busy: true,
+      busyWhy: "an Apply in the page's discussion has no known outcome yet, so not in it",
+    };
+  const key = startTurn(question, passage, selected, null, { mode, openPane: false });
+  return key ? { key } : { refused: "The turn could not start here." };
+}
+
+/** The turn an inline card draws, by key, in the open page's discussion;
+ *  `current` decides whether its edit card is offered. Null once the turn is
+ *  gone (Start over, another page). */
+export function discussTurnForCard(key: string): { turn: DiscussTurnView; current: boolean } | null {
+  const d = here();
+  const t = d?.turns.find((x) => x.key === key) ?? null;
+  return d && t ? { turn: t, current: currentTurn(d) === t } : null;
+}
+
+/** «Open in Discuss →» on an inline card: the pane on this page's thread,
+ *  scrolled to the turn. */
+export function showTurnInDiscuss(key: string): void {
   openDiscussTab();
+  afterRender(() => document.querySelector<HTMLElement>(`#${DISCUSS_BODY_ID} [data-turn-key="${CSS.escape(key)}"]`)?.scrollIntoView({ block: "nearest" }));
+}
+
+/** Called after every state change the tab paints (a stream frame, a preview,
+ *  an Apply), whether or not the tab is on screen: the inline cards repaint
+ *  from it. Returns the unsubscribe. */
+const changeListeners = new Set<() => void>();
+export function onDiscussChange(fn: () => void): () => void {
+  changeListeners.add(fn);
+  return () => changeListeners.delete(fn);
+}
+
+/** Start a turn of this page's discussion: its key, or null when nothing was
+ *  sent (off, read-only, off a page, or a turn still running). The pane opens
+ *  unless `openPane` is false (the selection menu's inline card). */
+function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, opts: { mode?: "explore" | "edit"; openPane?: boolean } = {}): string | null {
+  if (!enabled || discussSendBlocked()) return null;
+  const d = ensureHere();
+  if (!d || !question.trim() || discussionLive(d)) return null;
+  if (opts.openPane !== false) openDiscussTab();
   maybeLoad();
-  void runTurn(d, question.trim(), passage, passage ? selected : null, box);
-  return true;
+  const key = `t${++turnSeq}`;
+  void runTurn(d, key, question.trim(), passage, passage ? selected : null, box, opts.mode);
+  return key;
 }
 
 /** The turn the box sent was accepted: empty the box, unless the reader has
@@ -321,6 +384,7 @@ function clearSentBox(box: BoxSend): void {
 }
 
 function paint(): void {
+  for (const fn of changeListeners) fn();
   const body = document.getElementById(DISCUSS_BODY_ID);
   if (!body) return;
   const list = body.querySelector<HTMLElement>(".wiki-discuss-turns");
@@ -363,8 +427,8 @@ function schedulePaint(): void {
   else setTimeout(run, 0);
 }
 
-async function runTurn(d: DiscussionView, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null): Promise<void> {
-  const turn = newTurn(`t${++turnSeq}`, question, passage);
+async function runTurn(d: DiscussionView, key: string, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, mode?: "explore" | "edit"): Promise<void> {
+  const turn = newTurn(key, question, passage);
   noteActionError(d, null);
   if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
@@ -376,7 +440,7 @@ async function runTurn(d: DiscussionView, question: string, passage: DiscussPass
     if (passage.edge) body.edge = passage.edge;
   }
   if (d.discussionId) body.discussionId = d.discussionId;
-  body.mode = d.mode ?? "explore";
+  body.mode = mode ?? d.mode ?? "explore";
   const user = sendUser(d);
   if (user) body.userId = user;
   let res: Response;
@@ -454,19 +518,20 @@ async function previewEdit(t: DiscussTurnView): Promise<void> {
   schedulePaint();
 }
 
-/** «Preview again» / «Check again» on a card that holds no Apply. */
-function retryEdit(key: string): void {
+/** «Preview again» / «Check again» on a card that holds no Apply. `offPane`:
+ *  pressed on an inline card in the article, not in the tab. */
+function retryEdit(key: string, offPane = false): void {
   const d = here();
   const t = turnByKey(key);
   const e = t?.edit;
   if (!d || !t || !e?.retry || (e.state !== "refused" && e.state !== "failed") || currentTurn(d) !== t || discussSendBlocked()) return;
-  if (e.retry === "lost") void settleLostApply(d, t, e.preview ?? null);
+  if (e.retry === "lost") void settleLostApply(d, t, e.preview ?? null, offPane);
   else void previewEdit(t);
 }
 
 /** Apply's answer was lost: preview the same turn again to learn whether it
  *  wrote ({@link editAfterLostApply}); `shown` is the preview Apply sent. */
-async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: DiscussEditPreview | null): Promise<void> {
+async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: DiscussEditPreview | null, offPane: boolean): Promise<void> {
   const preview = shown ?? lostPreview.get(t.key) ?? null;
   if (!t.turnId || !preview) return;
   lostPreview.set(t.key, preview);
@@ -476,20 +541,38 @@ async function settleLostApply(d: DiscussionView, t: DiscussTurnView, shown: Dis
   const out = editAfterLostApply(preview, r);
   t.edit = out.edit;
   if (out.edit.retry !== "lost") lostPreview.delete(t.key);
-  finishApply(d, t, out.reload);
+  finishApply(d, t, out.reload, offPane);
 }
 
 /** The preview a lost Apply sent, kept while «Check again» is offered. */
 const lostPreview = new Map<string, DiscussEditPreview>();
 
 /** Paint the card; render the page again when it reads as written, keeping
- *  the reader on the tab when it is the one shown. */
-function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean): void {
+ *  the reader on the tab when it is the one shown. An Apply from an inline
+ *  card (`offPane`) ends on the tab whenever the card is not there to show
+ *  the outcome: always before a render (which removes the card), and with no
+ *  render when the reader closed or replaced the card while Apply ran. */
+function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean, offPane = false): void {
   paint();
-  if (!reload || !deps || deps.relPath() !== d.relPath) return;
+  if (!deps || deps.relPath() !== d.relPath) return;
+  if (!reload) {
+    if (offPane && !inlineCardShows(t.key)) showTurnInDiscuss(t.key);
+    return;
+  }
+  if (offPane) openDiscussTab();
   const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
   if (tab?.classList.contains("active")) afterApply = { page: `${deps.wiki()}\n${d.relPath}`, key: t.key };
   deps.reload?.();
+}
+
+/** Is an inline card in the article showing turn `key`, where the reader can
+ *  see it? One hidden with its text (graph mode, a lens) shows nothing; where
+ *  nothing is laid out there is no telling, and it counts as shown. */
+function inlineCardShows(key: string): boolean {
+  const card = document.querySelector(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn="${CSS.escape(key)}"]`);
+  if (!card) return false;
+  const wrap = document.getElementById("articleWrap");
+  return !wrap || !hasBox(wrap) || hasBox(card);
 }
 
 async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
@@ -503,7 +586,7 @@ async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; 
 }
 
 /** Apply: the previewed edit, by turn id and the two hashes the preview gave. */
-async function applyEdit(key: string): Promise<void> {
+async function applyEdit(key: string, offPane = false): Promise<void> {
   const d = here();
   const t = turnByKey(key);
   if (!d || !t?.turnId || t.edit?.state !== "ready" || !t.edit.preview || currentTurn(d) !== t || discussSendBlocked()) return;
@@ -519,25 +602,28 @@ async function applyEdit(key: string): Promise<void> {
       message: r.body.committed === true ? "Applied to the page, with a log.md entry and a commit." : uncommitted ? "Applied to the page, but the commit failed: the page now has changes no commit holds." : "Applied to the page, with a log.md entry; it was not committed here.",
     };
     // The page on screen is the one written: render it again.
-    finishApply(d, t, true);
+    finishApply(d, t, true, offPane);
     return;
   }
   // No answer, a success whose body did not arrive whole, or a gateway's 5xx:
   // the request may have written, so ask the route rather than claim either way.
   if (applyAnswerLost(r)) {
-    await settleLostApply(d, t, preview);
+    await settleLostApply(d, t, preview, offPane);
     return;
   }
   t.edit = editAfterApplyRefusal(preview, r.status, r.body);
-  paint();
+  finishApply(d, t, false, offPane);
 }
 
 /** «Change the wording»: the follow-up box asks for another wording, ahead of
- *  any draft the reader had typed; the reader sends it. */
-function rewordEdit(key: string): void {
+ *  any draft the reader had typed; the reader sends it. The box is in the tab:
+ *  from an inline card (`offPane`) the tab is shown first. */
+function rewordEdit(key: string, offPane = false): void {
   const t = turnByKey(key);
+  if (!t || discussSendBlocked()) return;
+  if (offPane) openDiscussTab();
   const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
-  if (!t || !input || discussSendBlocked()) return;
+  if (!input) return;
   input.value = rewordDraft(input.value);
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
@@ -956,19 +1042,22 @@ export function initDiscussTab(d: DiscussTabDeps): void {
       void continueInClaudeCode(cont.dataset.discussContinue ?? "");
       return;
     }
+    // The edit card's controls also sit in the selection menu's inline card,
+    // outside the tab's body (`offPane`).
+    const offPane = (el: HTMLElement) => !el.closest(`#${DISCUSS_BODY_ID}`);
     const apply = t.closest<HTMLElement>("[data-discuss-apply]");
     if (apply) {
-      void applyEdit(apply.dataset.discussApply ?? "");
+      void applyEdit(apply.dataset.discussApply ?? "", offPane(apply));
       return;
     }
     const reword = t.closest<HTMLElement>("[data-discuss-reword]");
     if (reword) {
-      rewordEdit(reword.dataset.discussReword ?? "");
+      rewordEdit(reword.dataset.discussReword ?? "", offPane(reword));
       return;
     }
     const retry = t.closest<HTMLElement>("[data-discuss-repreview]");
     if (retry) {
-      retryEdit(retry.dataset.discussRepreview ?? "");
+      retryEdit(retry.dataset.discussRepreview ?? "", offPane(retry));
       return;
     }
     const discard = t.closest<HTMLElement>("[data-discuss-discard]");

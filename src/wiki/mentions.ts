@@ -36,21 +36,13 @@ import type { WikiIndex } from "./store.ts";
 import { GREP_MAX_RESULTS, grepRootLog, grepTracked, historyFor, rootLogHeaders } from "./tracked-files.ts";
 import { askPrsInBackground, cachedPrFacts, parseRefString, type GhCheckDeps, type NotCheckedReason, type PrRef } from "./work-map/gh-check.ts";
 
-export const MENTION_KEY_MIN = 3;
-export const MENTION_KEY_MAX = 80;
+// The key check lives in a dependency-free module the reader bundle imports too.
+export { MENTION_KEY_MAX, MENTION_KEY_MIN, parseMentionKey } from "./mention-key.ts";
 /** Matching lines returned; past it the answer says `truncated`. */
 export const MENTIONS_MAX_LINES = GREP_MAX_RESULTS;
 export const MENTIONS_MAX_COMMITS = 50;
 /** Matching `log.md` lines returned, on a budget of their own. */
 export const MENTIONS_MAX_LOG = GREP_MAX_RESULTS;
-
-/** The key as searched, or why it is refused: 3–80 characters, no line break, NUL or other control character. Surrounding blanks are trimmed. */
-export function parseMentionKey(raw: string | undefined): { key: string } | { error: string } {
-  const key = (raw ?? "").trim();
-  if (key.length < MENTION_KEY_MIN || key.length > MENTION_KEY_MAX) return { error: `key must be ${MENTION_KEY_MIN}–${MENTION_KEY_MAX} characters` };
-  if (/[\u0000-\u001f\u007f]/.test(key)) return { error: "key may not hold a line break or control character" };
-  return { key };
-}
 
 /** Why a miss is not asked: a repo failure from the caches, or no refresh at all on this root. */
 export type MentionNotCheckedReason = NotCheckedReason | "read-only";

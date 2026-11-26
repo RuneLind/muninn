@@ -618,6 +618,45 @@ test("a role-user opens Related work's second hop — a read-slice GET, no page 
   expect(seen.errors).toEqual([]);
 });
 
+test("a selection shows no selection bar (only Copy would be left), and a right-click on it is the browser's own menu", async ({ page }) => {
+  const seen = watch(page);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PAGE_REL)}`);
+  const text = "Blåbærsyltetøy på brødskiva";
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(text);
+  const at = await page.evaluate((text) => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      const i = t.data.indexOf(text);
+      if (i === -1) continue;
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.setEnd(t, i + text.length);
+      const rects = r.getClientRects();
+      const a = rects[0]!;
+      const b = rects[rects.length - 1]!;
+      return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 1, y1: b.top + b.height / 2 };
+    }
+    throw new Error(`no text ${text}`);
+  }, text);
+  await page.mouse.move(at.x0, at.y0);
+  await page.mouse.down();
+  await page.mouse.move(at.x1, at.y1, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(text);
+  // The bar would show on the release's next tick: give it several.
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 300)));
+  await expect(page.locator("#wikiSelBar")).toBeHidden();
+  const prevented = await page.evaluate(({ x, y }) => {
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: x, clientY: y });
+    document.elementFromPoint(x, y)!.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }, { x: (at.x0 + at.x1) / 2, y: at.y0 });
+  expect(prevented).toBe(false);
+  await expect(page.locator("#wikiSelMenu")).toBeHidden();
+  expect(seen.errors).toEqual([]);
+});
+
 test("the overview makes no request outside the read slice, and has no Atlas tab — even linked", async ({ page }) => {
   const seen = watch(page);
   const paths: string[] = [];

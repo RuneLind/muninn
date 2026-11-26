@@ -76,6 +76,7 @@ import { fmtTokens } from "../../../utils/fmt-tokens.ts";
 import { localStore } from "./wiki-local-store.ts";
 import { LINE_REFS_TOGGLE_CLASS, ROLE_VIEW_CLASS } from "./wiki-report-blocks.ts";
 import { PEEK_CLASS } from "./wiki-ref-links.ts";
+import { SEL_CARD_CLASS } from "./wiki-selection-menu-model.ts";
 import { agentPaneCss, setAgentPane, type AgentPaneOptions } from "./wiki-agent-pane.ts";
 
 export const LENS_SWITCH_CLASS = "wiki-lens-switch";
@@ -198,8 +199,9 @@ export function decorateFoldSizes(article: Element, lang: Lang): void {
 }
 
 /** What every lens folds away in an id-led DecisionLog item (D6, D45): the
- *  rest of its text and whatever is nested under it. */
-const DL_REST = `:scope > .dl-text > .dl-rest, :scope > .dl-text ~ :not(.${DL_WHEN_CLASS})`;
+ *  rest of its text and whatever is nested under it, never the selection
+ *  menu's inline card (it answers about the item's visible text). */
+const DL_REST = `:scope > .dl-text > .dl-rest, :scope > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${SEL_CARD_CLASS})`;
 
 /** A fact-check mark or chip: what the compact view never folds away (K). */
 const FC_MARK = ".fc-mark, .fc-chip";
@@ -919,7 +921,7 @@ export function lensCss(): string {
 ${agentPaneCss()}
     .${READER_ONLY_OFF_CLASS} [${READER_ONLY_ATTR}] { display: none !important; }
     ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text > .dl-rest:not(.${PEEK_CLASS} *),
-    ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
+    ${LENSED} .dl-item:not(.${DL_EXPANDED_CLASS}) > .dl-text ~ :not(.${DL_WHEN_CLASS}):not(.${SEL_CARD_CLASS}):not(.${PEEK_CLASS} *) { display: none; }
     /* The reader's toggles: «mer», «Vis alle», a case's «mer», «+ N til», «+ N ikke kandidat». */
     .wiki-article :is(${TOGGLES}) {
       font: inherit; font-size: 0.85em; padding: 0 0.2em; border: none; background: none;

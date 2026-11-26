@@ -246,7 +246,27 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // PR 4 fix round 2 (an old one-shot turn's edit block found as the server finds it, which
 // brings `extractJson` and the fence reader into the bundle): 941,764 (319,985 gzipped),
 // so the pin moves to 941,800.
-const WIKI_CLIENT_MAX_BYTES = 941_800;
+// 2026-11-25, Discuss v2 PR 5 (the selection menu: its bar and right-click menu, the inline cards
+// for Explain, Where else and History, and the key chips, which bring `parseKeyKinds`' grammar check
+// and `classifyKey` into the bundle): 961,034 (326,737 gzipped), so the pin moves to 961,100.
+// PR 5 fix round 1 batch 1 (Enter's owners, the selection's end node, the read slice's hidden
+// actions left out of the bar): 962,255 (327,162 gzipped), so the pin moves to 962,300.
+// PR 5 fix round 1 batch 2 (an inline card's Apply and «Change the wording» show the Discuss tab, the
+// card let through the DecisionLog fold): 962,365 (327,251 gzipped), so the pin moves to 962,400.
+// PR 5 fix round 1 batch 3 (the classic Explain streamed into an inline card where the thread cannot
+// take the turn, the mentions answers' freshness window): 964,800 (328,019 gzipped), so the pin moves to 964,900.
+// PR 5 fix round 1 batch 4 (a card put back after a render of its page, the keyboard's menu and its
+// arrows, the bar hidden off-screen and the menu closed on a scroll): 967,485 (328,936 gzipped), so the
+// pin moves to 967,600.
+// PR 5 fix round 2 batch 1 (Enter's owners narrowed to real controls, the menu kept open on a scroll
+// beside the selection, no-agent Explain in the inline card, the Ask-view Explain removed): 968,164
+// (329,123 gzipped), so the pin moves to 968,300.
+// PR 5 fix round 2 batch 2 (an inline Apply's outcome on the tab once its card is gone, the strict
+// re-attach finder, the free-phrase texts): 969,237 (329,479 gzipped), so the pin moves to 969,400.
+// PR 5 class check (the held passage read in DOM order, a new inline turn held off while an Apply
+// is unsettled, a card shown with its text, the scroll check on the whole selection): 971,454
+// (330,241 gzipped), so the pin moves to 971,500.
+const WIKI_CLIENT_MAX_BYTES = 971_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

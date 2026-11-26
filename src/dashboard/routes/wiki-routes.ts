@@ -1845,6 +1845,9 @@ export function registerWikiReadRoutes(
         // and counts only when the discuss route would accept it (not a symlink,
         // over the bound or unreadable: those it refuses with 422/503).
         tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok",
+        // Discuss v2 PR 5: «Where else» / «History» read the mentions route,
+        // which is in the same group and answers only with MUNINN_AUTH off.
+        tools && authMode() === "off",
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

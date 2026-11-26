@@ -543,6 +543,17 @@ describe("readerPayload (the lens switch's page inputs)", () => {
     expect("trackerProjects" in readerPayload("kode", cfg({}), undefined)).toBe(false);
   });
 
+  test("mentions and keyKinds (Discuss v2 PR 5): the route flag for an admin; the validated kinds, absent without any", () => {
+    const admin = { roles: [], admin: true };
+    const keys = [{ name: "case", pattern: "MEL-\\d+", whole: /^(?:MEL-\d+)$/u }];
+    const p = readerPayload("kode", cfg({ keys }), undefined, admin, false, false, false, true);
+    expect(p.mentions).toBe(true);
+    expect(p.keyKinds).toEqual([{ name: "case", pattern: "MEL-\\d+" }]);
+    expect(readerPayload("kode", cfg({ keys }), undefined, { roles: [], admin: false }, false, false, false, true).mentions).toBe(false);
+    expect(readerPayload("kode", cfg({}), undefined, admin, false, false, false, false).mentions).toBe(false);
+    expect("keyKinds" in readerPayload("kode", cfg({}), undefined, admin)).toBe(false);
+  });
+
   test("WIKI_DEFAULT_LENS beats the file's defaultLens; Agent is offered nowhere yet", () => {
     const inst = parseWikiDefaultLens("felles=overview");
     expect(readerPayload("felles", cfg({ defaultLens: "all", language: "no" }), inst)).toEqual({
@@ -553,6 +564,7 @@ describe("readerPayload (the lens switch's page inputs)", () => {
       roles: { keys: [], viewer: [], preview: false },
       discussHandoff: false,
       discussAgent: false,
+      mentions: false,
     });
     expect(readerPayload("kode", cfg({ defaultLens: "all" }), inst).defaultLens).toBe("all");
     expect(readerPayload(undefined, null, undefined)).toEqual({
@@ -563,6 +575,7 @@ describe("readerPayload (the lens switch's page inputs)", () => {
       roles: { keys: [], viewer: [], preview: false },
       discussHandoff: false,
       discussAgent: false,
+      mentions: false,
     });
   });
 

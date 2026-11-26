@@ -64,3 +64,4 @@ t=$(mktemp); sed -n '<N>p' src/dashboard/reference/notes.md | fold -s -w 2000 > 
 - What's new — batch mode (`digest.ts`, `digest-changed-pages.ts`, `.wiki-reader.json` `whatsNew`) [trap]
 - Ask Claude Code (`wiki-discuss-handoff.ts`, `wiki-discuss-text.ts`) [trap]
 - Discuss tab (`wiki-discuss-tab.ts`, `wiki-discuss-state.ts`, `wiki-discuss-tab-view.ts`) [trap]
+- Selection menu (`wiki-selection-menu.ts`, `wiki-selection-menu-model.ts`) [trap]

@@ -14,7 +14,7 @@ import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
-import { DISCUSS_TEXT_HIDDEN, discussReading } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /** How a turn stands in the tab. `sending` until the route's `turn` event;
@@ -628,16 +628,13 @@ export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
   return parts.join("");
 }
 
-/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
- *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
-export function discussTurnHtml(t: DiscussTurnView, current = true): string {
-  const key = esc(t.key);
-  const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
-  if (t.passage) {
-    parts.push(`<button type="button" class="wiki-discuss-chip" data-discuss-chip="${key}" title="Show this passage in the page">“${esc(chipText(t.passage.selection))}”</button>`);
-    if (t.passageGone) parts.push(`<div class="wiki-discuss-gone" role="status">That passage is no longer in the page.</div>`);
-  } else parts.push(`<div class="wiki-discuss-whole">About the whole page</div>`);
-  parts.push(`<div class="wiki-discuss-q">${esc(t.question)}</div>`);
+/**
+ * A turn's body: the status line while it runs, its tool lines, the answer,
+ * the error and the proposed edit's card. The pane's turn and the selection
+ * menu's inline card (Discuss v2 PR 5) both draw it, so the two never differ.
+ */
+export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): string[] {
+  const parts: string[] = [];
   if (turnLive(t)) {
     const phase = t.state === "sending" ? "Starting the turn…" : (PHASE_WORDS[t.phase ?? ""] ?? "Working…");
     parts.push(`<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(phase)}</span></div>`);
@@ -648,6 +645,20 @@ export function discussTurnHtml(t: DiscussTurnView, current = true): string {
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${renderStreamingBody(t.text)}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
   if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
+  return parts;
+}
+
+/** One turn's markup. Every control keys on `data-discuss-*` and the turn's key.
+ *  `current`: the discussion's current turn ({@link currentTurn}), the only one whose edit is offered. */
+export function discussTurnHtml(t: DiscussTurnView, current = true): string {
+  const key = esc(t.key);
+  const parts: string[] = [`<div class="wiki-discuss-turn" data-turn-key="${key}" data-turn-state="${t.state}"${t.seq !== null ? ` data-turn-seq="${t.seq}"` : ""}>`];
+  if (t.passage) {
+    parts.push(`<button type="button" class="wiki-discuss-chip" data-discuss-chip="${key}" title="Show this passage in the page">“${esc(chipText(t.passage.selection))}”</button>`);
+    if (t.passageGone) parts.push(`<div class="wiki-discuss-gone" role="status">That passage is no longer in the page.</div>`);
+  } else parts.push(`<div class="wiki-discuss-whole">About the whole page</div>`);
+  parts.push(`<div class="wiki-discuss-q">${esc(t.question)}</div>`);
+  parts.push(...discussTurnBodyParts(t, current));
   if (t.turnId && !turnLive(t) && t.state !== "refused") {
     const h = t.handover;
     parts.push(
@@ -839,17 +850,16 @@ export function anchorRange(anchor: DiscussAnchor, article: Element): Range | nu
   return null;
 }
 
-/**
- * Find the passage `selection` in `article` as it is rendered now. White
- * space is ignored (a selection across list items reads with newlines the DOM
- * does not hold), so is text inside the reader's own controls. Both ends must
- * be there, in order, within the passage's length again: an edited passage
- * whose first words survive elsewhere does not count. When the text occurs
- * more than once, `context` (the turn's `before`/`after`) picks the copy whose
- * surroundings match it longest; a tie, or no context, is the first copy in
- * page order. Null when it is not in the page.
- */
-export function findPassage(article: Element, selection: string, context?: PassageContext | null): FoundPassage | null {
+/** Every copy of `selection` in `article` (see {@link findPassage}), each
+ *  turned into a range on demand and scored against a context on demand. */
+interface PassageCopies {
+  hits: { from: number; to: number }[];
+  range(h: { from: number; to: number }): Range;
+  /** How long each copy's surroundings match `before` (its end) and `after` (its start). */
+  scores(before: string, after: string): { b: number; a: number }[];
+}
+
+function passageCopies(article: Element, selection: string): PassageCopies | null {
   const want = compact(selection);
   if (!want) return null;
   const head = want.slice(0, KEY_CHARS);
@@ -893,45 +903,181 @@ export function findPassage(article: Element, selection: string, context?: Passa
     }
     return { node, offset: node.data.length };
   };
-  const rangeOf = (h: { from: number; to: number }): Range => {
-    const a = at(h.from);
-    const b = at(h.to - 1);
-    const r = doc.createRange();
-    r.setStart(a.node, a.offset);
-    r.setEnd(b.node, b.offset + 1);
-    return r;
-  };
-  let hit = hits[0]!;
-  const before = compact(context?.before ?? "");
-  const after = compact(context?.after ?? "");
-  if (hits.length > 1 && (before || after)) {
-    // Each copy's surroundings are read as the turn's `before`/`after` were
-    // (the context reading, which leaves out every reader-only element), not
-    // as the match above reads the page: a Fold's «Details» label or a caption
-    // next to the selected copy must not cost it the match. The article is
-    // read once, and each copy's surroundings are slices of that reading, at
-    // most `HANDOFF_CONTEXT_MAX` characters a side, as `before`/`after` are.
-    const reading = discussReading(article);
-    let best = 0;
-    for (const h of hits) {
+  return {
+    hits,
+    range(h) {
       const a = at(h.from);
       const b = at(h.to - 1);
-      const s = reading.at(a.node, a.offset);
-      const e = reading.at(b.node, b.offset + 1);
-      if (s === null || e === null) continue;
-      const around = {
-        before: compact(reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s)),
-        after: compact(reading.text.slice(e, e + HANDOFF_CONTEXT_MAX)),
-      };
-      const score = commonSuffix(around.before, before) + commonPrefix(around.after, after);
-      if (score > best) [best, hit] = [score, h];
-    }
-  }
-  const range = rangeOf(hit);
+      const r = doc.createRange();
+      r.setStart(a.node, a.offset);
+      r.setEnd(b.node, b.offset + 1);
+      return r;
+    },
+    scores(before, after) {
+      // Each copy's surroundings are read as the turn's `before`/`after` were
+      // (the context reading, which leaves out every reader-only element), not
+      // as the match above reads the page: a Fold's «Details» label or a caption
+      // next to the selected copy must not cost it the match. The article is
+      // read once, and each copy's surroundings are slices of that reading, at
+      // most `HANDOFF_CONTEXT_MAX` characters a side, as `before`/`after` are.
+      const reading = discussReading(article);
+      return hits.map((h) => {
+        const a = at(h.from);
+        const b = at(h.to - 1);
+        const s = reading.at(a.node, a.offset);
+        const e = reading.at(b.node, b.offset + 1);
+        if (s === null || e === null) return { b: 0, a: 0 };
+        return {
+          b: commonSuffix(compact(reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s)), before),
+          a: commonPrefix(compact(reading.text.slice(e, e + HANDOFF_CONTEXT_MAX)), after),
+        };
+      });
+    },
+  };
+}
+
+function foundAt(article: Element, range: Range): FoundPassage {
   const common = range.commonAncestorContainer;
   const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
   return { node: range.startContainer as Text, range, block };
+}
+
+/**
+ * Find the passage `selection` in `article` as it is rendered now. White
+ * space is ignored (a selection across list items reads with newlines the DOM
+ * does not hold), so is text inside the reader's own controls. Both ends must
+ * be there, in order, within the passage's length again: an edited passage
+ * whose first words survive elsewhere does not count. When the text occurs
+ * more than once, `context` (the turn's `before`/`after`) picks the copy whose
+ * surroundings match it longest; a tie, or no context, is the first copy in
+ * page order. Null when it is not in the page.
+ */
+export function findPassage(article: Element, selection: string, context?: PassageContext | null): FoundPassage | null {
+  const copies = passageCopies(article, selection);
+  if (!copies) return null;
+  let hit = copies.hits[0]!;
+  const before = compact(context?.before ?? "");
+  const after = compact(context?.after ?? "");
+  if (copies.hits.length > 1 && (before || after)) {
+    let best = 0;
+    copies.scores(before, after).forEach((sc, i) => {
+      if (sc.b + sc.a > best) [best, hit] = [sc.b + sc.a, copies.hits[i]!];
+    });
+  }
+  return foundAt(article, copies.range(hit));
+}
+
+/** How many characters (white space dropped) of each side of a passage's
+ *  held surroundings must still be next to a copy for it to be the same
+ *  passage (a side shorter than this, which reached the root's edge, must
+ *  match whole and still reach it). */
+export const SAME_PASSAGE_CHARS = 16;
+/** How many characters (white space dropped) of each side are held: the
+ *  copy matching more of them wins. */
+export const SAME_PASSAGE_WINDOW = 200;
+
+/**
+ * A passage as the selection menu holds it for a render of its page: its text
+ * as the copy walk reads it, and the text around that copy, read in DOM order
+ * by the same walk (white space dropped, the reader's additions and redraws
+ * left out), so a copy found after the render is scored exactly as the held
+ * one was read. Not the turn's `before`/`after`: those are in authored order
+ * (a DecisionLog newest first reads otherwise) and need text-node ends.
+ */
+export interface HeldPassage {
+  passage: string;
+  before: string;
+  after: string;
+  /** Where the copy started in the walk's text: the tie-break. */
+  at: number;
+}
+
+/** The text around copies, in DOM order: the copy walk's nodes, without
+ *  {@link DISCUSS_TEXT_SKIP} (reader additions, a mermaid fence the client
+ *  redraws), white space dropped. `at` maps a copy's boundary into it. */
+function domReading(root: Element): { text: string; at(node: Node, offset: number): number | null } {
+  const place = new Map<Node, { from: number; usable: boolean }>();
+  let text = "";
+  const walker = root.ownerDocument.createTreeWalker(root, 4);
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    const el = n.parentElement;
+    if (el?.closest(SKIP)) continue;
+    const usable = !el?.closest(DISCUSS_TEXT_SKIP);
+    place.set(n, { from: text.length, usable });
+    if (usable) text += compact(n.data);
+  }
+  return {
+    text,
+    at(node, offset) {
+      const p = place.get(node);
+      if (!p) return null;
+      return p.usable ? p.from + compact((node as Text).data.slice(0, offset)).length : p.from;
+    },
+  };
+}
+
+/**
+ * Hold the passage `range` selects in `root` (see {@link HeldPassage}): the
+ * copy the walk finds inside the range, so a range ending on an element
+ * boundary (a triple-click) is read as its text. Null when the walk finds no
+ * copy there (a diagram's or a control's text): such a card has no place to
+ * come back to.
+ */
+export function holdPassage(root: Element, range: Range): HeldPassage | null {
+  const passage = renderedPassageText(range);
+  const copies = passageCopies(root, passage);
+  if (!copies) return null;
+  // 0 = START_TO_START, 2 = END_TO_END, spelled out so the helper needs no global.
+  // A range a render has taken out of `root` is in another tree: it holds no copy.
+  const inside = (r: Range) => {
+    try {
+      return range.compareBoundaryPoints(0, r) <= 0 && range.compareBoundaryPoints(2, r) >= 0;
+    } catch {
+      return false;
+    }
+  };
+  const hit = copies.hits.find((h) => inside(copies.range(h)));
+  if (!hit) return null;
+  const reading = domReading(root);
+  const r = copies.range(hit);
+  const s = reading.at(r.startContainer, r.startOffset);
+  const e = reading.at(r.endContainer, r.endOffset);
+  if (s === null || e === null) return null;
+  return { passage, before: reading.text.slice(Math.max(0, s - SAME_PASSAGE_WINDOW), s), after: reading.text.slice(e, e + SAME_PASSAGE_WINDOW), at: hit.from };
+}
+
+/**
+ * The held passage where it was, or null. A copy counts when, on each side,
+ * at least {@link SAME_PASSAGE_CHARS} characters of its surroundings match the
+ * held ones, or the held side is shorter (it reached the root's edge) and the
+ * copy's side is that same text, whole. Of those copies the one matching the
+ * most held characters wins; on a tie the one nearest where the held copy
+ * started, then the first. A copy that only shares the words, with other text
+ * around it, is not the passage.
+ */
+export function findSamePassage(root: Element, held: HeldPassage): FoundPassage | null {
+  const copies = passageCopies(root, held.passage);
+  if (!copies) return null;
+  const reading = domReading(root);
+  const side = (got: string, want: string, n: number) => n >= SAME_PASSAGE_CHARS || (n === want.length && got.length === want.length);
+  let hit: { from: number; to: number } | null = null;
+  let best = -1;
+  let near = Infinity;
+  for (const h of copies.hits) {
+    const r = copies.range(h);
+    const s = reading.at(r.startContainer, r.startOffset);
+    const e = reading.at(r.endContainer, r.endOffset);
+    if (s === null || e === null) continue;
+    const before = reading.text.slice(Math.max(0, s - SAME_PASSAGE_WINDOW), s);
+    const after = reading.text.slice(e, e + SAME_PASSAGE_WINDOW);
+    const b = commonSuffix(before, held.before);
+    const a = commonPrefix(after, held.after);
+    if (!side(before, held.before, b) || !side(after, held.after, a)) continue;
+    const d = Math.abs(h.from - held.at);
+    if (b + a > best || (b + a === best && d < near)) [best, near, hit] = [b + a, d, h];
+  }
+  return hit ? foundAt(root, copies.range(hit)) : null;
 }
 
 // ── The article mark on the text a proposed edit replaces ────────────────

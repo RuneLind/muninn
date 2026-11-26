@@ -34,7 +34,6 @@ import {
 } from "./wiki-series-menu.ts";
 import {
   buildExplainUrl,
-  explainLabel,
   buildFactcheckUrl,
   factcheckLabel,
 } from "./wiki-explain.ts";
@@ -140,7 +139,6 @@ import {
   enhanceLens,
   lensKeyToggles,
   lensOf,
-  readerSelectionText,
   removeLensChip,
   storedLens,
   toggleLens,
@@ -327,7 +325,6 @@ import {
 } from "./wiki-menus-controller.ts";
 import {
   acceptFactcheckIntegrate,
-  askHistoryParam,
   askQuestion,
   cancelClaimRetryBatch,
   cancelFactcheckIntegrate,
@@ -388,8 +385,8 @@ import {
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
 import { initDiscussTab } from "./wiki-discuss-tab.ts";
+import { SEL_MAX_CHARS, SEL_MIN_CHARS, hideSelectionMenu, initSelectionMenu, selectionMenuOpen, setSelectionMenuPage, showSelectionBarForExplainer } from "./wiki-selection-menu.ts";
 import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
-import { nearestHeading } from "./wiki-nearest-heading.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
 const LENS_PARAM = "lens";
@@ -970,9 +967,8 @@ function renderBreadcrumb(m: WikiListing): void {
     // same reason: a utility about where the page is, not about its content.
     `<button class="wiki-bc-copy wiki-bc-locate" id="wikiLocateBtn" type="button" ` +
     `title="Show in list" aria-label="Show this page in the list">⌖</button>` +
-    // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
-    '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
-    '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
+    // A selection's actions (Explain, Fact check, …) are the selection menu's
+    // bar and right-click menu (`wiki-selection-menu.ts`, Discuss v2 PR 5).
     // Always-visible whole-article fact check (markdown pages + explainers).
     '<button class="wiki-bc-factcheck wiki-bc-factcheck-article" id="wikiFactcheckArticleBtn" ' +
     'title="Fact-check this whole page against the web">🔎 Fact check</button>' +
@@ -1500,6 +1496,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
       renderConnections(data);
       // «Ask Claude Code» for the whole page; an explainer's selection is in its iframe.
       setDiscussHandoffEnabled(data.reader?.discussHandoff === true, data.reader?.discussAgent === true);
+      setSelectionMenuPage(data.reader);
       // The same gate as a markdown page: an explainer with inferred keys has
       // provenance too. Its head rendered before this payload, so the strip is
       // inserted when the block lands (`placeProvStrip`), with no placeholder.
@@ -1693,6 +1690,7 @@ function fetchAndRenderPage(url: string, push: boolean, revealHash: boolean, has
       // Discuss P1: «Ask Claude Code» where the wiki opts in, for an admin;
       // P3: the Discuss tab where the wiki has an agent.
       setDiscussHandoffEnabled(reader?.discussHandoff === true, reader?.discussAgent === true);
+      setSelectionMenuPage(reader);
       const readerLang = reader?.language ?? DEFAULT_QUESTION_LANGUAGE;
       enhanceReportBlocks(articleRoot, { language: readerLang, idLabels: reader?.idLabels, roles: reader?.roles });
       // `<Query>` result tables: header-click sorting. No-op without one.
@@ -2052,15 +2050,11 @@ const GRAPH_NODE_SEL = `#${GRAPH_SECTION_ID} [${GRAPH_NODE_ATTR}]`;
  * capture phase and stops propagation, so every other owner — all bubble-phase —
  * would never see Escape while the card is open. It stands aside for: an open
  * dialog or menu anywhere (Share, Discuss, the series ★ menu, a native dialog —
- * page-wide, so it also covers a target inside one); the Explain pill (the
- * Fact check button only ever shows beside it); the header's Tools menu.
+ * page-wide, so it also covers a target inside one); the selection menu's
+ * bar or right-click menu; the header's Tools menu.
  */
 function escapeOwnedElsewhere(): boolean {
-  return (
-    modalOpen(document) ||
-    (document.getElementById("wikiExplainBtn")?.getClientRects().length ?? 0) > 0 ||
-    navMenuOpen(document)
-  );
+  return modalOpen(document) || selectionMenuOpen() || navMenuOpen(document);
 }
 
 // ── The URL lens: `?lens=` is spent by the first view that renders ────
@@ -2091,108 +2085,40 @@ function reloadPageInPlace(relPath: string | undefined, name?: string): void {
   }
 }
 
-// ── Select-to-Explain ─────────────────────────────────────────────────
-// Selecting text inside a rendered (markdown) article — or an HTML explainer,
-// via the iframe bridge — reveals the "✨ Explain" button in the breadcrumb bar
-// (a stable spot, no floating pill to position). Activating it runs the SAME
-// research stream as Ask (via `runAskStream`) against `/api/wiki/explain`, so the
-// explanation lands in the article pane + session history like any other Ask turn.
-const EXPLAIN_MIN_CHARS = 3;
-const EXPLAIN_MAX_CHARS = 1500;
-// Captured at selection time — BEFORE any click can collapse the selection.
-let pillSel = "";
-let pillHeading = "";
+// ── A selection's Explain and Fact check ───────────────────────────────
+// The selection menu (`wiki-selection-menu.ts`, Discuss v2 PR 5) offers them
+// on a bar at the selection and in a right-click menu. Its «Explain with
+// context» answers in an inline card under the paragraph (D3): a turn of the
+// page's thread where the wiki has an agent, else the classic
+// `/api/wiki/explain` stream, whose URL is built here.
 
-/** Reveal / hide the breadcrumb's Explain button. The button is (re)rendered
- *  hidden by `renderBreadcrumb` on every page load, so a lookup-by-id is enough;
- *  on the start view / Ask answers there is no breadcrumb and both are no-ops.
- *  (Named `*ExplainPill` still — the call sites below read as before.) */
-function hideExplainPill(): void {
-  const btn = document.getElementById("wikiExplainBtn");
-  if (btn) (btn as HTMLElement).style.display = "none";
-  // The selection-gated Fact check button rides the same selection state.
-  const fc = document.getElementById("wikiFactcheckBtn");
-  if (fc) (fc as HTMLElement).style.display = "none";
-}
-function showExplainPill(): void {
-  const btn = document.getElementById("wikiExplainBtn");
-  if (btn) (btn as HTMLElement).style.display = "";
-  const fc = document.getElementById("wikiFactcheckBtn");
-  if (fc) (fc as HTMLElement).style.display = "";
-}
-
-/** Decide whether to reveal the Explain button for the current selection, and
- *  capture the passage + heading if so. Called on `mouseup` inside the article
- *  pane. */
-function maybeShowExplainPill(): void {
-  // Real markdown page only — not the start view, not an Ask answer (both leave
-  // currentName null), not an HTML explainer (iframe selections are unreachable,
-  // but loadExplainer sets currentName, so exclude by type).
-  if (!getCurrentName()) return hideExplainPill();
-  // `currentArticle` — the listing the OPEN page was rendered from — never an
-  // `allPages` lookup by name: that lookup is first-match-on-stem, so on a wiki
-  // with same-stem pages it answered about a DIFFERENT page (wrong type, wrong
-  // title, wrong everything the caller then acted on).
-  const meta = currentArticle;
-  if (meta && meta.type === "explainer") return hideExplainPill();
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideExplainPill();
-  // Without the reader's own text (id nouns, fold sizes): the server locates
-  // this in the page source, which has none of it.
-  const text = readerSelectionText(sel).trim();
-  if (text.length < EXPLAIN_MIN_CHARS || text.length > EXPLAIN_MAX_CHARS) return hideExplainPill();
-  const wrap = document.getElementById("articleWrap");
-  const anchor = sel.anchorNode;
-  if (!wrap || !anchor || !wrap.contains(anchor)) return hideExplainPill();
-  // Never from the graph (its card included), which shares `#articleWrap`.
-  const graph = document.getElementById(GRAPH_SECTION_ID);
-  if (graph && (graph.contains(anchor) || (sel.focusNode && graph.contains(sel.focusNode)))) return hideExplainPill();
-  const range = sel.getRangeAt(0);
-  pillSel = text;
-  pillHeading = nearestHeading(range);
-  showExplainPill();
-}
-
-function activateExplain(): void {
-  hideExplainPill();
-  if (!pillSel || !getCurrentName()) return;
-  const explainMeta = currentArticle;
-  const turn: AskTurn = {
-    question: explainLabel(pillSel),
-    // The page the passage was read on. The question is only a display LABEL, so
-    // without this an escalated Explain turn names neither the page nor the real
-    // question (`composeDeclineQuestion`). Title where there is one — it is what
-    // wikilinks and the bot's own notes search use.
-    explainPage: explainMeta?.title || getCurrentName()!,
-    answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
-  };
-  const url = buildExplainUrl({
-    sel: pillSel,
+/** The classic Explain's URL for the open page, for the selection menu's inline card. */
+function explainUrlFor(sel: string, heading: string): string {
+  return buildExplainUrl({
+    sel,
     page: getCurrentName()!,
     // relPath beside the name — the route resolves it first. Without it, Explain
     // read the passage's context out of whichever same-stem page registered first.
     ...(currentRelPath ? { relPath: currentRelPath } : {}),
     wiki: WIKI,
-    ctx: pillHeading,
-    history: askHistoryParam(),
+    ctx: heading,
   });
-  runAskStream(url, turn);
 }
 
-/** Fact-check the current selection (`sel` mode). Same captured passage/heading
- *  as Explain; the answer streams into the article pane as a `factcheck` Ask turn. */
-function activateFactcheckSel(): void {
-  hideExplainPill();
-  if (!pillSel || !getCurrentName()) return;
+/** Fact-check a selection (`sel` mode), from the selection menu. The answer
+ *  streams into the article pane as a `factcheck` Ask turn. */
+function activateFactcheckSel(sel: string, heading: string): void {
+  hideSelectionMenu();
+  if (!sel || !getCurrentName()) return;
   const selMeta = currentArticle;
   const turn: AskTurn = {
-    question: factcheckLabel(pillSel),
+    question: factcheckLabel(sel),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
     page: getCurrentName()!, pageType: selMeta ? selMeta.type : undefined,
     // Persisted so a later ↻ can re-issue the SAME scoped call: the retry route
     // re-locates the excerpt from `sel`, and retrying a sel-mode claim in article
     // mode would verify it against a passage nobody selected.
-    fcMode: "sel", fcSel: pillSel, fcCtx: pillHeading || undefined,
+    fcMode: "sel", fcSel: sel, fcCtx: heading || undefined,
     // The exact page this check ran on, stamped at START — every write/retry the
     // turn can launch later resolves against it.
     ...(currentRelPath ? { pageRelPath: currentRelPath } : {}),
@@ -2202,8 +2128,8 @@ function activateFactcheckSel(): void {
     page: getCurrentName()!,
     ...(currentRelPath ? { relPath: currentRelPath } : {}),
     wiki: WIKI,
-    sel: pillSel,
-    ctx: pillHeading,
+    sel,
+    ctx: heading,
   });
   runAskStream(url, turn);
 }
@@ -2212,7 +2138,7 @@ function activateFactcheckSel(): void {
  *  breadcrumb button. Works on markdown pages AND explainers (server reduces the
  *  explainer HTML to prose). No selection needed. */
 function activateFactcheckArticle(): void {
-  hideExplainPill();
+  hideSelectionMenu();
   if (!getCurrentName()) return;
   const meta = currentArticle;
   const turn: AskTurn = {
@@ -2646,7 +2572,7 @@ function staleDeps(): StaleDeps {
  *  rest set it now, the shown page's hash cleared with its relPath (#829). An
  *  explainer renders its own breadcrumb; the other kinds show no page. */
 function leaveView(kind: PaneViewKind, relPath: string | null): void {
-  hideExplainPill();
+  hideSelectionMenu();
   abortAgentRuns(); // the Agent pane's plan-card run belongs to the page left
   currentNear = null; // the page left stops boosting a find
   if (kind === "page") return;
@@ -3302,47 +3228,23 @@ export function boot(): { dispose(): void } {
       submitFollowup();
     }
   });
-  // Show on selection release inside the article pane; the timeout lets the browser
-  // finalize the selection first. (articleWrap's element persists across page
-  // navigations — only its innerHTML is swapped — so a one-time listener suffices.)
-  document.getElementById("articleWrap")?.addEventListener("mouseup", () => {
-    setTimeout(maybeShowExplainPill, 0);
+  // A selection's bar and right-click menu (Discuss v2 PR 5): its own
+  // listeners, registered here where the Explain pill's were.
+  initSelectionMenu({
+    wiki: () => FIND_SELF_WIKI || WIKI,
+    relPath: () => currentRelPath,
+    currentName: () => getCurrentName(),
+    // `currentArticle`, never an `allPages` lookup by name (first match on a stem).
+    pageType: () => currentArticle?.type ?? null,
+    graphId: GRAPH_SECTION_ID,
+    explainUrl: (sel, heading) => explainUrlFor(sel, heading),
+    factcheck: activateFactcheckSel,
+    hrefFor: pageUrlByRelPath,
   });
-  // Dismiss on: selection collapse, article scroll, Escape, and a mousedown
-  // outside the buttons the handler below names (its `closest()` checks).
-  document.addEventListener("selectionchange", () => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) hideExplainPill();
-  });
-  document.addEventListener("keydown", (e) => {
-    if ((e as KeyboardEvent).key === "Escape") hideExplainPill();
-  });
-  // A mousedown on the Explain button activates it (preventDefault keeps the
-  // selection alive so `activateExplain` reads its captured passage); a mousedown
-  // on any button not named below dismisses it. One handler so the two never race.
+  // Whole-article Fact check — always visible, needs no selection.
   document.addEventListener("mousedown", (e) => {
     const t = e.target as HTMLElement;
-    if (t.closest && t.closest("#wikiExplainBtn")) {
-      e.preventDefault();
-      activateExplain();
-      return;
-    }
-    // Selection-gated Fact check — preventDefault keeps the selection alive so the
-    // captured passage is read (same pattern as Explain).
-    if (t.closest && t.closest("#wikiFactcheckBtn")) {
-      e.preventDefault();
-      activateFactcheckSel();
-      return;
-    }
-    // Whole-article Fact check — always visible, needs no selection.
-    if (t.closest && t.closest("#wikiFactcheckArticleBtn")) {
-      activateFactcheckArticle();
-      return;
-    }
-    // «Ask Claude Code» (its own module acts on the click): hiding the pill
-    // here would move either button out from under the pointer before mouseup.
-    if (t.closest && t.closest("#wikiDiscussHandoffBtn, #wikiDiscussHandoffPageBtn")) return;
-    hideExplainPill();
+    if (t.closest && t.closest("#wikiFactcheckArticleBtn")) activateFactcheckArticle();
   });
   // ── Explainer-iframe bridge ───────────────────────────────────────────
   // Standalone HTML explainers render in a sandboxed (opaque-origin) iframe, so the
@@ -3359,17 +3261,13 @@ export function boot(): { dispose(): void } {
     if (!frame || e.source !== frame.contentWindow) return;
     const data = e.data as { type?: string; sel?: unknown; heading?: unknown };
     if (!data || typeof data !== "object") return;
-    if (data.type === "wiki-explain-clear") return hideExplainPill();
+    if (data.type === "wiki-explain-clear") return hideSelectionMenu();
     if (data.type !== "wiki-explain-sel") return;
     const raw = typeof data.sel === "string" ? data.sel.trim() : "";
-    if (raw.length < EXPLAIN_MIN_CHARS) return hideExplainPill();
-    // Cap at the same ceiling as the md path (server re-caps too).
-    pillSel = raw.length > EXPLAIN_MAX_CHARS ? raw.slice(0, EXPLAIN_MAX_CHARS) : raw;
-    pillHeading = typeof data.heading === "string" ? data.heading : "";
-    // The Explain button lives in the breadcrumb (stable spot) — no rect to
-    // translate anymore; just reveal it. `renderBreadcrumb` already ran for this
-    // explainer, so the button exists.
-    showExplainPill();
+    if (raw.length < SEL_MIN_CHARS) return hideSelectionMenu();
+    // Cap at the same ceiling as the md path (server re-caps too). No rect
+    // crosses the frame: the bar sits at the frame's top.
+    showSelectionBarForExplainer(raw.length > SEL_MAX_CHARS ? raw.slice(0, SEL_MAX_CHARS) : raw, typeof data.heading === "string" ? data.heading : "");
   });
   registerRailMenuKeys();
   window.addEventListener("focus", () => maybeRefetchPages(true));

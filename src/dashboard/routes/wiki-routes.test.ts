@@ -420,6 +420,8 @@ describe("GET /api/wiki/html", () => {
       // The wiki's `.wiki-reader.json` sets no `discuss` block.
       discussHandoff: false,
       discussAgent: false,
+      // Tools registered and MUNINN_AUTH off: «Where else» / «History» (Discuss v2 PR 5).
+      mentions: true,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });
