@@ -6,7 +6,9 @@
  * (the same turn in the pane, once, with the pane closed when it starts);
  * «Where else» and «History» list what the mentions route finds, with no
  * model; a key in the selection gets a chip (its Trace since PR 6); «Add to Oppfølging» shows only on
- * a page with that heading; «Fact check» reaches the existing route.
+ * a page with that heading; «Fact check» calls the existing route (its stream is
+ * stubbed in the page here: a runner has no `claude`, and a fast-failing stream
+ * that the client closes crashed Bun 1.3.10's server).
  *
  * What the unit tests cannot reach: real mouse selection and a real
  * right-click in a browser, the bar's place at the selection, the card's
@@ -492,7 +494,7 @@ test("«Where else» lists the fixture's files and «History» its commits, with
   expect((await recorded()).length).toBe(before);
 });
 
-test("«Fact check» reaches the existing selection fact-check route", async ({ page }) => {
+test("«Fact check» calls the selection fact-check route (stream stubbed)", async ({ page }) => {
   await openPage(page);
   await dragSelect(page, NIGHT);
   // The stream is answered in the page, not by this spec's server. A runner has

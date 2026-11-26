@@ -3229,8 +3229,6 @@ export function boot(): { dispose(): void } {
       submitFollowup();
     }
   });
-  // A selection's bar and right-click menu (Discuss v2 PR 5): its own
-  // listeners, registered here where the Explain pill's were.
   // The key peek and the Trace view (Discuss v2 PR 6): Trace cards are placed as the menu's are.
   initKeyTrace({
     wiki: () => FIND_SELF_WIKI || WIKI,
@@ -3240,6 +3238,8 @@ export function boot(): { dispose(): void } {
     place: placeInlineCard,
     live: inlineCardLive,
   });
+  // A selection's bar and right-click menu (Discuss v2 PR 5): its own
+  // listeners, registered here where the Explain pill's were.
   initSelectionMenu({
     wiki: () => FIND_SELF_WIKI || WIKI,
     relPath: () => currentRelPath,

@@ -317,8 +317,9 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
 }
 
 /**
- * The turn's prompt: what the agent can read, the context pack, the
- * discussion so far and the question, last.
+ * The turn's prompt: the page, what the agent can read, the rest of the
+ * context pack (passage, section, headings), the discussion so far and the
+ * question, last.
  */
 export function renderAgentTurnPrompt(opts: {
   pack: ContextPack;
