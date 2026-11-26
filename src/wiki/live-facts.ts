@@ -590,7 +590,7 @@ export function markedMentions(
  *  (so {@link chipInsertions} need not scan again). With `kinds` (Discuss v2
  *  PR 6, the key marks) the `keys` kinds' whole-word matches are key mentions
  *  too, in the same never-marked regions; a span a tracker key already holds
- *  is not added twice. `skippedLines` counts the lines that scan skipped. */
+ *  is not added twice. `skippedLines`/`skippedChars` count what that scan skipped. */
 export function markedMentionsWithCode(
   body: string,
   markdown: string,
@@ -599,7 +599,7 @@ export function markedMentionsWithCode(
   trackers: readonly TrackerConfig[],
   titleOf: (id: string) => string | undefined,
   kinds: readonly Pick<KeyKind, "name" | "pattern">[] = [],
-): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number } {
+): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number; skippedChars?: number } {
   const fm = parseFrontmatter(markdown);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
   const code = readerCodeRegions(body);
@@ -632,7 +632,7 @@ export function markedMentionsWithCode(
     const held = new Intervals(bodyKeys.map((m) => [m.start, m.end] as const));
     for (const m of scanned.matches) if (!held.overlaps(m.start, m.end)) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
   }
-  const skipped = scanned ? { skippedLines: scanned.skippedLines } : {};
+  const skipped = scanned ? { skippedLines: scanned.skippedLines, skippedChars: scanned.skippedChars } : {};
   if (all.length === 0) return { mentions: [], ...skipped };
 
   const blockedSpans: [number, number][] = [];
@@ -831,7 +831,7 @@ export interface KeyMarksInput {
   kinds: readonly Pick<KeyKind, "name" | "pattern">[];
   relPath: string;
   /** Receives how many lines the `keys` scan skipped (the sweep's count). */
-  collect?: (r: { marks: number; skippedLines: number }) => void;
+  collect?: (r: { marks: number; skippedLines: number; skippedChars: number }) => void;
 }
 
 export interface KeyMark {
@@ -841,18 +841,33 @@ export interface KeyMark {
 }
 
 /**
+ * A key the render can mark without changing what the page renders: letters
+ * and digits in runs joined by single `-` or `.`, at least one join, a letter
+ * first. The mark keeps the key's first and last characters in the text it
+ * renders and parks only the inside, so every inline rule that reads a
+ * neighbour (an emphasis `*` or `_`, a before → after arrow) sees the page's
+ * characters, and none of these means anything to those rules; a leading
+ * letter is never the number a before → after chip reads. A key with no join
+ * (`D12`, `M10`) is an item id's shape, which the components read from the
+ * page's own text (a decision log's ids, a question's decision): a parked
+ * inside would hide it from them. Measured on both wikis with extra kinds
+ * (2026-11-26): joined keys, 0 renders changed; `[A-Z]\d{1,3}`, 52 pages.
+ */
+const MARKABLE_KEY_RE = /^\p{L}[\p{L}\p{N}]*(?:[-.][\p{L}\p{N}]+)+$/u;
+
+/**
  * The key mentions the reader underlines: the tracker keys and the `keys`
  * kinds' matches the mention parser marks ({@link markedMentionsWithCode}, so
  * never in code, a tag, a link's title, a heading, a wikilink or a state
  * home), less any inside a link or a bare URL (the mark would sit in the
- * anchor or split the URL) and any whose own fact chip follows it: that key's
- * peek is on the chip.
+ * anchor or split the URL), any whose own fact chip follows it (that key's
+ * peek is on the chip) and any {@link MARKABLE_KEY_RE} refuses.
  */
-export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number } {
-  if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0 };
-  const { mentions, code, skippedLines = 0 } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
-  const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80);
-  if (keys.length === 0) return { marks: [], skippedLines };
+export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number; skippedChars: number } {
+  if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0, skippedChars: 0 };
+  const { mentions, code, skippedLines = 0, skippedChars = 0 } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
+  const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80 && MARKABLE_KEY_RE.test(m.id));
+  if (keys.length === 0) return { marks: [], skippedLines, skippedChars };
   const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
   const chipAt = new Map(chips.map((c) => [c.at, c] as const));
   const marks: KeyMark[] = [];
@@ -862,7 +877,7 @@ export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMark
     if (chips.some((c) => c.at > m.start && c.at < m.end)) continue;
     marks.push({ key: m.id, start: m.start, end: m.end });
   }
-  return { marks, skippedLines };
+  return { marks, skippedLines, skippedChars };
 }
 
 /** A key mark's span: the key's own text, underlined by the reader's CSS. */

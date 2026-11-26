@@ -186,7 +186,10 @@ export function renderWikiHtml(
   // A chip rides the wikilink sentinel with an empty literal and an empty link
   // text, so code, an attribute value and every plain-text reader of a
   // sentinel give nothing for it. Inserted first: its offsets are `body`'s.
-  // A key mark rides it too, with the key as its literal and link text.
+  // A key mark rides two such empty sentinels INSIDE its key, after the first
+  // character and before the last, so every rule that reads a neighbour sees
+  // the page's own characters (`MEL-12*34*` keeps its literal stars); each
+  // sentinel renders a placeholder that `wrapKeyMarks` turns into the span.
   let marked = body;
   let chips: ChipInsertion[] = [];
   if (opts?.liveFacts) {
@@ -196,15 +199,22 @@ export function renderWikiHtml(
     chipPassCollected();
   }
   const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
-  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines });
+  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars });
+  const markKeys: string[] = [];
   if (chips.length || keyMarks?.marks.length) {
-    const park = (html: string, text: string) => {
-      literal.push(text);
-      linkTexts.push(text);
+    const park = (html: string) => {
+      literal.push("");
+      linkTexts.push("");
       rendered.push(html);
       return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
     };
-    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], (html) => park(html, ""), (m) => park(keyMarkHtml(m.key), m.key));
+    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], park, (m) => {
+      const text = body.slice(m.start, m.end);
+      const cps = [...text];
+      if (text !== m.key || cps.length < 3) return text;
+      const n = markKeys.push(m.key) - 1;
+      return cps[0] + park(keyMarkOpen(n)) + cps.slice(1, -1).join("") + park(keyMarkClose(n)) + cps.at(-1)!;
+    });
   }
   const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
@@ -246,7 +256,7 @@ export function renderWikiHtml(
   // are uncoloured where the code around them is highlighted. In an attribute
   // value (a `<Question>` card echoes `choices=`/`to=` into `data-question-*`)
   // the source text goes back too: link HTML there would end the value.
-  const html = restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal);
+  const html = wrapKeyMarks(restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal), markKeys);
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
   // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
@@ -261,6 +271,28 @@ export function renderWikiHtml(
   // Backstop: every sentinel is restored by now, and the body and the parsed
   // file values carry no NUL; one left (a source not yet covered) is never served.
   return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
+}
+
+export const keyMarkOpen = (n: number) => `\x00WIKIKEYOPEN${n}\x00`;
+export const keyMarkClose = (n: number) => `\x00WIKIKEYCLOSE${n}\x00`;
+const KEY_MARK_RUN_RE = /(.)\x00WIKIKEYOPEN(\d+)\x00([^<>&\x00]*)\x00WIKIKEYCLOSE\2\x00(.)/gsu;
+const KEY_MARK_LEFTOVER_RE = /\x00WIKIKEY(?:OPEN|CLOSE)\d+\x00/g;
+
+/**
+ * Each key mark's two placeholders, with the key's first and last characters
+ * around them, as the mark's span — only where the render left exactly the
+ * key's own text there in one run of text. Anywhere else (code and attribute
+ * values already got the empty source text back) a placeholder is dropped, so
+ * the page reads as it would unmarked.
+ */
+export function wrapKeyMarks(html: string, keys: readonly string[]): string {
+  if (keys.length === 0) return html;
+  return html
+    .replace(KEY_MARK_RUN_RE, (whole, first: string, n: string, inner: string, last: string) => {
+      const key = keys[Number(n)];
+      return key !== undefined && first + inner + last === key ? keyMarkHtml(key) : whole;
+    })
+    .replace(KEY_MARK_LEFTOVER_RE, "");
 }
 
 /** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared

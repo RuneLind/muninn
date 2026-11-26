@@ -178,42 +178,75 @@ export function grammarReason(pattern: string): string | null {
 
 /**
  * Lines longer than this are not scanned for `keys` kinds. Measured
- * 2026-11-26 over the tracked pages: the longest lines are tables in
- * `index.md` (kode-wiki 30,896 characters, mimir 26,017), and 4 kode-wiki and
- * 13 mimir lines pass 4,000. A worst grammar-legal case (`[-A]+` over `-A`
- * repeated, then a letter) costs 2.1 ms at 4,000 characters and 155 ms at
- * 32,000: quadratic, since each start runs to the same letter.
+ * 2026-11-26 in UTF-16 units over the tracked pages: the longest lines are
+ * tables (kode-wiki `index.md` 30,208, mimir `projects/muninn/dashboard.md`
+ * 25,804), and 4 kode-wiki and 13 mimir lines pass 4,000. A worst
+ * grammar-legal line (`[-A]+` over `-A` repeated, then a letter) costs ~2 ms
+ * per kind at 4,000: quadratic, since each start runs to the same letter.
  */
 export const KEY_SCAN_LINE_MAX = 4000;
 
-const WORD_CHAR = /[A-Za-z0-9_]/;
+/**
+ * Characters × kinds one page may scan; the lines after the budget is spent
+ * are skipped and counted. Measured 2026-11-26: the worst line above costs
+ * ~0.5 µs per character per kind (515 ms for 250 such lines, one kind), so
+ * this caps a page near 0.5 s whatever its kinds; the largest kode-wiki page
+ * (`log.md`, 738,635 scannable characters, one kind) still scans whole.
+ */
+export const KEY_SCAN_PAGE_MAX = 1_000_000;
+
+/** A key's own character: a Unicode letter or digit, the mentions route's
+ *  whole-key rule (`wholeKeyCount`); `_` and `-` do not continue a key. */
+const KEY_CHAR = /^[\p{L}\p{N}]$/u;
+
+/** The code point that ends right before `i` / starts at `i`, as a string. */
+function charBefore(text: string, i: number): string {
+  const lo = text.charCodeAt(i - 1);
+  if (lo >= 0xdc00 && lo <= 0xdfff && i >= 2) {
+    const hi = text.charCodeAt(i - 2);
+    if (hi >= 0xd800 && hi <= 0xdbff) return text.slice(i - 2, i);
+  }
+  return text[i - 1]!;
+}
+const charAt = (text: string, i: number): string => String.fromCodePoint(text.codePointAt(i)!);
 
 /**
- * Every whole-word match of a `keys` kind in `text`, with its kind: a match
- * starts where no letter, digit or `_` comes before it and ends where none
- * comes after, and is a key the mentions route searches (3–80 characters).
+ * Every whole-key match of a `keys` kind in `text`, with its kind: a match
+ * starts where no Unicode letter or digit comes before it and ends where none
+ * comes after (the mentions route's rule, so the peek counts what is marked),
+ * and is a key the mentions route searches (3–80 characters).
  * Tried only at such starts, with a sticky copy of each pattern, so a run of
  * letters is tried once, not at each of its offsets. Overlaps keep the
- * earlier match (then the longer). Lines over `lineMax` are skipped, counted
- * in `skippedLines`.
+ * earlier match (then the longer). Lines over `lineMax` are skipped, and so
+ * is every line once `pageMax` characters × kinds are spent: both counted in
+ * `skippedLines` (and their characters in `skippedChars`).
  */
 export function scanKeyKinds(
   text: string,
   kinds: readonly Pick<KeyKind, "name" | "pattern">[],
   lineMax = KEY_SCAN_LINE_MAX,
-): { matches: { key: string; kind: string; start: number; end: number }[]; skippedLines: number } {
-  if (kinds.length === 0) return { matches: [], skippedLines: 0 };
+  pageMax = KEY_SCAN_PAGE_MAX,
+): { matches: { key: string; kind: string; start: number; end: number }[]; skippedLines: number; skippedChars: number } {
+  if (kinds.length === 0) return { matches: [], skippedLines: 0, skippedChars: 0 };
   const sticky = kinds.map((k) => ({ name: k.name, re: new RegExp(k.pattern, "uy") }));
   const out: { key: string; kind: string; start: number; end: number }[] = [];
   let skippedLines = 0;
+  let skippedChars = 0;
+  let spent = 0;
   let lineStart = 0;
   while (lineStart <= text.length) {
     let lineEnd = text.indexOf("\n", lineStart);
     if (lineEnd < 0) lineEnd = text.length;
-    if (lineEnd - lineStart > lineMax) skippedLines++;
-    else {
+    const cost = (lineEnd - lineStart) * sticky.length;
+    if (lineEnd - lineStart > lineMax || spent + cost > pageMax) {
+      skippedLines++;
+      skippedChars += lineEnd - lineStart;
+      // Once over the page budget, every later line is skipped too.
+      if (lineEnd - lineStart <= lineMax) spent = pageMax + 1;
+    } else {
+      spent += cost;
       for (let i = lineStart; i < lineEnd; i++) {
-        if (i > lineStart && WORD_CHAR.test(text[i - 1]!)) continue;
+        if (i > lineStart && KEY_CHAR.test(charBefore(text, i))) continue;
         let best: { key: string; kind: string; start: number; end: number } | null = null;
         for (const k of sticky) {
           k.re.lastIndex = i;
@@ -221,7 +254,7 @@ export function scanKeyKinds(
           if (!m) continue;
           const end = i + m[0].length;
           if (end > lineEnd || m[0].length < 3 || m[0].length > 80) continue;
-          if (end < lineEnd && WORD_CHAR.test(text[end]!)) continue;
+          if (end < lineEnd && KEY_CHAR.test(charAt(text, end))) continue;
           if (!best || end > best.end) best = { key: m[0], kind: k.name, start: i, end };
         }
         if (best) {
@@ -232,5 +265,5 @@ export function scanKeyKinds(
     }
     lineStart = lineEnd + 1;
   }
-  return { matches: out, skippedLines };
+  return { matches: out, skippedLines, skippedChars };
 }

@@ -2300,13 +2300,21 @@ function runListHtml(list: ChecklistList): string {
     .join("");
 }
 
+/** A cell's visible text for the number-column reading. A parked sentinel
+ *  that shows no source text (a live chip, either half of a key mark) reads
+ *  as nothing, so neither changes whether a column holds numbers (the short
+ *  note `1 (MEL-604246)` stays short). */
+function cellText(html: string): string {
+  return htmlText(html).replace(/\x00WIKIPAGELINK(\d+)\x00/g, (m, i: string) => (currentLinkTexts?.[Number(i)] === "" && currentLinkSources?.[Number(i)] === "" ? "" : m));
+}
+
 /** A pipe table on the reader: number columns (`num`, on the header too) and
  *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
  *  a traffic light adds `v-light` and keeps its glyph on screen). */
 function readerTableHtml(headers: string[], rows: string[][]): string {
   const head = headers.map((h) => renderInlineWith(h, false));
   const body = rows.map((row) => row.map(renderInline));
-  const nums = numberColumns(head.map(htmlText), body.map((r) => r.map(htmlText)));
+  const nums = numberColumns(head.map(cellText), body.map((r) => r.map(cellText)));
   const thead = "<thead><tr>" + head.map((h, c) => `<th${nums.has(c) ? ' class="num"' : ""}>${h}</th>`).join("") + "</tr></thead>";
   const tbody = "<tbody>" + body.map((row) =>
     "<tr>" + row.map((cell, c) => {

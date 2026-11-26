@@ -1765,43 +1765,51 @@ export function registerWikiReadRoutes(
     // Never a failed page open: a throw in the chip render renders the page
     // without chips and warns (on every open: nothing dedupes it). When the
     // plain render throws too, the cause is no chip's: its error surfaces.
+    // KEY MARKS (Discuss v2 PR 6, D5): each key the mentions route would
+    // answer a peek for, underlined; only where that route answers this viewer.
+    // A render that throws with the marks is tried once more without them: a
+    // marks failure drops the marks alone (chips kept) and warns as the marks'.
     let liveFacts: LiveFactsPayload | undefined;
     let html: string | undefined;
     let chipError: unknown;
-    // KEY MARKS (Discuss v2 PR 6, D5): each key the mentions route would
-    // answer a peek for, underlined; only where that route answers this viewer.
+    let marksError: unknown;
     const keyMarks: KeyMarksInput | undefined =
       tools && authMode() === "off" && (c.get("role") ?? "admin") === "admin"
         ? { grammar: index.readerConfig?.prGrammar ?? null, trackers: jiraTrackers(index.readerConfig?.trackers), kinds: index.readerConfig?.keys ?? [], relPath: meta.relPath }
         : undefined;
+    const render = async (chips: LiveFactsInput | undefined): Promise<string> => {
+      const plain = () => renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, chips, undefined);
+      if (!keyMarks) return plain();
+      try {
+        return await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, chips, keyMarks);
+      } catch (err) {
+        // A throw without the marks too is not theirs: it propagates as before.
+        const out = await plain();
+        marksError = err;
+        return out;
+      }
+    };
     try {
       const loadedFacts = await readWikiFacts(index.root);
       if (loadedFacts) {
-        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, {
+        html = await render({
           loaded: loadedFacts,
           grammar: index.readerConfig?.prGrammar ?? null,
           trackers: jiraTrackers(index.readerConfig?.trackers),
           relPath: meta.relPath,
           collect: (f) => (liveFacts = f),
-        }, keyMarks);
+        });
       }
     } catch (err) {
       // `html` is still unset: the render's return is the try's last step.
       chipError = err;
       liveFacts = undefined;
     }
-    if (html === undefined) {
-      try {
-        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined, keyMarks);
-      } catch (err) {
-        // Never a failed page open over the marks either: the page without them.
-        if (!keyMarks) throw err;
-        log.warn("key marks failed on {relPath}; page rendered without them: {error}", { relPath: meta.relPath, error: err instanceof Error ? err.message : String(err) });
-        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined, undefined);
-      }
-    }
+    html ??= await render(undefined);
     if (chipError !== undefined)
       log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
+    if (marksError !== undefined)
+      log.warn("key marks failed on {relPath}; page rendered without them: {error}", { relPath: meta.relPath, error: marksError instanceof Error ? marksError.message : String(marksError) });
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])

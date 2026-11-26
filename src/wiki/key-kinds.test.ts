@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { KEY_PATTERN_MAX, KEY_SCAN_LINE_MAX, classifyKey, parseKeyKinds, scanKeyKinds } from "./key-kinds.ts";
+import { wholeKeyCount } from "./tracked-files.ts";
 
 describe("parseKeyKinds", () => {
   test("absent is empty with no warning; a non-array is empty with one", () => {
@@ -146,7 +147,52 @@ describe("scanKeyKinds (the Trace view's page-wide marking)", () => {
     // Over the bound: a 1 MB line of the same is skipped, not scanned.
     const huge = scanKeyKinds(`${"-A".repeat(500_000)}b`, greedy);
     const ms = performance.now() - t0;
-    expect(huge).toEqual({ matches: [], skippedLines: 1 });
+    expect(huge).toEqual({ matches: [], skippedLines: 1, skippedChars: 1_000_001 });
     expect(ms).toBeLessThan(250);
+  });
+});
+
+describe("scanKeyKinds: the mentions route's whole-key rule and the page budget (fix round 1)", () => {
+  const kinds = parseKeyKinds([{ name: "case", pattern: "MEL-\\d+" }]).kinds;
+  const keys = (text: string) => scanKeyKinds(text, kinds).matches.map((m) => m.key);
+
+  test("a Unicode letter or digit on either side is no whole key: æMEL-5555, MEL-5556ø, ÅMEL-5557, MEL-5558é, 𝐀MEL-5559", () => {
+    expect(keys("æMEL-5555 MEL-5556ø ÅMEL-5557 MEL-5558é 𝐀MEL-5559 MEL-5560𝐀 ٣MEL-5561")).toEqual([]);
+    expect(keys("(MEL-1) MEL-2. «MEL-3» MEL-4\u0301")).toEqual(["MEL-1", "MEL-2", "MEL-3", "MEL-4"]);
+  });
+
+  test("marked exactly where the peek's search counts the key whole, for every neighbour pair", () => {
+    const sides = ["", " ", "a", "Z", "æ", "ø", "é", "中", "𝐀", "٣", "7", "_", "-", ".", "*", "`", "(", "\u0301", "\u00a0"];
+    for (const a of sides)
+      for (const b of sides) {
+        const text = `x ${a}MEL-12${b} y`;
+        const marked = keys(text).includes("MEL-12");
+        const counted = wholeKeyCount(text, "MEL-12") === 1;
+        // Never a mark the peek does not count. Before an astral letter Bun's
+        // lookbehind reads one surrogate, so the search counts `𝐀MEL-12`
+        // whole; the scan reads the code point and does not mark it.
+        if (marked) expect([text, counted]).toEqual([text, true]);
+        if (a !== "𝐀") expect([text, marked]).toEqual([text, counted]);
+      }
+  });
+
+  test("the page budget: lines past it are skipped and counted, characters too", () => {
+    const text = ["MEL-1 aaaa", "MEL-2 bbbb", "MEL-3 cccc", "", "MEL-4"].join("\n");
+    const r = scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 20);
+    expect(r.matches.map((m) => m.key)).toEqual(["MEL-1", "MEL-2"]);
+    expect({ skippedLines: r.skippedLines, skippedChars: r.skippedChars }).toEqual({ skippedLines: 3, skippedChars: 15 });
+  });
+
+  test("the default budget bounds a page whatever its kinds: 250 worst-case lines under 8 kinds scan 31 lines", () => {
+    const eight = parseKeyKinds(Array.from({ length: 8 }, (_, i) => ({ name: `g${i}`, pattern: `[-A${"BCDEFGHI"[i]}]+` }))).kinds;
+    expect(eight.length).toBe(8);
+    const line = `${"-A".repeat((KEY_SCAN_LINE_MAX - 2) / 2)}b`;
+    const t0 = performance.now();
+    const r = scanKeyKinds(Array(250).fill(line).join("\n"), eight);
+    const ms = performance.now() - t0;
+    // 31 lines × 3,999 characters × 8 kinds = 991,752 fits 1,000,000; a 32nd would not.
+    expect(r.skippedLines).toBe(219);
+    expect(r.skippedChars).toBe(219 * line.length);
+    expect(ms).toBeLessThan(3000);
   });
 });
