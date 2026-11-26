@@ -95,16 +95,29 @@ export const WORK_TREE_TTL_MS = 60_000;
 const workTrees = new Map<string, { at: number; inside: Promise<boolean> }>();
 
 /**
- * Whether `root` is in a git work tree, which the mentions route's `git grep`
- * and `git log` need (it answers 500 elsewhere). The page route asks on every
- * open before it marks a key (fix round 1 J3), so the answer is kept per root
- * for {@link WORK_TREE_TTL_MS}.
+ * Whether the mentions' `git grep` and `git log` can run in `root`: it is in a
+ * git work tree and its HEAD names a commit. A repo before its first commit (a
+ * new wiki before the wiki-committer's first daily commit) is a work tree, but
+ * `git log` fails there (fix round 2).
+ */
+export async function mentionsGitState(root: string, git: GitRun = realGit): Promise<"ok" | "not-a-work-tree" | "no-commit"> {
+  const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], { timeoutMs: 5_000 });
+  if (!inside.ok || inside.stdout.trim() !== "true") return "not-a-work-tree";
+  const head = await git(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { timeoutMs: 5_000 });
+  return head.ok && head.exitCode === 0 ? "ok" : "no-commit";
+}
+
+/**
+ * Whether the mentions route can answer on `root` ({@link mentionsGitState}
+ * `ok`; it answers 500 elsewhere). The page route asks on every open before it
+ * marks a key (fix round 1 J3), so the answer is kept per root for
+ * {@link WORK_TREE_TTL_MS}.
  */
 export function mentionsWorkTree(root: string, git: GitRun = realGit, now = Date.now()): Promise<boolean> {
   const kept = workTrees.get(root);
   if (kept && now - kept.at < WORK_TREE_TTL_MS) return kept.inside;
-  const inside = git(root, ["rev-parse", "--is-inside-work-tree"], { timeoutMs: 5_000 }).then(
-    (r) => r.ok && r.stdout.trim() === "true",
+  const inside = mentionsGitState(root, git).then(
+    (s) => s === "ok",
     () => false,
   );
   workTrees.set(root, { at: now, inside });

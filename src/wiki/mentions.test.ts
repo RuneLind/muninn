@@ -10,7 +10,7 @@ import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { realGit } from "./decision-triage/git.ts";
-import { buildMentions, type MentionsBody } from "./mentions.ts";
+import { buildMentions, mentionsGitState, mentionsWorkTree, type MentionsBody } from "./mentions.ts";
 import { getWikiIndex } from "./store.ts";
 import { testTempDir } from "../test/temp-dir.ts";
 
@@ -97,5 +97,30 @@ describe("buildMentions: a classified key counts only where it stands whole", ()
     expect(lines(b)).toContain("plans/nordic.md:1 Saken æMEL-1 er ikke vår.");
     expect(b.commits.map((c) => c.sha)).toContain(at("ten"));
     expect(b.prs.map((p) => `${p.repo}#${p.number}`).sort()).toEqual(["acme/acme-api#3556", "acme/acme-api#3625"]);
+  });
+});
+
+// Fix round 2: the reader offers the peek and Trace only where the mentions can
+// answer, and a repo before its first commit cannot (its `git log` fails).
+describe("mentionsWorkTree: a git work tree whose HEAD names a commit", () => {
+  test("a repo with staged files and no commit is not offered; after its first commit it is, once the 60 s answer expires", async () => {
+    const fresh = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-mentions-fresh-"))), "wiki");
+    await mkdir(fresh, { recursive: true });
+    const run = async (...args: string[]) => {
+      const res = await realGit(fresh, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]);
+      if (!res.ok) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+    };
+    await run("init", "-q", "-b", "main");
+    await writeFile(path.join(fresh, "a.md"), "MEL-5 is new.\n");
+    await run("add", "-A");
+    const t0 = 1_000_000;
+    expect(await mentionsGitState(fresh)).toBe("no-commit");
+    expect(await mentionsWorkTree(fresh, realGit, t0)).toBe(false);
+    await run("commit", "-q", "-m", "first");
+    expect(await mentionsGitState(fresh)).toBe("ok");
+    // Kept for the TTL, then asked again.
+    expect(await mentionsWorkTree(fresh, realGit, t0 + 1_000)).toBe(false);
+    expect(await mentionsWorkTree(fresh, realGit, t0 + 61_000)).toBe(true);
+    expect(await mentionsGitState(path.dirname(fresh))).toBe("not-a-work-tree");
   });
 });

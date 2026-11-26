@@ -34,7 +34,7 @@
  * resolves) · 404 `no-agent` · 422 `rules-too-large` / 503 `rules-unreadable` ·
  * the page ladder (404/503) · 503 `no-bot` · 422 `connector` · 503 `surface` ·
  * on read-and-search 503 `no-snapshot` and 422 `page-not-in-snapshot` (a trace,
- * on any connector: 503 `no-snapshot` when the wiki is no git work tree) · 422
+ * on any connector: 503 `no-snapshot` when the wiki is no git work tree or has no commit yet) · 422
  * `no-user` / `unknown-user` the thread's user · 404/409 the discussion (a
  * given id must be this page's live wiki thread) · 409 `busy` · 429 `busy` (the
  * in-flight cap). Only then is the thread created (so a refused request leaves
@@ -99,7 +99,7 @@ import {
 } from "./discuss-agent.ts";
 import { parseRepoRoots, realGit, type GitRun } from "./decision-triage/git.ts";
 import { renderTraceTurnPrompt } from "./discuss-trace.ts";
-import { buildMentions, parseMentionKey, type MentionsBody, type MentionsInput } from "./mentions.ts";
+import { buildMentions, mentionsGitState, parseMentionKey, type MentionsBody, type MentionsInput } from "./mentions.ts";
 import { realGhCheckDeps, type GhCheckDeps } from "./work-map/gh-check.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "./plan-card.ts";
 import { planCardFromOutcome, runPlanCard } from "./plan-card-run.ts";
@@ -553,9 +553,12 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     if (!page) {
       // The key's mentions are read with git, on every connector: refused here,
       // before a thread or a turn exists, rather than failing inside the turn.
-      const inside = await git(wikiRoot, ["rev-parse", "--is-inside-work-tree"]);
-      if (!inside.ok || inside.stdout.trim() !== "true") {
+      const state = await mentionsGitState(wikiRoot, git);
+      if (state === "not-a-work-tree") {
         return refuse(503, { error: "a trace reads the wiki's files and history with git, and this wiki is not a git work tree", reason: "no-snapshot" });
+      }
+      if (state === "no-commit") {
+        return refuse(503, { error: "a trace reads the wiki's history with git, and this wiki has no commit yet", reason: "no-snapshot" });
       }
     } else if (kind === "readSearch") {
       // The agent reads the page from the wiki's snapshot: refuse a page the

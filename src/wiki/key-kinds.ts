@@ -210,6 +210,12 @@ function charBefore(text: string, i: number): string {
 }
 const charAt = (text: string, i: number): string => String.fromCodePoint(text.codePointAt(i)!);
 
+/** Whether the code point that ends right before `i` continues a key. Read as
+ *  a whole code point here because a `(?<![\p{L}\p{N}])` lookbehind under
+ *  Bun/JSC reads one UTF-16 unit, so an astral letter (`𝐀`, U+1D400) before a
+ *  key passed it (fix round 2). `wholeKeyCount` uses it too. */
+export const keyCharBefore = (text: string, i: number): boolean => i > 0 && KEY_CHAR.test(charBefore(text, i));
+
 /**
  * Every whole-key match of a `keys` kind in `text`, with its kind: a match
  * starts where no Unicode letter or digit comes before it and ends where none
@@ -246,7 +252,7 @@ export function scanKeyKinds(
     } else {
       spent += cost;
       for (let i = lineStart; i < lineEnd; i++) {
-        if (i > lineStart && KEY_CHAR.test(charBefore(text, i))) continue;
+        if (i > lineStart && keyCharBefore(text, i)) continue;
         let best: { key: string; kind: string; start: number; end: number } | null = null;
         for (const k of sticky) {
           k.re.lastIndex = i;

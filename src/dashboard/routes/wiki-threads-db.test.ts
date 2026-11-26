@@ -860,3 +860,30 @@ test("a trace on a wiki that is no git work tree is refused before its thread ex
     __resetWikiCacheForTest();
   }
 });
+
+// Fix round 2: a repo before its first commit is a work tree, but the mentions'
+// `git log` fails there; the trace is refused before its thread exists.
+test("a trace on a git work tree with no commit yet is refused before its thread exists", async () => {
+  const fresh = path.join(dir, "fresh");
+  await Bun.write(path.join(fresh, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(fresh, "notes", "sand.md"), "# Sand\n\nMEL-90 is here.\n");
+  for (const args of [["init", "-q"], ["add", "."]]) {
+    const r = Bun.spawnSync(["git", ...args], { cwd: fresh, stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  }
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "fresh", root: fresh, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    const app = apps();
+    const res = await tracePost(app, { wiki: "fresh", traceKey: "MEL-90", question: "Summarize MEL-90" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "a trace reads the wiki's history with git, and this wiki has no commit yet", reason: "no-snapshot" });
+    expect(calls).toHaveLength(0);
+    expect(await traceRows("fresh", "MEL-90")).toEqual({ threads: 0, turns: 0 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
+});

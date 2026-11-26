@@ -17,6 +17,7 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { cutLine, realGit, type GitResult, type GitRun } from "./decision-triage/git.ts";
+import { keyCharBefore } from "./key-kinds.ts";
 import { isWikiWriteArtifact } from "./lockfile.ts";
 
 /** `-c` beats every config file. fallbackToNoIndex would grep untracked files
@@ -169,7 +170,9 @@ export function chunkPaths(paths: readonly string[], maxBytes = GREP_PATHSPEC_CH
 
 /** A character that continues a key: a Unicode letter or digit. `_` and `-`
  *  are not, so `MEL-1_notes` and `MEL-1-fix` mention MEL-1, and `MEL-10`,
- *  `XMEL-1` and `MEL-1å` do not. */
+ *  `XMEL-1` and `MEL-1å` do not. The character before a match is checked as a
+ *  whole code point ({@link keyCharBefore}), not by a lookbehind, which reads
+ *  one UTF-16 unit under Bun/JSC and let `𝐀MEL-1` count. */
 const KEY_CHAR = "[\\p{L}\\p{N}]";
 const reEscape = (s: string) => s.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&");
 const wholeKeyRes = new Map<string, RegExp>();
@@ -179,12 +182,15 @@ export function wholeKeyCount(text: string, key: string): number {
   let re = wholeKeyRes.get(key);
   if (!re) {
     if (wholeKeyRes.size > 64) wholeKeyRes.clear();
-    re = new RegExp(`(?<!${KEY_CHAR})${reEscape(key)}(?!${KEY_CHAR})`, "gu");
+    re = new RegExp(`${reEscape(key)}(?!${KEY_CHAR})`, "gu");
     wholeKeyRes.set(key, re);
   }
   re.lastIndex = 0;
   let n = 0;
-  while (re.exec(text)) n++;
+  for (let m: RegExpExecArray | null; (m = re.exec(text)); ) {
+    if (keyCharBefore(text, m.index)) re.lastIndex = m.index + 1;
+    else n++;
+  }
   return n;
 }
 
@@ -359,8 +365,10 @@ export type HistoryResult =
   | {
       ok: true;
       commits: HistoryCommit[];
-      /** git's output ran past realGit's bound: the possibly cut last commit was dropped and more may follow. */
+      /** git's output ran past realGit's bound: the possibly cut last commit was dropped and more may follow. With `wholeKey`: a candidate could not be counted (`uncounted`, or the time ran out) or the scan bound was hit. */
       partial: boolean;
+      /** `wholeKey` only: candidate commits whose own patch ran past realGit's bound, so their change was not counted. */
+      uncounted?: string[];
     }
   | { ok: false; error: string };
 
@@ -429,33 +437,86 @@ const ereEscape = (s: string) => s.replace(/[.[\]()*+?{}|^$\\]/g, "\\$&");
  * candidate's patch (`-U0`, only the files `-G` matched) is counted here with
  * {@link wholeKeyCount}: a commit stays when some file's removed and added
  * lines hold the key a different number of times, which is `-S`'s rule (old
- * count against new), since unchanged lines cancel. A second `git log` reads
- * the kept commits' `--name-only` records, in the first run's order; their
- * `files` are the ones `-G` matched.
+ * count against new), since unchanged lines cancel. A last `git log` reads
+ * the kept commits' `--name-only` records, in log order; their `files` are
+ * the ones `-G` matched.
+ *
+ * The candidates are listed first as bare hashes, and their patches are read
+ * with `--no-walk --stdin`, so a patch past realGit's bound cuts only the run
+ * it is in: the next run starts at the cut commit, and a commit cut when it is
+ * the first of its run is past the bound alone and goes into `uncounted`
+ * (fix round 2: one patch of 4 MB used to lose every older commit). All runs
+ * share {@link HISTORY_TIMEOUT_MS}; a run that times out after a commit was
+ * counted ends the scan as `partial`.
  */
 async function wholeKeyHistory(root: string, git: GitRun, key: string, pathspec: string, limit: number): Promise<HistoryResult> {
+  const deadline = Date.now() + HISTORY_TIMEOUT_MS;
+  const left = () => Math.max(1, deadline - Date.now());
   const pickaxe = ["--no-show-signature", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", `-G(^|[^[:alnum:]])${ereEscape(key)}([^[:alnum:]]|$)`];
-  const patches = await git(root, ["log", ...pickaxe, `--max-count=${HISTORY_WHOLE_KEY_SCAN}`, "-p", "--unified=0", "--format=%x1e%H", "--", pathspec], { timeoutMs: HISTORY_TIMEOUT_MS });
-  if (!patches.ok) return { ok: false, error: gitError(patches, "git log") };
-  const read = wholeKeyChanges(patches.stdout, key, patches.capped === true);
-  // A capped run or a full scan may leave out commits that change the key.
-  const more = patches.capped === true || read.candidates >= HISTORY_WHOLE_KEY_SCAN;
-  const kept = read.changed.slice(0, limit);
-  if (kept.length === 0) return { ok: true, commits: [], partial: more };
+  const listed = await git(root, ["log", ...pickaxe, `--max-count=${HISTORY_WHOLE_KEY_SCAN}`, "--format=%H", "--", pathspec], { timeoutMs: left() });
+  if (!listed.ok) return { ok: false, error: gitError(listed, "git log") };
+  const hashes = listed.stdout.split("\n").filter((h) => /^[0-9a-f]{7,64}$/.test(h));
+  // A cut listing may end in a cut hash; a full scan may leave out older commits.
+  if (listed.capped) hashes.pop();
+  let more = listed.capped === true || hashes.length >= HISTORY_WHOLE_KEY_SCAN;
+  const changed: string[] = [];
+  const uncounted: string[] = [];
+  let read = 0;
+  // Past `limit` changed commits the answer is `partial` whatever the rest hold.
+  for (let i = 0; i < hashes.length && changed.length <= limit; ) {
+    const batch = hashes.slice(i);
+    const run = await git(root, ["log", "--no-walk=unsorted", "--stdin", ...pickaxe, "-p", "--unified=0", "--format=%x1e%H", "--", pathspec], {
+      timeoutMs: left(),
+      stdin: `${batch.join("\n")}\n`,
+    });
+    if (!run.ok && !run.timedOut) return { ok: false, error: gitError(run, "git log") };
+    const cut = run.capped === true || run.timedOut === true;
+    const got = wholeKeyChanges(run.stdout, key, cut);
+    changed.push(...got.changed);
+    read += got.read.length;
+    if (!cut) break;
+    if (run.timedOut) {
+      if (read === 0) return { ok: false, error: gitError(run, "git log") };
+      more = true;
+      break;
+    }
+    // Capped: the run stopped inside the commit after the last one read whole.
+    const last = got.read.length ? batch.indexOf(got.read.at(-1)!) : -1;
+    if (got.read.length && (last < 0 || last + 1 >= batch.length)) {
+      // The output's headers do not line up with the list: stop rather than guess.
+      more = true;
+      break;
+    }
+    if (last < 0) {
+      // Cut while it was the first of its run: its patch alone is past the bound.
+      uncounted.push(batch[0]!);
+      i += 1;
+    } else i += last + 1;
+  }
+  const out = (commits: HistoryCommit[], namesCut: boolean): HistoryResult => ({
+    ok: true,
+    commits,
+    partial: more || uncounted.length > 0 || namesCut || changed.length > limit,
+    ...(uncounted.length ? { uncounted } : {}),
+  });
+  const kept = changed.slice(0, limit);
+  if (kept.length === 0) return out([], false);
   const names = await git(root, ["log", "--no-walk=unsorted", "--stdin", ...pickaxe, "-z", "--format=%x1e%H%x1f%aI%x1f%an%x1f%s", "--name-only", "--", pathspec], {
-    timeoutMs: HISTORY_TIMEOUT_MS,
+    timeoutMs: left(),
     stdin: `${kept.join("\n")}\n`,
   });
   if (!names.ok) return { ok: false, error: gitError(names, "git log") };
   const byHash = new Map(parseHistory(names).map((c) => [c.hash, c]));
-  const commits = kept.flatMap((h) => byHash.get(h) ?? []);
-  return { ok: true, commits, partial: more || names.capped === true || read.changed.length > limit };
+  return out(
+    kept.flatMap((h) => byHash.get(h) ?? []),
+    names.capped === true,
+  );
 }
 
-/** The commits, in log order, of a `-p -U0 --format=%x1e%H` log whose patch changes some file's whole-key count, and how many commits it read. A line that starts with RS is a commit header: a patch line starts with a diff character. When `capped`, the last commit may be cut and is not read. */
-function wholeKeyChanges(stdout: string, key: string, capped: boolean): { changed: string[]; candidates: number } {
+/** The commits, in log order, of a `-p -U0 --format=%x1e%H` log whose patch changes some file's whole-key count, and the commits it read whole. A line that starts with RS is a commit header: a patch line starts with a diff character. When `cut`, the last commit may be cut and is not read. */
+function wholeKeyChanges(stdout: string, key: string, cut: boolean): { changed: string[]; read: string[] } {
   const changed: string[] = [];
-  let candidates = 0;
+  const read: string[] = [];
   let hash: string | null = null;
   let hit = false;
   let file: { removed: number; added: number; inHunk: boolean } | null = null;
@@ -465,6 +526,7 @@ function wholeKeyChanges(stdout: string, key: string, capped: boolean): { change
   };
   const endCommit = () => {
     endFile();
+    if (hash) read.push(hash);
     if (hash && hit) changed.push(hash);
     hash = null;
     hit = false;
@@ -473,7 +535,6 @@ function wholeKeyChanges(stdout: string, key: string, capped: boolean): { change
     if (line.startsWith("\x1e")) {
       endCommit();
       hash = line.slice(1).trim();
-      candidates++;
     } else if (line.startsWith("diff --git ")) {
       endFile();
       file = { removed: 0, added: 0, inHunk: false };
@@ -484,9 +545,9 @@ function wholeKeyChanges(stdout: string, key: string, capped: boolean): { change
     else if (line.startsWith("+")) file.added += wholeKeyCount(line.slice(1), key);
     else if (line.startsWith("-")) file.removed += wholeKeyCount(line.slice(1), key);
   }
-  if (capped) hash = null;
+  if (cut) hash = null;
   endCommit();
-  return { changed, candidates };
+  return { changed, read };
 }
 
 export const READ_MAX_LINES = 2_000;

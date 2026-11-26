@@ -1770,7 +1770,7 @@ export function registerWikiReadRoutes(
     // answer a peek for, underlined; only where that route answers this viewer
     // (`mentionsHere`, which PR 5's `mentions` flag shares): its tool group,
     // MUNINN_AUTH off, a registered wiki (it 400s a `WIKI_DIR` override's
-    // empty name) on a git work tree (it 500s elsewhere). Fix round 1 J3.
+    // empty name) on a git work tree with a commit (it 500s elsewhere). Fix round 1 J3.
     // A render that throws with the marks is tried once more without them: a
     // marks failure drops the marks alone (chips kept) and warns as the marks'.
     let liveFacts: LiveFactsPayload | undefined;
