@@ -31,12 +31,13 @@ export function headingSlug(text: string): string {
 }
 
 /** The ids a written fragment may name, in the order tried: as written, lower
- *  case, then each producer's slug of it as source text. Every id the reader
- *  mints is one of these forms of what an author writes: a Query, case row,
- *  DecisionLog item, Fold or RunChecklist step is `anchorSlug` of its id; a
- *  Question card keeps a safe id lower-cased, dots and spaces included; a
- *  heading is `headingSlug` of its text. The server passes a wikilink's
- *  `#anchor` through as written, since only the page knows which form exists. */
+ *  case, then each producer's slug of it as source text. A Query card,
+ *  DecisionLog item or Fold is `anchorSlug` of its id, a case row `case-` and a
+ *  RunChecklist step `<checklist anchor>-` before one, so a link to those
+ *  writes the prefix; a Question card keeps a safe id lower-cased, dots and
+ *  spaces included (not NFC); a heading is `headingSlug` of its text. The
+ *  server passes a wikilink's `#anchor` through as written, since only the
+ *  page knows which form exists. */
 function hashCandidates(id: string): string[] {
   return [...new Set([id, id.toLowerCase(), anchorSlug(id), headingSlug(id)])].filter(Boolean);
 }
