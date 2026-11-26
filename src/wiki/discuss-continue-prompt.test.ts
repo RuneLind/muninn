@@ -95,11 +95,11 @@ describe("renderContinuePrompt", () => {
 
 // ── A trace's commands, run: what they list against the mentions payload ──
 
-/** The rendered prompt's git commands, in order (the grep, then the log), read as markdown: each code block's text, one command per `env -i` line, and each code span that runs git. */
+/** The rendered prompt's git commands, in order (the grep, then the log), read as markdown: each code block's text, one command per line that starts with `env`, and each code span that runs git. */
 function commandsOf(prompt: string): string[] {
   const out: string[] = [];
   marked.walkTokens(marked.lexer(prompt), (t) => {
-    if (t.type === "code") out.push(...(t as { text: string }).text.split(/\n(?=env -i )/));
+    if (t.type === "code") out.push(...(t as { text: string }).text.split(/\n(?=env )/));
     else if (t.type === "codespan" && /\bgit\b/.test((t as { text: string }).text)) out.push((t as { text: string }).text);
   });
   return out;
@@ -241,6 +241,8 @@ interface ConfigRow {
   env?: (fx: Fixture) => Record<string, string>;
   /** Lines for the repo's own `.git/config` (the payload reads them too). */
   repo?: string;
+  /** Lines for the repo's `.git/info/attributes`. */
+  attributes?: string;
 }
 
 interface Fixture {
@@ -250,9 +252,13 @@ interface Fixture {
   /** A wiki in the same repo with a plain root, for the config rows. */
   plain: string;
   textconv: string;
+  /** A textconv driver that prints nothing. */
+  strip: string;
   gpg: string;
   hostile: string;
   system: string;
+  /** HOME for the shell: its `.gitconfig` and XDG `git/config` hold the row's global config too, since `env -i` keeps HOME. */
+  home: string;
 }
 
 /** Every global file starts with this, so on an unpinned command each row shows its own key's effect, not `core.quotePath`'s default (its own row). */
@@ -287,10 +293,16 @@ const CONFIG_ROWS: ConfigRow[] = [
     effect: "set",
     repo: "[core]\n\tquotePath = true\n[grep]\n\tfullName = true\n\tcolumn = true\n[submodule]\n\trecurse = true\n[color]\n\tui = always\n[log]\n\tdecorate = full\n\tshowSignature = true\n\tshowRoot = false\n[gpg]\n\tprogram = GPG\n[diff]\n\trenames = false\n[diff \"up\"]\n\ttextconv = TEXTCONV\n",
   },
+  {
+    cell: "the repo's own textconv that hides the key file from the pickaxe: a whole key's -G reads it raw (--no-textconv), as the payload's does",
+    effect: "set",
+    repo: "[diff \"strip\"]\n\ttextconv = STRIP\n",
+    attributes: "nøkkel-ny.md diff=strip\n",
+  },
 ];
 
 describe("a trace's commands read the config the payload reads (class check)", () => {
-  const fx: Fixture = { repo: "", wiki: "", plain: "", textconv: "", gpg: "", hostile: "", system: "" };
+  const fx: Fixture = { repo: "", wiki: "", plain: "", textconv: "", strip: "", gpg: "", hostile: "", system: "", home: "" };
   const subjects: string[] = [];
   const quiet = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
   const g = (cwd: string, ...args: string[]) => {
@@ -303,17 +315,22 @@ describe("a trace's commands read the config the payload reads (class check)", (
     g(fx.repo, ...extra, "commit", "-q", ...(extra.length ? ["-S"] : []), "-m", subject);
     subjects.push(subject);
   };
-  const fill = (text: string) => text.replace("TEXTCONV", fx.textconv).replace("GPG", fx.gpg);
+  const fill = (text: string) => text.replace("TEXTCONV", fx.textconv).replace("GPG", fx.gpg).replace("STRIP", fx.strip);
 
   beforeAll(async () => {
     const base = await realpath(await testTempDir(path.join(tmpdir(), "muninn-continue-hostile-")));
     fx.repo = path.join(base, "repo");
-    fx.wiki = path.join(fx.repo, "wi'ki \"q\" `b` $x \\y ø -z\nnl");
+    // A line of its own that is a code fence, for the fence's length.
+    fx.wiki = path.join(fx.repo, "wi'ki \"q\" `b` $x \\y ø -z\n```\nnl");
     fx.plain = path.join(fx.repo, "plain wiki");
     fx.textconv = path.join(base, "textconv.sh");
     fx.gpg = path.join(base, "gpg.sh");
+    fx.strip = path.join(base, "strip.sh");
+    await writeFile(fx.strip, "#!/bin/sh\n:\n", { mode: 0o755 });
     fx.hostile = path.join(base, "hostile.gitconfig");
     fx.system = path.join(base, "system.gitconfig");
+    fx.home = path.join(base, "home");
+    await mkdir(path.join(fx.home, ".config", "git"), { recursive: true });
     await writeFile(path.join(base, "keys.txt"), keyLines("Textconv"));
     await writeFile(fx.textconv, `#!/bin/sh\ncat '${path.join(base, "keys.txt")}'\n`, { mode: 0o755 });
     await writeFile(fx.gpg, "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = --verify ]; then echo 'gpg: FAKE SIGNATURE' >&2; exit 1; fi; done\ncat >/dev/null\necho '[GNUPG:] SIG_CREATED D 1 8 00 0 fake' >&2\nprintf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n=fake\\n-----END PGP SIGNATURE-----\\n'\n", { mode: 0o755 });
@@ -398,13 +415,17 @@ describe("a trace's commands read the config the payload reads (class check)", (
       expect({ key, commits: commits.map((c) => c.subject), all: want.commits.every(found) }).toEqual({ key, commits: want.commits.map((c) => c.subject), all: true });
     }
   };
-  const baseEnv = () => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", GIT_CONFIG_GLOBAL: fx.hostile });
+  const baseEnv = () => ({ PATH: process.env.PATH ?? "", HOME: fx.home, GIT_CONFIG_GLOBAL: fx.hostile });
+  /** The row's global config, in every file git reads as the user's. */
+  const writeGlobal = async (text: string) => {
+    for (const f of [fx.hostile, path.join(fx.home, ".gitconfig"), path.join(fx.home, ".config", "git", "config")]) await writeFile(f, text);
+  };
 
   // Key × root: every key class, on the root with every character class and on the plain one.
   for (const key of KEY_ROWS) {
     for (const [rootName, rootOf] of [["the root of every class", () => fx.wiki], ["a plain root", () => fx.plain]] as const) {
       test(`key ${JSON.stringify(key)} on ${rootName}: the commands parse out of the prompt and match the payload (whole key ⊆, substring =)`, async () => {
-        await writeFile(fx.hostile, NEUTRAL);
+        await writeGlobal(NEUTRAL);
         await Promise.all([true, false].map((wholeKey) => compare(rootOf(), key, wholeKey, baseEnv())));
       });
     }
@@ -413,16 +434,19 @@ describe("a trace's commands read the config the payload reads (class check)", (
   // Config: each row on the plain root, so a row shows its key's effect alone.
   for (const row of CONFIG_ROWS) {
     test(`config [${row.effect}] ${row.cell}`, async () => {
-      await writeFile(fx.hostile, fill(NEUTRAL + (row.global ?? "")));
+      await writeGlobal(fill(NEUTRAL + (row.global ?? "")));
       await writeFile(fx.system, fill(ALL_AT_ONCE));
       const env = { ...baseEnv(), ...row.env?.(fx) };
       const gitConfig = path.join(fx.repo, ".git", "config");
       const saved = await Bun.file(gitConfig).text();
+      const attributes = path.join(fx.repo, ".git", "info", "attributes");
       if (row.repo) await writeFile(gitConfig, saved + fill(row.repo));
+      if (row.attributes) await writeFile(attributes, row.attributes);
       try {
         await Promise.all(CONFIG_KEYS.flatMap((key) => [true, false].map((wholeKey) => compare(fx.plain, key, wholeKey, env, row.repo !== undefined))));
       } finally {
         if (row.repo) await writeFile(gitConfig, saved);
+        if (row.attributes) await writeFile(attributes, "");
       }
     });
   }

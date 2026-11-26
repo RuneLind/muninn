@@ -247,7 +247,8 @@ export function renderContinuePrompt(input: { path: string | null; trace?: Conti
           "I traced a key across a wiki with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the files and code it names before you answer.",
           "",
           `Key: ${trace.key}`,
-          `Wiki: ${trace.wiki} (${trace.root})`,
+          // A root holding a line break is shown as a JSON string, so no line of it (a code fence) can reach the markdown.
+          `Wiki: ${trace.wiki} (${/[\u0000-\u001f]/.test(trace.root) ? JSON.stringify(trace.root) : trace.root})`,
           ...traceWhereLines(trace),
           "",
         ]
