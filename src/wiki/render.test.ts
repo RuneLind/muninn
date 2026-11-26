@@ -43,8 +43,23 @@ describe("renderWikiHtml", () => {
     expect(html).toContain(
       '<a href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link" data-wiki-page="Claude Code" data-relpath="concepts/Claude Code.md" data-anchor="alpha-r11">R11</a>',
     );
-    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#Kj%C3%B8re%20plan"');
-    expect(html).toContain('data-anchor="Kjøre plan">Claude Code#Kjøre plan</a>');
+    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#kj%C3%B8re%20plan"');
+    expect(html).toContain('data-anchor="kjøre plan">Claude Code#Kjøre plan</a>');
+    expect(html).not.toContain("wiki-link-missing");
+  });
+
+  test("the anchor is lower case, as every anchor the renderer writes is", () => {
+    const html = renderWikiHtml("[[Claude Code#Alpha-R11|R11]] og [[Claude Code#D7]]", resolve);
+    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link"');
+    expect(html).toContain('data-anchor="alpha-r11">R11</a>');
+    expect(html).toContain('data-anchor="d7">Claude Code#D7</a>');
+  });
+
+  test("in a pipe table, the escaped pipe's backslash stays out of the page and the anchor", () => {
+    const html = renderWikiHtml("| a | b |\n|---|---|\n| [[Claude Code#r1\\|R1]] | [[Claude Code\\|CC]] |\n", resolve);
+    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#r1" class="wiki-link"');
+    expect(html).toContain('data-anchor="r1">R1</a>');
+    expect(html).toContain(">CC</a>");
     expect(html).not.toContain("wiki-link-missing");
   });
 

@@ -562,6 +562,16 @@ describe("web: anchors on RunChecklist steps and Fold", () => {
     expect(ids(html)).toEqual(["r1", "r1-2", "r1-3"]);
   });
 
+  test("a repeat's suffix never takes an id another fold or step was given by its author", () => {
+    const fold = (id: string) => `<Fold id="${id}" title="t">\n\nbody\n\n</Fold>`;
+    expect(ids(formatWebHtml([fold("a"), fold("a"), fold("a-2")].join("\n\n")))).toEqual(["a", "a-3", "a-2"]);
+    expect(ids(formatWebHtml([fold("r1-2"), "<RunChecklist>\n\n- [ ] **R1** a\n- [ ] **R1** b\n\n</RunChecklist>"].join("\n\n")))).toEqual([
+      "r1-2",
+      "r1",
+      "r1-3",
+    ]);
+  });
+
   test("a fold or step anchor yields to a DecisionLog item and a Query card, which keep their slugs", () => {
     const html = formatWebHtml(
       [

@@ -100,11 +100,15 @@ export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string, 
 }
 
 /** A wikilink target split at its first `#`: the page part resolves, the rest
- *  is an anchor on that page. A bare `[[#x]]` has no page part and stays whole. */
-function splitWikilinkAnchor(target: string): { page: string; anchor?: string } {
+ *  is an anchor on that page, lower-cased like every anchor the renderer and
+ *  the reader write. A bare `[[#x]]` has no page part and stays whole.
+ *  Backslashes go first, as `wikilinkTarget` drops them: a pipe table escapes
+ *  the label's pipe (`[[p#r1\|R1]]`), which left `p#r1\` as the target. */
+function splitWikilinkAnchor(raw: string): { page: string; anchor?: string } {
+  const target = raw.replace(/\\/g, "");
   const hash = target.indexOf("#");
   if (hash <= 0) return { page: target };
-  const anchor = target.slice(hash + 1).trim();
+  const anchor = target.slice(hash + 1).trim().toLowerCase();
   return { page: target.slice(0, hash), ...(anchor ? { anchor } : {}) };
 }
 

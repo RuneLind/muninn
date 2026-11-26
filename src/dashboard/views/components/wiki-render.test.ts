@@ -267,8 +267,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // is unsettled, a card shown with its text, the scroll check on the whole selection): 971,454
 // (330,241 gzipped), so the pin moves to 971,500.
 // RunChecklist steps as in-page ref targets (the peek's step branch): 972,225 (330,506 gzipped), so the
-// pin moves to 972,300.
-const WIKI_CLIENT_MAX_BYTES = 972_300;
+// pin moves to 972,300. Its fix round 1 batch 2 (block anchors reserve authored ids): 972,317
+// (330,491 gzipped), so the pin moves to 972,400.
+const WIKI_CLIENT_MAX_BYTES = 972_400;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

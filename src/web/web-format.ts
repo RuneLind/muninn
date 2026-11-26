@@ -475,13 +475,10 @@ export function formatWebHtml(
       }
     }
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
-    // Fold and RunChecklist-step anchors first, yielding to every other id;
-    // then cases: a Query card that collides with a case anchor yields; a
-    // DecisionLog item yields to both. The block pass runs again after the
-    // cases, the one pass that reads only its own rows' ids.
-    const anchored = unlinkQueryIds(
-      uniqueLogAnchors(uniqueAnchors(uniqueBlockAnchors(uniqueCaseAnchors(uniqueBlockAnchors(collapseBlockSpacing(rendered).trim()))))),
-    );
+    // Cases first; then Fold and RunChecklist-step anchors, yielding to every
+    // case and to every other id as written; then a Query card that collides
+    // with a case or block anchor yields; a DecisionLog item yields to all.
+    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueBlockAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim())))));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
@@ -869,18 +866,24 @@ function uniqueAnchors(html: string): string {
 const BLOCK_ANCHOR_RE = /<(details class="fold[^"]*"(?: open)?|li class="check-[^"]*"(?: value="\d+")?) id="([^"]+)">/g;
 
 /** A `<Fold id>`'s and a `RunChecklist` step's anchor made unique in the
- *  finished HTML. Runs FIRST and yields to every other id on the page as
- *  written (a case row, a Query or Question card, a DecisionLog item), and a
- *  repeat among these anchors yields to the first: it gets the first free
- *  `-2`, `-3`. Runs again after `uniqueCaseAnchors`, which reads only case-row
- *  ids and can hand a repeated case a suffix a fold holds; the Query and
- *  DecisionLog passes avoid every other id themselves. */
+ *  finished HTML. Runs after `uniqueCaseAnchors` (which reads only case-row
+ *  ids, so it must go first) and yields to every case row and to every other
+ *  id as written (a Query or Question card, a DecisionLog item); those two
+ *  passes then avoid the block anchors themselves. A repeat among these
+ *  anchors yields to the first: it gets the first free `-2`, `-3`, skipping
+ *  every block id an author wrote (`a`, `a`, `a-2` → `a`, `a-3`, `a-2`). */
 function uniqueBlockAnchors(html: string): string {
-  if (!html.match(BLOCK_ANCHOR_RE)) return html;
+  const matches = [...html.matchAll(BLOCK_ANCHOR_RE)];
+  if (!matches.length) return html;
   const used = new Set([...html.replace(BLOCK_ANCHOR_RE, "<$1>").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!));
+  const reserved = new Set(matches.map((m) => m[2]!));
   return html.replace(BLOCK_ANCHOR_RE, (_m, head: string, slug: string) => {
     let anchor = slug;
-    for (let k = 2; used.has(anchor); k++) anchor = `${slug}-${k}`;
+    if (used.has(anchor)) {
+      let k = 2;
+      while (used.has(`${slug}-${k}`) || reserved.has(`${slug}-${k}`)) k++;
+      anchor = `${slug}-${k}`;
+    }
     used.add(anchor);
     return `<${head} id="${anchor}">`;
   });

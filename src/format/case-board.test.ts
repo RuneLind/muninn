@@ -220,6 +220,19 @@ describe("CaseBoard on the web", () => {
     expect(html).toContain('<details class="fold" id="case-a-2-2">');
   });
 
+  test("a fold yielding to a case row never takes a later fold's own id", () => {
+    const html = formatWebHtml(
+      '<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />\n\n<Fold id="case-a-2" title="F1">\n\nx\n\n</Fold>\n\n<Fold id="case-a-2-2" title="F2">\n\ny\n\n</Fold>',
+      {
+        files: files({
+          "a.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+          "b.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+        }),
+      },
+    );
+    expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["case-a", "case-a-2", "case-a-2-3", "case-a-2-2"]);
+  });
+
   test("a second board repeating an earlier board's id gets the next free suffix", () => {
     const html = formatWebHtml('<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />', {
       files: files({
