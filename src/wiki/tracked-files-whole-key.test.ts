@@ -423,7 +423,7 @@ const ROWS: Row[] = [
     cell: "N3 names timed out: the commits it had not finished keep their bare hash, partial",
     list: listOf(A, B),
     patch: [ok(patchOf(A) + patchOf(B))],
-    names: [slow(recOf(A) + recOf(B).slice(0, 30))],
+    names: [slow(recOf(A) + recOf(B).slice(0, -4))], // cut inside its file list, after a whole header
     want: { commits: [[A, "described"], [B, "bare"]], partial: true },
     runs: ["list", "patch", "names"],
   },
