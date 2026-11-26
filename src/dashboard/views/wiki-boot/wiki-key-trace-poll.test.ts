@@ -673,3 +673,13 @@ test("D8 no range, a render takes it off the page while a read is in flight: the
   await r.answer(running());
   expect(pending()).toEqual([]);
 });
+
+test("D9 no range, taken off the page by a render not yet swept while a read is in flight: its answer sets no timer", async () => {
+  const card = await runningCard("none");
+  const r = await nextRead();
+  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-ask-view">An answer.</div>`;
+  expect(inlineCardLive(card)).toBe(false);
+  await r.answer(running());
+  expect(pending()).toEqual([]);
+  expect(reads.length).toBe(2);
+});
