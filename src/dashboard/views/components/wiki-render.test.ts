@@ -261,7 +261,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // PR 5 fix round 2 batch 1 (Enter's owners narrowed to real controls, the menu kept open on a scroll
 // beside the selection, no-agent Explain in the inline card, the Ask-view Explain removed): 968,164
 // (329,123 gzipped), so the pin moves to 968,300.
-const WIKI_CLIENT_MAX_BYTES = 968_300;
+// PR 5 fix round 2 batch 2 (an inline Apply's outcome on the tab once its card is gone, the strict
+// re-attach finder, the free-phrase texts): 969,237 (329,479 gzipped), so the pin moves to 969,400.
+const WIKI_CLIENT_MAX_BYTES = 969_400;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
