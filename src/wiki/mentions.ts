@@ -33,7 +33,7 @@
  */
 
 import { displayTitleOf } from "./core/wiki-filter.ts";
-import type { GitRun } from "./decision-triage/git.ts";
+import { realGit, type GitRun } from "./decision-triage/git.ts";
 import { classifyKey } from "./key-kinds.ts";
 import { prMentions } from "./live-facts.ts";
 import { parseLogEntries } from "./log-entries.ts";
@@ -88,6 +88,27 @@ export interface MentionsDeps {
   /** The background refresh's `gh`; null on a read-only root, where no refresh starts. */
   gh: Pick<GhCheckDeps, "runGh" | "disabled"> | null;
   now: () => number;
+}
+
+/** How long {@link mentionsWorkTree} keeps its answer for a root. */
+export const WORK_TREE_TTL_MS = 60_000;
+const workTrees = new Map<string, { at: number; inside: Promise<boolean> }>();
+
+/**
+ * Whether `root` is in a git work tree, which the mentions route's `git grep`
+ * and `git log` need (it answers 500 elsewhere). The page route asks on every
+ * open before it marks a key (fix round 1 J3), so the answer is kept per root
+ * for {@link WORK_TREE_TTL_MS}.
+ */
+export function mentionsWorkTree(root: string, git: GitRun = realGit, now = Date.now()): Promise<boolean> {
+  const kept = workTrees.get(root);
+  if (kept && now - kept.at < WORK_TREE_TTL_MS) return kept.inside;
+  const inside = git(root, ["rev-parse", "--is-inside-work-tree"], { timeoutMs: 5_000 }).then(
+    (r) => r.ok && r.stdout.trim() === "true",
+    () => false,
+  );
+  workTrees.set(root, { at: now, inside });
+  return inside;
 }
 
 const stateWord = (s: "OPEN" | "MERGED" | "CLOSED"): PrStateWord => (s === "OPEN" ? "open" : s === "MERGED" ? "merged" : "closed");

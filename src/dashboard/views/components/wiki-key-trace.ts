@@ -6,7 +6,11 @@
  * - **Peek (D5):** hovering a key the page render underlined
  *   (`span.wiki-key[data-wiki-key]`, `src/wiki/live-facts.ts` `planKeyMarks`)
  *   or a key's fact chip (a `data-live-fact` id with no `#`) shows what the
- *   mentions route says of it, with no model call. Answers are cached per key
+ *   mentions route says of it, with no model call. A mark whose chip shows is
+ *   chipped (`wiki-live-facts.ts`): the chip is then that key's one target.
+ *   A key the page defines (a CaseBoard row the reference linker links
+ *   inside the mark) gets this peek alone, with the row and «Go to ↓»; the
+ *   linker opens no peek of its own there (fix round 1 J1, J2). Answers are cached per key
  *   (`wiki-mentions-fetch.ts`). Not while a mouse button is down or text is
  *   selected, so it never covers a selection's bar.
  * - **Trace (D4):** an inline card, placed as the selection menu's cards are,
@@ -26,6 +30,7 @@ import { fetchMentions } from "./wiki-mentions-fetch.ts";
 import { inlineCardHtml } from "./wiki-selection-menu-model.ts";
 import { KEY_PEEK_ID, TRACE_SUMMARY_QUESTION, keyPeekHtml, traceBodyHtml, traceTurnHtml } from "./wiki-key-trace-model.ts";
 import { escHtml as esc } from "./escape.ts";
+import { KEY_PEEK_MARK_SELECTOR } from "../../../wiki/core/live-facts-chip.ts";
 
 const DISCUSS_PATH = "/api/wiki/discuss";
 const THREAD_PATH = "/api/wiki/discuss/thread";
@@ -227,9 +232,10 @@ function peekEl(): HTMLElement {
   return el;
 }
 
-/** The key an element offers a peek for: a key mark, or a key's fact chip. */
+/** The key an element offers a peek for: a key mark (not one whose chip
+ *  shows), or a key's fact chip. */
 export function peekKeyOf(el: Element | null): { el: HTMLElement; key: string } | null {
-  const hit = el?.closest?.<HTMLElement>(".wiki-article .wiki-key[data-wiki-key], .wiki-article span.fact-chip[data-live-fact]");
+  const hit = el?.closest?.<HTMLElement>(`.wiki-article ${KEY_PEEK_MARK_SELECTOR}, .wiki-article span.fact-chip[data-live-fact]`);
   if (!hit) return null;
   const key = hit.getAttribute("data-wiki-key") ?? hit.getAttribute("data-live-fact") ?? "";
   // A PR chip's id holds `#`: the peek is for keys.
@@ -261,7 +267,11 @@ async function showPeek(target: HTMLElement, key: string): Promise<void> {
   if (peekFor !== target || !target.isConnected || buttonDown || selectionLive()) return;
   const el = peekEl();
   const chipTitle = target.classList.contains("fact-chip") ? target.title : "";
-  el.innerHTML = (chipTitle ? `<div class="wiki-key-peek-meta">${esc(chipTitle)}</div>` : "") + (r.ok ? keyPeekHtml(r.body, { trace: true }) : `<div class="wiki-discuss-error">${esc(r.message)}</div>`);
+  const ref = inPageRef(target);
+  const here = ref ? (document.getElementById(ref.dataset.ref ?? "")?.textContent ?? "").replace(key, "").replace(/\s+/g, " ").trim() || key : undefined;
+  el.innerHTML =
+    (chipTitle ? `<div class="wiki-key-peek-meta">${esc(chipTitle)}</div>` : "") +
+    (r.ok ? keyPeekHtml(r.body, { trace: true, here }) : `<div class="wiki-discuss-error">${esc(r.message)}</div>`);
   // The chip's own tooltip would cover the peek: its text is in the peek, back on hide.
   if (chipTitle) {
     target.dataset.peekTitle = chipTitle;
@@ -277,6 +287,12 @@ async function showPeek(target: HTMLElement, key: string): Promise<void> {
   const top = box.bottom + 6 + h > vh - 4 && box.top - h - 6 > 4 ? box.top - h - 6 : box.bottom + 6;
   el.style.left = `${Math.max(4, Math.min(box.left, vw - w - 4))}px`;
   el.style.top = `${Math.max(4, top)}px`;
+}
+
+/** The reference link the linker put inside a key mark (a key the page
+ *  defines): its target is what «Go to ↓» jumps to. */
+function inPageRef(mark: Element | null): HTMLAnchorElement | null {
+  return mark?.querySelector<HTMLAnchorElement>("a.wiki-ref[data-ref]") ?? null;
 }
 
 function rangeAround(el: Element): Range {
@@ -317,6 +333,14 @@ export function initKeyTrace(d: KeyTraceDeps): void {
       const key = trace.getAttribute("data-key-trace") ?? "";
       hideKeyPeek();
       if (key) openTrace(key, at?.isConnected ? rangeAround(at) : null);
+      return;
+    }
+    if (t?.closest?.(`#${KEY_PEEK_ID} [data-key-goto]`)) {
+      e.preventDefault();
+      const link = inPageRef(peekFor);
+      hideKeyPeek();
+      // The linker's own click: its jump, its Back pill.
+      link?.click();
       return;
     }
     if (!t?.closest?.(`#${KEY_PEEK_ID}`)) hideKeyPeek();

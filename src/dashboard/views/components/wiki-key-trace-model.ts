@@ -12,6 +12,7 @@
 import { escHtml as esc } from "./escape.ts";
 import { prsHtml, whereElseHtml } from "./wiki-selection-menu-model.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
+import { KEY_MARK_CHIPPED_CLASS } from "../../../wiki/core/live-facts-chip.ts";
 
 export const KEY_PEEK_ID = "wikiKeyPeek";
 /** The question «Summarize» asks: the first turn of a key's trace thread. */
@@ -33,8 +34,10 @@ function totalsText(b: MentionsBody): string {
 const PR_WORDS: Record<string, string> = { open: "open", merged: "merged", closed: "closed", unknown: "not known yet", "not-a-pr": "not a PR", "not-checked": "not checked" };
 
 /** The hover peek: the key, its kind, where and how often it is named, its
- *  last change, its PRs, and «Trace». */
-export function keyPeekHtml(b: MentionsBody, opts: { trace: boolean }): string {
+ *  last change, its PRs, and «Trace». `here`: the text of the item the page
+ *  defines for the key (a CaseBoard row), with «Go to ↓» (fix round 1 J2:
+ *  the key's peek stands in for the reference peek). */
+export function keyPeekHtml(b: MentionsBody, opts: { trace: boolean; here?: string }): string {
   const last = b.commits[0];
   const files = b.files.slice(0, PEEK_FILES_MAX);
   const more = b.totalFiles - files.length;
@@ -48,6 +51,7 @@ export function keyPeekHtml(b: MentionsBody, opts: { trace: boolean }): string {
     (prs.length
       ? `<div class="wiki-key-peek-prs">${prs.map((p) => `<span data-pr-state="${esc(p.state)}">${esc(p.repo.split("/").pop() ?? p.repo)}#${p.number} ${esc(PR_WORDS[p.state] ?? p.state)}${p.reason ? ` (${esc(p.reason)})` : ""}</span>`).join(" · ")}</div>`
       : "") +
+    (opts.here ? `<div class="wiki-key-peek-here"><span>${esc(cut(opts.here, 140))}</span> <button type="button" class="wiki-key-peek-goto" data-key-goto>Go to ↓</button></div>` : "") +
     (opts.trace ? `<button type="button" class="wiki-key-peek-trace" data-key-trace="${esc(b.key)}">🧭 Trace</button>` : "")
   );
 }
@@ -97,7 +101,7 @@ export function traceTurnHtml(t: { question: string; answerHtml: string; state: 
 
 export function keyTraceStyles(): string {
   return `
-    .wiki-article .wiki-key { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }
+    .wiki-article .wiki-key:not(.${KEY_MARK_CHIPPED_CLASS}) { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }
     #${KEY_PEEK_ID} {
       position: fixed; z-index: 44; display: none; max-width: 340px; padding: 8px 10px;
       background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-secondary);
@@ -109,7 +113,8 @@ export function keyTraceStyles(): string {
     .wiki-key-peek-meta, .wiki-key-peek-prs { color: var(--text-secondary); }
     .wiki-key-peek-files { margin: 4px 0; padding-left: 16px; }
     .wiki-key-peek-more { color: var(--text-dim); list-style: none; margin-left: -16px; }
-    .wiki-key-peek-trace {
+    .wiki-key-peek-here { margin-top: 4px; color: var(--text-secondary); }
+    .wiki-key-peek-goto, .wiki-key-peek-trace {
       margin-top: 6px; background: transparent; border: 1px solid var(--border-primary); color: var(--accent-light);
       border-radius: 999px; padding: 2px 10px; font: inherit; cursor: pointer;
     }

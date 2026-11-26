@@ -14,6 +14,12 @@
  *   the thread not active. A follow-up continues the same thread, a
  *   selection's key chip opens the Trace view with the thread read back, and
  *   Apply refuses a trace turn.
+ * - Fix round 1 batch 4: a key whose fact chip hides (no counted PR, no Jira
+ *   status) keeps its underline and its peek (J1); a key the page's
+ *   CaseBoard defines opens one peek, the key's, with the row's «Go to ↓»
+ *   (J2); a wiki that is no git work tree gets no mark, and on a read-only
+ *   root or a wiki with no agent the Trace view shows the mentions with no
+ *   «Summarize» or follow-up box (J3).
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`) with two commits, a `keys` kind, a Jira tracker and a facts
@@ -47,12 +53,24 @@ const SUMMARY = "TRACE-SUMMARY: the case is named on two plans and in the log.";
 const RULES = ["# Rules", "", "Answer the question first.", "", "<!-- discuss:edit -->", "## Changing the page", "Propose at most one edit.", "<!-- /discuss:edit -->", ""].join("\n");
 const PAGE = ["---", "title: Ferry plan", "---", "", "# Ferry plan", "", NIGHT, "", "DEMO-12 has facts. DEMO-20 has none.", "", "In code: `MEL-55` stays plain.", ""].join("\n");
 const PAGE_OTHER = ["---", "title: Harbour plan", "---", "", "# Harbour plan", "", `The harbour waits for ${KEY}.`, ""].join("\n");
+const CASES_REL = "plans/cases.mdx";
+const CASE_KEY = "MEL-700001";
+const PAGE_CASES = ["---", "title: Case plan", "---", "", "# Case plan", "", "DEMO-30 has only a closed PR.", "", `${CASE_KEY} is held out.`, "", '<CaseBoard src="cases.yaml" />', ""].join("\n");
+const CASES_YAML = `- id: ${CASE_KEY}\n  status: hold\n  note: "Held out for now"\n`;
+/** The side wikis (J3): a read-only root and one with no agent, both git; one that is no git work tree. */
+const SIDE_REL = "plans/side.mdx";
+const SIDE_KEY = "MEL-800001";
+const PAGE_SIDE = ["---", "title: Side plan", "---", "", "# Side plan", "", `The side note names ${SIDE_KEY}.`, ""].join("\n");
+const RO_WIKI = "e2e-trace-ro";
+const NA_WIKI = "e2e-trace-na";
+const NG_WIKI = "e2e-trace-ng";
 const FACTS = {
   version: 1,
   prs: {
     "acme/acme-api#5": { title: "DEMO-12 fix", state: "MERGED", isDraft: false, mergedAt: "2026-11-02T10:00:00Z", inProd: null, draftTag: null, firstProd: null, checkedAt: "2026-11-20T10:00:00Z" },
+    "acme/acme-api#6": { title: "DEMO-30 try", state: "CLOSED", isDraft: false, mergedAt: null, inProd: null, draftTag: null, firstProd: null, checkedAt: "2026-11-20T10:00:00Z" },
   },
-  keys: { "DEMO-12": { prs: ["acme/acme-api#5"] } },
+  keys: { "DEMO-12": { prs: ["acme/acme-api#5"] }, "DEMO-30": { prs: ["acme/acme-api#6"] } },
 };
 
 let server: ChildProcess | undefined;
@@ -63,7 +81,10 @@ let sql: ReturnType<typeof postgres> | null = null;
 
 const GIT_IDENT = { GIT_AUTHOR_NAME: "e2e", GIT_AUTHOR_EMAIL: "e2e@example.invalid", GIT_COMMITTER_NAME: "e2e", GIT_COMMITTER_EMAIL: "e2e@example.invalid" };
 function git(...args: string[]): string {
-  const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env: { ...process.env, ...GIT_IDENT } });
+  return gitAt(root, ...args);
+}
+function gitAt(at: string, ...args: string[]): string {
+  const r = spawnSync("git", ["-C", at, ...args], { encoding: "utf8", env: { ...process.env, ...GIT_IDENT } });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
   return r.stdout;
 }
@@ -105,6 +126,25 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, REL), PAGE, "utf8");
   git("add", "-A");
   git("commit", "-q", "-m", "Ferry plan names the case");
+  await writeFile(path.join(root, CASES_REL), PAGE_CASES, "utf8");
+  await writeFile(path.join(root, "plans/cases.yaml"), CASES_YAML, "utf8");
+  git("add", "-A");
+  git("commit", "-q", "-m", "Case plan");
+  const sides: Record<string, string> = {};
+  for (const [name, isGit, rules] of [[RO_WIKI, true, true], [NA_WIKI, true, false], [NG_WIKI, false, true]] as const) {
+    const at = path.join(scratch, name);
+    sides[name] = at;
+    await mkdir(path.join(at, "plans"), { recursive: true });
+    if (rules) await writeFile(path.join(at, ".wiki-agent.md"), RULES, "utf8");
+    await writeFile(path.join(at, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }), "utf8");
+    await writeFile(path.join(at, SIDE_REL), PAGE_SIDE, "utf8");
+    if (isGit) {
+      const init = spawnSync("git", ["init", "-q", "-b", "main", at], { encoding: "utf8" });
+      if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
+      gitAt(at, "add", "-A");
+      gitAt(at, "commit", "-q", "-m", "Side plan names the case");
+    }
+  }
   const bot = path.join(scratch, "bots", BOT);
   await mkdir(bot, { recursive: true });
   await writeFile(path.join(bot, "CLAUDE.md"), "# e2e trace bot\n\nCreated by e2e/wiki-trace.spec.ts.\n");
@@ -128,7 +168,8 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${RO_WIKI}=${sides[RO_WIKI]},${NA_WIKI}=${sides[NA_WIKI]},${NG_WIKI}=${sides[NG_WIKI]}`,
+      WIKI_READONLY_ROOTS: sides[RO_WIKI],
       MUNINN_BOTS_DIR: path.join(scratch, "bots"),
       RESEARCH_BOT: BOT,
       PLAN_CARD_BIN: "",
@@ -223,9 +264,10 @@ test("keys are underlined beside a fact chip, never twice and never in code", as
   const a = article(page);
   await expect(a.locator(`.wiki-key[data-wiki-key="${KEY}"]`)).toHaveText(KEY);
   await expect(a.locator('.wiki-key[data-wiki-key="DEMO-20"]')).toHaveText("DEMO-20");
-  // DEMO-12 has a facts entry: its chip, and no underline of its own.
+  // DEMO-12 has a facts entry: its chip shows, and its mark draws no underline (fix round 1 J1).
   await expect(a.locator('span.fact-chip[data-live-fact="DEMO-12"]')).toBeVisible();
-  await expect(a.locator('.wiki-key[data-wiki-key="DEMO-12"]')).toHaveCount(0);
+  await expect(a.locator('.wiki-key[data-wiki-key="DEMO-12"]')).toHaveText("DEMO-12");
+  expect(await a.locator('.wiki-key[data-wiki-key="DEMO-12"]').evaluate((el) => getComputedStyle(el).textDecorationLine)).toBe("none");
   await expect(a.locator("code .wiki-key, pre .wiki-key")).toHaveCount(0);
   await expect(a.locator("code", { hasText: "MEL-55" })).toHaveCount(1);
   // The underline is drawn (the reader's CSS reaches the mark).
@@ -250,6 +292,12 @@ test("hovering a key shows its peek from the mentions route, asked once per key;
   await article(page).locator(`.wiki-key[data-wiki-key="${KEY}"]`).hover();
   await expect(peek(page)).toBeVisible();
   expect(asked.filter((k) => k === KEY)).toHaveLength(1);
+  // DEMO-12's own text is no second target: its chip shows.
+  await page.mouse.move(5, 5);
+  await expect(peek(page)).toBeHidden();
+  await article(page).locator('.wiki-key[data-wiki-key="DEMO-12"]').hover();
+  await page.waitForTimeout(700);
+  await expect(peek(page)).toBeHidden();
   // The fact chip of DEMO-12 shows DEMO-12's peek.
   await page.mouse.move(5, 5);
   await article(page).locator('span.fact-chip[data-live-fact="DEMO-12"]').hover();
@@ -313,4 +361,58 @@ test("a selection's key chip opens the Trace view, which reads the thread back; 
   const res = await page.request.post(`${BASE}/api/wiki/discuss/apply`, { data: { turnId: newest!.id, preview: true } });
   expect(res.status()).toBe(409);
   expect(((await res.json()) as { reason: string }).reason).toBe("no-page");
+});
+
+async function openAt(page: Page, wiki: string, rel: string, text: string): Promise<void> {
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
+  await expect(article(page)).toContainText(text);
+}
+
+test("a key whose fact chip hides keeps its underline and its peek (J1)", async ({ page }) => {
+  await openAt(page, WIKI, CASES_REL, "has only a closed PR");
+  const a = article(page);
+  await expect(a.locator('span.fact-chip[data-live-fact="DEMO-30"]')).toBeHidden();
+  const mark = a.locator('.wiki-key[data-wiki-key="DEMO-30"]');
+  await expect(mark).toHaveText("DEMO-30");
+  expect(await mark.evaluate((el) => getComputedStyle(el).textDecorationLine)).toContain("underline");
+  await mark.hover();
+  await expect(peek(page).locator(".wiki-key-peek-key")).toHaveText("DEMO-30");
+});
+
+test("a key the page's CaseBoard defines opens one peek, the key's, whose «Go to ↓» jumps to the row (J2)", async ({ page }) => {
+  await openAt(page, WIKI, CASES_REL, "is held out");
+  const mark = article(page).locator(`.wiki-key[data-wiki-key="${CASE_KEY}"]`);
+  await expect(mark.locator("a.wiki-ref")).toHaveCount(1);
+  await mark.hover();
+  await expect(peek(page).locator(".wiki-key-peek-key")).toHaveText(CASE_KEY);
+  // Past the reference peek's own delay: still the one card.
+  await page.waitForTimeout(700);
+  await expect(page.locator(".wiki-ref-peek")).toHaveCount(0);
+  await expect(peek(page)).toBeVisible();
+  // The row's text, as the reference peek showed it.
+  await expect(peek(page).locator(".wiki-key-peek-here")).toContainText("Held out for now");
+  await peek(page).locator("[data-key-goto]").click();
+  await expect(peek(page)).toBeHidden();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#case-${CASE_KEY.toLowerCase()}`);
+  // A click on the key itself still jumps, as the reference link did.
+  await page.evaluate(() => history.replaceState(history.state, "", location.pathname + location.search));
+  await mark.locator("a.wiki-ref").click();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe(`#case-${CASE_KEY.toLowerCase()}`);
+});
+
+test("no mark on a wiki that is no git work tree; a read-only root and a wiki with no agent: the peek and the Trace view's mentions, no «Summarize» or follow-up box (J3)", async ({ page }) => {
+  await openAt(page, NG_WIKI, SIDE_REL, "The side note names");
+  await expect(article(page).locator(".wiki-key")).toHaveCount(0);
+  for (const wiki of [RO_WIKI, NA_WIKI]) {
+    await openAt(page, wiki, SIDE_REL, "The side note names");
+    const mark = article(page).locator(`.wiki-key[data-wiki-key="${SIDE_KEY}"]`);
+    await mark.hover();
+    await expect(peek(page).locator("[data-peek-totals]")).toContainText("1 line in 1 file");
+    await peek(page).locator("[data-key-trace]").click();
+    const card = traceCard(page);
+    await expect(card.locator(".wiki-sel-file")).toHaveCount(1);
+    await expect(card.locator('[data-trace-ev="commit"]')).toHaveCount(1);
+    await expect(card.locator("[data-trace-summarize]")).toHaveCount(0);
+    await expect(card.locator(".wiki-trace-follow")).toHaveCount(0);
+  }
 });

@@ -8,9 +8,13 @@
  * huginn: {@link adoptLiveFactIssues} refills the key chips when it lands.
  * The chips carry `data-reader-only`, so Explain, Ask and fact-check leave
  * their text out.
+ *
+ * A key's mark (Discuss v2 PR 6) sits right before its own chip: while the
+ * chip shows, the mark is chipped and the chip is the key's one hover target;
+ * while it hides, the mark keeps its underline and peek (fix round 1 J1).
  */
 
-import { chipView, FACT_CHIP_CLASS, LIVE_FACT_ATTR, type LiveFactsPayload } from "../../../wiki/core/live-facts-chip.ts";
+import { chipView, FACT_CHIP_CLASS, KEY_MARK_ATTR, KEY_MARK_CHIPPED_CLASS, KEY_MARK_CLASS, LIVE_FACT_ATTR, type LiveFactsPayload } from "../../../wiki/core/live-facts-chip.ts";
 
 export type { LiveFactsPayload };
 
@@ -35,6 +39,8 @@ function paint(): void {
     chip.classList.toggle(FACT_CHIP_DIM_CLASS, view?.dim === true);
     if (view?.title) chip.title = view.title;
     else chip.removeAttribute("title");
+    const mark = chip.previousSibling as Element | null;
+    if (mark?.nodeType === 1 && mark.classList.contains(KEY_MARK_CLASS) && mark.getAttribute(KEY_MARK_ATTR) === id) mark.classList.toggle(KEY_MARK_CHIPPED_CLASS, !!view);
   });
 }
 

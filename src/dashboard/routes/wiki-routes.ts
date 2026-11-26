@@ -73,6 +73,7 @@ import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
 import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
 import { registerWikiMentionsRoute } from "./wiki-mentions.ts";
+import { mentionsWorkTree } from "../../wiki/mentions.ts";
 import { registerChecksAnswerRoute } from "./checks-answer.ts";
 import { realBootLineDeps, registerWikiBootLineRoute } from "./wiki-boot-line.ts";
 import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
@@ -1766,15 +1767,19 @@ export function registerWikiReadRoutes(
     // without chips and warns (on every open: nothing dedupes it). When the
     // plain render throws too, the cause is no chip's: its error surfaces.
     // KEY MARKS (Discuss v2 PR 6, D5): each key the mentions route would
-    // answer a peek for, underlined; only where that route answers this viewer.
+    // answer a peek for, underlined; only where that route answers this viewer
+    // (`mentionsHere`, which PR 5's `mentions` flag shares): its tool group,
+    // MUNINN_AUTH off, a registered wiki (it 400s a `WIKI_DIR` override's
+    // empty name) on a git work tree (it 500s elsewhere). Fix round 1 J3.
     // A render that throws with the marks is tried once more without them: a
     // marks failure drops the marks alone (chips kept) and warns as the marks'.
     let liveFacts: LiveFactsPayload | undefined;
     let html: string | undefined;
     let chipError: unknown;
     let marksError: unknown;
+    const mentionsHere = tools && authMode() === "off" && !!entry?.name && (await mentionsWorkTree(entry.root));
     const keyMarks: KeyMarksInput | undefined =
-      tools && authMode() === "off" && (c.get("role") ?? "admin") === "admin"
+      mentionsHere && (c.get("role") ?? "admin") === "admin"
         ? { grammar: index.readerConfig?.prGrammar ?? null, trackers: jiraTrackers(index.readerConfig?.trackers), kinds: index.readerConfig?.keys ?? [], relPath: meta.relPath }
         : undefined;
     const render = async (chips: LiveFactsInput | undefined): Promise<string> => {
@@ -1872,9 +1877,9 @@ export function registerWikiReadRoutes(
         // and counts only when the discuss route would accept it (not a symlink,
         // over the bound or unreadable: those it refuses with 422/503).
         tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok",
-        // Discuss v2 PR 5: «Where else» / «History» read the mentions route,
-        // which is in the same group and answers only with MUNINN_AUTH off.
-        tools && authMode() === "off",
+        // Discuss v2 PR 5: «Where else» / «History» read the mentions route:
+        // the key marks' gate above.
+        mentionsHere,
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

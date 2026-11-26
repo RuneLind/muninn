@@ -17,6 +17,16 @@ import * as liveFactsModule from "../../wiki/live-facts.ts";
 import { __setChipPassFaultForTest, resetWikiFactsCache } from "../../wiki/live-facts.ts";
 import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { testTempDir } from "../../test/temp-dir.ts";
+import { spawnSync } from "node:child_process";
+
+/** A one-commit git work tree at `root`, as the mentions route needs. */
+function gitInit(root: string): void {
+  const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
+  for (const args of [["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "init"]]) {
+    const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", env });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  }
+}
 
 const entry = (title: string, state: string, extra: Record<string, unknown> = {}) => ({
   title, state, isDraft: false, mergedAt: state === "MERGED" ? "2026-01-05T10:00:00Z" : null, inProd: null, firstProd: null, draftTag: null, checkedAt: "2026-01-20T08:00:00.000Z", ...extra,
@@ -126,6 +136,8 @@ describe("GET /api/wiki/page — key marks beside live chips", () => {
     await writeFile(path.join(root, "plans/plan.md"), PAGE, "utf8");
     await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
     await writeFile(path.join(root, ".wiki-facts.json"), JSON.stringify(FACTS), "utf8");
+    // The mentions route reads with git: marks only on a git work tree (fix round 1 J3).
+    gitInit(root);
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `marks=${root}`;
     __resetWikiRegistryForTest();
@@ -164,10 +176,10 @@ describe("GET /api/wiki/page — key marks beside live chips", () => {
   const marks = (html: string) => [...html.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1]);
   const warnings = () => records.map((r) => String(r.rawMessage));
 
-  test("both passes: the chips and the mark", async () => {
+  test("both passes: the chips and the marks (a chipped key is marked too, fix round 1 J1)", async () => {
     const data = await get();
     expect(chips(data.html)).toEqual(["acme/acme-api#101", "DEMO-11"]);
-    expect(marks(data.html)).toEqual(["DEMO-20"]);
+    expect(marks(data.html)).toEqual(["DEMO-11", "DEMO-20"]);
     expect(warnings()).toEqual([]);
   });
 
@@ -196,6 +208,85 @@ describe("GET /api/wiki/page — key marks beside live chips", () => {
       expect(warnings()).toEqual(["live chips failed on {relPath}; page rendered without chips: {error}"]);
     } finally {
       __setChipPassFaultForTest(null);
+    }
+  });
+});
+
+// WHERE THE MENTIONS ROUTE ANSWERS (fix round 1 J3): the key marks and the
+// reader's `mentions` flag only for a registered wiki (the route 400s a
+// `WIKI_DIR` override's empty name) whose root is a git work tree (the route
+// 500s elsewhere). Both share one gate.
+describe("GET /api/wiki/page — marks and the mentions flag only where the mentions route answers", () => {
+  let git = "";
+  let plain = "";
+  let app: Hono;
+  let prevExtra: string | undefined;
+  let prevDir: string | undefined;
+
+  beforeAll(async () => {
+    git = await testTempDir(path.join(tmpdir(), "wiki-marks-git-"));
+    plain = await testTempDir(path.join(tmpdir(), "wiki-marks-plain-"));
+    for (const root of [git, plain]) {
+      await mkdir(path.join(root, "plans"), { recursive: true });
+      await writeFile(path.join(root, "plans/plan.md"), PAGE, "utf8");
+      await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify(CONFIG), "utf8");
+    }
+    gitInit(git);
+    prevExtra = process.env.WIKI_EXTRA;
+    prevDir = process.env.WIKI_DIR;
+    process.env.WIKI_EXTRA = `gitwiki=${git},plainwiki=${plain}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    resetWikiFactsCache();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterAll(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    if (prevDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevDir;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    resetWikiFactsCache();
+    await rm(git, { recursive: true, force: true });
+    await rm(plain, { recursive: true, force: true });
+  });
+
+  const get = async (query: string) => {
+    const res = await app.request(`/api/wiki/page?${query}relPath=plans%2Fplan.md`);
+    expect(res.status).toBe(200);
+    return (await res.json()) as { html: string; reader: { mentions?: boolean } };
+  };
+  const marks = (html: string) => [...html.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1]);
+  const text = (html: string) => html.replace(/<[^>]+>/g, "");
+
+  test("a registered git wiki: its keys marked, the flag on", async () => {
+    const data = await get("wiki=gitwiki&");
+    expect(marks(data.html)).toEqual(["DEMO-11", "DEMO-20"]);
+    expect(data.reader.mentions).toBe(true);
+  });
+
+  test("a registered wiki that is no git work tree: no mark, the flag off", async () => {
+    const data = await get("wiki=plainwiki&");
+    expect(text(data.html)).toContain("DEMO-20 has no facts");
+    expect(marks(data.html)).toEqual([]);
+    expect(data.reader.mentions).toBe(false);
+  });
+
+  test("the WIKI_DIR override (no registry name), even on a git work tree: no mark, the flag off", async () => {
+    process.env.WIKI_DIR = git;
+    __resetWikiCacheForTest();
+    try {
+      const data = await get("");
+      expect(text(data.html)).toContain("DEMO-20 has no facts");
+      expect(marks(data.html)).toEqual([]);
+      expect(data.reader.mentions).toBe(false);
+    } finally {
+      delete process.env.WIKI_DIR;
+      __resetWikiCacheForTest();
     }
   });
 });

@@ -38,7 +38,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { READER_ONLY_ATTR } from "../format/reader-lens.ts";
 import { pageStemOf } from "./core/wiki-filter.ts";
-import { FACT_CHIP_CLASS, LIVE_FACT_ATTR, repoOfPr, type FactsKeyEntry, type FactsPrEntry, type LiveFactsPayload } from "./core/live-facts-chip.ts";
+import { FACT_CHIP_CLASS, KEY_MARK_ATTR, KEY_MARK_CLASS, LIVE_FACT_ATTR, repoOfPr, type FactsKeyEntry, type FactsPrEntry, type LiveFactsPayload } from "./core/live-facts-chip.ts";
 import { readOwns } from "./frontmatter-lists.ts";
 import { stateLineRoles } from "./lint-state.ts";
 import { WIKILINK_WITH_LABEL_RE } from "./page-text.ts";
@@ -821,8 +821,7 @@ export function applyChipInsertions(body: string, insertions: readonly ChipInser
 
 // ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
 
-export const KEY_MARK_CLASS = "wiki-key";
-export const KEY_MARK_ATTR = "data-wiki-key";
+export { KEY_MARK_ATTR, KEY_MARK_CLASS };
 
 /** What the page render's key marks need (`renderWikiHtml`'s `keyMarks`). */
 export interface KeyMarksInput {
@@ -860,8 +859,11 @@ const MARKABLE_KEY_RE = /^\p{L}[\p{L}\p{N}]*(?:[-.][\p{L}\p{N}]+)+$/u;
  * kinds' matches the mention parser marks ({@link markedMentionsWithCode}, so
  * never in code, a tag, a link's title, a heading, a wikilink or a state
  * home), less any inside a link or a bare URL (the mark would sit in the
- * anchor or split the URL), any whose own fact chip follows it (that key's
- * peek is on the chip) and any {@link MARKABLE_KEY_RE} refuses.
+ * anchor or split the URL), any a chip would split and any
+ * {@link MARKABLE_KEY_RE} refuses. A key whose own fact chip follows it is
+ * marked too: the reader hides a chip with nothing to show (no counted PR, no
+ * Jira status yet), and its chip paint takes the mark's underline and peek
+ * only while the chip shows (fix round 1 J1).
  */
 export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number; skippedChars: number } {
   if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0, skippedChars: 0 };
@@ -869,11 +871,9 @@ export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMark
   const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80 && MARKABLE_KEY_RE.test(m.id));
   if (keys.length === 0) return { marks: [], skippedLines, skippedChars };
   const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
-  const chipAt = new Map(chips.map((c) => [c.at, c] as const));
   const marks: KeyMark[] = [];
   for (const m of keys) {
     if (holdingSpan(links, m.start, m.end) || holdingSpan(refs, m.start, m.end) || holdingSpan(urls, m.start, m.end)) continue;
-    if (chipAt.get(m.end)?.ids.some((x) => x.kind === "key" && x.id === m.id)) continue;
     if (chips.some((c) => c.at > m.start && c.at < m.end)) continue;
     marks.push({ key: m.id, start: m.start, end: m.end });
   }

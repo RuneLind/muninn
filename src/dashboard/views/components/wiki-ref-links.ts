@@ -32,6 +32,7 @@ import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
 import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
 import { FACT_CHIP_SELECTOR, INLINE, PEEK_CLASS, REF_SKIP } from "./wiki-ref-dom.ts";
 import { enhanceLiveFacts, type LiveFactsPayload } from "./wiki-live-facts.ts";
+import { KEY_PEEK_MARK_SELECTOR } from "../../../wiki/core/live-facts-chip.ts";
 
 export { INLINE, PEEK_CLASS, REF_SKIP };
 import {
@@ -743,6 +744,9 @@ function install(): void {
   document.addEventListener("mouseover", (e) => {
     const a = refLink(e);
     if (!a || touchOnly()) return;
+    // Inside a key mark the key's peek (`wiki-key-trace.ts`) is the one card,
+    // with this link's «Go to ↓» (Discuss v2 PR 6, fix round 1 J2).
+    if (a.closest(KEY_PEEK_MARK_SELECTOR)) return;
     clearTimeout(hideTimer);
     if (peekFor === a) return;
     clearTimeout(showTimer);

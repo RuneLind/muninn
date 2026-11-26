@@ -613,11 +613,11 @@ describe("key marks: the page's keys underlined for the hover peek", () => {
     expect(got.map((m) => m.key)).toEqual(["MEL-8"]);
   });
 
-  test("a key with its own fact chip gets no underline (its peek is on the chip); one without a facts entry is underlined", () => {
+  test("a key with its own fact chip is marked too, the chip right after the mark: the reader hides a chip with nothing to show, and the key keeps a target (fix round 1 J1)", () => {
     const { html } = render(page("DEMO-12 has facts, DEMO-20 has none."), "plans/demo.mdx", { keyMarks: marks });
     expect(chipIds(html)).toEqual(["DEMO-12"]);
-    expect(markIds(html)).toEqual(["DEMO-20"]);
-    expect(html).toContain('DEMO-12<span class="fact-chip" data-live-fact="DEMO-12" data-reader-only></span> has facts');
+    expect(markIds(html)).toEqual(["DEMO-12", "DEMO-20"]);
+    expect(html).toContain('<span class="wiki-key" data-wiki-key="DEMO-12">DEMO-12</span><span class="fact-chip" data-live-fact="DEMO-12" data-reader-only></span> has facts');
   });
 
   test("marks and chips share one pass: a mark right before a PR chip keeps both in text order", () => {
