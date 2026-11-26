@@ -138,7 +138,8 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     // A fresh snapshot directory per turn: a copy of the wiki as it is now.
     wikiSnapshot: async (d) => {
       const to = path.join(dir, "snaps", `wiki-${++snaps}`);
-      await Bun.write(path.join(to, "notes", "harbour.md"), Bun.file(path.join(d, "notes", "harbour.md")));
+      const note = Bun.file(path.join(d, "notes", "harbour.md"));
+      if (await note.exists()) await Bun.write(path.join(to, "notes", "harbour.md"), note);
       return { kind: "wiki", dir: to, key: `k${snaps}`, source: d };
     },
     oneShot: async (prompt, _config, bot, opts) => {
@@ -150,7 +151,7 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     log: quiet,
   });
   const app = new Hono();
-  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar] });
+  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar], ...(extra.authMode ? { authMode: extra.authMode } : {}) });
   registerWikiDiscussApplyRoute(app, config, { readonlyRefusal: () => null, egressRefusal: () => null });
   app.route("/chat", createChatRoutes([ivar], config, { discussEngine: engine }));
   return app;
@@ -756,4 +757,56 @@ test("a trace body is refused with a page, a selection or Edit, and a page discu
   const other = await tracePost(app, { question: "Q", discussionId: page });
   expect(other.status).toBe(409);
   expect(((await other.json()) as { error: string }).error).toBe("that discussion is about another key");
+});
+
+// ── Fix round 1: a trace is refused before any thread, turn or mentions work ──
+
+const traceRows = async (wikiName: string, key: string) => {
+  const [t] = await getDb()`SELECT count(*)::int AS n FROM threads WHERE wiki = ${wikiName} AND trace_key = ${key}`;
+  const [r] = await getDb()`SELECT count(*)::int AS n FROM wiki_discuss_turns WHERE wiki = ${wikiName} AND trace_key = ${key}`;
+  return { threads: t!.n as number, turns: r!.n as number };
+};
+
+test("on an instance that authenticates, a trace turn and a trace thread read are refused: no thread, no turn, no mentions read", async () => {
+  let mentionsCalls = 0;
+  const app = apps(undefined, {
+    authMode: () => "entra",
+    mentions: async () => {
+      mentionsCalls++;
+      return { ok: false, error: "the mentions must not be read" };
+    },
+  });
+  const res = await tracePost(app, { traceKey: "MEL-88", question: "Summarize MEL-88" });
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ error: "Trace is not served on an instance that authenticates", reason: "trace-off" });
+  const read = await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-88");
+  expect(read.status).toBe(404);
+  expect(((await read.json()) as { reason: string }).reason).toBe("trace-off");
+  expect(mentionsCalls).toBe(0);
+  expect(calls).toHaveLength(0);
+  expect(await traceRows("harbour", "MEL-88")).toEqual({ threads: 0, turns: 0 });
+  // A page turn on the same instance is unchanged.
+  const page = await frames(await pane(app, { question: "When?" }));
+  expect(page.map((f) => f.event)).toContain("done");
+});
+
+test("a trace on a wiki that is no git work tree is refused before its thread exists", async () => {
+  const dune = path.join(dir, "dune");
+  await Bun.write(path.join(dune, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(dune, "notes", "sand.md"), "# Sand\n\nMEL-89 is here.\n");
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "dune", root: dune, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    const app = apps();
+    const res = await tracePost(app, { wiki: "dune", traceKey: "MEL-89", question: "Summarize MEL-89" });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { reason: string }).reason).toBe("no-snapshot");
+    expect(calls).toHaveLength(0);
+    expect(await traceRows("dune", "MEL-89")).toEqual({ threads: 0, turns: 0 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
 });

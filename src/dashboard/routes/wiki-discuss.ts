@@ -29,6 +29,7 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
+import { authMode } from "../../auth/policy.ts";
 import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
 import {
   getDiscussTurn,
@@ -47,6 +48,7 @@ import {
   createDiscussEngine,
   parseDiscussBody,
   sharedDiscussEngine,
+  TRACE_AUTH_REFUSAL,
   type DiscussEngine,
   type DiscussEngineDeps,
   type DiscussMirrorFactory,
@@ -251,7 +253,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   //
   // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
   // the Trace view): the thread and its messages; a trace has no closed list
-  // or one-shot turns. 400 a bad key (the mentions route's rule).
+  // or one-shot turns. 404 `trace-off` while `MUNINN_AUTH` is not `off`, then
+  // 400 a bad key (the mentions route's rules).
   app.get("/api/wiki/discuss/thread", admin, async (c) => {
     const traceQ = c.req.query("traceKey");
     if (traceQ !== undefined) return traceThreadRead(c, traceQ);
@@ -302,6 +305,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   });
 
   async function traceThreadRead(c: Context, raw: string): Promise<Response> {
+    // Absent where a trace turn is refused: an instance that authenticates.
+    if ((deps.authMode ?? authMode)() !== "off") return c.json(TRACE_AUTH_REFUSAL, 404);
     const key = parseMentionKey(raw);
     if ("error" in key) return c.json({ error: `traceKey: ${key.error}` }, 400);
     try {

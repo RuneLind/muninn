@@ -6,7 +6,12 @@
  *
  * The key is a literal, searched as a fixed string (`grepTracked`, `historyFor`
  * in `tracked-files.ts`). Its `kind` comes from the wiki's `trackers` or its
- * `keys` (`key-kinds.ts`) and never decides whether it is searched.
+ * `keys` (`key-kinds.ts`) and never decides whether it is searched, only how:
+ * a classified key counts only where it stands whole (`wholeKey`: no Unicode
+ * letter or digit right before or after it), so `MEL-1` is not found inside
+ * `MEL-10` or `MEL-1029036`, in its lines, its totals, its commits or its log
+ * lines. A free phrase (`kind` null: «Where else» on a selection) is matched
+ * as a substring.
  *
  * Every read goes through `tracked-files.ts`: the whole-wiki grep, and the
  * root `log.md` on a grep of its own (`grepRootLog`, `rootLogHeaders`), so a
@@ -89,16 +94,18 @@ const stateWord = (s: "OPEN" | "MERGED" | "CLOSED"): PrStateWord => (s === "OPEN
 
 export async function buildMentions(input: MentionsInput, deps: MentionsDeps): Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }> {
   const { root, key } = input;
+  const cfg = input.index?.readerConfig ?? null;
+  const kind = classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []);
+  const wholeKey = kind !== null;
   const [grep, history, logGrep] = await Promise.all([
-    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true }),
+    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true, wholeKey }),
     // One more than shown: only a 51st commit says there are more than 50.
-    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS + 1 }),
-    grepRootLog(root, key, { git: deps.git, max: MENTIONS_MAX_LOG, fullText: true }),
+    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS + 1, wholeKey }),
+    grepRootLog(root, key, { git: deps.git, max: MENTIONS_MAX_LOG, fullText: true, wholeKey }),
   ]);
   if (!grep.ok) return grep;
   if (!history.ok) return history;
   if (!logGrep.ok) return logGrep;
-  const cfg = input.index?.readerConfig ?? null;
 
   const byFile = new Map<string, MentionsBody["files"][number]>();
   for (const h of grep.hits) {
@@ -161,7 +168,7 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
     ok: true,
     body: {
       key,
-      kind: classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []),
+      kind,
       files: [...byFile.values()],
       commits: history.commits.slice(0, MENTIONS_MAX_COMMITS).map((c) => ({ sha: c.hash, date: c.date, subject: c.subject, files: c.files })),
       log,

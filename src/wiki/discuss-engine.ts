@@ -28,11 +28,13 @@
  *    ({@link copilotDiscussReach}).
  *  - any other connector is refused in the preflight.
  *
- * Preflight, in order: 403 role not admin · 404 an unknown wiki · 403
+ * Preflight, in order: 403 role not admin · 404 `trace-off` a trace while
+ * `MUNINN_AUTH` is not `off` (the mentions route's rule) · 404 an unknown wiki · 403
  * `readonly` a read-only wiki (the egress prologue, right after the wiki
  * resolves) · 404 `no-agent` · 422 `rules-too-large` / 503 `rules-unreadable` ·
  * the page ladder (404/503) · 503 `no-bot` · 422 `connector` · 503 `surface` ·
- * on read-and-search 503 `no-snapshot` and 422 `page-not-in-snapshot` · 422
+ * on read-and-search 503 `no-snapshot` and 422 `page-not-in-snapshot` (a trace,
+ * on any connector: 503 `no-snapshot` when the wiki is no git work tree) · 422
  * `no-user` / `unknown-user` the thread's user · 404/409 the discussion (a
  * given id must be this page's live wiki thread) · 409 `busy` · 429 `busy` (the
  * in-flight cap). Only then is the thread created (so a refused request leaves
@@ -275,6 +277,8 @@ export interface DiscussEngineDeps {
   /** A trace turn's mentions payload (PR 6); default `buildMentions` with the
    *  work map's `gh` refresh and this engine's `git`. */
   mentions?: (input: MentionsInput) => Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }>;
+  /** `MUNINN_AUTH`'s mode; default the auth policy's. A trace turn runs only where it is `off`, as the mentions route answers. */
+  authMode?: () => string;
   planCardConfig?: () => PlanCardConfig;
   /** `DECISION_TRIAGE_REPO_ROOTS`'s raw value; default the config's. */
   repoRoots?: () => string | null;
@@ -295,6 +299,9 @@ export interface DiscussBody extends HandoffBody {
   /** The thread's user; else the bot's `bot_default_user`. */
   userId?: string;
 }
+
+/** A trace on an authenticating instance: the mentions route's 404, as JSON. */
+export const TRACE_AUTH_REFUSAL = { error: "Trace is not served on an instance that authenticates", reason: "trace-off" } as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const USER_ID_MAX = 200;
@@ -477,6 +484,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
   async function prepare(req: DiscussRequest): Promise<Prepared | DiscussRefusal> {
     const body = req.body;
     if ((req.role || "admin") !== "admin") return refuse(403, { error: "Discuss's wiki agent is for admins" });
+    // A trace spawns git grep, git log and a background gh refresh, which the
+    // mentions route it mirrors never does on an authenticating instance.
+    if (body.traceKey !== undefined && (deps.authMode ?? authMode)() !== "off") return refuse(404, TRACE_AUTH_REFUSAL);
     const { entry, unknownWiki, wiki } = resolveWikiRequest(getWikiRegistry(), body.wiki, undefined, process.env.WIKI_DIR);
     if (unknownWiki) return refuse(404, { error: `no wiki configured for "${wiki || "(none)"}"` });
     // The egress prologue, right after the wiki resolves: before the rules,
@@ -540,7 +550,14 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     const probe: ToolSurface = copilot ? { mcpTools: copilot.tools } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };
     const refused = await blocker(connector, probe);
     if (refused) return refuse(503, { error: `the wiki agent cannot run on ${bot.name}: ${refused}`, reason: "surface" });
-    if (kind === "readSearch" && page) {
+    if (!page) {
+      // The key's mentions are read with git, on every connector: refused here,
+      // before a thread or a turn exists, rather than failing inside the turn.
+      const inside = await git(wikiRoot, ["rev-parse", "--is-inside-work-tree"]);
+      if (!inside.ok || inside.stdout.trim() !== "true") {
+        return refuse(503, { error: "a trace reads the wiki's files and history with git, and this wiki is not a git work tree", reason: "no-snapshot" });
+      }
+    } else if (kind === "readSearch") {
       // The agent reads the page from the wiki's snapshot: refuse a page the
       // snapshot would not hold before a turn is stored for it.
       const holds = await wikiSnapshotHolds(wikiRoot, page.meta.relPath, git);
