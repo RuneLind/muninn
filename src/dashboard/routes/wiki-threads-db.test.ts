@@ -39,6 +39,7 @@ const { processMessage } = await import("../../core/message-processor.ts");
 const { chatState } = await import("../../chat/state.ts");
 const { createChatRoutes } = await import("../../chat/routes.ts");
 const { createDiscussEngine } = await import("../../wiki/discuss-engine.ts");
+const { mentionsWorkTree } = await import("../../wiki/mentions.ts");
 const { registerWikiDiscussRoute, WIKI_DISCUSS_PATH } = await import("./wiki-discuss.ts");
 const { registerWikiDiscussApplyRoute, WIKI_DISCUSS_APPLY_PATH } = await import("./wiki-discuss-apply.ts");
 const { STORED_EDIT_MARKER, WIKI_AGENT_RULES_FILE } = await import("../../wiki/discuss-agent.ts");
@@ -892,6 +893,40 @@ test("a trace on a git work tree with no commit yet is refused before its thread
     expect(await res.json()).toEqual({ error: "a trace reads the wiki's history with git, and this wiki has no commit yet", reason: "no-snapshot" });
     expect(calls).toHaveLength(0);
     expect(await traceRows("fresh", "MEL-90")).toEqual({ threads: 0, turns: 0 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
+});
+
+// Class check (sweep A, mutant M17): the pre-flight asks git each time
+// (`mentionsGitState`), never the page route's answer kept 60 s per root
+// (`mentionsWorkTree`), so a wiki's first commit is seen by the next trace.
+test("the trace pre-flight reads the wiki's git state afresh: a first commit made after a page open's cached «no» is seen", async () => {
+  const late = path.join(dir, "late");
+  await Bun.write(path.join(late, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(late, "notes", "sand.md"), "# Sand\n\nMEL-91 is here.\n");
+  const run = (...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: late, stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  };
+  run("init", "-q");
+  run("add", ".");
+  // A page open on this wiki now: the page route's check answers «no» and keeps it.
+  expect(await mentionsWorkTree(late)).toBe(false);
+  run("commit", "-qm", "first commit");
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "late", root: late, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    expect(await mentionsWorkTree(late)).toBe(false); // still the kept answer
+    const res = await tracePost(apps(), { wiki: "late", traceKey: "MEL-91", question: "Summarize MEL-91" });
+    expect(res.status).toBe(200);
+    const evs = await frames(res);
+    expect(evs.map((e) => e.event)).toContain("done");
+    expect(calls).toHaveLength(1);
+    expect(await traceRows("late", "MEL-91")).toEqual({ threads: 1, turns: 1 });
   } finally {
     __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
     __resetWikiCacheForTest();

@@ -365,7 +365,7 @@ export type HistoryResult =
   | {
       ok: true;
       commits: HistoryCommit[];
-      /** git's output ran past realGit's bound: the possibly cut last commit was dropped and more may follow. With `wholeKey`: a candidate could not be counted (`uncounted`, or the time ran out) or the scan bound was hit. */
+      /** git's output ran past realGit's bound: the possibly cut last commit was dropped and more may follow. With `wholeKey`: a candidate could not be counted (`uncounted`), the candidate listing reached {@link HISTORY_WHOLE_KEY_SCAN}, more than `limit` commits changed, a patch run timed out after at least one commit was read whole (the commits counted until then are kept), or the names run timed out or ran past its bound (a commit it did not describe carries its hash alone: empty date, author and subject, no files). */
       partial: boolean;
       /** `wholeKey` only: candidate commits whose own patch ran past realGit's bound, so their change was not counted. */
       uncounted?: string[];
@@ -376,7 +376,7 @@ export const HISTORY_DEFAULT_LIMIT = 20;
 /** Files listed per commit; one bulk commit touched 415 (huginn-nav/wiki). */
 export const HISTORY_FILES_SHOWN = 20;
 export const HISTORY_MAX_LIMIT = 100;
-const HISTORY_TIMEOUT_MS = 30_000;
+export const HISTORY_TIMEOUT_MS = 30_000;
 
 /** A root-relative path a caller may hand to git: no absolute path, no `..`, no NUL. */
 export function isSafeRelPath(rel: string): boolean {
@@ -384,8 +384,10 @@ export function isSafeRelPath(rel: string): boolean {
   return !rel.split(/[\\/]/).includes("..");
 }
 
-/** Candidate commits {@link historyFor} checks for a whole key: past it, `partial` unless enough were confirmed. */
+/** Candidate commits {@link historyFor} checks for a whole key: a listing that reaches it makes the answer `partial`, since older candidates were not listed. */
 export const HISTORY_WHOLE_KEY_SCAN = 300;
+/** The part of {@link HISTORY_TIMEOUT_MS} a whole-key history keeps for its names run: the listing and patch runs stop that much before the deadline, so a timeout among them leaves the names run time to describe what was counted. That run reads `--name-only` for at most `limit` commits; on melosys-kode-wiki (2026-11-26) it took 72–76 ms for MEL-409394's 40 commits and 142–152 ms for MEL-545776's 86. */
+export const HISTORY_NAMES_RESERVE_MS = 3_000;
 
 /** The commits whose diff changes how often `term` occurs (`git log -S`), newest first. With `wholeKey`, how often it occurs as a whole key ({@link wholeKeyCount}): see {@link wholeKeyHistory}. */
 export async function historyFor(root: string, term: string, opts: TrackedOpts & { path?: string; limit?: number; wholeKey?: boolean } = {}): Promise<HistoryResult> {
@@ -445,30 +447,45 @@ export const ereEscape = (s: string): string => s.replace(/[.[\]()*+?{}|^$\\]/g,
  * with `--no-walk --stdin`, so a patch past realGit's bound cuts only the run
  * it is in: the next run starts at the cut commit, and a commit cut when it is
  * the first of its run is past the bound alone and goes into `uncounted`
- * (fix round 2: one patch of 4 MB used to lose every older commit). All runs
- * share {@link HISTORY_TIMEOUT_MS}; a run that times out after a commit was
- * counted ends the scan as `partial`.
+ * (fix round 2: one patch of 4 MB used to lose every older commit).
+ *
+ * All runs share one {@link HISTORY_TIMEOUT_MS} deadline. The listing and the
+ * patch runs stop {@link HISTORY_NAMES_RESERVE_MS} before it; the names run
+ * gets what is left, never less than that reserve. A bound never throws away
+ * what was counted: a patch run that times out after a commit was read whole
+ * ends the scan as `partial` with the commits counted so far, and a names run
+ * that times out or is cut leaves each commit it did not describe as its bare
+ * hash, `partial`. A timeout before any commit was read whole, and a git
+ * failure at any step, are errors (class check, Discuss v2 PR 6: the table is
+ * in `tracked-files-whole-key.test.ts`).
  */
 async function wholeKeyHistory(root: string, git: GitRun, key: string, pathspec: string, limit: number): Promise<HistoryResult> {
   const deadline = Date.now() + HISTORY_TIMEOUT_MS;
-  const left = () => Math.max(1, deadline - Date.now());
+  /** Time left for the listing and the patch runs; 0 or less is none. */
+  const scanLeft = () => deadline - HISTORY_NAMES_RESERVE_MS - Date.now();
   const pickaxe = ["--no-show-signature", "--no-color", "--no-ext-diff", "--no-textconv", "--relative", `-G(^|[^[:alnum:]])${ereEscape(key)}([^[:alnum:]]|$)`];
-  const listed = await git(root, ["log", ...pickaxe, `--max-count=${HISTORY_WHOLE_KEY_SCAN}`, "--format=%H", "--", pathspec], { timeoutMs: left() });
+  const listed = await git(root, ["log", ...pickaxe, `--max-count=${HISTORY_WHOLE_KEY_SCAN}`, "--format=%H", "--", pathspec], { timeoutMs: Math.max(1, scanLeft()) });
   if (!listed.ok) return { ok: false, error: gitError(listed, "git log") };
+  // Never cut: no line bound is set, and 300 `%H` lines are at most 300 × 65
+  // bytes, far under realGit's 4 MB byte bound.
   const hashes = listed.stdout.split("\n").filter((h) => /^[0-9a-f]{7,64}$/.test(h));
-  // A cut listing may end in a cut hash; a full scan may leave out older commits.
-  if (listed.capped) hashes.pop();
-  let more = listed.capped === true || hashes.length >= HISTORY_WHOLE_KEY_SCAN;
+  // A full listing may leave out older candidates.
+  let more = hashes.length >= HISTORY_WHOLE_KEY_SCAN;
   const changed: string[] = [];
   const uncounted: string[] = [];
   let read = 0;
   // Past `limit` changed commits the answer is `partial` whatever the rest hold.
   for (let i = 0; i < hashes.length && changed.length <= limit; ) {
     const batch = hashes.slice(i);
-    const run = await git(root, ["log", "--no-walk=unsorted", "--stdin", ...pickaxe, "-p", "--unified=0", "--format=%x1e%H", "--", pathspec], {
-      timeoutMs: left(),
-      stdin: `${batch.join("\n")}\n`,
-    });
+    const budget = scanLeft();
+    // No scan time left is a run that timed out before it read anything.
+    const run: GitResult =
+      budget <= 0
+        ? { ok: false, stdout: "", timedOut: true }
+        : await git(root, ["log", "--no-walk=unsorted", "--stdin", ...pickaxe, "-p", "--unified=0", "--format=%x1e%H", "--", pathspec], {
+            timeoutMs: budget,
+            stdin: `${batch.join("\n")}\n`,
+          });
     if (!run.ok && !run.timedOut) return { ok: false, error: gitError(run, "git log") };
     const cut = run.capped === true || run.timedOut === true;
     const got = wholeKeyChanges(run.stdout, key, cut);
@@ -502,14 +519,16 @@ async function wholeKeyHistory(root: string, git: GitRun, key: string, pathspec:
   const kept = changed.slice(0, limit);
   if (kept.length === 0) return out([], false);
   const names = await git(root, ["log", "--no-walk=unsorted", "--stdin", ...pickaxe, "-z", "--format=%x1e%H%x1f%aI%x1f%an%x1f%s", "--name-only", "--", pathspec], {
-    timeoutMs: left(),
+    timeoutMs: Math.max(HISTORY_NAMES_RESERVE_MS, deadline - Date.now()),
     stdin: `${kept.join("\n")}\n`,
   });
-  if (!names.ok) return { ok: false, error: gitError(names, "git log") };
-  const byHash = new Map(parseHistory(names).map((c) => [c.hash, c]));
+  if (!names.ok && !names.timedOut) return { ok: false, error: gitError(names, "git log") };
+  // A timed-out run can stop mid record, as a cut one can: its last is dropped.
+  const byHash = new Map(parseHistory({ ...names, capped: names.capped === true || names.timedOut === true }).map((c) => [c.hash, c]));
+  const commits = kept.map((hash) => byHash.get(hash) ?? { hash, date: "", author: "", subject: "", files: [], fileCount: 0 });
   return out(
-    kept.flatMap((h) => byHash.get(h) ?? []),
-    names.capped === true,
+    commits,
+    kept.some((h) => !byHash.has(h)),
   );
 }
 
