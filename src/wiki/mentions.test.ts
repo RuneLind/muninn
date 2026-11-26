@@ -100,6 +100,25 @@ describe("buildMentions: a classified key counts only where it stands whole", ()
   });
 });
 
+// Fix round 2 batch 3 (finding 9): the trace pack's cut notes need every root
+// log.md line the search saw, not only the 500 the payload lists.
+test("buildMentions: logTotalLines counts the root log.md lines past the listed 500", async () => {
+  const wiki = path.join(await realpath(await testTempDir(path.join(tmpdir(), "muninn-mentions-log-"))), "wiki");
+  await mkdir(wiki, { recursive: true });
+  const run = async (...args: string[]) => {
+    const res = await realGit(wiki, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args]);
+    if (!res.ok) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+  };
+  await run("init", "-q", "-b", "main");
+  await writeFile(path.join(wiki, "log.md"), ["# Log", "", "## [2026-11-01] note | many", "", ...Array.from({ length: 520 }, (_, i) => `- KEY-7 line ${i}.`), ""].join("\n"));
+  await writeFile(path.join(wiki, "page.md"), "KEY-7 once.\n");
+  await run("add", "-A");
+  await run("commit", "-q", "-m", "log");
+  const res = await buildMentions({ wiki: "log-fixture", root: wiki, key: "KEY-7", index: null }, { gh: null, now: Date.now });
+  if (!res.ok) throw new Error(res.error);
+  expect([res.body.log.length, res.body.logTotalLines, res.body.totalLines]).toEqual([500, 520, 521]);
+});
+
 // Fix round 2: the reader offers the peek and Trace only where the mentions can
 // answer, and a repo before its first commit cannot (its `git log` fails).
 describe("mentionsWorkTree: a git work tree whose HEAD names a commit", () => {
