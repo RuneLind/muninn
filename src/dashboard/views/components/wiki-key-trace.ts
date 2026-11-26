@@ -34,7 +34,10 @@
  *   send; a thread that is gone clears the card back to «Summarize» with a
  *   note, and a permanent refusal (or reads failing past the bound) ends its
  *   running turns as errors with that message, or says it in the note when
- *   none runs, so the follow-up box or «Summarize» is always there.
+ *   none runs, so the follow-up box or «Summarize» is there. Known gap
+ *   (deferred): a held card whose due read or stream finds it not live (an
+ *   Ask or start view took the pane) stops for good, and stays «Still
+ *   running» when Back puts it on the page again.
  * - **Ordering (class check C):** one read at a time and one timer. A send,
  *   a newer read and the card's drop each stop the reads before them
  *   (`stopReads`: the timer cleared, the read in flight aborted), and a read
@@ -105,7 +108,7 @@ interface TraceState {
   /** The running send's stream, aborted when the card leaves for good. */
   ctl: AbortController | null;
   poll: ReturnType<typeof setTimeout> | null;
-  /** The thread read in flight, aborted when the card leaves for good or a newer read starts. */
+  /** The thread read in flight, aborted when the card leaves for good, a newer read starts or a send starts. */
   pollCtl: AbortController | null;
   /** Failed reads in a row since the last read that worked or the last send (`tracePollStep`). */
   pollFailures: number;

@@ -5,6 +5,9 @@
  * without key marks, the page rendered with live facts is the page rendered
  * without them, less the chip spans and the mark wrappers. Each cell also
  * says whether it gets a chip, so a fix that refuses chips cannot pass.
+ * Not covered (deferred): a bare URL ending in a digit after a character
+ * outside `[A-Za-z0-9#/-]` (`…?q=1`) keeps its chip at the site, which
+ * breaks a `1 → 2` chain right after it.
  *
  * The neighbours an inline rule reads (`renderInlineWith` in
  * `src/web/web-format.ts`): `*`/`_` emphasis (`(?<!\w)` before an opener),

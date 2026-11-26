@@ -13,8 +13,9 @@
  * (`fire` asserts it); no timer or read outlives its card; a permanent
  * refusal ends at once with the route's message, a transient one retries
  * under the bound, counted since the last read that worked or the last send;
- * the card always ends on «Summarize», the follow-up box, or a running turn
- * that is still being read.
+ * the card ends on «Summarize», the follow-up box, or a running turn that is
+ * still being read. Not covered (deferred): a held card that stops being live
+ * under an Ask view and comes back on Back stays «Still running».
  *
  * Own process: it installs happy-dom's globals and wires the menu's and the
  * trace's document listeners once, so it is alone in its `bun test` link.
