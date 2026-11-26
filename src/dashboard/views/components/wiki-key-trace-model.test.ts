@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { PEEK_FILES_MAX, keyPeekHtml, traceBodyHtml, traceTimelineHtml, traceTurnHtml } from "./wiki-key-trace-model.ts";
+import { PEEK_FILES_MAX, TRACE_RUNNING_STATUS, keyPeekHtml, traceBodyHtml, traceTimelineHtml, traceTurnHtml, traceTurnsFromThread, type TraceThreadMessage } from "./wiki-key-trace-model.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
 
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
@@ -58,4 +58,47 @@ test("a turn: the question escaped, a status while it runs, an error as an alert
   expect(traceTurnHtml({ question: "<q>", answerHtml: "", state: "running", status: "Working: mentions", turnId: null })).toContain("&lt;q&gt;");
   expect(traceTurnHtml({ question: "q", answerHtml: "", state: "running", status: "Working: mentions" })).toContain("Working: mentions");
   expect(traceTurnHtml({ question: "q", answerHtml: "nope", state: "error", turnId: "t1" })).toContain('role="alert">nope');
+});
+
+// Fix round 1 K2, K3: the read-back builds turns from their ledger rows.
+const row = (id: string, seq: number, endState: string, o: { answer?: string; error?: string | null; assistantMessageId?: string | null } = {}) => ({
+  id,
+  seq,
+  question: `Q${seq}`,
+  answer: o.answer ?? "",
+  endState,
+  error: o.error ?? null,
+  assistantMessageId: o.assistantMessageId ?? null,
+});
+const msg = (id: string, role: string, content: string, turn: TraceThreadMessage["turn"] = null): TraceThreadMessage => ({ id, role, content, turn });
+
+test("read-back turns: each row's endState, its answer by the assistant message id, a running turn with no answer, none matched by position", () => {
+  const messages = [
+    // Turn 1's answer message was never stored: the row's own answer.
+    msg("u1", "user", "Q1", row("t1", 1, "done", { answer: "A1 from the row" })),
+    msg("u2", "user", "Q2", row("t2", 2, "error", { answer: "partial", error: "connector broke", assistantMessageId: "a2" })),
+    msg("a2", "assistant", "partial\n\n(unfinished)"),
+    msg("u3", "user", "Q3", row("t3", 3, "timeout", { assistantMessageId: "a3" })),
+    msg("a3", "assistant", "(unfinished)"),
+    msg("u4", "user", "Q4", row("t4", 4, "done", { answer: "A4 row", assistantMessageId: "a4" })),
+    msg("a4", "assistant", "A4 stored"),
+    msg("u5", "user", "Q5", row("t5", 5, "running")),
+  ];
+  expect(traceTurnsFromThread(messages)).toEqual([
+    { question: "Q1", text: "A1 from the row", state: "done", turnId: "t1" },
+    { question: "Q2", text: "The turn failed. connector broke", state: "error", turnId: "t2" },
+    { question: "Q3", text: "The turn ran past its time limit and was stopped.", state: "error", turnId: "t3" },
+    { question: "Q4", text: "A4 stored", state: "done", turnId: "t4" },
+    { question: "Q5", text: "", state: "running", status: TRACE_RUNNING_STATUS, turnId: "t5" },
+  ]);
+});
+
+test("read-back turns: in seq order whatever the message order, one per row, an abandoned row an error, a message with no row left out", () => {
+  const messages = [
+    msg("u2", "user", "Q2", row("t2", 2, "abandoned")),
+    msg("x", "assistant", "stray answer with no row"),
+    msg("u1", "user", "Q1", row("t1", 1, "done", { assistantMessageId: "a1" })),
+    msg("a1", "assistant", "A1", row("t1", 1, "done", { assistantMessageId: "a1" })),
+  ];
+  expect(traceTurnsFromThread(messages).map((t) => `${t.turnId}:${t.state}:${t.text}`)).toEqual(["t1:done:A1", "t2:error:The turn was abandoned: its run stopped before it ended."]);
 });

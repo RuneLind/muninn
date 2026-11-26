@@ -131,7 +131,7 @@ let repositionQueued = false;
  *  under the bar (now hidden) and must not show the bar again. The next
  *  press clears it. */
 let actedOnPress = false;
-/** The open Explain / Oppfølging card, kept so a render of its page can put
+/** The open Explain / Oppfølging / Trace card, kept so a render of its page can put
  *  it back; `passage` null when the page's text has no copy of it to find. */
 let held: { el: HTMLElement; wiki: string; relPath: string; passage: HeldPassage | null } | null = null;
 let reattachQueued = false;
@@ -239,11 +239,13 @@ function reattachCard(): void {
   if (!h || h.el.isConnected) return;
   if (!cardHeld(h.el)) {
     held = null;
+    dropCard(h.el);
     return;
   }
   const key = h.el.getAttribute("data-sel-turn");
   if (key && discussTurnForCard(key)?.turn.edit?.state === "applied") {
     held = null;
+    dropCard(h.el);
     return;
   }
   const wrap = document.getElementById("articleWrap");
@@ -506,15 +508,41 @@ function activate(act: SelAction, key: string | null): void {
 }
 
 /** An inline card at `range` (before an explainer's frame when null): the
- *  Trace view's place (`wiki-key-trace.ts`), the same as every other card's. */
-export function placeInlineCard(range: Range | null, html: string): HTMLElement | null {
-  return placeCard({ text: "", heading: "", range, explainer: range === null, items: [] }, html);
+ *  Trace view's place (`wiki-key-trace.ts`), the same as every other card's.
+ *  Held like an Explain card, so a render of its page puts it back
+ *  (fix round 1 K1); `onDrop` runs once when it leaves for good (closed,
+ *  replaced, another page). */
+export function placeInlineCard(range: Range | null, html: string, onDrop?: () => void): HTMLElement | null {
+  const s: Shown = { text: "", heading: "", range, explainer: range === null, items: [] };
+  const card = placeCard(s, html);
+  if (!card) return null;
+  if (onDrop) dropHooks.set(card, onDrop);
+  holdCard(card, s);
+  return card;
+}
+
+/** Is `card` on the page, or out for a render of its page and coming back? */
+export function inlineCardLive(card: Element): boolean {
+  return card.isConnected || cardHeld(card);
+}
+
+/** What runs when a card leaves for good (`placeInlineCard`'s `onDrop`). */
+const dropHooks = new WeakMap<Element, () => void>();
+function dropCard(card: Element): void {
+  const f = dropHooks.get(card);
+  dropHooks.delete(card);
+  f?.();
 }
 
 /** Put a card under the selection's paragraph (before the frame on an
  *  explainer), replacing any card already open on the page. */
 function placeCard(s: Shown, html: string): HTMLElement | null {
-  for (const old of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}`))) old.remove();
+  for (const old of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}`))) {
+    old.remove();
+    dropCard(old);
+  }
+  // A held card out for a render (not in the pane): replaced too.
+  if (held) dropCard(held.el);
   held = null;
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
@@ -842,6 +870,7 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
       const card = close.closest(`.${SEL_CARD_CLASS}`);
       if (card && held?.el === card) held = null;
       card?.remove();
+      if (card) dropCard(card);
       return;
     }
     const pane = t.closest?.<HTMLElement>(`.${SEL_CARD_CLASS} [data-sel-card-pane]`);

@@ -20,6 +20,14 @@
  *   continue it, and an open card reads it back first
  *   (`GET /api/wiki/discuss/thread?traceKey=`). No Apply: a trace turn has no
  *   page. «Continue in Claude Code» copies a prompt with no page path.
+ * - **Thread state (fix round 1 K1–K3):** the card is held like an Explain
+ *   card, so a render of its page puts it back with its stream still
+ *   feeding it; the stream aborts when the card leaves for good (closed,
+ *   replaced, another page). The read-back builds turns from their ledger
+ *   rows (`traceTurnsFromThread`): a turn still running on the server shows
+ *   running, with no «Summarize» or follow-up box, and the card reads the
+ *   thread again every `TRACE_POLL_MS` until it has ended; a send refused
+ *   409 `busy` goes to that read.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -28,7 +36,7 @@ import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { discussAgentOn, discussSendBlocked, discussUserFor } from "./wiki-discuss-tab.ts";
 import { fetchMentions } from "./wiki-mentions-fetch.ts";
 import { inlineCardHtml } from "./wiki-selection-menu-model.ts";
-import { KEY_PEEK_ID, TRACE_SUMMARY_QUESTION, keyPeekHtml, traceBodyHtml, traceTurnHtml } from "./wiki-key-trace-model.ts";
+import { KEY_PEEK_ID, TRACE_SUMMARY_QUESTION, keyPeekHtml, traceBodyHtml, traceTurnHtml, traceTurnsFromThread, type TraceThreadMessage } from "./wiki-key-trace-model.ts";
 import { escHtml as esc } from "./escape.ts";
 import { KEY_PEEK_MARK_SELECTOR } from "../../../wiki/core/live-facts-chip.ts";
 
@@ -37,6 +45,8 @@ const THREAD_PATH = "/api/wiki/discuss/thread";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
 const PEEK_DELAY_MS = 300;
 const PEEK_HIDE_MS = 200;
+/** How often a card showing a turn still running on the server reads the thread again. */
+const TRACE_POLL_MS = 1500;
 
 export interface KeyTraceDeps {
   wiki(): string;
@@ -44,8 +54,11 @@ export interface KeyTraceDeps {
   hrefFor(relPath: string): string;
   /** The mentions route answers this viewer (the reader payload's `mentions`). */
   mentionsOn(): boolean;
-  /** Puts an inline card at `range` (the selection menu's `placeInlineCard`). */
-  place(range: Range | null, html: string): HTMLElement | null;
+  /** Puts an inline card at `range` (the selection menu's `placeInlineCard`);
+   *  `onDrop` runs once when the card leaves for good. */
+  place(range: Range | null, html: string, onDrop?: () => void): HTMLElement | null;
+  /** The card is on the page, or out for a render of its page (`inlineCardLive`). */
+  live(card: Element): boolean;
 }
 
 let deps: KeyTraceDeps | null = null;
@@ -67,12 +80,27 @@ interface TraceState {
   turns: TraceTurn[];
   discussionId: string | null;
   busy: boolean;
+  /** The running send's stream, aborted when the card leaves for good. */
+  ctl: AbortController | null;
+  poll: ReturnType<typeof setTimeout> | null;
+  dropped: boolean;
 }
 
 const traces = new WeakMap<HTMLElement, TraceState>();
 
 function turnsEl(st: TraceState): HTMLElement | null {
   return st.card.querySelector<HTMLElement>(".wiki-trace-turns");
+}
+
+function live(st: TraceState): boolean {
+  return !st.dropped && !!deps?.live(st.card);
+}
+
+function dropTrace(st: TraceState): void {
+  st.dropped = true;
+  st.ctl?.abort();
+  if (st.poll) clearTimeout(st.poll);
+  st.poll = null;
 }
 
 function paintTurns(st: TraceState): void {
@@ -82,33 +110,33 @@ function paintTurns(st: TraceState): void {
     .map((t) => traceTurnHtml({ question: t.question, answerHtml: t.state === "error" ? esc(t.text) : t.text ? renderStreamingBody(t.text) : "", state: t.state, status: t.status, turnId: t.turnId }))
     .join("");
   const started = st.turns.length > 0;
+  // A turn running (this card's or one read back): nothing to send until it ends.
+  const running = st.turns.some((t) => t.state === "running");
   const sum = st.card.querySelector<HTMLElement>("[data-trace-summarize]");
   if (sum) sum.hidden = started;
   const follow = st.card.querySelector<HTMLFormElement>(".wiki-trace-follow");
-  if (follow) follow.hidden = !started;
+  if (follow) follow.hidden = !started || running;
   for (const b of Array.from(st.card.querySelectorAll<HTMLButtonElement>("[data-trace-summarize], .wiki-trace-follow button"))) b.disabled = st.busy;
 }
 
-/** The key's live trace thread, read back into the card (its turns from the message pairs). */
+/** The key's live trace thread, read back into the card from its ledger
+ *  rows; again every `TRACE_POLL_MS` while a turn of it is still running. */
 async function loadThread(st: TraceState): Promise<void> {
+  if (st.poll) clearTimeout(st.poll);
+  st.poll = null;
   const q = new URLSearchParams({ wiki: st.wiki, traceKey: st.key });
   const user = discussUserFor(st.wiki);
   if (user) q.set("userId", user);
   try {
     const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" } });
-    if (!res.ok) return;
-    const data = (await res.json()) as { thread?: { id: string } | null; messages?: { role: string; content: string; turn: { id: string; question: string; endState: string } | null }[] };
-    if (!data.thread || st.turns.length) return;
+    if (!res.ok || !live(st)) return;
+    const data = (await res.json()) as { thread?: { id: string } | null; messages?: TraceThreadMessage[] };
+    // A send started meanwhile owns the turns; no thread leaves what the card shows.
+    if (!data.thread || st.busy || !live(st)) return;
     st.discussionId = data.thread.id;
-    let question = "";
-    for (const m of data.messages ?? []) {
-      if (m.role === "user") question = m.turn?.question ?? m.content;
-      else if (m.role === "assistant") st.turns.push({ question, text: m.content, state: "done", turnId: m.turn?.id ?? null });
-    }
-    // A turn whose two messages carried its row on the user message only: its id from there.
-    const ids = (data.messages ?? []).filter((m) => m.turn).map((m) => m.turn!.id);
-    st.turns.forEach((t, i) => (t.turnId ??= ids[i] ?? null));
+    st.turns = traceTurnsFromThread(data.messages ?? []);
     paintTurns(st);
+    if (st.turns.some((t) => t.state === "running")) st.poll = setTimeout(() => void loadThread(st), TRACE_POLL_MS);
   } catch {
     /* the card still shows the mentions; a send starts or continues the thread */
   }
@@ -128,13 +156,19 @@ async function send(st: TraceState, question: string): Promise<void> {
     turn.state = "error";
     turn.text = msg;
   };
+  const ctl = new AbortController();
+  st.ctl = ctl;
+  let busyRead = false;
   try {
-    const res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body) });
+    const res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body), signal: ctl.signal });
     if (!res.ok || !res.body) {
-      const err = (await res.json().catch(() => null)) as { error?: unknown } | null;
-      fail(typeof err?.error === "string" ? `${err.error} (${res.status})` : `The turn was refused (${res.status}).`);
+      const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+      // A turn of the thread still runs (another tab, /chat): show that turn, not this refusal.
+      if (res.status === 409 && err?.reason === "busy") busyRead = true;
+      else fail(typeof err?.error === "string" ? `${err.error} (${res.status})` : `The turn was refused (${res.status}).`);
     } else {
       const parser = makeSseFrameParser((f) => {
+        if (!live(st)) return ctl.abort();
         let m: Record<string, unknown> = {};
         try {
           m = JSON.parse(f.data) as Record<string, unknown>;
@@ -157,12 +191,20 @@ async function send(st: TraceState, question: string): Promise<void> {
       const dec = new TextDecoder();
       for (let r = await reader.read(); !r.done; r = await reader.read()) parser.push(dec.decode(r.value, { stream: true }));
       parser.end();
-      if (turn.state === "running") fail("The turn ended before its answer.");
+      if (turn.state === "running" && !ctl.signal.aborted) fail("The turn ended before its answer.");
     }
   } catch {
-    fail("The turn failed: the server did not answer.");
+    if (!ctl.signal.aborted) fail("The turn failed: the server did not answer.");
   }
+  if (st.ctl === ctl) st.ctl = null;
   st.busy = false;
+  if (ctl.signal.aborted || !live(st)) return;
+  if (busyRead) {
+    st.turns = st.turns.filter((t) => t !== turn);
+    paintTurns(st);
+    await loadThread(st);
+    return;
+  }
   paintTurns(st);
 }
 
@@ -193,23 +235,27 @@ async function continueInClaudeCode(st: TraceState, btn: HTMLElement): Promise<v
 export function openTrace(key: string, range: Range | null): HTMLElement | null {
   const d = deps;
   if (!d) return null;
-  const card = d.place(range, inlineCardHtml("trace", key, `<div class="wiki-discuss-status"><span class="spinner"></span><span>Searching the wiki…</span></div>`, null));
+  let st: TraceState | null = null;
+  const card = d.place(range, inlineCardHtml("trace", key, `<div class="wiki-discuss-status"><span class="spinner"></span><span>Searching the wiki…</span></div>`, null), () => {
+    if (st) dropTrace(st);
+  });
   if (!card) return null;
   card.setAttribute("data-trace-key", key);
-  const st: TraceState = { key, wiki: d.wiki(), card, turns: [], discussionId: null, busy: false };
-  traces.set(card, st);
+  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, busy: false, ctl: null, poll: null, dropped: false });
+  traces.set(card, state);
   void (async () => {
-    const r = await fetchMentions(st.wiki, key);
+    const r = await fetchMentions(state.wiki, key);
     const body = card.querySelector(".wiki-sel-card-body");
-    if (!card.isConnected || !body) return;
+    // Out for a render of its page counts as here: the card comes back.
+    if (!live(state) || !body) return;
     if (!r.ok) {
       body.innerHTML = `<div class="wiki-discuss-error" role="alert">${esc(r.message)}</div>`;
       return;
     }
     const agent = discussAgentOn();
     body.innerHTML = traceBodyHtml(r.body, { currentRelPath: d.relPath(), hrefFor: d.hrefFor, agent });
-    paintTurns(st);
-    if (agent) await loadThread(st);
+    paintTurns(state);
+    if (agent) await loadThread(state);
   })();
   return card;
 }

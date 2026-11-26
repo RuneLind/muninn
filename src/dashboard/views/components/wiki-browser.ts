@@ -385,7 +385,7 @@ import {
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
 import { initDiscussTab } from "./wiki-discuss-tab.ts";
-import { SEL_MAX_CHARS, SEL_MIN_CHARS, hideSelectionMenu, initSelectionMenu, placeInlineCard, selectionMenuMentionsOn, selectionMenuOpen, setSelectionMenuPage, showSelectionBarForExplainer } from "./wiki-selection-menu.ts";
+import { SEL_MAX_CHARS, SEL_MIN_CHARS, hideSelectionMenu, initSelectionMenu, inlineCardLive, placeInlineCard, selectionMenuMentionsOn, selectionMenuOpen, setSelectionMenuPage, showSelectionBarForExplainer } from "./wiki-selection-menu.ts";
 import { initKeyTrace } from "./wiki-key-trace.ts";
 import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
 
@@ -3238,6 +3238,7 @@ export function boot(): { dispose(): void } {
     hrefFor: pageUrlByRelPath,
     mentionsOn: selectionMenuMentionsOn,
     place: placeInlineCard,
+    live: inlineCardLive,
   });
   initSelectionMenu({
     wiki: () => FIND_SELF_WIKI || WIKI,

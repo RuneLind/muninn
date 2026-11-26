@@ -20,6 +20,13 @@
  *   (J2); a wiki that is no git work tree gets no mark, and on a read-only
  *   root or a wiki with no agent the Trace view shows the mentions with no
  *   «Summarize» or follow-up box (J3).
+ * - Fix round 1 batch 5: a render of the same page puts the Trace card back
+ *   with its turn still streaming into it, and closing it or another page
+ *   aborts that stream (K1, the discuss POST held by `page.route`); a send
+ *   refused 409 `busy` and a reopened card show the key's running turn with no
+ *   «Summarize» or follow-up box and pick up its answer (K2); read-back turns
+ *   take their state from the ledger row and their answer by message id (K3).
+ *   K2 and K3 write the thread, messages and ledger rows as the engine does.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`) with two commits, a `keys` kind, a Jira tracker and a facts
@@ -415,4 +422,178 @@ test("no mark on a wiki that is no git work tree; a read-only root and a wiki wi
     await expect(card.locator("[data-trace-summarize]")).toHaveCount(0);
     await expect(card.locator(".wiki-trace-follow")).toHaveCount(0);
   }
+});
+
+// ── Fix round 1 batch 5: the Trace card's thread state (K1–K3) ────────────
+
+/** Render the page on screen again: its rail row, the page fetched and drawn anew. */
+async function renderAgain(page: Page, rel: string, shown: string): Promise<void> {
+  const rendered = page.waitForResponse((r) => r.url().includes("/api/wiki/page?"));
+  await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).first().click();
+  await rendered;
+  await expect(article(page)).toContainText(shown);
+}
+
+/** The Trace card of the key mark `key` on the page shown, from its peek. */
+async function traceFromPeek(page: Page, key: string): Promise<void> {
+  await page.mouse.move(5, 5);
+  await article(page).locator(`.wiki-key[data-wiki-key="${key}"]`).hover();
+  await peek(page).locator(`[data-key-trace="${key}"]`).click();
+  await expect(traceCard(page).locator('[data-trace-sec="thread"]')).toBeVisible();
+}
+
+/** A key's live trace thread written as the engine writes one (another tab's or /chat's turns). */
+async function seedTraceThread(key: string): Promise<string> {
+  const [t] = await sql!`INSERT INTO threads (user_id, bot_name, name, kind, wiki, trace_key) VALUES (${USER}, ${BOT}, ${`wiki trace: ${key.toLowerCase()}`}, 'wiki', ${WIKI}, ${key}) RETURNING id`;
+  return t!.id as string;
+}
+async function seedMessage(threadId: string, role: "user" | "assistant", content: string): Promise<string> {
+  const [m] = await sql!`INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id) VALUES (${USER}, ${BOT}, ${role}, ${content}, 'wiki', 'web', ${threadId}) RETURNING id`;
+  return m!.id as string;
+}
+async function seedTurn(
+  threadId: string,
+  key: string,
+  seq: number,
+  question: string,
+  o: { endState: string; answer?: string; error?: string; userMessageId: string; assistantMessageId?: string | null },
+): Promise<string> {
+  const [t] = await sql!`
+    INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, trace_key, thread_id, question, answer, end_state, error, bot_name, connector, user_message_id, assistant_message_id, finished_at)
+    VALUES (${threadId}, ${seq}, ${WIKI}, ${key}, ${threadId}, ${question}, ${o.answer ?? ""}, ${o.endState}, ${o.error ?? null}, ${BOT}, 'claude-sdk', ${o.userMessageId}, ${o.assistantMessageId ?? null}, ${o.endState === "running" ? null : new Date()})
+    RETURNING id`;
+  return t!.id as string;
+}
+/** The running turn ends done, as the engine finishes one: the row, then its answer message. */
+async function finishSeeded(threadId: string, turnId: string, answer: string): Promise<void> {
+  const a = await seedMessage(threadId, "assistant", answer);
+  await sql!`UPDATE wiki_discuss_turns SET end_state = 'done', answer = ${answer}, assistant_message_id = ${a}, finished_at = now() WHERE id = ${turnId}`;
+}
+
+test("K1: a render of the same page puts the Trace card back with its follow-up still streaming into it; closing it or leaving the page aborts that stream", async ({ page }) => {
+  let release: () => void = () => {};
+  const released = new Promise<void>((r) => (release = r));
+  let posts = 0;
+  await page.route("**/api/wiki/discuss", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    posts++;
+    // Only the first turn ever answers; the later ones stay pending until aborted.
+    if (posts > 1) return;
+    await released;
+    const body = `event: delta\ndata: {"text":"TRACE-AFTER "}\n\nevent: done\ndata: ${JSON.stringify({ answer: "TRACE-AFTER-RENDER: the answer reached the held card." })}\n\nevent: end\ndata: {}\n\n`;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body }).catch(() => {});
+  });
+  const failed: string[] = [];
+  page.on("requestfailed", (r) => {
+    if (r.url().endsWith("/api/wiki/discuss") && r.method() === "POST") failed.push(r.failure()?.errorText ?? "failed");
+  });
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="done"]')).toHaveCount(2);
+  await card.evaluate((el) => el.setAttribute("data-e2e-mark", "trace"));
+  await card.locator(".wiki-trace-input").fill("Is the night route still open?");
+  await card.locator(".wiki-trace-follow button[type=submit]").click();
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(1);
+  await renderAgain(page, REL, "DEMO-20 has none.");
+  // The same element, back under the key's paragraph.
+  const back = page.locator('#articleWrap .wiki-sel-card[data-sel-card="trace"][data-e2e-mark="trace"]');
+  await expect(back).toHaveCount(1);
+  // Under the key's line: after the night route's sentence, before the next line.
+  expect(
+    await back.evaluate((el, night) => {
+      const text = el.parentElement?.closest(".wiki-article")?.textContent ?? "";
+      const at = text.indexOf(el.textContent ?? "\u0000");
+      return at > text.indexOf(night) && at < text.indexOf("DEMO-20 has none.");
+    }, NIGHT),
+  ).toBe(true);
+  release();
+  await expect(back.locator(".wiki-trace-a").last()).toContainText("TRACE-AFTER-RENDER");
+  await expect(back.locator('.wiki-trace-turn[data-trace-state="done"]')).toHaveCount(3);
+  expect(failed).toEqual([]);
+
+  // Closed while its turn streams: the stream is aborted.
+  await back.locator(".wiki-trace-input").fill("Who owns it?");
+  await back.locator(".wiki-trace-follow button[type=submit]").click();
+  await expect.poll(() => posts).toBe(2);
+  await back.locator("[data-sel-card-close]").click();
+  await expect.poll(() => failed.length).toBe(1);
+
+  // Another page while its turn streams: aborted too.
+  await traceFromPeek(page, KEY);
+  await traceCard(page).locator(".wiki-trace-input").fill("And the harbour?");
+  await traceCard(page).locator(".wiki-trace-follow button[type=submit]").click();
+  await expect.poll(() => posts).toBe(3);
+  await renderAgain(page, OTHER, "The harbour waits for");
+  await expect.poll(() => failed.length).toBe(2);
+  await expect(traceCard(page)).toHaveCount(0);
+});
+
+test("K2: «Summarize» refused busy shows the key's running turn, with no «Summarize» or follow-up box, and picks up its answer; a reopened card does the same", async ({ page }) => {
+  const key = "DEMO-20";
+  await openPage(page);
+  await traceFromPeek(page, key);
+  const card = traceCard(page);
+  await expect(card.locator("[data-trace-summarize]")).toBeVisible();
+  // A turn of the key's thread starts elsewhere after the card read it back.
+  const threadId = await seedTraceThread(key);
+  const u1 = await seedMessage(threadId, "user", "BUSY-Q1: what is DEMO-20?");
+  const t1 = await seedTurn(threadId, key, 1, "BUSY-Q1: what is DEMO-20?", { endState: "running", userMessageId: u1 });
+  const refused = page.waitForResponse((r) => r.url().endsWith("/api/wiki/discuss") && r.request().method() === "POST");
+  await card.locator("[data-trace-summarize]").click();
+  expect((await refused).status()).toBe(409);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(1);
+  await expect(card.locator(".wiki-trace-q")).toHaveText(["BUSY-Q1: what is DEMO-20?"]);
+  await expect(card.locator(".wiki-discuss-error")).toHaveCount(0);
+  await expect(card.locator("[data-trace-summarize]")).toBeHidden();
+  await expect(card.locator(".wiki-trace-follow")).toBeHidden();
+  await finishSeeded(threadId, t1, "BUSY-A1: DEMO-20 is the ferry's ticket.");
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="done"]')).toHaveCount(1);
+  await expect(card.locator(".wiki-trace-a")).toContainText("BUSY-A1");
+  await expect(card.locator(".wiki-trace-follow")).toBeVisible();
+  await expect(card.locator("[data-trace-summarize]")).toBeHidden();
+
+  // A second turn runs when the card is opened again: read back running.
+  const u2 = await seedMessage(threadId, "user", "BUSY-Q2: and its PR?");
+  const t2 = await seedTurn(threadId, key, 2, "BUSY-Q2: and its PR?", { endState: "running", userMessageId: u2 });
+  await card.locator("[data-sel-card-close]").click();
+  await traceFromPeek(page, key);
+  const again = traceCard(page);
+  await expect(again.locator(".wiki-trace-turn")).toHaveCount(2);
+  await expect(again.locator(".wiki-trace-turn").nth(1)).toHaveAttribute("data-trace-state", "running");
+  await expect(again.locator("[data-trace-summarize]")).toBeHidden();
+  await expect(again.locator(".wiki-trace-follow")).toBeHidden();
+  await finishSeeded(threadId, t2, "BUSY-A2: none yet.");
+  await expect(again.locator('.wiki-trace-turn[data-trace-state="done"]')).toHaveCount(2);
+  await expect(again.locator(".wiki-trace-a").nth(1)).toContainText("BUSY-A2");
+  await expect(again.locator(".wiki-trace-follow")).toBeVisible();
+});
+
+test("K3: read-back turns take their state from the ledger row and their answer by message id: an error turn reads as an error, and a turn with no stored answer shifts no turn id", async ({ page }) => {
+  const threadId = await seedTraceThread(CASE_KEY);
+  // Turn 1: done, but its answer message was never stored.
+  const u1 = await seedMessage(threadId, "user", "IDS-Q1");
+  const t1 = await seedTurn(threadId, CASE_KEY, 1, "IDS-Q1", { endState: "done", answer: "IDS-A1 from the row", userMessageId: u1, assistantMessageId: null });
+  // Turn 2: failed, its «(unfinished)» message stored.
+  const u2 = await seedMessage(threadId, "user", "IDS-Q2");
+  const a2 = await seedMessage(threadId, "assistant", "IDS-PARTIAL\n\n(unfinished)");
+  const t2 = await seedTurn(threadId, CASE_KEY, 2, "IDS-Q2", { endState: "error", answer: "IDS-PARTIAL", error: "connector broke", userMessageId: u2, assistantMessageId: a2 });
+  // Turn 3: done.
+  const u3 = await seedMessage(threadId, "user", "IDS-Q3");
+  const a3 = await seedMessage(threadId, "assistant", "IDS-A3 the newest answer");
+  const t3 = await seedTurn(threadId, CASE_KEY, 3, "IDS-Q3", { endState: "done", answer: "IDS-A3 the newest answer", userMessageId: u3, assistantMessageId: a3 });
+
+  await openAt(page, WIKI, CASES_REL, "is held out");
+  await traceFromPeek(page, CASE_KEY);
+  const card = traceCard(page);
+  const turns = card.locator(".wiki-trace-turn");
+  await expect(turns).toHaveCount(3);
+  expect(await turns.evaluateAll((els) => els.map((e) => `${e.getAttribute("data-trace-turn")}:${e.getAttribute("data-trace-state")}`))).toEqual([`${t1}:done`, `${t2}:error`, `${t3}:done`]);
+  await expect(turns.nth(0).locator(".wiki-trace-a")).toContainText("IDS-A1 from the row");
+  await expect(turns.nth(1).locator(".wiki-discuss-error")).toHaveText("The turn failed. connector broke");
+  await expect(turns.nth(2).locator(".wiki-trace-a")).toContainText("IDS-A3 the newest answer");
+  // «Continue in Claude Code» builds the prompt for the newest turn, not one by position.
+  const posted = page.waitForRequest((r) => r.url().endsWith("/api/wiki/discuss/continue") && r.method() === "POST");
+  await card.locator("[data-trace-continue]").click();
+  expect(JSON.parse((await posted).postData() ?? "{}")).toEqual({ turnId: t3 });
 });

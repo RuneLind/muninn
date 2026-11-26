@@ -99,6 +99,51 @@ export function traceTurnHtml(t: { question: string; answerHtml: string; state: 
   return `<div class="wiki-trace-turn" data-trace-turn="${esc(t.turnId ?? "")}" data-trace-state="${t.state}"><div class="wiki-trace-q">${esc(t.question)}</div><div class="wiki-trace-a">${body}</div></div>`;
 }
 
+/** A trace thread message as `GET /api/wiki/discuss/thread?traceKey=` sends
+ *  it: its ledger row on the first of the turn's messages only. */
+export interface TraceThreadMessage {
+  id: string;
+  role: string;
+  content: string;
+  turn: { id: string; seq: number; question: string; answer: string; endState: string; error: string | null; assistantMessageId: string | null } | null;
+}
+
+export interface TraceTurnView {
+  question: string;
+  text: string;
+  state: "running" | "done" | "error";
+  status?: string;
+  turnId: string;
+}
+
+/** The status a read-back turn still running on the server shows. */
+export const TRACE_RUNNING_STATUS = "Still running on the server…";
+const TRACE_END_WORDS: Record<string, string> = {
+  timeout: "The turn ran past its time limit and was stopped.",
+  abandoned: "The turn was abandoned: its run stopped before it ended.",
+};
+
+/** The thread's turns from their ledger rows, in turn order (fix round 1
+ *  K2, K3): each row's state is its `endState`, and its answer the message
+ *  its `assistantMessageId` names (the row's own `answer` when that message
+ *  was not stored), never a message matched by position. */
+export function traceTurnsFromThread(messages: TraceThreadMessage[]): TraceTurnView[] {
+  const byId = new Map(messages.map((m) => [m.id, m]));
+  const rows = new Map<string, NonNullable<TraceThreadMessage["turn"]>>();
+  for (const m of messages) if (m.turn && !rows.has(m.turn.id)) rows.set(m.turn.id, m.turn);
+  return [...rows.values()]
+    .sort((a, b) => a.seq - b.seq)
+    .map((t): TraceTurnView => {
+      if (t.endState === "running") return { question: t.question, text: "", state: "running", status: TRACE_RUNNING_STATUS, turnId: t.id };
+      if (t.endState === "done") {
+        const a = t.assistantMessageId ? byId.get(t.assistantMessageId) : undefined;
+        return { question: t.question, text: a?.role === "assistant" ? a.content : t.answer, state: "done", turnId: t.id };
+      }
+      const words = TRACE_END_WORDS[t.endState] ?? "The turn failed.";
+      return { question: t.question, text: t.error ? `${words} ${t.error}` : words, state: "error", turnId: t.id };
+    });
+}
+
 export function keyTraceStyles(): string {
   return `
     .wiki-article .wiki-key:not(.${KEY_MARK_CHIPPED_CLASS}) { text-decoration: underline dotted color-mix(in srgb, var(--accent) 70%, transparent); text-underline-offset: 3px; cursor: help; }
@@ -124,6 +169,7 @@ export function keyTraceStyles(): string {
     .wiki-trace-turn { border-top: 1px solid var(--border-secondary); padding: 6px 0; }
     .wiki-trace-q { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
     .wiki-trace-actions, .wiki-trace-follow { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+    .wiki-trace-follow[hidden] { display: none; }
     .wiki-trace-input { flex: 1 1 220px; min-width: 0; font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border-primary); background: var(--bg-primary); color: var(--text-primary); }
   `;
 }
