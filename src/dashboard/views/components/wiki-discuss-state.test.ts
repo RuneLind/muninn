@@ -14,6 +14,8 @@ import {
   discussTurnHtml,
   discussTurnsHtml,
   findPassage,
+  findSamePassage,
+  passageContextOf,
   newTurn,
   patchDiscussTurns,
   renderedPassageText,
@@ -274,6 +276,57 @@ function article(html: string) {
   win.document.body.appendChild(el);
   return el as unknown as Element;
 }
+
+// Fix round 2 batch 2, R2-5: the selection menu's re-attach takes a copy only
+// when its own surroundings are still there, on each side the context holds.
+describe("findSamePassage", () => {
+  const P = "the harbour timetable";
+  const ctx = { before: "The first lines of the long page say that", after: "is printed on the quay every single morning." };
+  const parent = (f: ReturnType<typeof findSamePassage>) => (f ? (f.range.startContainer.parentElement?.id ?? "") : null);
+  test("the copy with both sides still around it; not one with only the words", () => {
+    const a = article(`<p id="other">Elsewhere we read ${P} and more.</p><p id="own">${ctx.before} ${P} ${ctx.after}</p>`);
+    expect(parent(findSamePassage(a, P, ctx))).toBe("own");
+    // findPassage keeps taking a copy where findSamePassage takes none.
+    const b = article(`<p id="other">Elsewhere we read ${P} and more.</p>`);
+    expect(findSamePassage(b, P, ctx)).toBeNull();
+    expect(findPassage(b, P, ctx)).not.toBeNull();
+  });
+  test("one side matching is not enough, whichever side", () => {
+    const beforeOnly = article(`<p>${ctx.before} ${P} was rewritten to say something else entirely.</p>`);
+    const afterOnly = article(`<p>A wholly rewritten opening now precedes ${P} ${ctx.after}</p>`);
+    expect(findSamePassage(beforeOnly, P, ctx)).toBeNull();
+    expect(findSamePassage(afterOnly, P, ctx)).toBeNull();
+  });
+  test("a side needs SAME_PASSAGE_CHARS of its text (white space dropped), not all of it", () => {
+    // After: "is printed on the quay" (18 characters) kept, the rest changed.
+    const far = article(`<p>${ctx.before} ${P} is printed on the quay at noon only.</p>`);
+    expect(findSamePassage(far, P, ctx)).not.toBeNull();
+    // After: "is printed" (9 characters) kept.
+    const near = article(`<p>${ctx.before} ${P} is printed nowhere now.</p>`);
+    expect(findSamePassage(near, P, ctx)).toBeNull();
+  });
+  test("a side shorter than SAME_PASSAGE_CHARS must match whole; an empty side is not checked", () => {
+    const a = article(`<p id="own">Intro ${P} ${ctx.after}</p>`);
+    expect(parent(findSamePassage(a, P, { before: "Intro", after: ctx.after }))).toBe("own");
+    expect(findSamePassage(a, P, { before: "Outro", after: ctx.after })).toBeNull();
+    expect(parent(findSamePassage(a, P, { before: "", after: ctx.after }))).toBe("own");
+  });
+  test("without context: a sole copy only", () => {
+    expect(parent(findSamePassage(article(`<p id="own">Read ${P} here.</p>`), P, null))).toBe("own");
+    expect(findSamePassage(article(`<p>Read ${P} here.</p><p>And ${P} again.</p>`), P, null)).toBeNull();
+  });
+  test("passageContextOf reads a range's surroundings so findSamePassage picks its copy again", () => {
+    const a = article(`<p id="one">First: ${P} at nine on weekdays.</p><p id="two">Second: ${P} at ten on Sundays.</p>`);
+    const two = a.querySelector("#two")!.firstChild as Text;
+    const r = a.ownerDocument.createRange();
+    r.setStart(two, two.data.indexOf(P));
+    r.setEnd(two, two.data.indexOf(P) + P.length);
+    const c = passageContextOf(a, r);
+    expect(c?.before?.endsWith("Second: ")).toBe(true);
+    expect(c?.after?.startsWith(" at ten on Sundays.")).toBe(true);
+    expect(parent(findSamePassage(a, P, c))).toBe("two");
+  });
+});
 
 describe("findPassage", () => {
   test("a bullet: found across inline markup and line breaks, its block the list item", () => {

@@ -952,6 +952,35 @@ test("R2-5: the selected paragraph rewritten, the phrase still in another one: t
   }
 });
 
+// R2-5's rule takes no copy from several when the card holds no context, so
+// a card whose selection was no passage (the article head) gets its context
+// read off the article pane: its head copy, also in the body, comes back.
+test("R2-5: a classic card on a head selection the body repeats comes back under the head, not at the top with the note", async () => {
+  const HEAD = "The ferry plan head";
+  const render = () => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article-head"><h1>${HEAD}</h1></div><div class="wiki-article"><h2>Brief</h2>${HEAD} names this page.<br><br>${NIGHT}</div>`;
+    setDiscussAgentEnabled(true);
+    setSelectionMenuPage({ mentions: true });
+  };
+  explainManual = true;
+  try {
+    render();
+    await selectText(HEAD, ".wiki-article-head");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+    expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+    render();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+    expect(card.querySelector(".wiki-sel-card-moved") === null).toBe(true);
+    explainCtl?.close();
+  } finally {
+    explainManual = false;
+  }
+});
+
 const key = (target: EventTarget, k: string, shiftKey = false) => {
   const ev = new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true });
   target.dispatchEvent(ev);
