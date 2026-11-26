@@ -273,7 +273,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // mentions fetch, the only modules it adds): 986,426 (334,765 gzipped), so the pin moves to 986,500.
 // Its fix round 2 batch 4 (the Trace card's poll read again after a failure, ended on a gone thread
 // or a refusal, its read aborted with the card): 988,101 (335,407 gzipped), so the pin moves to 988,200.
-const WIKI_CLIENT_MAX_BYTES = 988_200;
+// Its class check C (reads stopped by a send, the read's reason classified, a no-range card dropped by
+// a render): 988,870 (335,629 gzipped), so the pin moves to 988,900.
+const WIKI_CLIENT_MAX_BYTES = 988_900;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

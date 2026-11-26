@@ -4,10 +4,13 @@ import {
   TRACE_POLL_MAX_FAILURES,
   TRACE_POLL_MAX_MS,
   TRACE_POLL_MS,
+  TRACE_READ_PERMANENT_REASONS,
   TRACE_RUNNING_STATUS,
   keyPeekHtml,
   traceBodyHtml,
   tracePollStep,
+  traceReadOf,
+  traceReadTransient,
   traceTimelineHtml,
   traceTurnHtml,
   traceTurnsFromThread,
@@ -143,4 +146,54 @@ test("the poll's next step: a thread that is gone, a 404 or another refusal ends
   expect(tracePollStep({ kind: "gone" }, 2)).toEqual({ next: "gone" });
   expect(tracePollStep({ kind: "refused", status: 404, error: "trace-off" }, 0)).toEqual({ next: "failed", message: "trace-off (404)." });
   expect(tracePollStep({ kind: "refused", status: 422 }, 5)).toEqual({ next: "failed", message: "The thread could not be read (422)." });
+});
+
+// ── Class check C: the read's classification, row by row ────────────────────
+
+/** [status, reason, read again?]: by the route's reason where it sends one it knows, else by status. */
+const READ_CLASSES: [number, string | undefined, boolean][] = [
+  [400, undefined, false],
+  [403, undefined, false],
+  [404, "trace-off", false],
+  [404, undefined, false],
+  [408, undefined, true],
+  [409, undefined, false],
+  [418, undefined, false],
+  [422, "unknown-user", false],
+  [422, "no-user", false],
+  [429, undefined, true],
+  [500, undefined, true],
+  [502, undefined, true],
+  [503, "no-bot", false],
+  [503, undefined, true],
+  [503, "draining", true],
+  [504, undefined, true],
+];
+
+for (const [status, reason, again] of READ_CLASSES) {
+  test(`class check C: a ${status}${reason ? ` ${reason}` : ""} read is ${again ? "read again" : "permanent"}`, () => {
+    expect(traceReadTransient({ status, ...(reason ? { reason } : {}) })).toBe(again);
+    const step = tracePollStep({ kind: "refused", status, error: "route says", ...(reason ? { reason } : {}) }, 5);
+    expect(step).toEqual(again ? { next: "again", delayMs: 30000, failures: 6 } : { next: "failed", message: `route says (${status}).` });
+  });
+}
+
+test("class check C: every reason the thread read sends is permanent, the 503 no-bot among them", () => {
+  expect([...TRACE_READ_PERMANENT_REASONS].sort()).toEqual(["no-bot", "no-user", "trace-off", "unknown-user"]);
+  expect(tracePollStep({ kind: "refused", status: 503, error: "no bot answers on this wiki here", reason: "no-bot" }, 0)).toEqual({ next: "failed", message: "no bot answers on this wiki here (503)." });
+});
+
+test("class check C: an answer that is no thread is read again, and past the bound says so; a transient refusal past it keeps the route's words", () => {
+  expect(tracePollStep({ kind: "malformed" }, 0)).toEqual({ next: "again", delayMs: TRACE_POLL_MS, failures: 1 });
+  expect(tracePollStep({ kind: "malformed" }, TRACE_POLL_MAX_FAILURES)).toEqual({ next: "failed", message: "The thread could not be read: the server's answer was not a thread, so the turn's end is not known." });
+  expect(tracePollStep({ kind: "refused", status: 500, error: "could not read the thread" }, TRACE_POLL_MAX_FAILURES)).toEqual({ next: "failed", message: "could not read the thread (500): the turn's end is not known." });
+  expect(tracePollStep({ kind: "refused", status: 500 }, TRACE_POLL_MAX_FAILURES - 1)).toEqual({ next: "again", delayMs: TRACE_POLL_MAX_MS, failures: TRACE_POLL_MAX_FAILURES });
+});
+
+test("class check C: a 200 answer is the thread, `thread: null` (gone), or no thread at all (malformed)", () => {
+  const msgs: TraceThreadMessage[] = [];
+  expect(traceReadOf({ thread: { id: "th" }, messages: msgs })).toEqual({ read: { kind: "thread", running: false }, thread: { id: "th", messages: msgs } });
+  expect(traceReadOf({ thread: null, messages: [] })).toEqual({ read: { kind: "gone" }, thread: null });
+  for (const bad of [undefined, null, "x", {}, { thread: { id: 5 }, messages: [] }, { thread: { id: "th" } }, { thread: { id: "th" }, messages: "no" }, { thread: "th", messages: [] }])
+    expect([bad, traceReadOf(bad)]).toEqual([bad, { read: { kind: "malformed" }, thread: null }]);
 });

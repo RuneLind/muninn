@@ -28,12 +28,18 @@
  *   running, with no «Summarize» or follow-up box, and the card reads the
  *   thread again every `TRACE_POLL_MS` until it has ended; a send refused
  *   409 `busy` goes to that read.
- * - **Poll failures (fix round 2 batch 4):** a failed read is read again
- *   with a growing wait, a bounded number of times (`tracePollStep`); a thread
- *   that is gone clears the card back to «Summarize» with a note, and a
- *   refusal (or reads failing past the bound) ends its running turns as
- *   errors, so the follow-up box comes back. The read in flight aborts with
- *   the card.
+ * - **Poll failures (fix round 2 batch 4, class check C):** a failed read is
+ *   read again with a growing wait, a bounded number of times
+ *   (`tracePollStep`), counted since the last read that worked or the last
+ *   send; a thread that is gone clears the card back to «Summarize» with a
+ *   note, and a permanent refusal (or reads failing past the bound) ends its
+ *   running turns as errors with that message, or says it in the note when
+ *   none runs, so the follow-up box or «Summarize» is always there.
+ * - **Ordering (class check C):** one read at a time and one timer. A send,
+ *   a newer read and the card's drop each stop the reads before them
+ *   (`stopReads`: the timer cleared, the read in flight aborted), and a read
+ *   applies nothing once aborted, so no answer older than a send lands
+ *   after it.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -49,6 +55,7 @@ import {
   keyPeekHtml,
   traceBodyHtml,
   tracePollStep,
+  traceReadOf,
   traceTurnHtml,
   traceTurnsFromThread,
   type TraceThreadMessage,
@@ -100,7 +107,7 @@ interface TraceState {
   poll: ReturnType<typeof setTimeout> | null;
   /** The thread read in flight, aborted when the card leaves for good or a newer read starts. */
   pollCtl: AbortController | null;
-  /** Failed reads in a row (`tracePollStep`). */
+  /** Failed reads in a row since the last read that worked or the last send (`tracePollStep`). */
   pollFailures: number;
   dropped: boolean;
 }
@@ -115,16 +122,23 @@ function live(st: TraceState): boolean {
   return !st.dropped && !!deps?.live(st.card);
 }
 
+/** No read of the card's thread goes on: the next one's timer cleared, the
+ *  one in flight aborted (its answer is then never applied). */
+function stopReads(st: TraceState): void {
+  if (st.poll) clearTimeout(st.poll);
+  st.poll = null;
+  st.pollCtl?.abort();
+  st.pollCtl = null;
+}
+
 function dropTrace(st: TraceState): void {
   st.dropped = true;
   st.ctl?.abort();
-  st.pollCtl?.abort();
-  if (st.poll) clearTimeout(st.poll);
-  st.poll = null;
+  stopReads(st);
 }
 
-/** The card's one note line, under the follow-up box. `end` marks the thread-gone
- *  note, which a send clears. */
+/** The card's one note line, under the follow-up box. `end` marks a note
+ *  about the thread's read (gone, or refused), which a send clears. */
 function traceNote(st: TraceState, text: string, end = false): void {
   let el = st.card.querySelector<HTMLElement>(".wiki-trace-note");
   if (!el) {
@@ -157,9 +171,7 @@ function paintTurns(st: TraceState): void {
  *  rows; again while a turn of it is still running, and after a failed read
  *  ({@link tracePollStep}). */
 async function loadThread(st: TraceState): Promise<void> {
-  if (st.poll) clearTimeout(st.poll);
-  st.poll = null;
-  st.pollCtl?.abort();
+  stopReads(st);
   if (!live(st)) return;
   const ctl = new AbortController();
   st.pollCtl = ctl;
@@ -167,26 +179,30 @@ async function loadThread(st: TraceState): Promise<void> {
   const user = discussUserFor(st.wiki);
   if (user) q.set("userId", user);
   let read: TraceThreadRead;
-  type ThreadBody = { thread?: { id: string } | null; messages?: TraceThreadMessage[] };
-  let data: ThreadBody | null = null;
+  let thread: { id: string; messages: TraceThreadMessage[] } | null = null;
   try {
     const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" }, signal: ctl.signal });
     if (res.ok) {
-      data = (await res.json()) as ThreadBody | null;
-      read = data?.thread ? { kind: "thread", running: false } : { kind: "gone" };
+      // Not JSON, or JSON that is no thread: `malformed`, read again under the bound.
+      ({ read, thread } = traceReadOf(await res.json().catch(() => undefined)));
     } else {
-      const err = (await res.json().catch(() => null)) as { error?: unknown } | null;
-      read = { kind: "refused", status: res.status, ...(typeof err?.error === "string" ? { error: err.error } : {}) };
+      const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+      read = {
+        kind: "refused",
+        status: res.status,
+        ...(typeof err?.error === "string" ? { error: err.error } : {}),
+        ...(typeof err?.reason === "string" ? { reason: err.reason } : {}),
+      };
     }
   } catch {
     read = { kind: "unreachable" };
   }
   if (st.pollCtl === ctl) st.pollCtl = null;
-  // Dropped or superseded; or a send started meanwhile, which owns the turns.
-  if (ctl.signal.aborted || st.busy || !live(st)) return;
-  if (read.kind === "thread" && data?.thread) {
-    st.discussionId = data.thread.id;
-    st.turns = traceTurnsFromThread(data.messages ?? []);
+  // Superseded (a send, a newer read) or dropped: the answer is older than the card's state.
+  if (ctl.signal.aborted || !live(st)) return;
+  if (thread) {
+    st.discussionId = thread.id;
+    st.turns = traceTurnsFromThread(thread.messages);
     paintTurns(st);
     read = { kind: "thread", running: st.turns.some((t) => t.state === "running") };
   }
@@ -197,19 +213,27 @@ async function loadThread(st: TraceState): Promise<void> {
     return;
   }
   st.pollFailures = 0;
-  if (step.next === "gone" && st.turns.length > 0) {
-    st.turns = [];
-    st.discussionId = null;
-    paintTurns(st);
-    traceNote(st, TRACE_THREAD_GONE, true);
-  } else if (step.next === "failed" && st.turns.some((t) => t.state === "running")) {
-    for (const t of st.turns) if (t.state === "running") Object.assign(t, { state: "error", text: step.message, status: undefined });
-    paintTurns(st);
+  if (step.next === "gone") {
+    // A card with no turns (its first read, a key never traced) has nothing gone.
+    if (st.turns.length > 0) {
+      st.turns = [];
+      st.discussionId = null;
+      paintTurns(st);
+      traceNote(st, TRACE_THREAD_GONE, true);
+    }
+  } else if (step.next === "failed") {
+    if (st.turns.some((t) => t.state === "running")) {
+      for (const t of st.turns) if (t.state === "running") Object.assign(t, { state: "error", text: step.message, status: undefined });
+      paintTurns(st);
+    } else traceNote(st, step.message, true);
   }
 }
 
 async function send(st: TraceState, question: string): Promise<void> {
   if (st.busy || !question.trim() || discussSendBlocked()) return;
+  // A user action: the reads before it are superseded, and the bound counts afresh.
+  stopReads(st);
+  st.pollFailures = 0;
   const turn: TraceTurn = { question: question.trim(), text: "", state: "running", turnId: null };
   st.card.querySelector(".wiki-trace-note[data-trace-end]")?.remove();
   st.turns.push(turn);

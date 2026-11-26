@@ -207,12 +207,13 @@ export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjec
   // the files and history say may have moved.
   clearMentionsCache();
   hideKeyPeek();
-  if (held && !reattachQueued) {
+  if ((held || inlineCards.size) && !reattachQueued) {
     reattachQueued = true;
     // After the rest of the render: its enhancements must not run over the card.
     const run = () => {
       reattachQueued = false;
       reattachCard();
+      sweepInlineCards();
     };
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
     else setTimeout(run, 0);
@@ -516,9 +517,20 @@ export function placeInlineCard(range: Range | null, html: string, onDrop?: () =
   const s: Shown = { text: "", heading: "", range, explainer: range === null, items: [] };
   const card = placeCard(s, html);
   if (!card) return null;
-  if (onDrop) dropHooks.set(card, onDrop);
+  if (onDrop) {
+    dropHooks.set(card, onDrop);
+    inlineCards.add(card);
+  }
   holdCard(card, s);
   return card;
+}
+
+/** Inline cards with a drop hook, until dropped. A render that took one off
+ *  the page and does not hold it (no passage: an explainer's) drops it, so
+ *  its timers and reads end with it (class check C). */
+const inlineCards = new Set<Element>();
+function sweepInlineCards(): void {
+  for (const card of Array.from(inlineCards)) if (!inlineCardLive(card)) dropCard(card);
 }
 
 /** Is `card` on the page, or out for a render of its page and coming back? */
@@ -531,6 +543,7 @@ const dropHooks = new WeakMap<Element, () => void>();
 function dropCard(card: Element): void {
   const f = dropHooks.get(card);
   dropHooks.delete(card);
+  inlineCards.delete(card);
   f?.();
 }
 

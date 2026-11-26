@@ -30,8 +30,12 @@
  * - Fix round 2 batch 4: a failed thread read (a network failure, a 500) is
  *   read again until the turn is seen to end; a thread that is gone puts the
  *   card back on «Summarize» with a note, and a 404 ends the running turn as
- *   an error with the follow-up box back; a closed card reads no more. The
- *   thread reads are answered by `page.route`.
+ *   an error with the follow-up box back; a closed card reads no more, its
+ *   timer cleared (counted by an init script). The thread reads are answered
+ *   by `page.route`.
+ * - Class check C: a 503 `no-bot` read ends at once with the route's message,
+ *   and a slow first read landing after a refused «Summarize» deletes nothing.
+ *   The full table is the happy-dom file `wiki-key-trace-poll.test.ts`.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`) with two commits, a `keys` kind, a Jira tracker and a facts
@@ -675,14 +679,84 @@ test("a 404 ends the running turn as an error, with the follow-up box back", asy
   expect(reads()).toBe(2);
 });
 
-test("a closed card reads no more: its read after a failure is never made", async ({ page }) => {
+/** Count the page's pending 1.5 s timers (the Trace poll's first wait; nothing else on /wiki sets one). */
+async function trackPollTimers(page: Page): Promise<() => Promise<number>> {
+  await page.addInitScript(() => {
+    const pending = new Set<unknown>();
+    const set = window.setTimeout.bind(window);
+    const clear = window.clearTimeout.bind(window);
+    window.setTimeout = ((cb: TimerHandler, ms?: number, ...rest: unknown[]) => {
+      if (ms !== 1500 || typeof cb !== "function") return set(cb, ms, ...rest);
+      const id: number = set(() => {
+        pending.delete(id);
+        (cb as (...a: unknown[]) => void)(...rest);
+      }, ms);
+      pending.add(id);
+      return id;
+    }) as typeof window.setTimeout;
+    window.clearTimeout = ((id?: number) => {
+      pending.delete(id);
+      clear(id);
+    }) as typeof window.clearTimeout;
+    (window as unknown as { __tracePollPending: () => number }).__tracePollPending = () => pending.size;
+  });
+  return () => page.evaluate(() => (window as unknown as { __tracePollPending: () => number }).__tracePollPending());
+}
+
+test("a closed card reads no more: its next read's timer is cleared, and that read is never made", async ({ page }) => {
+  const timers = await trackPollTimers(page);
   const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : { status: 500, body: { error: "could not read the thread" } }));
   await openPage(page);
   await traceFromPeek(page, KEY);
   await expect(traceCard(page).locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(1);
   await expect.poll(reads).toBe(2);
+  // The read after the 500 is due in 1.5 s: one timer.
+  await expect.poll(timers).toBe(1);
   await traceCard(page).locator("[data-sel-card-close]").click();
-  // The next read was due 1.5 s after the failed one.
+  // Cleared with the card (`dropTrace`), not left to find the card gone.
+  expect(await timers()).toBe(0);
   await page.waitForTimeout(3500);
   expect(reads()).toBe(2);
+});
+
+test("class check C: a 503 no-bot read ends the running turn at once with the route's message; no read again", async ({ page }) => {
+  const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : { status: 503, body: { error: "no bot answers on this wiki here", reason: "no-bot" } }));
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect.poll(reads).toBe(2);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="error"] .wiki-discuss-error')).toHaveText("no bot answers on this wiki here (503).");
+  await expect(card.locator(".wiki-trace-follow")).toBeVisible();
+  await page.waitForTimeout(2000);
+  expect(reads()).toBe(2);
+});
+
+test("class check C: a slow first read that answers `thread: null` after a refused «Summarize» deletes nothing", async ({ page }) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  let reads = 0;
+  await page.route(
+    (url) => url.pathname === "/api/wiki/discuss/thread" && url.searchParams.has("traceKey"),
+    async (route) => {
+      reads++;
+      await held;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ thread: null, messages: [] }) }).catch(() => {});
+    },
+  );
+  await page.route("**/api/wiki/discuss", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "SLOW-READ: the wiki agent cannot run here", reason: "connector" }) });
+  });
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect.poll(() => reads).toBe(1);
+  await card.locator("[data-trace-summarize]").click();
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="error"] .wiki-discuss-error')).toHaveText("SLOW-READ: the wiki agent cannot run here (422)");
+  release();
+  await page.waitForTimeout(1000);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="error"]')).toHaveCount(1);
+  await expect(card.locator(".wiki-trace-note")).toHaveCount(0);
+  await expect(card.locator(".wiki-trace-follow")).toBeVisible();
+  expect(reads).toBe(1);
 });
