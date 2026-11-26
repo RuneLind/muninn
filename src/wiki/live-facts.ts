@@ -869,7 +869,8 @@ export interface KeyMarksInput {
   trackers: readonly TrackerConfig[];
   kinds: readonly Pick<KeyKind, "name" | "pattern">[];
   relPath: string;
-  /** Receives how many lines the `keys` scan skipped, and the middle it skipped past the page budget ({@link scanKeyKinds}). */
+  /** Receives how many lines the `keys` scan skipped, and the middle it skipped past the page budget ({@link scanKeyKinds}),
+   *  whose `fromLine`/`toLine` `renderWikiHtml` gives as the page file's lines. */
   collect?: (r: { marks: number; skippedLines: number; skippedChars: number; middle?: SkippedMiddle }) => void;
 }
 

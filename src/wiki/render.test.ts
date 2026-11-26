@@ -1,5 +1,7 @@
 import { test, expect, describe } from "bun:test";
-import { paragraphGaps, readerPayload, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { paragraphGaps, readerBodyLines, readerPayload, renderWikiHtml, stripFrontmatter } from "./render.ts";
+import { stripSentinelLines } from "./decision-text.ts";
+import { withoutSentinelDelimiters } from "../format/markdown-core.ts";
 import { parseWikiDefaultLens } from "../format/reader-lens.ts";
 import type { WikiPageMeta } from "./store.ts";
 import { stripTokenSpans } from "../test/highlighted-code.ts";
@@ -701,4 +703,63 @@ describe("post-passes (architecture review 2026-11-16, A2)", () => {
     const r = locateSection("# T\n\n## A\n\nx\x01y\x00z\n", { heading: "A", ordinal: 0, count: 1 });
     expect(r).toEqual({ ok: true, section: { level: 2, headingText: "A", markdown: "\nxyz\n" } });
   });
+});
+
+// Class-check sweep B, surface 2: a line the render reports in the body's
+// numbers (the key scan's skipped middle) is named in the file's. Every
+// transform between the file and `readerBody`'s string, crossed: each body
+// line holding `MEL-<n>` must map to file line n.
+describe("readerBodyLines: each body line's line in the file", () => {
+  const FM = { none: [], present: ["---", "title: Big", "a: 1", "b: 2", "---"], empty: ["---", "---"] } as const;
+  const H1 = {
+    matching: ["# Big"],
+    "non-matching": ["# Other"],
+    absent: [],
+    setext: ["Big", "==="],
+    "blank lines, then matching": ["", "", "  # Big"],
+  } as const;
+  const SENTINEL = { none: "none", "before the keys": "before", "around keys": "around" } as const;
+  /** The old `readerBody`, verbatim: the body must not change. */
+  const oldReaderBody = (markdown: string, stripTitle?: string) => {
+    let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
+    if (stripTitle) {
+      const m = body.match(/^\s*#\s+(.+)\n?/);
+      if (m && m[1]!.trim().toLowerCase() === stripTitle.trim().toLowerCase()) body = body.slice(m.index! + m[0].length);
+    }
+    return body;
+  };
+  for (const [fmName, fm] of Object.entries(FM))
+    for (const [h1Name, h1] of Object.entries(H1))
+      for (const [sName, sentinel] of Object.entries(SENTINEL))
+        for (const eol of ["\n", "\r\n"])
+          for (const bom of ["", "\uFEFF"])
+            test(`frontmatter ${fmName}, H1 ${h1Name}, sentinel ${sName}, ${eol === "\n" ? "LF" : "CRLF"}${bom ? ", BOM" : ""}`, () => {
+              const lines: string[] = [...fm, ...h1, ""];
+              const key = () => lines.push(`- MEL-${lines.length + 1} text`);
+              key();
+              key();
+              if (sentinel === "before") lines.push("<!-- factcheck:start -->", "<!-- factcheck:end -->");
+              if (sentinel === "around") lines.push("<!-- factcheck:start -->");
+              key();
+              key();
+              if (sentinel === "around") lines.push("<!-- factcheck:end -->");
+              key();
+              const markdown = bom + lines.join(eol) + eol;
+              const { body, fileLine } = readerBodyLines(markdown, "Big");
+              expect(body).toBe(oldReaderBody(markdown, "Big"));
+              // The transforms do run: the marker lines go, and under LF without a BOM the frontmatter and the matching H1 too.
+              if (sentinel !== "none" && eol === "\n") expect(body).not.toContain("factcheck:");
+              if (eol === "\n" && !bom && fm.length) expect(body).not.toContain("title: Big");
+              if (eol === "\n" && !bom && h1Name.endsWith("matching") && !h1Name.startsWith("non")) expect(body).not.toContain("# Big");
+              const got: [number, number][] = [];
+              body.split("\n").forEach((line, j) => {
+                const m = /MEL-(\d+)/.exec(line);
+                if (m) got.push([Number(m[1]), fileLine(j)]);
+              });
+              expect(got.length).toBe(5);
+              for (const [want, at] of got) expect([want, at]).toEqual([want, want]);
+              // Every body line maps inside the file, in order.
+              const all = body.split("\n").map((_, j) => fileLine(j));
+              expect(all.every((n, j) => n >= 1 && n <= markdown.split("\n").length && (j === 0 || n > all[j - 1]!))).toBe(true);
+            });
 });

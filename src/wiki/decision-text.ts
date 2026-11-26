@@ -32,16 +32,22 @@ export function wikiLinkText(target: string, label: string | undefined): string 
  * the walker skips the frontmatter itself.
  */
 export function stripSentinelLines(markdown: string): string {
-  const owned = new Set<number>();
-  for (const span of findLiveSentinelBlocks(markdown)) {
-    owned.add(span.startLine);
-    owned.add(span.endLine);
-  }
+  const owned = liveSentinelLines(markdown);
   if (owned.size === 0) return markdown;
   return markdown
     .split("\n")
     .filter((_, i) => !owned.has(i))
     .join("\n");
+}
+
+/** The 0-based `\n`-split line indices {@link stripSentinelLines} drops. */
+export function liveSentinelLines(markdown: string): Set<number> {
+  const owned = new Set<number>();
+  for (const span of findLiveSentinelBlocks(markdown)) {
+    owned.add(span.startLine);
+    owned.add(span.endLine);
+  }
+  return owned;
 }
 
 /** Every wikilink in `text` replaced by the text it shows. */

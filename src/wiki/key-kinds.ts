@@ -223,10 +223,13 @@ export const keyCharBefore = (text: string, i: number): boolean => i > 0 && KEY_
 export const keyCharAfter = (text: string, i: number): boolean => i < text.length && KEY_CHAR.test(charAt(text, i));
 
 /** Lines {@link scanKeyKinds} skipped once the page budget was spent: the
- *  middle of the page, 1-based and inclusive. */
+ *  middle of the scanned text, 1-based and inclusive, with how many lines and
+ *  characters that is (the over-long lines outside it are not counted here). */
 export interface SkippedMiddle {
   fromLine: number;
   toLine: number;
+  lines: number;
+  chars: number;
 }
 
 /**
@@ -284,12 +287,15 @@ export function scanKeyKinds(
   const out: { key: string; kind: string; start: number; end: number }[] = [];
   let skippedLines = 0;
   let skippedChars = 0;
+  let middleChars = 0;
   for (let line = 0; line < n; line++) {
     const lineStart = starts[line]!;
     const lineEnd = ends[line]!;
-    if ((line >= front && line < back) || lineEnd - lineStart > lineMax) {
+    const inMiddle = line >= front && line < back;
+    if (inMiddle || lineEnd - lineStart > lineMax) {
       skippedLines++;
       skippedChars += lineEnd - lineStart;
+      if (inMiddle) middleChars += lineEnd - lineStart;
       continue;
     }
     for (let i = lineStart; i < lineEnd; i++) {
@@ -310,5 +316,5 @@ export function scanKeyKinds(
       }
     }
   }
-  return { matches: out, skippedLines, skippedChars, ...(front < back ? { middle: { fromLine: front + 1, toLine: back } } : {}) };
+  return { matches: out, skippedLines, skippedChars, ...(front < back ? { middle: { fromLine: front + 1, toLine: back, lines: back - front, chars: middleChars } } : {}) };
 }

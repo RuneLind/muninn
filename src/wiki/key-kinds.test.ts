@@ -182,8 +182,16 @@ describe("scanKeyKinds: the mentions route's whole-key rule and the page budget 
     const text = ["MEL-1 aaaa", "MEL-2 bbbb", "MEL-3 cccc", "MEL-4 dddd", "MEL-5"].join("\n");
     const r = scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 25);
     expect(r.matches.map((m) => m.key)).toEqual(["MEL-1", "MEL-4", "MEL-5"]);
-    expect({ skippedLines: r.skippedLines, skippedChars: r.skippedChars, middle: r.middle }).toEqual({ skippedLines: 2, skippedChars: 20, middle: { fromLine: 2, toLine: 3 } });
+    expect({ skippedLines: r.skippedLines, skippedChars: r.skippedChars, middle: r.middle }).toEqual({ skippedLines: 2, skippedChars: 20, middle: { fromLine: 2, toLine: 3, lines: 2, chars: 20 } });
     expect(scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 45).middle).toBeUndefined();
+  });
+
+  test("the middle counts its own lines and characters: an over-long line outside it is counted only in the totals (sweep B)", () => {
+    const long = `MEL-9 ${"z".repeat(KEY_SCAN_LINE_MAX)}`;
+    const text = [long, "MEL-1 aaaa", "MEL-2 bbbb", "MEL-3 cccc", "MEL-4 dddd", "MEL-5"].join("\n");
+    const r = scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 25);
+    expect(r.middle).toEqual({ fromLine: 3, toLine: 4, lines: 2, chars: 20 });
+    expect([r.skippedLines, r.skippedChars]).toEqual([3, 20 + long.length]);
   });
 
   test("a 3 MB log.md past the default budget keeps the entries at both ends, where both wikis add new ones, and skips the oldest in between", () => {
@@ -212,7 +220,7 @@ describe("scanKeyKinds: the mentions route's whole-key rule and the page budget 
     expect(r.skippedLines).toBe(219);
     expect(r.skippedChars).toBe(219 * line.length);
     // 16 from the top and 15 from the bottom: the end that has spent less goes next.
-    expect(r.middle).toEqual({ fromLine: 17, toLine: 235 });
+    expect(r.middle).toEqual({ fromLine: 17, toLine: 235, lines: 219, chars: 219 * line.length });
     expect(ms).toBeLessThan(3000);
   });
 });

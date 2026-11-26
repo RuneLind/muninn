@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import { jiraTrackers, readWikiFacts, type KeyMarksInput, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import type { SkippedMiddle } from "../../wiki/key-kinds.ts";
 import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
@@ -1777,6 +1778,10 @@ export function registerWikiReadRoutes(
     let html: string | undefined;
     let chipError: unknown;
     let marksError: unknown;
+    // What the `keys` scan skipped, from the last render with the marks: said
+    // once per page open, after the renders, and only when the page served
+    // carries the marks (a chip fault renders up to three times).
+    let scanSkips: { skippedLines: number; skippedChars: number; middle?: SkippedMiddle } | undefined;
     const mentionsHere = tools && authMode() === "off" && !!entry?.name && (await mentionsWorkTree(entry.root));
     const keyMarks: KeyMarksInput | undefined =
       mentionsHere && (c.get("role") ?? "admin") === "admin"
@@ -1785,11 +1790,8 @@ export function registerWikiReadRoutes(
             trackers: jiraTrackers(index.readerConfig?.trackers),
             kinds: index.readerConfig?.keys ?? [],
             relPath: meta.relPath,
-            // Lines the `keys` scan skipped go unmarked: said once per render (fix round 2, finding 5).
             collect: ({ skippedLines, skippedChars, middle }) => {
-              const props = { wiki: entry?.name, relPath: meta.relPath, skippedLines, skippedChars };
-              if (middle) log.warn("key marks: {relPath} passed the scan budget; lines {fromLine}–{toLine} are unmarked ({skippedLines} lines, {skippedChars} chars skipped)", { ...props, ...middle });
-              else if (skippedLines > 0) log.info("key marks: {skippedLines} lines of {relPath} are over the line bound and unmarked ({skippedChars} chars)", props);
+              scanSkips = { skippedLines, skippedChars, ...(middle ? { middle } : {}) };
             },
           }
         : undefined;
@@ -1826,6 +1828,23 @@ export function registerWikiReadRoutes(
       log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
     if (marksError !== undefined)
       log.warn("key marks failed on {relPath}; page rendered without them: {error}", { relPath: meta.relPath, error: marksError instanceof Error ? marksError.message : String(marksError) });
+    // Lines the `keys` scan skipped go unmarked (fix round 2, finding 5; sweep B): the
+    // middle past the page budget, in the file's lines, is a warning; over-long lines alone are info.
+    if (scanSkips && marksError === undefined) {
+      const { skippedLines, skippedChars, middle } = scanSkips;
+      const props = { wiki: entry?.name, relPath: meta.relPath };
+      if (middle)
+        log.warn("key marks: lines {fromLine}–{toLine} of {relPath} are unmarked: the page passed the scan budget ({middleLines} lines, {middleChars} chars skipped there; {longLines} over-long lines skipped elsewhere)", {
+          ...props,
+          fromLine: middle.fromLine,
+          toLine: middle.toLine,
+          middleLines: middle.lines,
+          middleChars: middle.chars,
+          longLines: skippedLines - middle.lines,
+          longChars: skippedChars - middle.chars,
+        });
+      else if (skippedLines > 0) log.info("key marks: {longLines} lines of {relPath} are over the line bound and unmarked ({longChars} chars)", { ...props, longLines: skippedLines, longChars: skippedChars });
+    }
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])

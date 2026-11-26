@@ -292,27 +292,59 @@ describe("GET /api/wiki/page — marks and the mentions flag only where the ment
 });
 
 // Fix round 2 batch 3 (finding 5): a page past the `keys` scan's budget has an
-// unmarked middle, and the render says so once, with the counts; before, the
-// skipped lines (then the page's end) went unmarked with no signal.
-describe("GET /api/wiki/page — a page past the key scan's budget is logged once per render", () => {
+// unmarked middle, and the page open says so once, with the counts; before,
+// the skipped lines (then the page's end) went unmarked with no signal.
+// Class-check sweep B: the lines are the FILE's, past every transform between
+// the file and the scanned body; the counts say what they name; one warning
+// per page open whatever the renders; over-long lines alone are info.
+describe("GET /api/wiki/page — a page past the key scan's budget is logged once per page open, in the file's lines", () => {
   let root = "";
   let app: Hono;
   let prevExtra: string | undefined;
   const records: LogRecord[] = [];
-  // ~1.2 M characters of one-kind lines: past KEY_SCAN_PAGE_MAX (1,000,000).
-  const BIG = ["# Big", "", ...Array.from({ length: 6_000 }, (_, i) => `- MEL-${i + 1} ${"y".repeat(190)}`)].join("\n");
+  /** ~1.2 M characters of `MEL-<n>` lines past KEY_SCAN_PAGE_MAX (1,000,000),
+   *  each key's number its own line in the file. */
+  function bigPage(o: { head: string[]; eol?: string; sentinelInside?: boolean; longLines?: number; extra?: string }): string {
+    const lines = [...o.head, ""];
+    if (o.extra) lines.push(o.extra, "");
+    for (let i = 0; i < (o.longLines ?? 0); i++) lines.push(`long ${"z".repeat(4_100)}`);
+    for (let i = 0; i < 6_000; i++) {
+      if (o.sentinelInside && (i === 2_990 || i === 3_010)) lines.push(i === 2_990 ? "<!-- factcheck:start -->" : "<!-- factcheck:end -->");
+      lines.push(`- MEL-${lines.length + 1} ${"y".repeat(190)}`);
+    }
+    return lines.join(o.eol ?? "\n") + (o.eol ?? "\n");
+  }
+  const FM = ["---", "title: Big", "a: 1", "b: 2", "---"];
+  /** One page per transform between the file and `readerBody`'s string. */
+  const ROWS: Record<string, string> = {
+    "no frontmatter: the H1 stays (the title is the file stem)": bigPage({ head: ["# Big"] }),
+    "5 frontmatter lines and the matching H1": bigPage({ head: [...FM, "# Big"] }),
+    "frontmatter and a non-matching H1 (kept)": bigPage({ head: [...FM, "# Other"] }),
+    "empty frontmatter, no H1": bigPage({ head: ["---", "---"] }),
+    "frontmatter, blank lines, then the matching H1": bigPage({ head: [...FM, "", "", "# Big"] }),
+    "frontmatter, the H1 and a live fact-check block inside the middle": bigPage({ head: [...FM, "# Big"], sentinelInside: true }),
+    "a live fact-check block before the keys": bigPage({ head: [...FM, "# Big", "", "<!-- factcheck:start -->", "Checked.", "<!-- factcheck:end -->"] }),
+    "CRLF line ends with frontmatter and the H1": bigPage({ head: [...FM, "# Big"], eol: "\r\n" }),
+    "a setext H1 (never stripped)": bigPage({ head: [...FM, "Big", "==="] }),
+    "over-long lines above the middle": bigPage({ head: [...FM, "# Big"], longLines: 3 }),
+  };
+  const slug = (name: string) => name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
 
   beforeAll(async () => {
     root = await testTempDir(path.join(tmpdir(), "wiki-marks-budget-"));
     await mkdir(path.join(root, "notes"), { recursive: true });
-    await writeFile(path.join(root, "notes/big.md"), BIG, "utf8");
+    for (const [name, page] of Object.entries(ROWS)) await writeFile(path.join(root, `notes/${slug(name)}.md`), page, "utf8");
+    await writeFile(path.join(root, "notes/chip.md"), bigPage({ head: [...FM, "# Big"], extra: "DEMO-11 has facts." }), "utf8");
     await writeFile(path.join(root, "notes/small.md"), "# Small\n\nMEL-1 and MEL-2.\n", "utf8");
-    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }), "utf8");
+    await writeFile(path.join(root, "notes/long.md"), `# Long\n\nMEL-1 here.\n\nMEL-2 ${"z".repeat(4_100)}\n\nMEL-3 ${"z".repeat(4_100)}\n`, "utf8");
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }], trackers: [{ id: "jira", projects: ["DEMO"] }] }), "utf8");
+    await writeFile(path.join(root, ".wiki-facts.json"), JSON.stringify({ version: 1, prs: {}, keys: { "DEMO-11": { prs: [] } } }), "utf8");
     gitInit(root);
     prevExtra = process.env.WIKI_EXTRA;
     process.env.WIKI_EXTRA = `budget=${root}`;
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
+    resetWikiFactsCache();
     app = new Hono();
     app.onError((err, c) => c.json({ error: String(err) }, 500));
     registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
@@ -332,6 +364,7 @@ describe("GET /api/wiki/page — a page past the key scan's budget is logged onc
     else process.env.WIKI_EXTRA = prevExtra;
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
+    resetWikiFactsCache();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -340,19 +373,83 @@ describe("GET /api/wiki/page — a page past the key scan's budget is logged onc
     const res = await app.request(`/api/wiki/page?wiki=budget&relPath=${encodeURIComponent(rel)}`);
     expect(res.status).toBe(200);
     const html = ((await res.json()) as { html: string }).html;
-    return { marks: [...html.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1]), logged: records.filter((r) => String(r.rawMessage).startsWith("key marks:")) };
+    return { html, marks: [...html.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1]!), logged: records.filter((r) => String(r.rawMessage).startsWith("key marks:")) };
   };
+  type Props = { wiki: string; relPath: string; fromLine: number; toLine: number; middleLines: number; middleChars: number; longLines: number; longChars: number };
 
-  test("its first and last lines are marked, its middle is not, and one warning names the skipped lines", async () => {
-    const { marks, logged } = await open("notes/big.md");
-    expect([marks.includes("MEL-1"), marks.includes("MEL-6000"), marks.includes("MEL-3000")]).toEqual([true, true, false]);
+  for (const [name, page] of Object.entries(ROWS))
+    test(`${name}: the warning names the file lines of the first and last unmarked keys`, async () => {
+      const { marks, logged } = await open(`notes/${slug(name)}.md`);
+      const keys = [...page.matchAll(/MEL-(\d+)/g)].map((m) => Number(m[1]));
+      const marked = new Set(marks.map((k) => Number(k.slice(4))));
+      const unmarked = keys.filter((n) => !marked.has(n));
+      // The keys sit at both ends of the page, the unmarked ones in one run between.
+      expect([marked.has(keys[0]!), marked.has(keys.at(-1)!), unmarked.length > 0]).toEqual([true, true, true]);
+      const [from, to] = [unmarked[0]!, unmarked.at(-1)!];
+      expect(keys.filter((n) => n >= from && n <= to).every((n) => !marked.has(n))).toBe(true);
+      expect(logged.length).toBe(1);
+      expect(logged[0]!.level).toBe("warning");
+      const p = logged[0]!.properties as Props;
+      expect([p.wiki, p.relPath]).toEqual(["budget", `notes/${slug(name)}.md`]);
+      expect([p.fromLine, p.toLine]).toEqual([from, to]);
+      const said = logged[0]!.message.map(String).join("");
+      expect(Number(/\((\d+) lines/.exec(said)![1])).toBeLessThanOrEqual(to - from + 1);
+      // The middle's own count: one key per skipped body line, so never more than the range.
+      expect(p.middleLines).toBe(unmarked.length);
+      expect(p.middleLines).toBeLessThanOrEqual(p.toLine - p.fromLine + 1);
+      // Characters as the scan counts them: each skipped line's, its `\r` included.
+      const fileLines = page.split("\n");
+      const charsOf = (keep: (line: string) => boolean) => fileLines.filter(keep).reduce((sum, line) => sum + line.length, 0);
+      const unmarkedSet = new Set(unmarked);
+      expect(p.middleChars).toBe(charsOf((line) => unmarkedSet.has(Number(/MEL-(\d+)/.exec(line)?.[1]))));
+      expect(p.longLines).toBe(name.startsWith("over-long") ? 3 : 0);
+      expect(p.longChars).toBe(charsOf((line) => line.startsWith("long ")));
+      // The message as written names the same lines.
+      expect(said).toContain(`lines ${from}–${to}`);
+    });
+
+  test("a chip fault after the marks are planned renders three times and still warns once", async () => {
+    // Throws only with chips: the marks render with chips, then the chips-only
+    // render throw; the render without chips (marks kept) succeeds.
+    const real = liveFactsModule.applyChipsAndMarks;
+    const spy = spyOn(liveFactsModule, "applyChipsAndMarks").mockImplementation((body, chips, ...rest) => {
+      if (chips.length) throw new Error("injected chip fault after planKeyMarks");
+      return real(body, chips, ...rest);
+    });
+    try {
+      const { html, marks, logged } = await open("notes/chip.md");
+      expect(spy.mock.calls.length).toBe(3);
+      expect(html).not.toContain('class="fact-chip"');
+      expect(marks.length).toBeGreaterThan(0);
+      expect(logged.map((r) => r.level)).toEqual(["warning"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("a page served without its marks says nothing of the scan: only the marks' own warning", async () => {
+    // Throws only with marks, after the scan was collected: both renders with marks fail.
+    const real = liveFactsModule.applyChipsAndMarks;
+    const spy = spyOn(liveFactsModule, "applyChipsAndMarks").mockImplementation((body, chips, marks, ...rest) => {
+      if (marks.length) throw new Error("injected marks fault after the scan");
+      return real(body, chips, marks, ...rest);
+    });
+    try {
+      const { marks, logged } = await open(`notes/${slug("5 frontmatter lines and the matching H1")}.md`);
+      expect(marks).toEqual([]);
+      expect(logged).toEqual([]);
+      expect(records.map((r) => String(r.rawMessage))).toEqual(["key marks failed on {relPath}; page rendered without them: {error}"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("over-long lines alone are info, not a warning, and the count is theirs", async () => {
+    const { marks, logged } = await open("notes/long.md");
+    expect(marks).toEqual(["MEL-1"]);
     expect(logged.length).toBe(1);
-    const p = logged[0]!.properties as { wiki: string; relPath: string; skippedLines: number; skippedChars: number; fromLine: number; toLine: number };
-    expect(logged[0]!.level).toBe("warning");
-    expect([p.wiki, p.relPath]).toEqual(["budget", "notes/big.md"]);
-    expect(p.skippedLines).toBe(p.toLine - p.fromLine + 1);
-    expect(p.skippedLines).toBeGreaterThan(0);
-    expect(p.skippedChars).toBeGreaterThan(0);
+    expect(logged[0]!.level).toBe("info");
+    expect(logged[0]!.properties).toMatchObject({ relPath: "notes/long.md", longLines: 2, longChars: 2 * ("MEL-2 ".length + 4_100) });
   });
 
   test("a page that fits logs nothing", async () => {

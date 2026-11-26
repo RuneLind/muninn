@@ -40,7 +40,7 @@ import { markGlossaryTerms } from "../format/glossary-view.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { renderedCodeRegions, inRenderedCode, restoreParkedSentinels } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
-import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
+import { decisionText, liveSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
 import { applyChipsAndMarks, chipPassCollected, keyMarkHtml, planKeyMarks, planLiveChips, type ChipInsertion, type KeyMarksInput, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
@@ -65,7 +65,26 @@ export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
  * of the same text the reader drew its headings from.
  */
 export function readerBody(markdown: string, stripTitle?: string): string {
-  let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
+  return readerBodyLines(markdown, stripTitle).body;
+}
+
+/**
+ * {@link readerBody}, and for each of its lines (0-based) the 1-based line of
+ * `markdown` it is read from. The body is the page less its live fact-check
+ * marker lines (whole lines), then a suffix of that: past the frontmatter
+ * (whole lines) and the repeated H1 (its `\s*` takes leading blank lines, and
+ * under CRLF the H1's `\r` stays, so the body may start mid-line). A line a
+ * render reports in the body's numbers is named by this in the file's.
+ */
+export function readerBodyLines(markdown: string, stripTitle?: string): { body: string; fileLine: (bodyLine: number) => number } {
+  const clean = withoutSentinelDelimiters(markdown);
+  const owned = liveSentinelLines(clean);
+  const lines = clean.split("\n");
+  // `stripSentinelLines`, keeping each kept line's index in `markdown`.
+  const kept: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (!owned.has(i)) kept.push(i);
+  const text = owned.size === 0 ? clean : kept.map((i) => lines[i]).join("\n");
+  let body = stripFrontmatter(text);
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
@@ -75,7 +94,9 @@ export function readerBody(markdown: string, stripTitle?: string): string {
       body = body.slice(m.index! + m[0].length);
     }
   }
-  return body;
+  let first = 0;
+  for (let i = 0, end = text.length - body.length; i < end; i++) if (text.charCodeAt(i) === 10) first++;
+  return { body, fileLine: (bodyLine) => (kept[Math.min(first + bodyLine, kept.length - 1)] ?? 0) + 1 };
 }
 
 /** A step's trailing `<Check>` as the reader's slot. The inline scanner never
@@ -174,7 +195,7 @@ export function renderWikiHtml(
   // body text; with none left, none can reassemble. The sibling files' parsers
   // drop both from every value they read (`withoutSentinelDelimiters`).
   markdown = withoutSentinelDelimiters(markdown);
-  const body = readerBody(markdown, opts?.stripTitle);
+  const { body, fileLine } = readerBodyLines(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];
@@ -199,7 +220,9 @@ export function renderWikiHtml(
     chipPassCollected();
   }
   const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
-  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars, ...(keyMarks.middle ? { middle: keyMarks.middle } : {}) });
+  // The middle's lines are the body's: reported in the file's (`readerBodyLines`).
+  const middle = keyMarks?.middle && { ...keyMarks.middle, fromLine: fileLine(keyMarks.middle.fromLine - 1), toLine: fileLine(keyMarks.middle.toLine - 1) };
+  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars, ...(middle ? { middle } : {}) });
   const markKeys: string[] = [];
   // The chips parked one character early (`chipShifts`), moved after the inline pass.
   const shifted = new Set<number>();
