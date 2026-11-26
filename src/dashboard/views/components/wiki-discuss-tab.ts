@@ -106,6 +106,7 @@ import {
 } from "./wiki-discuss-state.ts";
 import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_POPOUT_ID, DISCUSS_START_OVER_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
+import { SEL_CARD_CLASS } from "./wiki-selection-menu-model.ts";
 
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
@@ -535,15 +536,25 @@ const lostPreview = new Map<string, DiscussEditPreview>();
 
 /** Paint the card; render the page again when it reads as written, keeping
  *  the reader on the tab when it is the one shown. An Apply from an inline
- *  card (`offPane`) opens the tab first: the render removes the card, so the
- *  outcome is shown on the pane's turn, as a pane Apply ends. */
+ *  card (`offPane`) ends on the tab whenever the card is not there to show
+ *  the outcome: always before a render (which removes the card), and with no
+ *  render when the reader closed or replaced the card while Apply ran. */
 function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean, offPane = false): void {
   paint();
-  if (!reload || !deps || deps.relPath() !== d.relPath) return;
+  if (!deps || deps.relPath() !== d.relPath) return;
+  if (!reload) {
+    if (offPane && !inlineCardShows(t.key)) showTurnInDiscuss(t.key);
+    return;
+  }
   if (offPane) openDiscussTab();
   const tab = document.querySelector<HTMLElement>(`[data-conntab="${DISCUSS_TAB}"]`);
   if (tab?.classList.contains("active")) afterApply = { page: `${deps.wiki()}\n${d.relPath}`, key: t.key };
   deps.reload?.();
+}
+
+/** Is an inline card in the article showing turn `key`? */
+function inlineCardShows(key: string): boolean {
+  return !!document.querySelector(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn="${CSS.escape(key)}"]`);
 }
 
 async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
@@ -583,7 +594,7 @@ async function applyEdit(key: string, offPane = false): Promise<void> {
     return;
   }
   t.edit = editAfterApplyRefusal(preview, r.status, r.body);
-  paint();
+  finishApply(d, t, false, offPane);
 }
 
 /** «Change the wording»: the follow-up box asks for another wording, ahead of

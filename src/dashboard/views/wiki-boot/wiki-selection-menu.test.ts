@@ -16,7 +16,9 @@
  *   batch 2): «Change the wording» opens it before filling its box, and an
  *   Apply that renders the page again (written, commit failed, or a lost answer
  *   the check finds written) opens it on the applied turn, which the render
- *   then focuses; an outcome with no render stays on the card.
+ *   then focuses; an outcome with no render stays on the card while the card
+ *   is there, else (closed or replaced while Apply ran) opens the tab on the
+ *   turn (fix round 2 batch 2, R2-4).
  * - «Where else»/«History» answers (fix round 1 batch 3, F7): one with a PR row
  *   the route is refreshing (`stale: true`) is asked again, any answer is
  *   reused only within `MENTIONS_FRESH_MS`, and a page render (an Apply's)
@@ -31,7 +33,9 @@
  *   painting and its classic stream not aborted; at the article's top with a
  *   note when the passage is gone. Not after an Apply of its own turn, not
  *   once closed, and not on another page (its classic stream aborts). A
- *   passage the page shows twice comes back under the copy it was on.
+ *   passage the page shows twice comes back under the copy it was on; a
+ *   rewritten paragraph whose words survive elsewhere sends it to the top
+ *   with the note, never under that other copy (fix round 2 batch 2, R2-5).
  * - Keyboard (F11): ⇧F10 or the ContextMenu key opens the menu with focus on
  *   its first item, ↑/↓ move, Escape closes with focus off the hidden menu,
  *   and the browser's `contextmenu` that may follow the gesture is prevented;
@@ -73,6 +77,8 @@ const switched: string[] = [];
 let reloads = 0;
 /** What the next Apply request is answered with. */
 let applyAnswer: () => Response = () => json({ ok: true, committed: true });
+/** While set, an Apply request (not a preview) waits for it: an Apply in flight. */
+let applyGate: Promise<void> | null = null;
 /** Answers for the preview requests that follow, before the default preview. */
 const checkAnswers: (() => Response)[] = [];
 const gateway = () => new Response("Bad Gateway", { status: 502 });
@@ -116,6 +122,7 @@ beforeAll(() => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       if (body.preview === true && checkAnswers.length) return checkAnswers.shift()!();
       if (body.preview === true) return json({ ok: true, before: EDIT_OLD, after: EDIT_NEW, beforeCtx: "", afterCtx: "", fromLine: 9, toLine: 9, baseHash: "b1", previewHash: "p1" });
+      if (applyGate) await applyGate;
       return applyAnswer();
     }
     if (url.startsWith("/api/wiki/mentions?")) {
@@ -908,6 +915,43 @@ test("a passage the page shows twice: the card comes back under the copy it was 
   }
 });
 
+// Fix round 2 batch 2, R2-5: the selected paragraph rewritten while its words
+// survive in another one. A copy whose surroundings differ is not the passage:
+// the card goes to the article's top with the note, not under that copy.
+test("R2-5: the selected paragraph rewritten, the phrase still in another one: the card at the article's top with the note, not under the other copy", async () => {
+  const PHRASE = "about the harbour timetable";
+  const filler = (rewrite: string | null) => {
+    const ps = Array.from({ length: 70 }, (_, i) => `<p>${i + 1 === 5 && rewrite !== null ? rewrite : `Filler paragraph ${i + 1} ${PHRASE} and the ferry berths.`}</p>`);
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${ps.join("")}<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+    setDiscussAgentEnabled(true);
+    setSelectionMenuPage({ mentions: true });
+  };
+  try {
+    filler(null);
+    await selectText(PHRASE, ".wiki-article p:nth-of-type(5)");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    push!("turn", { turnId: "turn-44", seq: 44, discussionId: "thread-1" });
+    await settle();
+    const card = document.querySelector("#articleWrap .wiki-sel-card[data-sel-turn]")!;
+    expect(card.previousElementSibling?.textContent).toBe(`Filler paragraph 5 ${PHRASE} and the ferry berths.`);
+    // The same page again: under paragraph 5 still.
+    filler(null);
+    await settle();
+    expect(card.previousElementSibling?.textContent).toBe(`Filler paragraph 5 ${PHRASE} and the ferry berths.`);
+    expect(card.querySelector(".wiki-sel-card-moved") === null).toBe(true);
+    // Paragraph 5 rewritten: the phrase is only in the others now.
+    filler("Paragraph 5 now covers the bus schedule instead.");
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(document.querySelector("#articleWrap .wiki-article")!.firstElementChild === card).toBe(true);
+    expect(card.previousElementSibling === null).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent).toBe("The passage this answers is no longer on the page as it was.");
+  } finally {
+    await endTurn();
+  }
+});
+
 const key = (target: EventTarget, k: string, shiftKey = false) => {
   const ev = new KeyboardEvent("keydown", { key: k, shiftKey, bubbles: true, cancelable: true });
   target.dispatchEvent(ev);
@@ -1123,4 +1167,82 @@ test("R2-3: an explainer's Explain is a card before its frame, the page kept", a
   expect(card.querySelector(".wiki-sel-card-sub")?.textContent ?? null).toBeNull();
   expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("CLASSIC for A passage in the frame");
   expect(document.querySelector("#articleWrap .wiki-article-head h1")?.textContent).toBe("Explainer");
+});
+
+// Fix round 2 batch 2, R2-4: an Apply pressed on the inline card whose outcome
+// renders nothing stays on the card only while the card is there to show it.
+// Closed (✕) or replaced by another card while Apply ran, the outcome opens the
+// Discuss tab on the turn; with the card still there, the tab stays closed.
+const STALE = "The page changed since the preview: preview it again.";
+const stale = () => json({ ok: false, stale: true, error: STALE }, 409);
+const tabActive = () => document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`)!.classList.contains("active");
+const paneEdit = (key: string | null) => document.querySelector(`#discussBody [data-turn-key="${key}"] .wiki-discuss-edit`);
+
+/** Apply pressed and held in flight; `meanwhile` runs; then the route answers `answer`. */
+async function applyHeld(card: Element, answer: () => Response, meanwhile: () => Promise<void>): Promise<void> {
+  let release!: () => void;
+  applyGate = new Promise<void>((r) => (release = r));
+  applyAnswer = answer;
+  try {
+    (card.querySelector("[data-discuss-apply]") as HTMLButtonElement).click();
+    await settle();
+    expect(card.querySelector("[data-discuss-apply]")?.textContent).toBe("Applying…");
+    await meanwhile();
+    release();
+    await settle();
+  } finally {
+    applyGate = null;
+    applyAnswer = () => json({ ok: true, committed: true });
+    checkAnswers.length = 0;
+  }
+}
+
+const closeCard = (card: Element) => async () => {
+  (card.querySelector("[data-sel-card-close]") as HTMLButtonElement).click();
+  expect(card.isConnected).toBe(false);
+};
+
+test("R2-4: an inline Apply refused after its card was closed: the Discuss tab shows the turn's refusal", async () => {
+  const card = await followCardWithEdit("turn-45", 45);
+  const key = card.getAttribute("data-sel-turn");
+  await applyHeld(card, stale, closeCard(card));
+  expect(document.querySelectorAll("#articleWrap .wiki-sel-card").length).toBe(0);
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(tabActive()).toBe(true);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("refused");
+  expect(paneEdit(key)?.textContent).toContain(STALE);
+});
+
+test("R2-4: an inline Apply refused after another card replaced it: the Discuss tab shows the turn's refusal", async () => {
+  const card = await followCardWithEdit("turn-46", 46);
+  const key = card.getAttribute("data-sel-turn");
+  await applyHeld(card, stale, async () => {
+    await whereElse();
+    expect(card.isConnected).toBe(false);
+  });
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(tabActive()).toBe(true);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("refused");
+  expect(paneEdit(key)?.textContent).toContain(STALE);
+});
+
+test("R2-4: an inline Apply whose answer was lost, unsettled after its card was closed: the Discuss tab, with «Check again»", async () => {
+  const card = await followCardWithEdit("turn-47", 47);
+  const key = card.getAttribute("data-sel-turn");
+  checkAnswers.push(gateway);
+  await applyHeld(card, gateway, closeCard(card));
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(tabActive()).toBe(true);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("failed");
+  expect(document.querySelector(`#discussBody [data-turn-key="${key}"] [data-discuss-repreview]`)?.textContent).toBe("Check again");
+});
+
+test("R2-4: an inline Apply refused with its card still there: the card shows the refusal, the tab stays closed", async () => {
+  const card = await followCardWithEdit("turn-48", 48);
+  await applyHeld(card, stale, async () => {});
+  expect(card.isConnected).toBe(true);
+  expect(switched).toEqual([]);
+  expect(tabActive()).toBe(false);
+  expect(card.querySelector(".wiki-discuss-edit")?.getAttribute("data-edit-state")).toBe("refused");
+  expect(card.querySelector(".wiki-discuss-edit")?.textContent).toContain(STALE);
 });

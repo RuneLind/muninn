@@ -97,6 +97,11 @@ const PLAIN = "plans/plain.mdx";
 const PLAIN_FIRST = "The plain wiki keeps its first sentence here.";
 const PLAIN_SECOND = "The second sentence follows it.";
 const PAGE_PLAIN = ["---", "title: Plain plan", "---", "", "# Plain plan", "", PLAIN_FIRST, "", PLAIN_SECOND, ""].join("\n");
+// Fix round 2 batch 2, R2-6: a page the reader serves but git does not track
+// yet, holding on one line a phrase a committed page holds too.
+const FRESH = "plans/fresh.mdx";
+const PIER = "The pier opens at six.";
+const PAGE_FRESH = ["---", "title: Fresh plan", "---", "", "# Fresh plan", "", "Not committed yet.", "", PIER, ""].join("\n");
 const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
 
 let server: ChildProcess | undefined;
@@ -178,6 +183,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, "sql/q3.csv"), `case,state\n${KEY},open\n`, "utf8");
   git("add", "-A");
   git("commit", "-q", "-m", "Ferry plan and Q-3 name the case");
+  // Left untracked: the grep behind «Where else» never reads it.
+  await writeFile(path.join(root, FRESH), PAGE_FRESH, "utf8");
   const bot = path.join(scratch, "bots", BOT);
   await mkdir(bot, { recursive: true });
   await writeFile(path.join(bot, "CLAUDE.md"), "# e2e selection bot\n\nCreated by e2e/wiki-selection-menu.spec.ts.\n");
@@ -258,14 +265,14 @@ const menu = (page: Page) => page.locator("#wikiSelMenu");
 
 async function openPage(page: Page, rel = REL, wiki = WIKI): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
-  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80", [CARDS]: "The line after the diagram.", [PLAIN]: PLAIN_SECOND };
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80", [CARDS]: "The line after the diagram.", [PLAIN]: PLAIN_SECOND, [FRESH]: PIER };
   await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
 /** The client rects of `text`'s first copy in the article (across inline
  *  markup's text nodes): its first and last line. */
-async function textBox(page: Page, text: string): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
-  return page.evaluate((text) => {
+async function textBox(page: Page, text: string, after = ""): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
+  return page.evaluate(({ text, after }) => {
     const article = document.querySelector("#articleWrap .wiki-article")!;
     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
     const nodes: { t: Text; at: number }[] = [];
@@ -274,7 +281,8 @@ async function textBox(page: Page, text: string): Promise<{ x0: number; y0: numb
       nodes.push({ t, at: all.length });
       all += t.data;
     }
-    const i = all.indexOf(text);
+    // The first copy after `after`'s first copy, when given.
+    const i = all.indexOf(text, after ? all.indexOf(after) : 0);
     if (i === -1) throw new Error(`no text ${text}`);
     const find = (n: number, end: boolean) => nodes.findLast((x) => (end ? x.at < n : x.at <= n))!;
     const s = find(i, false);
@@ -286,14 +294,14 @@ async function textBox(page: Page, text: string): Promise<{ x0: number; y0: numb
     const a = rects[0]!;
     const b = rects[rects.length - 1]!;
     return { x0: a.left + 1, y0: a.top + a.height / 2, x1: b.right - 1, y1: b.top + b.height / 2 };
-  }, text);
+  }, { text, after });
 }
 
 /** A real mouse drag over `text` (as the DOM holds it); the selection reads `selected`. */
-async function dragSelect(page: Page, text: string, selected = text): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
+async function dragSelect(page: Page, text: string, selected = text, after = ""): Promise<{ x0: number; y0: number; x1: number; y1: number }> {
   // A press inside a live selection drags it instead of starting a new one.
   await page.evaluate(() => getSelection()!.removeAllRanges());
-  const at = await textBox(page, text);
+  const at = await textBox(page, text, after);
   await page.mouse.move(at.x0, at.y0);
   await page.mouse.down();
   await page.mouse.move(at.x1, at.y1, { steps: 8 });
@@ -700,6 +708,51 @@ test("a render of the same page puts the open Explain card back under its passag
   expect(discussPosts.length).toBe(1);
 });
 
+test("fix round 2 R2-5: the selected paragraph rewritten on disk, its words still in another one: the card at the article's top with the note, not under that copy", async ({ page }) => {
+  const PHRASE = "about the harbour timetable";
+  const discussPosts: string[] = [];
+  // The turn never answers: the card stays open across the render.
+  await page.route("**/api/wiki/discuss", (route) => {
+    discussPosts.push(route.request().postData() ?? "");
+  });
+  try {
+    await openPage(page, LONG);
+    await dragSelect(page, PHRASE, PHRASE, "Filler paragraph 5 ");
+    await bar(page).locator("#wikiExplainBtn").click();
+    await expect.poll(() => discussPosts.length).toBe(1);
+    const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+    await expect(card).toBeVisible();
+    expect(await cardBetween(page, ".wiki-sel-card", "Filler paragraph 5 about", "Filler paragraph 6 about")).toBe(true);
+    await card.evaluate((el) => el.setAttribute("data-e2e-mark", "r25"));
+    await writeFile(path.join(root, LONG), PAGE_LONG.replace("Filler paragraph 5 about the harbour timetable and its berths.", "Paragraph 5 now covers the bus schedule instead."), "utf8");
+    const rendered = page.waitForResponse((r) => r.url().includes("/api/wiki/page?"));
+    await page.locator(`.wiki-list-item[data-relpath="${LONG}"]`).first().click();
+    await rendered;
+    await expect(page.locator("#articleWrap .wiki-article")).toContainText("Paragraph 5 now covers the bus schedule");
+    const back = page.locator('#articleWrap .wiki-sel-card[data-e2e-mark="r25"]');
+    await expect(back.locator(".wiki-sel-card-moved")).toHaveText("The passage this answers is no longer on the page as it was.");
+    expect(await back.evaluate((el) => el.parentElement?.classList.contains("wiki-article") && el.parentElement.firstElementChild === el)).toBe(true);
+    await shot(page, "16-card-moved-after-rewrite");
+  } finally {
+    await writeFile(path.join(root, LONG), PAGE_LONG, "utf8");
+  }
+});
+
+test("fix round 2 R2-6: «Where else» on a phrase of a page git does not track yet never says its source lacks the phrase", async ({ page }) => {
+  await openPage(page, FRESH);
+  await dragSelect(page, PIER);
+  const answered = page.waitForResponse((r) => r.url().includes("/api/wiki/mentions?"));
+  await bar(page).locator('[data-selact="where"]').click();
+  const body = (await (await answered).json()) as { files: { relPath: string }[]; kind: string | null };
+  // The real grep: the committed page only, never the untracked one on screen.
+  expect([body.kind, body.files.map((f) => f.relPath)]).toEqual([null, [OTHER]]);
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  await expect(card.locator(".wiki-sel-empty")).toContainText("This page is not listed, though the phrase was selected on it.");
+  await expect(card.locator(".wiki-sel-empty")).toContainText("a new page not yet in git");
+  await expect(card).not.toContainText("does not have the phrase");
+  await shot(page, "17-where-else-untracked-page");
+});
+
 test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on its first item; arrows move, Escape puts focus back on the page, Enter runs the item", async ({ page }) => {
   await openPage(page);
   // The night sentence's first character selected, extended with ⇧→ (a collapsed
@@ -997,6 +1050,38 @@ test("«Change the wording» on an inline card shows the Discuss tab, its box ho
   await expect(input).toHaveValue("Propose another wording for that edit, for the same passage: ");
   await expect(input).toBeFocused();
   await shot(page, "9-reword-from-card");
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("fix round 2 R2-4: Apply on an inline card, the card closed while Apply runs, the page changed meanwhile: the Discuss tab shows the turn's refusal", async ({ page }) => {
+  const card = await followCardWithEdit(page);
+  const key = await card.getAttribute("data-sel-turn");
+  // The real Apply request, held until the card is closed and the page has changed on disk.
+  let release: () => void = () => {};
+  const released = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/discuss/apply", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}") as { preview?: boolean };
+    if (body.preview !== true) await released;
+    await route.continue();
+  });
+  try {
+    await card.locator("[data-discuss-apply]").click();
+    await expect(card.locator("[data-discuss-apply]")).toHaveText("Applying…");
+    await card.locator("[data-sel-card-close]").click();
+    await expect(page.locator("#articleWrap .wiki-sel-card")).toHaveCount(0);
+    await writeFile(path.join(root, REL), PAGE.replace("## Oppfølging", "Changed while Apply ran.\n\n## Oppfølging"), "utf8");
+    const applied = page.waitForResponse((r) => r.url().includes("/api/wiki/discuss/apply") && r.request().postData()?.includes("previewHash") === true && !r.request().postData()?.includes('"preview":true'));
+    release();
+    const answer = await applied;
+    expect(answer.status()).toBe(409);
+    await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+    const refused = page.locator(`#discussBody [data-turn-key="${key}"] .wiki-discuss-edit[data-edit-state="refused"]`);
+    await expect(refused).toBeVisible();
+    await shot(page, "18-refused-after-card-closed");
+  } finally {
+    await page.unroute("**/api/wiki/discuss/apply");
+    await writeFile(path.join(root, REL), PAGE, "utf8");
+  }
   expect(await pageText()).toBe(PAGE);
 });
 

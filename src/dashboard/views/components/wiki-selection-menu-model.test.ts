@@ -252,13 +252,28 @@ describe("the mentions cards", () => {
   test("a free phrase found elsewhere but not in the open page's source: the page is said to be not listed, and why", () => {
     const opts = { currentRelPath: "plans/here.mdx", hrefFor: (r: string) => r };
     const phrase = body({ key: "the ferry leaves", kind: null });
-    expect(whereElseHtml(phrase, opts)).toContain(`This page is not listed: its source does not have the phrase as written. ${NOT_AS_WRITTEN}`);
+    expect(whereElseHtml(phrase, opts)).toContain(`This page is not listed, though the phrase was selected on it. ${NOT_AS_WRITTEN}`);
     // Listed, or a key, or a list cut short: no such line.
     expect(whereElseHtml(phrase, { ...opts, currentRelPath: "plans/a.mdx" })).not.toContain("This page is not listed");
     expect(whereElseHtml(body(), opts)).not.toContain("This page is not listed");
     expect(whereElseHtml(body({ kind: null, truncated: true }), opts)).not.toContain("This page is not listed");
     // No open page to speak of (off a page): no such line.
     expect(whereElseHtml(phrase, { ...opts, currentRelPath: null })).not.toContain("This page is not listed");
+  });
+  // Fix round 2 batch 2, R2-6: the route greps only tracked files, so an open
+  // page not yet committed (the wiki-committer runs daily) holds the phrase on
+  // one line and is still not listed. Neither text may blame the phrase then.
+  test("the open page is untracked and holds the phrase on one line: no text says its source lacks the phrase, both name a page not yet in git", () => {
+    const opts = { currentRelPath: "plans/new.mdx", hrefFor: (r: string) => r };
+    const elsewhere = whereElseHtml(body({ key: "the ferry leaves", kind: null }), opts);
+    const nowhere = whereElseHtml(body({ key: "the ferry leaves", kind: null, files: [], log: [], prs: [] }), opts);
+    for (const html of [elsewhere, nowhere]) {
+      expect(html).not.toContain("does not have the phrase");
+      expect(html).toContain("a new page not yet in git");
+    }
+    expect(elsewhere).toContain("This page is not listed");
+    // A recognised key keeps its plain line.
+    expect(whereElseHtml(body({ files: [], log: [] }), opts)).toContain("is named nowhere in the wiki's tracked files.");
   });
   test("«History»: commits and log lines newest first, escaped", () => {
     const doc = new Window().document;

@@ -289,9 +289,11 @@ function prsHtml(b: MentionsBody): string {
   );
 }
 
-/** Why a free phrase (no key kind) can be missed: the route greps each
- *  source line for it as written, and the selection is the rendered text. */
-export const NOT_AS_WRITTEN = "The search matches one source line at a time, as written: a phrase that wraps across lines, or carries formatting or a link in the source, is not found.";
+/** Why a free phrase (no key kind) can be missed: the route `git grep`s
+ *  each line of the tracked files for it as written (never an untracked one,
+ *  such as a page the wiki-committer has not committed yet), and the
+ *  selection is the rendered text. The answer cannot tell which reason holds. */
+export const NOT_AS_WRITTEN = "The search reads only the files git tracks in the wiki, one source line at a time, as written: a new page not yet in git, a phrase that wraps across lines, or one with formatting or a link in the source is not found.";
 
 /** «Where else»: each file that names the key, with its line numbers and its
  *  first line; the open page marked; then the log.md lines and the PRs. A page
@@ -326,7 +328,7 @@ export function whereElseHtml(b: MentionsBody, opts: { currentRelPath: string | 
     : "";
   const hereMissing =
     phrase && !b.truncated && opts.currentRelPath !== null && !b.files.some((f) => f.relPath === opts.currentRelPath)
-      ? `<div class="wiki-sel-empty">This page is not listed: its source does not have the phrase as written. ${esc(NOT_AS_WRITTEN)}</div>`
+      ? `<div class="wiki-sel-empty">This page is not listed, though the phrase was selected on it. ${esc(NOT_AS_WRITTEN)}</div>`
       : "";
   return `<div class="wiki-sel-meta">${esc(total)}${b.truncated ? " · not all listed" : ""}</div><ul class="wiki-sel-files">${rows}</ul>${hereMissing}${log}${prsHtml(b)}`;
 }

@@ -12,7 +12,7 @@
  * Invented content only.
  */
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -22,6 +22,7 @@ import { MENTION_UNANSWERED_RETRY_MS, __mentionPrsSettledForTest, __resetGhCheck
 import { testTempDir } from "../../test/temp-dir.ts";
 import { registerWikiMentionsRoute, type WikiMentionsRouteDeps } from "./wiki-mentions.ts";
 import { MENTIONS_MAX_COMMITS, MENTIONS_MAX_LINES, type MentionsBody } from "../../wiki/mentions.ts";
+import { whereElseHtml } from "../views/components/wiki-selection-menu-model.ts";
 
 const WIKI = "mentions-fixture";
 let root = "";
@@ -378,6 +379,27 @@ describe("GET /api/wiki/mentions", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as MentionsBody;
     expect([body.files, body.commits, body.log, body.prs]).toEqual([[], [], [], []]);
+  });
+
+  // Fix round 2 batch 2, R2-6: the reader serves a page before the
+  // wiki-committer commits it, and the grep never reads an untracked file. The
+  // «Where else» card for a phrase on that page must not blame the phrase.
+  test("a phrase on one line of an untracked page: the page is not listed, and the card says the search reads only tracked files", async () => {
+    const phrase = "the harbour pilot boards at dawn";
+    await put("plans/delta.md", `# Delta\n\nNote: ${phrase}.\n`);
+    await put("plans/fresh.md", `# Fresh\n\nToday ${phrase} again.\n`);
+    await git("add", "plans/delta.md");
+    await git("commit", "-q", "-m", "delta");
+    try {
+      const body = (await (await get(appWith().app, `wiki=${WIKI}&key=${encodeURIComponent(phrase)}`)).json()) as MentionsBody;
+      expect(body.kind).toBeNull();
+      expect(body.files.map((f) => f.relPath)).toEqual(["plans/delta.md"]);
+      const html = whereElseHtml(body, { currentRelPath: "plans/fresh.md", hrefFor: (r) => r });
+      expect(html).not.toContain("does not have the phrase");
+      expect(html).toContain("a new page not yet in git");
+    } finally {
+      await rm(path.join(root, "plans/fresh.md"));
+    }
   });
 
   test("the key is searched as a fixed string, never a pattern", async () => {

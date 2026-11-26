@@ -850,17 +850,16 @@ export function anchorRange(anchor: DiscussAnchor, article: Element): Range | nu
   return null;
 }
 
-/**
- * Find the passage `selection` in `article` as it is rendered now. White
- * space is ignored (a selection across list items reads with newlines the DOM
- * does not hold), so is text inside the reader's own controls. Both ends must
- * be there, in order, within the passage's length again: an edited passage
- * whose first words survive elsewhere does not count. When the text occurs
- * more than once, `context` (the turn's `before`/`after`) picks the copy whose
- * surroundings match it longest; a tie, or no context, is the first copy in
- * page order. Null when it is not in the page.
- */
-export function findPassage(article: Element, selection: string, context?: PassageContext | null): FoundPassage | null {
+/** Every copy of `selection` in `article` (see {@link findPassage}), each
+ *  turned into a range on demand and scored against a context on demand. */
+interface PassageCopies {
+  hits: { from: number; to: number }[];
+  range(h: { from: number; to: number }): Range;
+  /** How long each copy's surroundings match `before` (its end) and `after` (its start). */
+  scores(before: string, after: string): { b: number; a: number }[];
+}
+
+function passageCopies(article: Element, selection: string): PassageCopies | null {
   const want = compact(selection);
   if (!want) return null;
   const head = want.slice(0, KEY_CHARS);
@@ -904,45 +903,108 @@ export function findPassage(article: Element, selection: string, context?: Passa
     }
     return { node, offset: node.data.length };
   };
-  const rangeOf = (h: { from: number; to: number }): Range => {
-    const a = at(h.from);
-    const b = at(h.to - 1);
-    const r = doc.createRange();
-    r.setStart(a.node, a.offset);
-    r.setEnd(b.node, b.offset + 1);
-    return r;
-  };
-  let hit = hits[0]!;
-  const before = compact(context?.before ?? "");
-  const after = compact(context?.after ?? "");
-  if (hits.length > 1 && (before || after)) {
-    // Each copy's surroundings are read as the turn's `before`/`after` were
-    // (the context reading, which leaves out every reader-only element), not
-    // as the match above reads the page: a Fold's «Details» label or a caption
-    // next to the selected copy must not cost it the match. The article is
-    // read once, and each copy's surroundings are slices of that reading, at
-    // most `HANDOFF_CONTEXT_MAX` characters a side, as `before`/`after` are.
-    const reading = discussReading(article);
-    let best = 0;
-    for (const h of hits) {
+  return {
+    hits,
+    range(h) {
       const a = at(h.from);
       const b = at(h.to - 1);
-      const s = reading.at(a.node, a.offset);
-      const e = reading.at(b.node, b.offset + 1);
-      if (s === null || e === null) continue;
-      const around = {
-        before: compact(reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s)),
-        after: compact(reading.text.slice(e, e + HANDOFF_CONTEXT_MAX)),
-      };
-      const score = commonSuffix(around.before, before) + commonPrefix(around.after, after);
-      if (score > best) [best, hit] = [score, h];
-    }
-  }
-  const range = rangeOf(hit);
+      const r = doc.createRange();
+      r.setStart(a.node, a.offset);
+      r.setEnd(b.node, b.offset + 1);
+      return r;
+    },
+    scores(before, after) {
+      // Each copy's surroundings are read as the turn's `before`/`after` were
+      // (the context reading, which leaves out every reader-only element), not
+      // as the match above reads the page: a Fold's «Details» label or a caption
+      // next to the selected copy must not cost it the match. The article is
+      // read once, and each copy's surroundings are slices of that reading, at
+      // most `HANDOFF_CONTEXT_MAX` characters a side, as `before`/`after` are.
+      const reading = discussReading(article);
+      return hits.map((h) => {
+        const a = at(h.from);
+        const b = at(h.to - 1);
+        const s = reading.at(a.node, a.offset);
+        const e = reading.at(b.node, b.offset + 1);
+        if (s === null || e === null) return { b: 0, a: 0 };
+        return {
+          b: commonSuffix(compact(reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s)), before),
+          a: commonPrefix(compact(reading.text.slice(e, e + HANDOFF_CONTEXT_MAX)), after),
+        };
+      });
+    },
+  };
+}
+
+function foundAt(article: Element, range: Range): FoundPassage {
   const common = range.commonAncestorContainer;
   const holder = (common.nodeType === 1 ? (common as Element) : common.parentElement)?.closest(`${BLOCK}, details`) ?? null;
   const block = holder && holder.tagName !== "DETAILS" && article.contains(holder) && holder !== article ? holder : null;
   return { node: range.startContainer as Text, range, block };
+}
+
+/**
+ * Find the passage `selection` in `article` as it is rendered now. White
+ * space is ignored (a selection across list items reads with newlines the DOM
+ * does not hold), so is text inside the reader's own controls. Both ends must
+ * be there, in order, within the passage's length again: an edited passage
+ * whose first words survive elsewhere does not count. When the text occurs
+ * more than once, `context` (the turn's `before`/`after`) picks the copy whose
+ * surroundings match it longest; a tie, or no context, is the first copy in
+ * page order. Null when it is not in the page.
+ */
+export function findPassage(article: Element, selection: string, context?: PassageContext | null): FoundPassage | null {
+  const copies = passageCopies(article, selection);
+  if (!copies) return null;
+  let hit = copies.hits[0]!;
+  const before = compact(context?.before ?? "");
+  const after = compact(context?.after ?? "");
+  if (copies.hits.length > 1 && (before || after)) {
+    let best = 0;
+    copies.scores(before, after).forEach((sc, i) => {
+      if (sc.b + sc.a > best) [best, hit] = [sc.b + sc.a, copies.hits[i]!];
+    });
+  }
+  return foundAt(article, copies.range(hit));
+}
+
+/** How many characters (white space dropped) of each side of a passage's
+ *  held surroundings must still be next to a copy for it to be the same
+ *  passage (all of a side shorter than this). */
+export const SAME_PASSAGE_CHARS = 16;
+
+/**
+ * The passage where it was, or null: like {@link findPassage}, but a copy is
+ * taken only when its surroundings still match `context` on each side the
+ * context holds, at least {@link SAME_PASSAGE_CHARS} characters (or the whole
+ * side), the best of those copies winning, the first on a tie. A copy that
+ * only shares the words, with other text around it, is not the passage.
+ * Without context only a sole copy is taken: nothing tells several apart.
+ */
+export function findSamePassage(article: Element, selection: string, context: PassageContext | null): FoundPassage | null {
+  const copies = passageCopies(article, selection);
+  if (!copies) return null;
+  const before = compact(context?.before ?? "");
+  const after = compact(context?.after ?? "");
+  if (!before && !after) return copies.hits.length === 1 ? foundAt(article, copies.range(copies.hits[0]!)) : null;
+  let hit: { from: number; to: number } | null = null;
+  let best = -1;
+  copies.scores(before, after).forEach((sc, i) => {
+    const same = sc.b >= Math.min(before.length, SAME_PASSAGE_CHARS) && sc.a >= Math.min(after.length, SAME_PASSAGE_CHARS);
+    if (same && sc.b + sc.a > best) [best, hit] = [sc.b + sc.a, copies.hits[i]!];
+  });
+  return hit ? foundAt(article, copies.range(hit)) : null;
+}
+
+/** The surroundings of `range` in `root`, read as {@link findSamePassage}
+ *  scores a copy's (null when an end is not in a text node of `root`). */
+export function passageContextOf(root: Element, range: Range): PassageContext | null {
+  if (range.startContainer.nodeType !== 3 || range.endContainer.nodeType !== 3) return null;
+  const reading = discussReading(root);
+  const s = reading.at(range.startContainer as Text, range.startOffset);
+  const e = reading.at(range.endContainer as Text, range.endOffset);
+  if (s === null || e === null) return null;
+  return { before: reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s), after: reading.text.slice(e, e + HANDOFF_CONTEXT_MAX) };
 }
 
 // ── The article mark on the text a proposed edit replaces ────────────────

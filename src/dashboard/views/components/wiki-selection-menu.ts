@@ -31,8 +31,9 @@
  *
  * - An Explain or Oppfølging card still open when the same page renders again
  *   (an in-place reload, an Apply from the pane) is put back at its passage,
- *   found again by the Discuss chip's finder, or at the article's top with a
- *   note when the passage is gone; its classic stream keeps running meanwhile.
+ *   a copy whose surroundings still match the ones held (`findSamePassage`),
+ *   or at the article's top with a note when there is none; its classic
+ *   stream keeps running meanwhile.
  *   Not after an Apply of its own turn (its outcome is on the Discuss tab),
  *   and not on another page.
  * - Keyboard: the ContextMenu key or ⇧F10 opens the menu at the selection
@@ -55,7 +56,7 @@ import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
 import { discussAgentOn, discussSendBlocked, discussTurnForCard, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
-import { discussTurnBodyParts, findPassage, renderedPassageText, type PassageContext } from "./wiki-discuss-state.ts";
+import { discussTurnBodyParts, findSamePassage, passageContextOf, renderedPassageText, type PassageContext } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
   FOLLOW_QUESTION,
@@ -239,7 +240,9 @@ function reattachCard(): void {
   const a = article();
   // Not a page view (an Ask answer took the pane): kept for the page's next render.
   if (!wrap || !a) return;
-  const found = findPassage(wrap, h.passage, h.context);
+  // Only a copy with its own surroundings still around it: a copy of the
+  // words elsewhere, after the passage itself was rewritten, is not its place.
+  const found = findSamePassage(wrap, h.passage, h.context);
   h.el.querySelector(`.${MOVED_CLASS}`)?.remove();
   if (found) insertCard(h.el, found.range);
   else {
@@ -526,11 +529,13 @@ function insertCard(card: HTMLElement, range: Range | null): boolean {
 }
 
 /** Keep an answer card for a render of its page (`reattachCard`): its
- *  passage as the Discuss chip's finder reads the page. */
+ *  passage as the Discuss chip's finder reads the page, and its surroundings
+ *  (read off the article pane when the selection was no passage). */
 function holdCard(card: HTMLElement, s: Shown, context: PassageContext | null): void {
   const rel = deps?.relPath();
+  const wrap = document.getElementById("articleWrap");
   if (!deps || !rel || !s.range) return;
-  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: renderedPassageText(s.range), context };
+  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: renderedPassageText(s.range), context: context ?? (wrap ? passageContextOf(wrap, s.range) : null) };
 }
 
 /** The passage's surroundings, so a re-attached card finds its own copy (none on an explainer). */
