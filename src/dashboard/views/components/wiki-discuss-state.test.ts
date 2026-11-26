@@ -519,6 +519,21 @@ describe("holdPassage × findSamePassage: the re-attach state space", () => {
       expect(parent(findSamePassage(pane(html), h))).toBe(id);
     }
   });
+  test("copies matching every held character and equally near the held place: the first", () => {
+    const R = "Same words around it ";
+    const block = `${R.repeat(12)}${P} ${R.repeat(12)}`;
+    const src = pane(`<p id="a">${block}</p><p id="b">${block}</p>`);
+    const h = holdPassage(src, at(src, "#b"))!;
+    const cp = (x: string) => x.replace(/\s+/g, "").length;
+    // Copy one lies as far before the held place as copy two lies after it:
+    // copy two starts cp(P) + 13 × cp(R) after copy one.
+    const gap = cp(P) + 13 * cp(R);
+    expect(gap % 2).toBe(0);
+    const spacer = h.at - gap / 2 - cp(R.repeat(12));
+    expect(spacer).toBeGreaterThan(0);
+    const after = pane(`<p id="sp">${"x".repeat(spacer)}</p><p id="one">${R.repeat(12)}${P} ${R.repeat(13)}</p><p id="two">${P} ${R.repeat(12)}</p>`);
+    expect(parent(findSamePassage(after, h))).toBe("one");
+  });
   test("holdPassage: none for a diagram's text; a triple-click's element end is read as its text", () => {
     const svg = pane(`<p>Lead.</p><svg><text id="t">Node label</text></svg>`);
     const r = svg.ownerDocument.createRange();

@@ -1665,3 +1665,19 @@ test("class check S1×S3: a card hidden with its text comes back shown after a r
     setDiscussAgentEnabled(true);
   }
 });
+
+test("class check S2: the page renders again while an inline Apply runs: the card comes back with the turn, and the 409 shows on it", async () => {
+  const card = await followCardWithEdit("turn-66", 66);
+  await applyHeld(card, stale, async () => {
+    // An in-place render of the same page (not the Apply's own): the card goes back under its passage.
+    renderPage();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector("[data-discuss-apply]")?.textContent).toBe("Applying…");
+  });
+  expect(card.isConnected).toBe(true);
+  expect(switched).toEqual([]);
+  expect(tabActive()).toBe(false);
+  expect(card.querySelector(".wiki-discuss-edit")?.getAttribute("data-edit-state")).toBe("refused");
+  expect(card.querySelector(".wiki-discuss-edit")?.textContent).toContain(STALE);
+});
