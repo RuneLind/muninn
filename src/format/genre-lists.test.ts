@@ -565,10 +565,11 @@ describe("web: anchors on RunChecklist steps and Fold", () => {
   test("a repeat's suffix never takes an id another fold or step was given by its author", () => {
     const fold = (id: string) => `<Fold id="${id}" title="t">\n\nbody\n\n</Fold>`;
     expect(ids(formatWebHtml([fold("a"), fold("a"), fold("a-2")].join("\n\n")))).toEqual(["a", "a-3", "a-2"]);
-    expect(ids(formatWebHtml([fold("r1-2"), "<RunChecklist>\n\n- [ ] **R1** a\n- [ ] **R1** b\n\n</RunChecklist>"].join("\n\n")))).toEqual([
-      "r1-2",
+    // The authored id comes after the repeat that would have taken it.
+    expect(ids(formatWebHtml(["<RunChecklist>\n\n- [ ] **R1** a\n- [ ] **R1** b\n\n</RunChecklist>", fold("r1-2")].join("\n\n")))).toEqual([
       "r1",
       "r1-3",
+      "r1-2",
     ]);
   });
 

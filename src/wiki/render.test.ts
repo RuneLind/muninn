@@ -74,6 +74,11 @@ describe("renderWikiHtml", () => {
     expect(html).not.toContain("wiki-link-missing");
   });
 
+  test("a backslash anywhere in the target goes, as wikilinkTarget drops it", () => {
+    const html = renderWikiHtml("[[Claude\\ Code#a\\_b|x]]", resolve);
+    expect(html).toContain('data-relpath="concepts/Claude Code.md" data-anchor="a_b">x</a>');
+  });
+
   test("a wikilink with an empty #, or a bare [[#x]], carries no anchor", () => {
     const html = renderWikiHtml("[[Claude Code#]] og [[#x]]", resolve);
     expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md" class="wiki-link"');

@@ -233,6 +233,18 @@ describe("CaseBoard on the web", () => {
     expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["case-a", "case-a-2", "case-a-2-3", "case-a-2-2"]);
   });
 
+  test("block anchors are given after the case rows' final ids, not before", () => {
+    // Before the cases, a fold `case-a` would take `case-a-2` and push the second row's repeat on.
+    const fold = '<Fold id="case-a" title="F">\n\nx\n\n</Fold>';
+    const html = formatWebHtml(`<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />\n\n${fold}\n\n${fold}`, {
+      files: files({
+        "a.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+        "b.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+      }),
+    });
+    expect([...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])).toEqual(["case-a", "case-a-2", "case-a-3", "case-a-4"]);
+  });
+
   test("a second board repeating an earlier board's id gets the next free suffix", () => {
     const html = formatWebHtml('<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />', {
       files: files({
