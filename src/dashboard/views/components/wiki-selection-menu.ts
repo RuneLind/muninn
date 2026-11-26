@@ -31,9 +31,11 @@
  *
  * - An Explain or Oppfølging card still open when the same page renders again
  *   (an in-place reload, an Apply from the pane) is put back at its passage,
- *   a copy whose surroundings still match the ones held (`findSamePassage`),
- *   or at the article's top with a note when there is none; its classic
- *   stream keeps running meanwhile.
+ *   a copy whose surroundings, read in DOM order off the live range when the
+ *   card opened (`holdPassage`), still match (`findSamePassage`), or at the
+ *   article's top with a note when there is none; its classic stream keeps
+ *   running meanwhile. A card is shown exactly while the element its
+ *   selection ends in is laid out (`syncCardVisibility`).
  *   Not after an Apply of its own turn (its outcome is on the Discuss tab),
  *   and not on another page.
  * - Keyboard: the ContextMenu key or ⇧F10 opens the menu at the selection
@@ -56,7 +58,7 @@ import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
 import { discussAgentOn, discussSendBlocked, discussTurnForCard, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
-import { discussTurnBodyParts, findSamePassage, passageContextOf, renderedPassageText, type PassageContext } from "./wiki-discuss-state.ts";
+import { discussTurnBodyParts, findSamePassage, holdPassage, type HeldPassage } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
   FOLLOW_QUESTION,
@@ -65,6 +67,7 @@ import {
   SEL_MENU_ID,
   detectKeys,
   followHeading,
+  hasBox,
   historyHtml,
   inlineCardAnchor,
   inlineCardHtml,
@@ -133,8 +136,9 @@ let repositionQueued = false;
  *  under the bar (now hidden) and must not show the bar again. The next
  *  press clears it. */
 let actedOnPress = false;
-/** The open Explain / Oppfølging card, kept so a render of its page can put it back. */
-let held: { el: HTMLElement; wiki: string; relPath: string; passage: string; context: PassageContext | null } | null = null;
+/** The open Explain / Oppfølging card, kept so a render of its page can put
+ *  it back; `passage` null when the page's text has no copy of it to find. */
+let held: { el: HTMLElement; wiki: string; relPath: string; passage: HeldPassage | null } | null = null;
 let reattachQueued = false;
 /** Until then a `contextmenu` belongs to the keyboard gesture that opened the menu. */
 let keyMenuUntil = 0;
@@ -220,6 +224,11 @@ function cardHeld(card: Element): boolean {
 }
 
 const MOVED_CLASS = "wiki-sel-card-moved";
+/** The note on a card whose passage is not on the page as it was. */
+export const MOVED_GONE = "The passage this answers is no longer on the page as it was.";
+/** The note on a card whose passage is no text the page can be searched for
+ *  (a diagram's labels, a control): the page rendered again, so its place is lost. */
+export const MOVED_UNFINDABLE = "The page was drawn again, and the passage this answers is not text it can be searched for (a diagram or a control), so its place is not known.";
 
 /** The held card, taken out by a render of its page: back under its passage,
  *  or at the article's top saying the passage is gone. Dropped on another
@@ -242,12 +251,15 @@ function reattachCard(): void {
   if (!wrap || !a) return;
   // Only a copy with its own surroundings still around it: a copy of the
   // words elsewhere, after the passage itself was rewritten, is not its place.
-  const found = findSamePassage(wrap, h.passage, h.context);
+  const found = h.passage ? findSamePassage(wrap, h.passage) : null;
   h.el.querySelector(`.${MOVED_CLASS}`)?.remove();
   if (found) insertCard(h.el, found.range);
   else {
-    h.el.querySelector(".wiki-sel-card-head")?.insertAdjacentHTML("afterend", `<div class="wiki-discuss-hint ${MOVED_CLASS}" role="status">The passage this answers is no longer on the page as it was.</div>`);
+    const why = h.passage ? MOVED_GONE : MOVED_UNFINDABLE;
+    h.el.querySelector(".wiki-sel-card-head")?.insertAdjacentHTML("afterend", `<div class="wiki-discuss-hint ${MOVED_CLASS}" role="status">${why}</div>`);
+    cardAnchor.delete(h.el);
     a.insertBefore(h.el, a.firstChild);
+    h.el.style.display = "";
   }
   if (key) paintTurnCard(h.el);
   h.el.scrollIntoView?.({ block: "nearest" });
@@ -469,8 +481,8 @@ function activate(act: SelAction, key: string | null): void {
   switch (act) {
     case "explain":
       // No thread to take the turn (no wiki agent, an explainer): the classic answer, still in a card.
-      if (s.explainer || !discussAgentOn()) classicExplainCard(s, "", passageContext(s));
-      else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why, context) => classicExplainCard(s, why, context));
+      if (s.explainer || !discussAgentOn()) classicExplainCard(s, "");
+      else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why) => classicExplainCard(s, why));
       return;
     case "follow":
       threadCard("follow", s, FOLLOW_QUESTION, "edit");
@@ -514,6 +526,9 @@ function insertCard(card: HTMLElement, range: Range | null): boolean {
   // In the article pane but not in the page's text (its head): under that part.
   let outside: Node | null = endNode && wrap?.contains(endNode) && !a?.contains(endNode) ? endNode : null;
   while (outside && outside.parentNode !== wrap) outside = outside.parentNode;
+  // The text the card belongs to: shown exactly while it is (`syncCardVisibility`).
+  const textEl = endNode ? (endNode.nodeType === 1 ? (endNode as Element) : endNode.parentElement) : null;
+  let anchor: Element | null = textEl;
   if (range && a && endNode && a.contains(endNode)) {
     const at = inlineCardAnchor(range, a);
     at.parent.insertBefore(card, at.before);
@@ -521,52 +536,80 @@ function insertCard(card: HTMLElement, range: Range | null): boolean {
     wrap.insertBefore(card, outside.nextSibling);
   } else {
     const frame = document.querySelector(".wiki-explainer-frame");
+    anchor = range ? textEl : frame;
     if (frame?.parentNode) frame.parentNode.insertBefore(card, frame);
     else if (wrap) wrap.appendChild(card);
     else return false;
   }
+  if (anchor) cardAnchor.set(card, anchor);
+  else cardAnchor.delete(card);
+  syncCardVisibility();
   return true;
 }
 
+/** Where each card's text is: the element holding its selection's end, or an
+ *  explainer's frame. None for a card at the article's top. */
+const cardAnchor = new WeakMap<Element, Element>();
+
+/** A card is shown exactly while the text it belongs to is: graph mode hides
+ *  an explainer's frame but not the card before it, Overview hides a fence or
+ *  a head line the card sits beside, not in. Nothing changes where nothing is
+ *  laid out (a DOM without layout, the article pane itself hidden). */
+function syncCardVisibility(): void {
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap || !hasBox(wrap)) return;
+  for (const card of Array.from(wrap.querySelectorAll<HTMLElement>(`.${SEL_CARD_CLASS}`))) {
+    const at = cardAnchor.get(card);
+    const want = !at || (at.isConnected && hasBox(at)) ? "" : "none";
+    if (card.style.display !== want) card.style.display = want;
+  }
+}
+
+let visibilityQueued = false;
+function queueVisibility(): void {
+  if (visibilityQueued || !document.querySelector(`#articleWrap .${SEL_CARD_CLASS}`)) return;
+  visibilityQueued = true;
+  const run = () => {
+    visibilityQueued = false;
+    syncCardVisibility();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 0);
+}
+
 /** Keep an answer card for a render of its page (`reattachCard`): its
- *  passage as the Discuss chip's finder reads the page, and its surroundings
- *  (read off the article pane when the selection was no passage). */
-function holdCard(card: HTMLElement, s: Shown, context: PassageContext | null): void {
+ *  passage and the text around it, read off the article pane in DOM order by
+ *  the walk the re-attach searches with (`holdPassage`), whatever the
+ *  selection's shape (a triple-click's element boundary, DecisionLog items
+ *  shown newest first, the article head). */
+function holdCard(card: HTMLElement, s: Shown): void {
   const rel = deps?.relPath();
   const wrap = document.getElementById("articleWrap");
   if (!deps || !rel || !s.range) return;
-  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: renderedPassageText(s.range), context: context ?? (wrap ? passageContextOf(wrap, s.range) : null) };
-}
-
-/** The passage's surroundings, so a re-attached card finds its own copy (none on an explainer). */
-function passageContext(s: Shown): PassageContext | null {
-  const live = window.getSelection();
-  const p = live && s.range ? readSelectionPassage(live) : null;
-  return p ? { before: p.before, after: p.after } : null;
+  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: wrap ? holdPassage(wrap, s.range) : null };
 }
 
 /** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread.
  *  `fallback` runs instead of an error card, with the reason, when the
  *  selection is no passage or a turn of the discussion is still running. */
-function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit", fallback?: (why: string, context: PassageContext | null) => void): void {
+function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" | "edit", fallback?: (why: string) => void): void {
   const live = window.getSelection();
   const passage = live && s.range ? readSelectionPassage(live) : null;
   if (!passage) {
-    if (fallback) return fallback("outside the page's text, so not in its discussion", null);
+    if (fallback) return fallback("outside the page's text, so not in its discussion");
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">This selection cannot be sent as a passage of the page: select it again inside the page's text.</div>`, null));
     return;
   }
-  const context = { before: passage.before, after: passage.after };
   const p = { selection: passage.selection, before: passage.before, after: passage.after, atStart: passage.atStart, atEnd: passage.atEnd, heading: passage.heading, ...(passage.edge ? { edge: passage.edge } : {}) };
   const r = startInlineTurn(question, p, passage.range, mode);
-  if ("refused" in r && r.busy && fallback) return fallback("the page's discussion is busy, so not in it", context);
+  if ("refused" in r && r.busy && fallback) return fallback(r.busyWhy ?? "the page's discussion is busy, so not in it");
   if ("refused" in r) {
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
   const card = placeCard(s, inlineCardHtml(kind, "a turn in this page's discussion", "", r.key));
   if (!card) return;
-  holdCard(card, s, context);
+  holdCard(card, s);
   paintTurnCard(card);
 }
 
@@ -576,13 +619,13 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
  *  the discussion; `why` is its sub line (none without an agent). A
  *  card that leaves the page (replaced, closed, another page) aborts its
  *  stream; one a render of its page took out keeps it, for `reattachCard`. */
-function classicExplainCard(s: Shown, why: string, context: PassageContext | null): void {
+function classicExplainCard(s: Shown, why: string): void {
   const d = deps;
   if (!d) return;
   const card = placeCard(s, inlineCardHtml("explain", why, `<div class="wiki-discuss-status"><span class="spinner"></span><span>Searching the wiki…</span></div>`, null));
   const body = card?.querySelector(".wiki-sel-card-body");
   if (!card || !body) return;
-  holdCard(card, s, context);
+  holdCard(card, s);
   const live = () => card.isConnected || cardHeld(card);
   const ctl = new AbortController();
   let text = "";
@@ -724,13 +767,16 @@ function enterIsOurs(t: EventTarget | null): boolean {
 }
 
 /** Does a scroll of `t` move what the bar or menu is shown for? The document's,
- *  or a scroller holding the selection (`#articleWrap`, a code block it is in)
- *  or the explainer's frame; not the panes, nor a scroller beside the selection. */
+ *  or a scroller holding any part of the selection (`#articleWrap`, a code
+ *  block or a results table it starts, ends or runs through: the bar sits at
+ *  its end, the menu near its start) or the explainer's frame; not the panes,
+ *  nor a scroller beside the selection. */
 function scrollMovesSelection(t: EventTarget | null): boolean {
   if (!shown) return false;
   if (!(t instanceof Node) || t === document || t === document.documentElement || t === document.body) return true;
-  const at = shown.range ? shown.range.startContainer : document.querySelector(".wiki-explainer-frame");
-  return !!at && t.contains(at);
+  if (shown.range) return shown.range.intersectsNode(t);
+  const frame = document.querySelector(".wiki-explainer-frame");
+  return !!frame && t.contains(frame);
 }
 
 /** Wire the menu once, at boot. */
@@ -834,4 +880,10 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   );
   window.addEventListener("resize", queueReposition);
   onDiscussChange(paintTurnCards);
+  // A card follows its text's visibility: graph mode, a lens, a fold or a
+  // DecisionLog «Vis alle» each change a class or attribute in the pane.
+  const wrapEl = document.getElementById("articleWrap");
+  if (wrapEl && typeof MutationObserver === "function") {
+    new MutationObserver(queueVisibility).observe(wrapEl, { attributes: true, subtree: true, attributeFilter: ["class", "hidden", "open", "style"] });
+  }
 }

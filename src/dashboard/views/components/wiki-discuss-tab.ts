@@ -106,7 +106,7 @@ import {
 } from "./wiki-discuss-state.ts";
 import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_POPOUT_ID, DISCUSS_START_OVER_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
-import { SEL_CARD_CLASS } from "./wiki-selection-menu-model.ts";
+import { SEL_CARD_CLASS, hasBox } from "./wiki-selection-menu-model.ts";
 
 export { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_TAB };
 const DISCUSS_PATH = "/api/wiki/discuss";
@@ -312,13 +312,26 @@ export function askInDiscuss(question: string, passage: DiscussPassage | null, s
  * left as the reader set it), and the pane is not opened. The card draws it
  * through {@link discussTurnForCard} and repaints on {@link onDiscussChange}.
  * A refusal before the request says why, in the words the panel uses;
- * `busy` marks the one a caller may route elsewhere (a turn still running).
+ * `busy` marks the one a caller may route elsewhere (a turn still running, or
+ * an Apply with no outcome yet), `busyWhy` its words for that elsewhere.
+ * An Apply in flight, or one whose answer was lost and is not settled, holds
+ * off a new inline turn: that turn would become the current one, and the
+ * Apply's outcome (a refusal, «Check again») is offered on the current turn only.
  */
-export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string; busy?: true } {
+export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string; busy?: true; busyWhy?: string } {
   if (!enabled) return { refused: "This wiki has no wiki agent here." };
   if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
   if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended.", busy: true };
+  const unsettled = d ? currentTurn(d)?.edit : null;
+  if (unsettled?.state === "applying")
+    return { refused: "This page's discussion has an Apply still running: ask when it has ended.", busy: true, busyWhy: "an Apply in the page's discussion is still running, so not in it" };
+  if (unsettled?.retry === "lost")
+    return {
+      refused: "Apply's answer was lost, so whether it wrote is not known yet: settle it with «Check again» (or Discard) on its edit, in its card or the Discuss tab, then ask.",
+      busy: true,
+      busyWhy: "an Apply in the page's discussion has no known outcome yet, so not in it",
+    };
   const key = startTurn(question, passage, selected, null, { mode, openPane: false });
   return key ? { key } : { refused: "The turn could not start here." };
 }
@@ -552,9 +565,14 @@ function finishApply(d: DiscussionView, t: DiscussTurnView, reload: boolean, off
   deps.reload?.();
 }
 
-/** Is an inline card in the article showing turn `key`? */
+/** Is an inline card in the article showing turn `key`, where the reader can
+ *  see it? One hidden with its text (graph mode, a lens) shows nothing; where
+ *  nothing is laid out there is no telling, and it counts as shown. */
 function inlineCardShows(key: string): boolean {
-  return !!document.querySelector(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn="${CSS.escape(key)}"]`);
+  const card = document.querySelector(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn="${CSS.escape(key)}"]`);
+  if (!card) return false;
+  const wrap = document.getElementById("articleWrap");
+  return !wrap || !hasBox(wrap) || hasBox(card);
 }
 
 async function postApply(body: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {

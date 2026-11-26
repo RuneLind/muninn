@@ -14,7 +14,7 @@ import { escHtml as esc } from "./escape.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
-import { DISCUSS_TEXT_HIDDEN, discussReading } from "./wiki-discuss-text.ts";
+import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
 
 /** How a turn stands in the tab. `sending` until the route's `turn` event;
@@ -970,41 +970,114 @@ export function findPassage(article: Element, selection: string, context?: Passa
 
 /** How many characters (white space dropped) of each side of a passage's
  *  held surroundings must still be next to a copy for it to be the same
- *  passage (all of a side shorter than this). */
+ *  passage (a side shorter than this, which reached the root's edge, must
+ *  match whole and still reach it). */
 export const SAME_PASSAGE_CHARS = 16;
+/** How many characters (white space dropped) of each side are held: the
+ *  copy matching more of them wins. */
+export const SAME_PASSAGE_WINDOW = 200;
 
 /**
- * The passage where it was, or null: like {@link findPassage}, but a copy is
- * taken only when its surroundings still match `context` on each side the
- * context holds, at least {@link SAME_PASSAGE_CHARS} characters (or the whole
- * side), the best of those copies winning, the first on a tie. A copy that
- * only shares the words, with other text around it, is not the passage.
- * Without context only a sole copy is taken: nothing tells several apart.
+ * A passage as the selection menu holds it for a render of its page: its text
+ * as the copy walk reads it, and the text around that copy, read in DOM order
+ * by the same walk (white space dropped, the reader's additions and redraws
+ * left out), so a copy found after the render is scored exactly as the held
+ * one was read. Not the turn's `before`/`after`: those are in authored order
+ * (a DecisionLog newest first reads otherwise) and need text-node ends.
  */
-export function findSamePassage(article: Element, selection: string, context: PassageContext | null): FoundPassage | null {
-  const copies = passageCopies(article, selection);
-  if (!copies) return null;
-  const before = compact(context?.before ?? "");
-  const after = compact(context?.after ?? "");
-  if (!before && !after) return copies.hits.length === 1 ? foundAt(article, copies.range(copies.hits[0]!)) : null;
-  let hit: { from: number; to: number } | null = null;
-  let best = -1;
-  copies.scores(before, after).forEach((sc, i) => {
-    const same = sc.b >= Math.min(before.length, SAME_PASSAGE_CHARS) && sc.a >= Math.min(after.length, SAME_PASSAGE_CHARS);
-    if (same && sc.b + sc.a > best) [best, hit] = [sc.b + sc.a, copies.hits[i]!];
-  });
-  return hit ? foundAt(article, copies.range(hit)) : null;
+export interface HeldPassage {
+  passage: string;
+  before: string;
+  after: string;
+  /** Where the copy started in the walk's text: the tie-break. */
+  at: number;
 }
 
-/** The surroundings of `range` in `root`, read as {@link findSamePassage}
- *  scores a copy's (null when an end is not in a text node of `root`). */
-export function passageContextOf(root: Element, range: Range): PassageContext | null {
-  if (range.startContainer.nodeType !== 3 || range.endContainer.nodeType !== 3) return null;
-  const reading = discussReading(root);
-  const s = reading.at(range.startContainer as Text, range.startOffset);
-  const e = reading.at(range.endContainer as Text, range.endOffset);
+/** The text around copies, in DOM order: the copy walk's nodes, without
+ *  {@link DISCUSS_TEXT_SKIP} (reader additions, a mermaid fence the client
+ *  redraws), white space dropped. `at` maps a copy's boundary into it. */
+function domReading(root: Element): { text: string; at(node: Node, offset: number): number | null } {
+  const place = new Map<Node, { from: number; usable: boolean }>();
+  let text = "";
+  const walker = root.ownerDocument.createTreeWalker(root, 4);
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    const el = n.parentElement;
+    if (el?.closest(SKIP)) continue;
+    const usable = !el?.closest(DISCUSS_TEXT_SKIP);
+    place.set(n, { from: text.length, usable });
+    if (usable) text += compact(n.data);
+  }
+  return {
+    text,
+    at(node, offset) {
+      const p = place.get(node);
+      if (!p) return null;
+      return p.usable ? p.from + compact((node as Text).data.slice(0, offset)).length : p.from;
+    },
+  };
+}
+
+/**
+ * Hold the passage `range` selects in `root` (see {@link HeldPassage}): the
+ * copy the walk finds inside the range, so a range ending on an element
+ * boundary (a triple-click) is read as its text. Null when the walk finds no
+ * copy there (a diagram's or a control's text): such a card has no place to
+ * come back to.
+ */
+export function holdPassage(root: Element, range: Range): HeldPassage | null {
+  const passage = renderedPassageText(range);
+  const copies = passageCopies(root, passage);
+  if (!copies) return null;
+  // 0 = START_TO_START, 2 = END_TO_END, spelled out so the helper needs no global.
+  // A range a render has taken out of `root` is in another tree: it holds no copy.
+  const inside = (r: Range) => {
+    try {
+      return range.compareBoundaryPoints(0, r) <= 0 && range.compareBoundaryPoints(2, r) >= 0;
+    } catch {
+      return false;
+    }
+  };
+  const hit = copies.hits.find((h) => inside(copies.range(h)));
+  if (!hit) return null;
+  const reading = domReading(root);
+  const r = copies.range(hit);
+  const s = reading.at(r.startContainer, r.startOffset);
+  const e = reading.at(r.endContainer, r.endOffset);
   if (s === null || e === null) return null;
-  return { before: reading.text.slice(Math.max(0, s - HANDOFF_CONTEXT_MAX), s), after: reading.text.slice(e, e + HANDOFF_CONTEXT_MAX) };
+  return { passage, before: reading.text.slice(Math.max(0, s - SAME_PASSAGE_WINDOW), s), after: reading.text.slice(e, e + SAME_PASSAGE_WINDOW), at: hit.from };
+}
+
+/**
+ * The held passage where it was, or null. A copy counts when, on each side,
+ * at least {@link SAME_PASSAGE_CHARS} characters of its surroundings match the
+ * held ones, or the held side is shorter (it reached the root's edge) and the
+ * copy's side is that same text, whole. Of those copies the one matching the
+ * most held characters wins; on a tie the one nearest where the held copy
+ * started, then the first. A copy that only shares the words, with other text
+ * around it, is not the passage.
+ */
+export function findSamePassage(root: Element, held: HeldPassage): FoundPassage | null {
+  const copies = passageCopies(root, held.passage);
+  if (!copies) return null;
+  const reading = domReading(root);
+  const side = (got: string, want: string, n: number) => n >= SAME_PASSAGE_CHARS || (n === want.length && got.length === want.length);
+  let hit: { from: number; to: number } | null = null;
+  let best = -1;
+  let near = Infinity;
+  for (const h of copies.hits) {
+    const r = copies.range(h);
+    const s = reading.at(r.startContainer, r.startOffset);
+    const e = reading.at(r.endContainer, r.endOffset);
+    if (s === null || e === null) continue;
+    const before = reading.text.slice(Math.max(0, s - SAME_PASSAGE_WINDOW), s);
+    const after = reading.text.slice(e, e + SAME_PASSAGE_WINDOW);
+    const b = commonSuffix(before, held.before);
+    const a = commonPrefix(after, held.after);
+    if (!side(before, held.before, b) || !side(after, held.after, a)) continue;
+    const d = Math.abs(h.from - held.at);
+    if (b + a > best || (b + a === best && d < near)) [best, near, hit] = [b + a, d, h];
+  }
+  return hit ? foundAt(root, copies.range(hit)) : null;
 }
 
 // ── The article mark on the text a proposed edit replaces ────────────────

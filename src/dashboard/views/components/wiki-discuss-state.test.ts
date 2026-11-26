@@ -14,8 +14,9 @@ import {
   discussTurnHtml,
   discussTurnsHtml,
   findPassage,
+  SAME_PASSAGE_CHARS,
   findSamePassage,
-  passageContextOf,
+  holdPassage,
   newTurn,
   patchDiscussTurns,
   renderedPassageText,
@@ -277,58 +278,263 @@ function article(html: string) {
   return el as unknown as Element;
 }
 
-// Fix round 2 batch 2, R2-5: the selection menu's re-attach takes a copy only
-// when its own surroundings are still there, on each side the context holds.
-describe("findSamePassage", () => {
+// Class check (round 3) of the selection menu's re-attach: the held passage
+// and its surroundings are read off the live range in DOM order by the walk
+// the search uses (`holdPassage`), and a copy after a render is taken only
+// when its own surroundings are still there (`findSamePassage`). Every
+// selection shape × every change to the page, one cell each: S = back under
+// the same passage, N = none (the card goes to the top with the note), U = no
+// copy to hold at all (the card goes to the top with the «cannot be searched
+// for» note). Never under another copy.
+describe("holdPassage × findSamePassage: the re-attach state space", () => {
+  const LEAD = "Opening words of the filler sentence that runs on before";
+  const TAIL = "and then closing words that carry the filler sentence on.";
+  // The last word changed: within SAME_PASSAGE_CHARS of the passage's start.
+  const LEAD_NEAR = "Opening words of the filler sentence that runs on BEFORE";
+  // The first word changed: far outside SAME_PASSAGE_CHARS.
+  const LEAD_FAR = "OPENING words of the filler sentence that runs on before";
+  const OTHER_LEAD = "A wholly different lead-in wording precedes";
+  const OTHER_TAIL = "followed by an unrelated ending of its own.";
+  type Text3 = "keep" | "edit" | "remove";
+  interface Block {
+    lead: string;
+    tail: string;
+    text: Text3;
+    own: boolean;
+  }
+  interface Shape {
+    name: string;
+    block(b: Block): string;
+    select(root: Element): Range;
+    /** The page around the block: the article (default), or the whole pane for a head selection. */
+    pane?: boolean;
+  }
+  const own = (b: Block) => (b.own ? " data-own" : "");
+  const pick = (b: Block, keep: string, edit: string, remove: string) => (b.text === "keep" ? keep : b.text === "edit" ? edit : remove);
+  const ownEl = (root: Element) => root.querySelector("[data-own]")!;
+  const textIn = (el: Element, want: string): { t: Text; i: number } => {
+    const w = el.ownerDocument.createTreeWalker(el, 4);
+    for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) {
+      const i = t.data.indexOf(want);
+      if (i !== -1) return { t, i };
+    }
+    throw new Error(want);
+  };
+  const span = (root: Element, el: Element, from: string, to: string): Range => {
+    const a = textIn(el, from);
+    const r = root.ownerDocument.createRange();
+    r.setStart(a.t, a.i);
+    const scope = el.tagName === "LI" || el.tagName === "P" ? (el.parentElement ?? el) : el;
+    const b = textIn(scope.contains(el) && !el.textContent!.includes(to) ? scope : el, to);
+    r.setEnd(b.t, b.i + to.length);
+    return r;
+  };
+  const shapes: Shape[] = [
+    {
+      name: "within one text node",
+      block: (b) => `<p${own(b)}>${b.lead} ${pick(b, "the harbour timetable", "the harbour schedule", "nothing of the sort")} ${b.tail}</p>`,
+      select: (root) => span(root, ownEl(root), "the harbour", "timetable"),
+    },
+    {
+      name: "across inline elements",
+      block: (b) => `<p${own(b)}>${b.lead} <strong>the night</strong> ${pick(b, "route of", "path of", "nothing")} <em>the ferry</em> ${b.tail}</p>`,
+      select: (root) => span(root, ownEl(root), "the night", "the ferry"),
+    },
+    {
+      name: "across blocks",
+      block: (b) => `<p${own(b)}>${b.lead} first block ${pick(b, "ends here.", "stops here.", "is gone.")}</p><p>Second block starts ${b.tail}</p>`,
+      select: (root) => span(root, ownEl(root), "first block", "Second block starts"),
+    },
+    {
+      name: "triple-click: ends at (next block, 0)",
+      block: (b) => `<p>${b.lead}</p><p${own(b)}>${pick(b, "Whole paragraph passage words.", "Whole paragraph passage changed.", "Something else entirely.")}</p><p>${b.tail}</p>`,
+      select: (root) => {
+        const p = ownEl(root);
+        const r = root.ownerDocument.createRange();
+        r.setStart(p.firstChild!, 0);
+        r.setEnd(p.nextElementSibling!, 0);
+        return r;
+      },
+    },
+    {
+      name: "triple-click: a bare run ending at (container, k)",
+      block: (b) => `<div${own(b)}>${b.lead}<br><br>${pick(b, "Bare run passage words.", "Bare run passage changed.", "Something else entirely.")}<br><br>${b.tail}</div>`,
+      select: (root) => {
+        const d = ownEl(root);
+        const r = root.ownerDocument.createRange();
+        r.setStart(d.childNodes[3]!, 0);
+        r.setEnd(d, 4);
+        return r;
+      },
+    },
+    {
+      name: "across two DecisionLog items shown newest first",
+      block: (b) =>
+        `<p>${b.lead}</p><section class="decision-log"><ul class="dl-list">` +
+        `<li data-dl-order="1"${own(b)}>D2 — Keep the ${pick(b, "night", "day", "bus")} route as it is.</li>` +
+        `<li data-dl-order="0">D1 — Use the flat file for berths.</li></ul></section><p>${b.tail}</p>`,
+      select: (root) => {
+        const li = ownEl(root);
+        const a = textIn(li, "Keep the");
+        const z = textIn(li.nextElementSibling!, "Use the flat");
+        const r = root.ownerDocument.createRange();
+        r.setStart(a.t, a.i);
+        r.setEnd(z.t, z.i + "Use the flat".length);
+        return r;
+      },
+    },
+    {
+      name: "the head's title, which the body repeats (triple-click)",
+      pane: true,
+      block: (b) =>
+        `<div class="wiki-article-head"><div class="crumbs">${b.lead}</div><h1${own(b)}>${pick(b, "Ferry timetable plan", "Ferry schedule plan", "Harbour notes")}</h1><div class="meta">${b.tail}</div></div>`,
+      select: (root) => {
+        const h = ownEl(root);
+        const r = root.ownerDocument.createRange();
+        r.setStart(h.firstChild!, 0);
+        r.setEnd(h.nextElementSibling!, 0);
+        return r;
+      },
+    },
+    {
+      name: "inside a table cell",
+      block: (b) => `<p>${b.lead}</p><table><tbody><tr><td>Row label</td><td${own(b)}>${pick(b, "cell passage text", "cell passage changed", "other cell words")}</td></tr></tbody></table><p>${b.tail}</p>`,
+      select: (root) => span(root, ownEl(root), "cell passage", "text"),
+    },
+    {
+      name: "a mermaid label (an svg's text)",
+      block: (b) => `<p>${b.lead}</p><svg><text${own(b)}>${pick(b, "Node label text", "Node label changed", "Other node")}</text></svg><p>${b.tail}</p>`,
+      select: (root) => span(root, ownEl(root), "Node label", "text"),
+    },
+  ];
+  type Change = "unchanged" | "white space only" | "passage edited" | "passage removed" | "a copy elsewhere, original intact" | "a copy elsewhere, original removed" | "an edit within 16 characters" | "an edit beyond 16 characters";
+  const changes: Change[] = ["unchanged", "white space only", "passage edited", "passage removed", "a copy elsewhere, original intact", "a copy elsewhere, original removed", "an edit within 16 characters", "an edit beyond 16 characters"];
+  const expected: Record<Change, "S" | "N"> = {
+    unchanged: "S",
+    "white space only": "S",
+    "passage edited": "N",
+    "passage removed": "N",
+    "a copy elsewhere, original intact": "S",
+    "a copy elsewhere, original removed": "N",
+    "an edit within 16 characters": "N",
+    "an edit beyond 16 characters": "S",
+  };
+  function page(shape: Shape, change: Change): Element {
+    const text: Text3 = change === "passage edited" ? "edit" : change === "passage removed" || change === "a copy elsewhere, original removed" ? "remove" : "keep";
+    const lead = change === "an edit within 16 characters" ? LEAD_NEAR : change === "an edit beyond 16 characters" ? LEAD_FAR : LEAD;
+    const mine = shape.block({ lead, tail: TAIL, text, own: true });
+    const copy = change.startsWith("a copy") ? shape.block({ lead: OTHER_LEAD, tail: OTHER_TAIL, text: "keep", own: false }) : "";
+    // The head's title is always repeated in the body, with other words around it.
+    const repeat = shape.pane ? `<p>The body says Ferry timetable plan once more, in passing.</p>` : "";
+    const body = `<h2>Section</h2><p>Opening paragraph of the page.</p>${shape.pane ? "" : mine}<p>Separator paragraph between the blocks.</p>${repeat}${shape.pane ? copy.replace(/<\/?div[^>]*>/g, "") : copy}<p>Closing paragraph of the page.</p>`;
+    const win = new Window();
+    const root = win.document.createElement("div");
+    root.id = "articleWrap";
+    root.innerHTML = shape.pane ? `${mine}<div class="wiki-article">${body}</div>` : `<div class="wiki-article">${body}</div>`;
+    win.document.body.appendChild(root);
+    if (change === "white space only") {
+      const w = win.document.createTreeWalker(root, 4);
+      for (let t = w.nextNode() as Text | null; t; t = w.nextNode() as Text | null) t.data = `\n  ${t.data.replace(/ /g, " \n   ")}  \n`;
+    }
+    return root as unknown as Element;
+  }
+  function outcome(shape: Shape, change: Change): "S" | "N" | "U" | "OTHER" {
+    const before = page(shape, "unchanged");
+    const held = holdPassage(before, shape.select(before));
+    if (!held) return "U";
+    const after = page(shape, change);
+    const f = findSamePassage(after, held);
+    if (!f) return "N";
+    return f.range.startContainer.parentElement?.closest("[data-own]") ? "S" : "OTHER";
+  }
+  for (const shape of shapes) {
+    for (const change of changes) {
+      const want = shape.name.startsWith("a mermaid") ? "U" : expected[change];
+      test(`${shape.name} × ${change}: ${want}`, () => {
+        expect(outcome(shape, change)).toBe(want);
+      });
+    }
+  }
+
   const P = "the harbour timetable";
-  const ctx = { before: "The first lines of the long page say that", after: "is printed on the quay every single morning." };
+  const at = (root: Element, el: string, from = P) => {
+    const t = textIn(root.querySelector(el)!, from);
+    const r = root.ownerDocument.createRange();
+    r.setStart(t.t, t.i);
+    r.setEnd(t.t, t.i + from.length);
+    return r;
+  };
   const parent = (f: ReturnType<typeof findSamePassage>) => (f ? (f.range.startContainer.parentElement?.id ?? "") : null);
-  test("the copy with both sides still around it; not one with only the words", () => {
-    const a = article(`<p id="other">Elsewhere we read ${P} and more.</p><p id="own">${ctx.before} ${P} ${ctx.after}</p>`);
-    expect(parent(findSamePassage(a, P, ctx))).toBe("own");
-    // findPassage keeps taking a copy where findSamePassage takes none.
-    const b = article(`<p id="other">Elsewhere we read ${P} and more.</p>`);
-    expect(findSamePassage(b, P, ctx)).toBeNull();
-    expect(findPassage(b, P, ctx)).not.toBeNull();
+  const pane = (html: string) => article(html);
+  test("SAME_PASSAGE_CHARS on each side, at its boundary: 16 matching characters keep the copy, 15 do not", () => {
+    // Twenty compact characters on each side of the passage; one of them changed
+    // at distance k (k = 1 is the character next to the passage).
+    const B = "abcdefghijklmnopqrst";
+    const A = "ABCDEFGHIJKLMNOPQRST";
+    const at16 = (s: string, k: number, before: boolean) => {
+      const i = before ? s.length - k : k - 1;
+      return s.slice(0, i) + "#" + s.slice(i + 1);
+    };
+    const src = pane(`<p id="own">${B} ${P} ${A}</p>`);
+    const h = holdPassage(src, at(src, "#own"))!;
+    expect(h.before.endsWith(B)).toBe(true);
+    expect(h.after.startsWith(A)).toBe(true);
+    for (const [k, want] of [[16, null], [17, "own"]] as const) {
+      expect(parent(findSamePassage(pane(`<p id="own">${at16(B, k, true)} ${P} ${A}</p>`), h))).toBe(want);
+      expect(parent(findSamePassage(pane(`<p id="own">${B} ${P} ${at16(A, k, false)}</p>`), h))).toBe(want);
+    }
+    expect(SAME_PASSAGE_CHARS).toBe(16);
   });
-  test("one side matching is not enough, whichever side", () => {
-    const beforeOnly = article(`<p>${ctx.before} ${P} was rewritten to say something else entirely.</p>`);
-    const afterOnly = article(`<p>A wholly rewritten opening now precedes ${P} ${ctx.after}</p>`);
-    expect(findSamePassage(beforeOnly, P, ctx)).toBeNull();
-    expect(findSamePassage(afterOnly, P, ctx)).toBeNull();
+  test("a side that reached the root's edge must match whole and still reach it", () => {
+    const src = pane(`<p id="own">Intro ${P} and a long tail that goes on and on.</p>`);
+    const h = holdPassage(src, at(src, "#own"))!;
+    expect(h.before).toBe("Intro");
+    expect(parent(findSamePassage(pane(`<p id="own">Intro ${P} and a long tail that goes on and on.</p>`), h))).toBe("own");
+    // The same five characters before it, but no longer at the edge.
+    expect(findSamePassage(pane(`<p>Earlier text.</p><p id="own">Intro ${P} and a long tail that goes on and on.</p>`), h)).toBeNull();
+    expect(findSamePassage(pane(`<p id="own">Outro ${P} and a long tail that goes on and on.</p>`), h)).toBeNull();
   });
-  test("a side needs SAME_PASSAGE_CHARS of its text (white space dropped), not all of it", () => {
-    // After: "is printed on the quay" (18 characters) kept, the rest changed.
-    const far = article(`<p>${ctx.before} ${P} is printed on the quay at noon only.</p>`);
-    expect(findSamePassage(far, P, ctx)).not.toBeNull();
-    // After: "is printed" (9 characters) kept.
-    const near = article(`<p>${ctx.before} ${P} is printed nowhere now.</p>`);
-    expect(findSamePassage(near, P, ctx)).toBeNull();
+  test("two copies both qualifying: the one matching more held characters wins, even when it comes later or lies farther from the held place", () => {
+    const shared = "the shared twenty-char";
+    const near = `<p id="near">Unrelated ${shared} ${P} after twenty shared Unrelated.</p>`;
+    const mine = `<p id="own">The original long lead ${shared} ${P} after twenty shared and its long tail.</p>`;
+    const src = pane(near + mine);
+    const h = holdPassage(src, at(src, "#own"))!;
+    expect(parent(findSamePassage(pane(near + mine), h))).toBe("own");
+    // The lesser copy alone still qualifies (16+ characters each side): it is a real competitor.
+    expect(parent(findSamePassage(pane(near), h))).toBe("near");
+    // Held with its copy first; after the render the lesser copy sits at that place
+    // and the original far below: the original still wins on what it matches.
+    const first = pane(mine);
+    const h2 = holdPassage(first, at(first, "#own"))!;
+    const filler = `<p>${"Many filler words push the original far down the page. ".repeat(20)}</p>`;
+    expect(parent(findSamePassage(pane(near + filler + mine), h2))).toBe("own");
   });
-  test("a side shorter than SAME_PASSAGE_CHARS must match whole; an empty side is not checked", () => {
-    const a = article(`<p id="own">Intro ${P} ${ctx.after}</p>`);
-    expect(parent(findSamePassage(a, P, { before: "Intro", after: ctx.after }))).toBe("own");
-    expect(findSamePassage(a, P, { before: "Outro", after: ctx.after })).toBeNull();
-    expect(parent(findSamePassage(a, P, { before: "", after: ctx.after }))).toBe("own");
+  test("copies matching every held character: the one nearest where the held copy started", () => {
+    const filler = "Same words around it ".repeat(12);
+    const html = `<p id="a">${filler}${P} ${filler}</p><p id="b">${filler}${P} ${filler}</p><p id="c">${filler}${P} ${filler}</p>`;
+    for (const id of ["a", "b", "c"]) {
+      const src = pane(html);
+      const h = holdPassage(src, at(src, `#${id}`))!;
+      expect(parent(findSamePassage(pane(html), h))).toBe(id);
+    }
   });
-  test("two copies matching equally: the first in page order", () => {
-    const a = article(`<p id="one">Intro ${P} tail.</p><p id="two">Intro ${P} tail.</p>`);
-    expect(parent(findSamePassage(a, P, { before: "Intro ", after: " tail." }))).toBe("one");
+  test("holdPassage: none for a diagram's text; a triple-click's element end is read as its text", () => {
+    const svg = pane(`<p>Lead.</p><svg><text id="t">Node label</text></svg>`);
+    const r = svg.ownerDocument.createRange();
+    r.selectNodeContents(svg.querySelector("#t")!);
+    expect(holdPassage(svg, r)).toBeNull();
+    const tc = pane(`<p id="own">Whole paragraph.</p><p id="next">Next one.</p>`);
+    const t = tc.ownerDocument.createRange();
+    t.setStart(tc.querySelector("#own")!.firstChild!, 0);
+    t.setEnd(tc.querySelector("#next")!, 0);
+    expect(holdPassage(tc, t)).toMatchObject({ passage: "Whole paragraph.", after: "Nextone." });
   });
-  test("without context: a sole copy only", () => {
-    expect(parent(findSamePassage(article(`<p id="own">Read ${P} here.</p>`), P, null))).toBe("own");
-    expect(findSamePassage(article(`<p>Read ${P} here.</p><p>And ${P} again.</p>`), P, null)).toBeNull();
-  });
-  test("passageContextOf reads a range's surroundings so findSamePassage picks its copy again", () => {
-    const a = article(`<p id="one">First: ${P} at nine on weekdays.</p><p id="two">Second: ${P} at ten on Sundays.</p>`);
-    const two = a.querySelector("#two")!.firstChild as Text;
-    const r = a.ownerDocument.createRange();
-    r.setStart(two, two.data.indexOf(P));
-    r.setEnd(two, two.data.indexOf(P) + P.length);
-    const c = passageContextOf(a, r);
-    expect(c?.before?.endsWith("Second: ")).toBe(true);
-    expect(c?.after?.startsWith(" at ten on Sundays.")).toBe(true);
-    expect(parent(findSamePassage(a, P, c))).toBe("two");
+  test("the surroundings leave out what the client redraws: a mermaid fence drawn or not reads the same", () => {
+    const drawn = pane(`<p id="own">Lead ${P} tail.</p><div class="mermaid"><svg><text>A</text></svg></div><p>After the diagram comes this.</p>`);
+    const h = holdPassage(drawn, at(drawn, "#own"))!;
+    const undrawn = pane(`<p id="own">Lead ${P} tail.</p><pre><code class="language-mermaid">graph LR; A --> B</code></pre><p>After the diagram comes this.</p>`);
+    expect(parent(findSamePassage(undrawn, h))).toBe("own");
   });
 });
 

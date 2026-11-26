@@ -20,6 +20,12 @@ import type { MentionsBody } from "../../../wiki/mentions.ts";
 export const SEL_BAR_ID = "wikiSelBar";
 export const SEL_MENU_ID = "wikiSelMenu";
 export const SEL_CARD_CLASS = "wiki-sel-card";
+
+/** Is `el` laid out with a box (not under a `display: none`)? Every element
+ *  answers false where nothing is laid out: a caller checks its root first. */
+export function hasBox(el: Element): boolean {
+  return Array.from(el.getClientRects()).some((r) => r.width > 0 || r.height > 0);
+}
 /** The bar keeps the ids the breadcrumb's selection-gated buttons had: the
  *  read-only guards and every spec that drives a selection key on them. */
 export const SEL_EXPLAIN_BTN_ID = "wikiExplainBtn";

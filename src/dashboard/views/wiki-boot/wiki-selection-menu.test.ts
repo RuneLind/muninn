@@ -57,7 +57,7 @@ import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { MENTIONS_FRESH_MS, initSelectionMenu, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -1276,6 +1276,9 @@ test("R2-4: an inline Apply whose answer was lost, unsettled after its card was 
   expect(tabActive()).toBe(true);
   expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("failed");
   expect(document.querySelector(`#discussBody [data-turn-key="${key}"] [data-discuss-repreview]`)?.textContent).toBe("Check again");
+  // Settled by the reader (Discard): later tests start inline turns again.
+  (document.querySelector(`#discussBody [data-turn-key="${key}"] [data-discuss-discard]`) as HTMLButtonElement).click();
+  expect(paneEdit(key) === null || paneEdit(key)?.getAttribute("data-edit-state") === "discarded").toBe(true);
 });
 
 test("R2-4: an inline Apply refused with its card still there: the card shows the refusal, the tab stays closed", async () => {
@@ -1286,4 +1289,379 @@ test("R2-4: an inline Apply refused with its card still there: the card shows th
   expect(tabActive()).toBe(false);
   expect(card.querySelector(".wiki-discuss-edit")?.getAttribute("data-edit-state")).toBe("refused");
   expect(card.querySelector(".wiki-discuss-edit")?.textContent).toContain(STALE);
+});
+
+// ── Class check (round 3) ───────────────────────────────────────────────
+// Surface 1: where a held card goes back. The context is read off the live
+// range in DOM order (`holdPassage`), so a triple-click's element-boundary
+// end and DecisionLog items shown newest first come back on an unchanged page.
+
+test("class check S1: a triple-clicked head title the body repeats comes back under the head on an unchanged page", async () => {
+  const HEAD = "The ferry plan head";
+  const render = () => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article-head"><h1>${HEAD}</h1><div class="wiki-meta">Plan · updated today</div></div><div class="wiki-article"><h2>Brief</h2>${HEAD} names this page.<br><br>${NIGHT}</div>`;
+    setDiscussAgentEnabled(true);
+    setSelectionMenuPage({ mentions: true });
+  };
+  explainManual = true;
+  try {
+    render();
+    // Where a triple-click ends: on the next block's start, not in the title's text.
+    const h1 = document.querySelector(".wiki-article-head h1")!;
+    const r = document.createRange();
+    r.setStart(h1.firstChild!, 0);
+    r.setEnd(h1.nextElementSibling!, 0);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+    await settle();
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+    expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+    render();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent ?? null).toBeNull();
+    explainCtl?.close();
+  } finally {
+    explainManual = false;
+  }
+});
+
+test("class check S1: a selection across two DecisionLog items shown newest first comes back in its item on an unchanged page", async () => {
+  const render = () => {
+    document.getElementById("articleWrap")!.innerHTML =
+      `<div class="wiki-article"><h2>Brief</h2><section class="decision-log"><ul class="dl-list">` +
+      `<li class="dl-item" id="d2" data-dl-order="1" data-dl-sep=" — ">D2 Keep the night route.</li>` +
+      `<li class="dl-item" id="d1" data-dl-order="0" data-dl-sep=" — ">D1 Use the flat file. The berth list stays in one place.</li>` +
+      `</ul></section><p>${NIGHT}</p></div>`;
+    setDiscussAgentEnabled(true);
+    setSelectionMenuPage({ mentions: true });
+  };
+  try {
+    render();
+    const d2 = document.getElementById("d2")!.firstChild as Text;
+    const d1 = document.getElementById("d1")!.firstChild as Text;
+    const r = document.createRange();
+    r.setStart(d2, d2.data.indexOf("Keep the night"));
+    r.setEnd(d1, d1.data.indexOf("Use the flat") + "Use the flat".length);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+    await settle();
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    push!("turn", { turnId: "turn-60", seq: 60, discussionId: "thread-1" });
+    await settle();
+    const card = document.querySelector("#articleWrap .wiki-sel-card[data-sel-turn]")!;
+    expect(card.parentElement?.id).toBe("d1");
+    render();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.parentElement?.id).toBe("d1");
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent ?? null).toBeNull();
+  } finally {
+    await endTurn();
+  }
+});
+
+test("class check S1: a selection with no text the page can be searched for (a diagram label) says so when the page renders again", async () => {
+  const render = () => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2><p>${NIGHT}</p><svg><text id="lbl">Berth node label</text></svg><p>The morning route adds a stop.</p></div>`;
+    setDiscussAgentEnabled(false);
+    setSelectionMenuPage({ mentions: true });
+  };
+  explainManual = true;
+  try {
+    render();
+    await selectText("Berth node label", "#lbl");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+    expect(card).toBeTruthy();
+    render();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(document.querySelector("#articleWrap .wiki-article")!.firstElementChild === card).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent).toBe(MOVED_UNFINDABLE);
+    explainCtl?.close();
+  } finally {
+    explainManual = false;
+    setDiscussAgentEnabled(true);
+  }
+});
+
+// Surface 2: an inline Apply's outcome is always seen. A new inline turn is
+// held off while an Apply runs or its lost answer is not settled: it would
+// become the current turn and hide that outcome («A newer turn follows»).
+
+test("class check S2: Explain from another selection while an inline Apply runs is the classic card, naming the Apply; the 409 then shows on the Discuss tab", async () => {
+  const card = await followCardWithEdit("turn-61", 61);
+  const key = card.getAttribute("data-sel-turn");
+  const before = posts.length;
+  explainAsked.length = 0;
+  await applyHeld(card, stale, async () => {
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(card.isConnected).toBe(false);
+    // No new turn: the classic stream in its own card, saying why.
+    expect(posts.length).toBe(before);
+    expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual([NIGHT]);
+    const classic = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])')!;
+    expect(classic.querySelector(".wiki-sel-card-sub")?.textContent).toBe("· an Apply in the page's discussion is still running, so not in it");
+  });
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(tabActive()).toBe(true);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("refused");
+  expect(paneEdit(key)?.textContent).toContain(STALE);
+  expect(paneEdit(key)?.textContent).not.toContain("A newer turn follows");
+});
+
+test("class check S2: «Add to Oppfølging» while an inline Apply runs is refused in its card, saying why; no turn starts", async () => {
+  const card = await followCardWithEdit("turn-62", 62);
+  const before = posts.length;
+  await applyHeld(card, stale, async () => {
+    await selectText(NIGHT);
+    act(barEl().querySelector('[data-selact="follow"]')!);
+    await settle();
+    expect(posts.length).toBe(before);
+    const err = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="follow"] .wiki-discuss-error');
+    expect(err?.textContent).toBe("This page's discussion has an Apply still running: ask when it has ended.");
+  });
+  expect(posts.length).toBe(before);
+});
+
+test("class check S2: a lost Apply not settled holds off a new inline turn; its «Check again» keeps working and settles it; Discard frees it", async () => {
+  const card = await followCardWithEdit("turn-63", 63);
+  const key = card.getAttribute("data-sel-turn");
+  const before = posts.length;
+  checkAnswers.push(gateway);
+  await applyHeld(card, gateway, async () => {});
+  expect(card.querySelector("[data-discuss-repreview]")?.textContent).toBe("Check again");
+  // Explain elsewhere: the classic card, naming why; no turn takes the Apply's place.
+  await selectText(NIGHT);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(posts.length).toBe(before);
+  expect(document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"] .wiki-sel-card-sub')?.textContent).toBe("· an Apply in the page's discussion has no known outcome yet, so not in it");
+  // The card was replaced: the turn is still the current one, «Check again» in the pane works.
+  const again = document.querySelector<HTMLButtonElement>(`#discussBody [data-turn-key="${key}"] [data-discuss-repreview]`);
+  expect(again?.textContent).toBe("Check again");
+  checkAnswers.push(gateway);
+  again!.click();
+  await settle();
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("failed");
+  expect(paneEdit(key)?.textContent).not.toContain("A newer turn follows");
+  // Discard settles it by hand: a new inline turn starts again.
+  (document.querySelector(`#discussBody [data-turn-key="${key}"] [data-discuss-discard]`) as HTMLButtonElement).click();
+  await selectText(NIGHT);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(posts.length).toBe(before + 1);
+  await endTurn();
+});
+
+test("class check S2: a pane Apply refused while the reader is on another tab leaves the tab as the reader set it", async () => {
+  const card = await followCardWithEdit("turn-64", 64);
+  const key = card.getAttribute("data-sel-turn");
+  // The same turn in the pane: its Apply pressed there.
+  showTab(DISCUSS_TAB);
+  switched.length = 0;
+  let release!: () => void;
+  applyGate = new Promise<void>((r) => (release = r));
+  applyAnswer = stale;
+  const proto = (globalThis as unknown as { HTMLElement: { prototype: { scrollIntoView: (...a: unknown[]) => void } } }).HTMLElement.prototype;
+  const realScroll = proto.scrollIntoView;
+  const scrolled: (string | null)[] = [];
+  proto.scrollIntoView = function (this: Element) {
+    if (this.closest("#discussBody")) scrolled.push(this.getAttribute("data-turn-key"));
+  };
+  try {
+    (document.querySelector(`#discussBody [data-turn-key="${key}"] [data-discuss-apply]`) as HTMLButtonElement).click();
+    await settle();
+    // The card is closed and the reader moves to another tab while it runs.
+    (card.querySelector("[data-sel-card-close]") as HTMLButtonElement).click();
+    showTab("conn");
+    switched.length = 0;
+    release();
+    await settle();
+  } finally {
+    proto.scrollIntoView = realScroll;
+    applyGate = null;
+    applyAnswer = () => json({ ok: true, committed: true });
+  }
+  expect(switched).toEqual([]);
+  expect(tabActive()).toBe(false);
+  expect(scrolled).toEqual([]);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("refused");
+});
+
+/** Give `el` a laid-out box, or none, for the visibility checks (happy-dom lays nothing out). */
+function boxOf(el: Element, has: () => boolean): void {
+  (el as unknown as { getClientRects: () => unknown[] }).getClientRects = () => (has() ? [{ width: 100, height: 20 }] : []);
+}
+
+test("class check S2: an inline Apply refused while its card is hidden with its text (graph mode) shows on the Discuss tab", async () => {
+  const card = await followCardWithEdit("turn-65", 65);
+  const key = card.getAttribute("data-sel-turn");
+  const wrap = document.getElementById("articleWrap")!;
+  try {
+    boxOf(wrap, () => true);
+    await applyHeld(card, stale, async () => {
+      // Graph mode hides the article, and the card in it, while Apply runs.
+      boxOf(card, () => false);
+    });
+  } finally {
+    delete (wrap as unknown as Record<string, unknown>).getClientRects;
+  }
+  expect(card.isConnected).toBe(true);
+  expect(switched).toEqual([DISCUSS_TAB]);
+  expect(tabActive()).toBe(true);
+  expect(paneEdit(key)?.getAttribute("data-edit-state")).toBe("refused");
+});
+
+// Surface 3: the card and the bar stay where the reader sees them.
+
+test("class check S3: a selection ending inside a scroller: that scroller's scroll moves it (the menu closes); one beside it does not", async () => {
+  renderPage();
+  document.querySelector(".wiki-article")!.insertAdjacentHTML("beforeend", `<p id="lead">Lead words before the box.</p><pre id="box"><code>BOX line that scrolls sideways</code></pre><pre id="beside"><code>Another box</code></pre>`);
+  const menuEl = () => document.getElementById("wikiSelMenu")!;
+  const scroll = (t: EventTarget) => t.dispatchEvent(new Event("scroll", { bubbles: false }));
+  const lead = document.getElementById("lead")!.firstChild as Text;
+  const box = document.querySelector("#box code")!.firstChild as Text;
+  const open = async (r: Range) => {
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(r);
+    document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+    await settle();
+    key(document.body, "F10", true);
+    expect(menuEl().style.display).toBe("block");
+  };
+  // Starts before the box, ends inside it: the bar sits at that end.
+  const endsIn = document.createRange();
+  endsIn.setStart(lead, 0);
+  endsIn.setEnd(box, 8);
+  await open(endsIn);
+  scroll(document.getElementById("beside")!);
+  await settle();
+  expect(menuEl().style.display).toBe("block");
+  scroll(document.getElementById("box")!);
+  expect(menuEl().style.display).toBe("none");
+  // Starts inside it, ends after it.
+  const startsIn = document.createRange();
+  startsIn.setStart(box, 4);
+  startsIn.setEnd(document.querySelector("#beside code")!.firstChild!, 3);
+  await open(startsIn);
+  scroll(document.getElementById("box")!);
+  expect(menuEl().style.display).toBe("none");
+});
+
+test("class check S3: a card is shown exactly while its text is: an explainer's card hides with the frame in graph mode", async () => {
+  const wrap = document.getElementById("articleWrap")!;
+  wrap.innerHTML = `<div class="wiki-article-head"><h1>Explainer</h1></div><iframe class="wiki-explainer-frame"></iframe>`;
+  setSelectionMenuPage({ mentions: true });
+  const frame = wrap.querySelector(".wiki-explainer-frame")!;
+  try {
+    boxOf(wrap, () => true);
+    // The reader's CSS: graph mode hides the frame.
+    boxOf(frame, () => !wrap.classList.contains("wiki-graph-on"));
+    showSelectionBarForExplainer("A passage in the frame", "Frame heading");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = wrap.querySelector<HTMLElement>(".wiki-sel-card")!;
+    expect(card.nextElementSibling === frame).toBe(true);
+    expect(card.style.display).toBe("");
+    wrap.classList.add("wiki-graph-on");
+    await settle();
+    expect(card.style.display).toBe("none");
+    wrap.classList.remove("wiki-graph-on");
+    await settle();
+    expect(card.style.display).toBe("");
+  } finally {
+    wrap.classList.remove("wiki-graph-on");
+    delete (wrap as unknown as Record<string, unknown>).getClientRects;
+  }
+});
+
+test("class check S3: a card beside a head line Overview hides goes with it, and comes back with it", async () => {
+  const wrap = document.getElementById("articleWrap")!;
+  wrap.innerHTML = `<div class="wiki-article-head"><h1>Ferry</h1><div class="wiki-series-head">Series: the ferry plans</div></div><div class="wiki-article lens-all"><p>${NIGHT}</p></div>`;
+  setDiscussAgentEnabled(true);
+  setSelectionMenuPage({ mentions: true });
+  const series = wrap.querySelector(".wiki-series-head")!;
+  const article = wrap.querySelector(".wiki-article")!;
+  try {
+    boxOf(wrap, () => true);
+    boxOf(series, () => !article.classList.contains("lens-overview"));
+    await selectText("the ferry plans", ".wiki-series-head");
+    act(barEl().querySelector('[data-selact="where"]')!);
+    await settle();
+    const card = wrap.querySelector<HTMLElement>(".wiki-sel-card")!;
+    expect(card.previousElementSibling?.className).toBe("wiki-article-head");
+    expect(card.style.display).toBe("");
+    article.classList.replace("lens-all", "lens-overview");
+    await settle();
+    expect(card.style.display).toBe("none");
+    article.classList.replace("lens-overview", "lens-all");
+    await settle();
+    expect(card.style.display).toBe("");
+  } finally {
+    delete (wrap as unknown as Record<string, unknown>).getClientRects;
+  }
+});
+
+test("class check S1×S3: a card hidden with its text comes back shown after a render: under its passage when shown, at the top with the note when gone", async () => {
+  const render = (night: string) => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2><p id="np">${night}</p><p>The morning route adds a stop.</p></div>`;
+    setDiscussAgentEnabled(false);
+    setSelectionMenuPage({ mentions: true });
+  };
+  const wrap = document.getElementById("articleWrap")!;
+  explainManual = true;
+  let hidden = false;
+  try {
+    render(NIGHT);
+    boxOf(wrap, () => true);
+    boxOf(document.getElementById("np")!, () => !hidden);
+    await selectText(NIGHT, "#np");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = wrap.querySelector<HTMLElement>(".wiki-sel-card")!;
+    expect(card.style.display).toBe("");
+    // Its paragraph hidden (a lens): the card goes with it.
+    hidden = true;
+    wrap.querySelector(".wiki-article")!.classList.add("lens-overview");
+    await settle();
+    expect(card.style.display).toBe("none");
+    // The page renders again with the passage shown (All): the card back under it, shown.
+    hidden = false;
+    render(NIGHT);
+    boxOf(document.getElementById("np")!, () => !hidden);
+    await settle();
+    expect(card.parentElement?.classList.contains("wiki-article")).toBe(true);
+    expect(card.previousElementSibling?.id).toBe("np");
+    expect(card.style.display).toBe("");
+    hidden = true;
+    wrap.querySelector(".wiki-article")!.classList.add("lens-overview");
+    await settle();
+    expect(card.style.display).toBe("none");
+    // The page renders without the passage: the card at the top, shown, with the note.
+    render("The night route was rewritten entirely.");
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(wrap.querySelector(".wiki-article")!.firstElementChild === card).toBe(true);
+    expect(card.style.display).toBe("");
+    expect(card.querySelector(".wiki-sel-card-moved")?.textContent).toBe("The passage this answers is no longer on the page as it was.");
+    explainCtl?.close();
+  } finally {
+    explainManual = false;
+    delete (wrap as unknown as Record<string, unknown>).getClientRects;
+    setDiscussAgentEnabled(true);
+  }
 });

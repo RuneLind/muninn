@@ -47,6 +47,14 @@
  * Discuss pane leaves the menu open (R2-2); on a second wiki with no
  * `.wiki-agent.md`, Explain answers in the inline card too (R2-3). The answer
  * routes need `WIKI_ANSWER_WIKIS`, so the server names this wiki there.
+ *
+ * Class check (round 3): a triple-clicked head title the body repeats, and a
+ * selection across two DecisionLog items shown newest first, come back under
+ * their passage when the unchanged page renders again; Explain while an
+ * inline Apply runs is the classic card, so the Apply's 409 still shows on
+ * the Discuss tab; an explainer's card hides with its frame in graph mode.
+ * The fixture gains `plans/frame.html` and `plans/titled.mdx` (no key), in
+ * the first commit, and the DecisionLog page text before and after its log.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -102,7 +110,16 @@ const PAGE_PLAIN = ["---", "title: Plain plan", "---", "", "# Plain plan", "", P
 const FRESH = "plans/fresh.mdx";
 const PIER = "The pier opens at six.";
 const PAGE_FRESH = ["---", "title: Fresh plan", "---", "", "# Fresh plan", "", "Not committed yet.", "", PIER, ""].join("\n");
-const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
+// Class check (round 3): an HTML explainer, to select in its frame.
+const FRAME = "plans/frame.html";
+const FRAME_TEXT = "The frame passage the reader selects.";
+// Class check (round 3): a page whose body names its own title again.
+const TITLED = "plans/titled.mdx";
+const TITLE = "Pier timetable plan";
+const PAGE_TITLED = ["---", `title: ${TITLE}`, "---", "", `The ${TITLE} is named here again, in the body.`, "", "The pier opens at seven.", ""].join("\n");
+const PAGE_FRAME = `<!doctype html><html><head><title>Frame plan</title></head><body><h2>Frame heading</h2><p>${FRAME_TEXT}</p></body></html>`;
+// Text before and after the log (class check): with none, the held context is empty on both sides.
+const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "The decisions below are for the ferry.", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", "", "The log closes here for now.", ""].join("\n");
 
 let server: ChildProcess | undefined;
 let fake: ChildProcess | undefined;
@@ -169,6 +186,8 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, QUAY), PAGE_QUAY, "utf8");
   await writeFile(path.join(root, LONG), PAGE_LONG, "utf8");
   await writeFile(path.join(root, CARDS), PAGE_CARDS, "utf8");
+  await writeFile(path.join(root, FRAME), PAGE_FRAME, "utf8");
+  await writeFile(path.join(root, TITLED), PAGE_TITLED, "utf8");
   // A second wiki with no `.wiki-agent.md`: no thread to put a turn in.
   plainRoot = path.join(scratch, "plain-wiki");
   await mkdir(path.join(plainRoot, "plans"), { recursive: true });
@@ -265,7 +284,7 @@ const menu = (page: Page) => page.locator("#wikiSelMenu");
 
 async function openPage(page: Page, rel = REL, wiki = WIKI): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
-  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80", [CARDS]: "The line after the diagram.", [PLAIN]: PLAIN_SECOND, [FRESH]: PIER };
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80", [CARDS]: "The line after the diagram.", [PLAIN]: PLAIN_SECOND, [FRESH]: PIER, [TITLED]: "The pier opens at seven." };
   await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
@@ -1010,6 +1029,115 @@ test("fix round 2 R2-3: on a wiki with no agent, Explain answers in a card under
   expect(discussPosts).toEqual([]);
 });
 
+// ── Class check (round 3) ───────────────────────────────────────────────
+
+/** Render the page on screen again: its rail row, the page fetched and drawn anew. */
+async function renderAgain(page: Page, rel: string, shown: string): Promise<void> {
+  const rendered = page.waitForResponse((r) => r.url().includes("/api/wiki/page?"));
+  await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).first().click();
+  await rendered;
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown);
+}
+
+test("class check S1: a triple-clicked head title the body repeats comes back under the head when the unchanged page renders again", async ({ page }) => {
+  const explains: string[] = [];
+  await page.route("**/api/wiki/explain?**", async (route) => {
+    explains.push(route.request().url());
+    const body = `event: done\ndata: ${JSON.stringify({ answer: "CLASSIC-ANSWER for the title" })}\n\nevent: end\ndata: {}\n\n`;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  await openPage(page, TITLED);
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(`The ${TITLE} is named here again`);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const h1 = page.locator("#articleWrap .wiki-article-head h1");
+  const box = (await h1.boundingBox())!;
+  await page.mouse.click(box.x + 20, box.y + box.height / 2, { clickCount: 3 });
+  await expect(bar(page)).toBeVisible();
+  const end = await page.evaluate(() => {
+    const r = getSelection()!.getRangeAt(0);
+    return { node: r.endContainer.nodeName, offset: r.endOffset, text: getSelection()!.toString().trim() };
+  });
+  test.info().annotations.push({ type: "triple-click end", description: JSON.stringify(end) });
+  expect(end.text).toBe(TITLE);
+  await bar(page).locator("#wikiExplainBtn").click();
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]');
+  await expect(card.locator(".wiki-sel-card-body")).toContainText("CLASSIC-ANSWER for the title");
+  expect(await card.evaluate((c) => c.previousElementSibling?.classList.contains("wiki-article-head"))).toBe(true);
+  await card.evaluate((el) => el.setAttribute("data-e2e-mark", "head"));
+  await renderAgain(page, TITLED, "The pier opens at seven.");
+  const back = page.locator('#articleWrap .wiki-sel-card[data-e2e-mark="head"]');
+  await expect(back).toBeVisible();
+  expect(await back.evaluate((c) => c.previousElementSibling?.classList.contains("wiki-article-head"))).toBe(true);
+  await expect(back.locator(".wiki-sel-card-moved")).toHaveCount(0);
+  expect(explains.length).toBe(1);
+});
+
+test("class check S1: a selection across two DecisionLog items shown newest first comes back in its item when the unchanged page renders again", async ({ page }) => {
+  const discussPosts: string[] = [];
+  // The turn never answers: the card stays open across the render.
+  await page.route("**/api/wiki/discuss", (route) => {
+    discussPosts.push(route.request().postData() ?? "");
+  });
+  await openPage(page, DECISIONS);
+  const d2 = page.locator("#articleWrap .wiki-article li.dl-item").filter({ hasText: "Keep the night route" });
+  const d1 = page.locator("#articleWrap .wiki-article li.dl-item").filter({ hasText: FLAT });
+  // Newest first: D2 above D1 in the page.
+  expect((await d2.boundingBox())!.y).toBeLessThan((await d1.boundingBox())!.y);
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const from = await textBox(page, "Keep the night");
+  const to = await textBox(page, "Use the flat");
+  await page.mouse.move(from.x0, from.y0);
+  await page.mouse.down();
+  await page.mouse.move(to.x1, to.y1, { steps: 8 });
+  await page.mouse.up();
+  const text = await page.evaluate(() => getSelection()!.toString());
+  expect(text).toContain("Keep the night route.");
+  expect(text).toContain("Use the flat");
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => discussPosts.length).toBe(1);
+  const card = d1.locator('.wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+  await expect(card).toBeVisible();
+  await card.evaluate((el) => el.setAttribute("data-e2e-mark", "dl"));
+  await renderAgain(page, DECISIONS, "Keep the night route.");
+  const back = page.locator('#articleWrap .wiki-sel-card[data-e2e-mark="dl"]');
+  await expect(back).toBeVisible();
+  expect(await back.evaluate((c) => c.closest("li.dl-item")?.textContent?.includes("Use the flat file") ?? false)).toBe(true);
+  await expect(back.locator(".wiki-sel-card-moved")).toHaveCount(0);
+});
+
+test("class check S3: an explainer's card hides with its frame in graph mode and comes back with it", async ({ page }) => {
+  await page.route("**/api/wiki/explain?**", async (route) => {
+    const body = `event: done\ndata: ${JSON.stringify({ answer: "CLASSIC-ANSWER for the frame" })}\n\nevent: end\ndata: {}\n\n`;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(FRAME)}`);
+  const frameEl = page.locator("#articleWrap > iframe.wiki-explainer-frame");
+  await expect(frameEl).toBeVisible();
+  await expect(page.frameLocator("iframe.wiki-explainer-frame").locator("p")).toHaveText(FRAME_TEXT);
+  const frame = page.frames().find((f) => f.url().includes("/api/wiki/html"))!;
+  // A selection in the frame: its bridge posts it up and the bar shows at the frame's top.
+  await frame.evaluate(() => {
+    const r = document.createRange();
+    r.selectNodeContents(document.querySelector("p")!);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(r);
+  });
+  await expect(bar(page)).toBeVisible();
+  await bar(page).locator("#wikiExplainBtn").click();
+  const card = page.locator('#articleWrap > .wiki-sel-card[data-sel-card="explain"]');
+  await expect(card.locator(".wiki-sel-card-body")).toContainText("CLASSIC-ANSWER for the frame");
+  expect(await card.evaluate((c) => c.nextElementSibling?.classList.contains("wiki-explainer-frame"))).toBe(true);
+  // Graph mode: this fixture wiki is no tracker wiki, so the pane's class is set
+  // as `applyDisplay` sets it; the reader's own CSS then hides the frame.
+  await page.evaluate(() => document.getElementById("articleWrap")!.classList.add("wiki-graph-on"));
+  await expect(frameEl).toBeHidden();
+  await expect(card).toBeHidden();
+  await expect(page.locator("#articleWrap .wiki-article-head h1")).toBeVisible();
+  await page.evaluate(() => document.getElementById("articleWrap")!.classList.remove("wiki-graph-on"));
+  await expect(frameEl).toBeVisible();
+  await expect(card).toBeVisible();
+});
+
 const FOLLOW_OLD = "The morning route adds a stop.";
 const FOLLOW_NEW = "The morning route adds two stops.";
 const pageText = () => readFile(path.join(root, REL), "utf8");
@@ -1078,6 +1206,49 @@ test("fix round 2 R2-4: Apply on an inline card, the card closed while Apply run
     const refused = page.locator(`#discussBody [data-turn-key="${key}"] .wiki-discuss-edit[data-edit-state="refused"]`);
     await expect(refused).toBeVisible();
     await shot(page, "18-refused-after-card-closed");
+  } finally {
+    await page.unroute("**/api/wiki/discuss/apply");
+    await writeFile(path.join(root, REL), PAGE, "utf8");
+  }
+  expect(await pageText()).toBe(PAGE);
+});
+
+test("class check S2: Explain from another selection while an inline Apply runs is the classic card, naming the Apply; the Apply's 409 then shows on the Discuss tab", async ({ page }) => {
+  const card = await followCardWithEdit(page);
+  const key = await card.getAttribute("data-sel-turn");
+  const discussPosts: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/wiki/discuss") discussPosts.push(r.url());
+  });
+  await page.route("**/api/wiki/explain?**", async (route) => {
+    const body = `event: done\ndata: ${JSON.stringify({ answer: "CLASSIC-ANSWER while Apply runs" })}\n\nevent: end\ndata: {}\n\n`;
+    await route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  let release: () => void = () => {};
+  const released = new Promise<void>((r) => (release = r));
+  await page.route("**/api/wiki/discuss/apply", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}") as { preview?: boolean };
+    if (body.preview !== true) await released;
+    await route.continue();
+  });
+  try {
+    await card.locator("[data-discuss-apply]").click();
+    await expect(card.locator("[data-discuss-apply]")).toHaveText("Applying…");
+    await dragSelect(page, NIGHT);
+    await bar(page).locator("#wikiExplainBtn").click();
+    const classic = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])');
+    await expect(classic.locator(".wiki-sel-card-body")).toContainText("CLASSIC-ANSWER while Apply runs");
+    await expect(classic.locator(".wiki-sel-card-sub")).toHaveText("· an Apply in the page's discussion is still running, so not in it");
+    expect(discussPosts.length).toBe(0);
+    await writeFile(path.join(root, REL), PAGE.replace("## Oppfølging", "Changed while Apply ran.\n\n## Oppfølging"), "utf8");
+    const applied = page.waitForResponse((r) => r.url().includes("/api/wiki/discuss/apply") && r.request().postData()?.includes("previewHash") === true && !r.request().postData()?.includes('"preview":true'));
+    release();
+    expect((await applied).status()).toBe(409);
+    await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
+    const turn = page.locator(`#discussBody [data-turn-key="${key}"]`);
+    await expect(turn.locator('.wiki-discuss-edit[data-edit-state="refused"]')).toBeVisible();
+    await expect(turn).not.toContainText("A newer turn follows");
+    expect(discussPosts.length).toBe(0);
   } finally {
     await page.unroute("**/api/wiki/discuss/apply");
     await writeFile(path.join(root, REL), PAGE, "utf8");
