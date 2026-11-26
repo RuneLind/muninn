@@ -2305,8 +2305,15 @@ function runListHtml(list: ChecklistList): string {
  *  as nothing, so neither changes whether a column holds numbers (the short
  *  note `1 (MEL-604246)` stays short). */
 function cellText(html: string): string {
-  return htmlText(html).replace(/\x00WIKIPAGELINK(\d+)\x00/g, (m, i: string) => (currentLinkTexts?.[Number(i)] === "" && currentLinkSources?.[Number(i)] === "" ? "" : m));
+  return htmlText(html).replace(/\x00WIKIPAGELINK(\d+)\x00/g, (m, i: string) => (showsNothing(i) ? "" : m));
 }
+
+/** A parked wikilink sentinel with no text and no source: a live chip or a key mark's half. */
+const showsNothing = (i: string) => currentLinkTexts?.[Number(i)] === "" && currentLinkSources?.[Number(i)] === "";
+const silentSentinel = (placeholder: string) => {
+  const m = /^\x00WIKIPAGELINK(\d+)\x00$/.exec(placeholder);
+  return m !== null && showsNothing(m[1]!);
+};
 
 /** A pipe table on the reader: number columns (`num`, on the header too) and
  *  verdict cells (`v-good`/`v-warn`/`v-bad`, the glyph kept as hidden text;
@@ -2909,7 +2916,7 @@ function renderInlineWith(text: string, chips: boolean): string {
 
   // Before → after chips, on the text between tags and parked sentinels, so
   // code, hrefs and inline components never take one.
-  if (chips && readerShapesOn()) result = beforeAfterChipsHtml(result);
+  if (chips && readerShapesOn()) result = beforeAfterChipsHtml(result, silentSentinel);
 
   return ph.restore(result);
 }

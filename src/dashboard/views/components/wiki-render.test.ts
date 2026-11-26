@@ -275,7 +275,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // or a refusal, its read aborted with the card): 988,101 (335,407 gzipped), so the pin moves to 988,200.
 // Its class check C (reads stopped by a send, the read's reason classified, a no-range card dropped by
 // a render): 988,870 (335,629 gzipped), so the pin moves to 988,900.
-const WIKI_CLIENT_MAX_BYTES = 988_900;
+// Its class-check sweep B (the before → after rule reads a chip's sentinel as nothing): 988,985
+// (335,694 gzipped), so the pin moves to 989,000.
+const WIKI_CLIENT_MAX_BYTES = 989_000;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

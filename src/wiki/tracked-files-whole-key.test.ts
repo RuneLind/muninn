@@ -54,8 +54,9 @@ describe("wholeKeyCount", () => {
   // Fix round 2 batch 3 (finding 4): tracker keys (`bodyKeyMentions`, the
   // tracker marks and the chips' mentions) took an ASCII boundary, so
   // `åMEL-12` and `𝐀MEL-12` were marked and `MEL-12_x` was not.
-  // A chip never sits where the peek counts nothing; it skips a key a literal
-  // `_` follows (`MEL-12_x`), where it would let the reader read that `_` as italics.
+  // A chip never sits where the peek counts nothing, and sits wherever it
+  // counts: since sweep B a chip parked before the key's last character leaves
+  // a literal `_` after it (`MEL-12_x`) literal (`chipShifts`).
   test("tracker keys: the counter, bodyKeyMentions and the reader's marks agree on each neighbour; a chip only where they count", () => {
     const trackers = jiraTrackers(parseTrackersConfig([{ id: "jira", projects: ["MEL"] }], () => {}));
     const rows = [...NEIGHBOURS, "MEL-12-3", "_MEL-12"].map((t) => {
@@ -68,7 +69,7 @@ describe("wholeKeyCount", () => {
         chips: chipInsertions(line, markedMentions(line, line, "x.md", null, trackers, () => undefined), () => true).flatMap((c) => c.ids).filter((c) => c.id === "MEL-12").length,
       };
     });
-    for (const r of rows) expect({ t: r.t, body: r.body, marks: r.marks, chips: r.chips }).toEqual({ t: r.t, body: r.count, marks: r.count, chips: r.t.startsWith("MEL-12_") ? 0 : r.count });
+    for (const r of rows) expect({ t: r.t, body: r.body, marks: r.marks, chips: r.chips }).toEqual({ t: r.t, body: r.count, marks: r.count, chips: r.count });
     expect(rows.filter((r) => r.count === 1).map((r) => r.t)).toEqual(["MEL-12_x", "MEL-12", "😀MEL-12", "(MEL-12)", "MEL-12-3", "_MEL-12"]);
   });
 

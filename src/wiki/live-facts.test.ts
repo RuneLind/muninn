@@ -284,8 +284,11 @@ describe("mention forms the reader renders (fix round 1, k5)", () => {
     expect(html).toContain(`<em>api #103${chipFor("acme/acme-api#103")}</em>`);
     expect(html).toContain(`<em>DEMO-12${chipFor("DEMO-12")}</em>`);
     // Not italics in the reader (a word character outside): DEMO-12 is a whole
-    // key there, but a chip before that literal `_` could make it italics, so none.
-    expect(chipIds(render(page("x_DEMO-12_ y")).html)).toEqual([]);
+    // key there, and its chip, parked before the `2` (sweep B, `chipShifts`),
+    // leaves that literal `_` literal.
+    const literal = render(page("x_DEMO-12_ y")).html;
+    expect(literal).toContain(`x_DEMO-12${chipFor("DEMO-12")}_ y`);
+    expect(stripChips(literal)).toBe(renderWikiHtml(page("x_DEMO-12_ y"), () => undefined));
   });
 });
 
@@ -350,9 +353,13 @@ describe("pinned edges (fix round 2: each kills a named mutant)", () => {
     expect(html).toContain('[api #101<span class="fact-chip" data-live-fact="acme/acme-api#101" data-reader-only></span>]<a href="https://e.com" target="_blank" rel="noopener">b</a>');
   });
 
-  // `_DEMO-12_y`: a whole key since fix round 2 batch 3, but chipless before the literal `_`.
-  test("an `_` followed by a word character closes no italics: `_api #103_x` and `_DEMO-12_y` get no chip", () => {
-    expect(chipIds(render(page("_api #103_x and _DEMO-12_y")).html)).toEqual([]);
+  // `_DEMO-12_y`: a whole key since fix round 2 batch 3; its chip leaves the literal `_` literal (sweep B).
+  test("an `_` followed by a word character closes no italics: `_api #103_x` is no mention, `_DEMO-12_y` chips with no italics", () => {
+    const md = page("_api #103_x and _DEMO-12_y");
+    const { html } = render(md);
+    expect(chipIds(html)).toEqual(["DEMO-12"]);
+    expect(html).not.toContain("<em>");
+    expect(stripChips(html)).toBe(renderWikiHtml(md, () => undefined));
   });
 });
 

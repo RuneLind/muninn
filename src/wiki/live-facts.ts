@@ -486,16 +486,34 @@ export interface Mention {
   kind: "pr" | "key";
   start: number;
   end: number;
-  /** A key a literal `_` follows (not italics, which the view reads as `*`):
-   *  a chip right after it would let the reader read that `_` as italics,
-   *  so it gets none there (fix round 2 batch 3); it is still marked. */
-  noChip?: true;
 }
 
-/** One chip site: the offset in the body and the ids, in text order. */
+/** One chip site: the offset in the body and the ids, in text order. With
+ *  `shift` the render parks the chips before `body[at - 1]` and moves them
+ *  past it after the inline pass ({@link chipShifts}). */
 export interface ChipInsertion {
   at: number;
   ids: { id: string; kind: "pr" | "key" }[];
+  shift?: true;
+}
+
+/**
+ * Whether a chip at `at` is parked one character early, between the site's
+ * last two characters, and moved past the last one after the inline pass
+ * (`moveShiftedChips` in `render.ts`). Parked AT the site, the sentinel would
+ * be the neighbour the next character's rule reads: after a key's digit, a
+ * `*` or `_` cannot open emphasis, after the sentinel it can
+ * (`MELOSYS-4763*foo*`). Between a letter or digit and a letter, digit, `-`,
+ * `#` or `/`, it touches no character any inline rule reads as a delimiter,
+ * so the renderer reads every neighbour as it does without the chip; each of
+ * those is a character the before → after rule glues to the number after it,
+ * so no chain starts at the moved character either. ASCII, so the moved
+ * character is one code unit the escape leaves alone. Every key and PR
+ * mention ends in a digit after one of these, so only a link, a reference
+ * link, an autolink or an odd bare URL keeps its chip at the site.
+ */
+export function chipShifts(body: string, at: number): boolean {
+  return at >= 2 && /[A-Za-z0-9]/.test(body[at - 1]!) && /[A-Za-z0-9#/-]/.test(body[at - 2]!);
 }
 
 // A tag is a name and attributes in HTML's own grammar (`name`, `name=value`,
@@ -510,7 +528,9 @@ const REF_LINK_RE = /\[([^\]\n]+)\]\[([^\]\n]*)\]/g;
 const AUTOLINK_RE = /<https?:\/\/[^>\n]+>/g;
 /** The renderer's underscore italics (`renderInlineWith`), without its lookbehind. */
 const UNDERSCORE_EM_RE = /_([^_\n]+?)_(?!\w)/g;
-const URL_RE = /https?:\/\/[^\s<>()[\]]+/g;
+/** No `|`: a table splits its cells before any inline rule, so a URL ends at
+ *  a cell's edge (a chip past the `|` landed in the next cell). */
+const URL_RE = /https?:\/\/[^\s<>()[\]|]+/g;
 
 /**
  * The regions the reader shows as code: its fences (`readerFencedLines`:
@@ -653,7 +673,7 @@ export function markedMentionsWithCode(
     if (r.form === "bare" && !bareBelongs(r.id)) continue;
     all.push({ id: r.id, kind: "pr", start: r.start, end: r.end });
   }
-  const key = (m: { key: string; start: number; end: number }): Mention => ({ id: m.key, kind: "key", start: m.start, end: m.end, ...(view[m.end] === "_" ? { noChip: true as const } : {}) });
+  const key = (m: { key: string; start: number; end: number }): Mention => ({ id: m.key, kind: "key", start: m.start, end: m.end });
   for (const m of bodyKeys) all.push(key(m));
   if (scanned) {
     const held = new Intervals(bodyKeys.map((m) => [m.start, m.end] as const));
@@ -723,6 +743,10 @@ function linkSpans(body: string, inCode: Intervals): { links: [number, number][]
       emphasis ??= readerEmphasisSpans(body);
       for (const [a, b] of emphasis) if (a >= start && a < end && b > end && b <= full) end = b;
     }
+    // A chip that cannot shift ({@link chipShifts}) after a word character
+    // would let a trimmed `*`/`_` open emphasis (`?a=_x*y*`): it goes past the
+    // trimmed run, where the next character is one no inline rule reads.
+    if (end < full && !chipShifts(body, end) && /\w/.test(body[end - 1]!) && /[*_]/.test(body[end]!)) end = full;
     urls.push([start, end]);
   }
   return { links, refs, urls };
@@ -740,10 +764,9 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
   for (const m of mentions) {
     if (!has(m)) continue;
     const span = holdingSpan(links, m.start, m.end) ?? holdingSpan(refs, m.start, m.end) ?? holdingSpan(urls, m.start, m.end);
-    if (!span && m.noChip) continue;
     const at = span ? span[1] : m.end;
     let site = sites.get(at);
-    if (!site) sites.set(at, (site = { at, ids: [] }));
+    if (!site) sites.set(at, (site = { at, ids: [], ...(chipShifts(body, at) ? { shift: true as const } : {}) }));
     // One chip per PR: GitHub ids ignore case, so the site keeps the first spelling.
     const lower = m.id.toLowerCase();
     if (!site.ids.some((x) => x.kind === m.kind && x.id.toLowerCase() === lower)) site.ids.push({ id: m.id, kind: m.kind });
@@ -835,17 +858,6 @@ export function planLiveChips(
   return { insertions, facts: out };
 }
 
-/** `body` with each insertion's sentinels in place; `sentinel(html)` registers
- *  one chip's HTML and returns its token. */
-export function applyChipInsertions(body: string, insertions: readonly ChipInsertion[], sentinel: (html: string) => string): string {
-  let out = "";
-  let cursor = 0;
-  for (const site of insertions) {
-    out += body.slice(cursor, site.at) + site.ids.map(({ id }) => sentinel(chipSpanHtml(id))).join("");
-    cursor = site.at;
-  }
-  return out + body.slice(cursor);
-}
 
 // ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
 
@@ -914,22 +926,37 @@ export function keyMarkHtml(key: string): string {
   return `<span class="${KEY_MARK_CLASS}" ${KEY_MARK_ATTR}="${escapeHtml(key)}">${escapeHtml(key)}</span>`;
 }
 
-/** `body` with each chip inserted and each mark's text replaced, in one pass
- *  over its offsets (a chip at a mark's start goes before it, at its end after). */
-export function applyChipsAndMarks(body: string, chips: readonly ChipInsertion[], marks: readonly KeyMark[], chipSentinel: (html: string) => string, markSentinel: (m: KeyMark) => string): string {
+/**
+ * `body` with each chip inserted and each mark's text replaced, in one pass
+ * over its offsets (a chip at a mark's start goes before it, at its end
+ * after). A `shift` chip goes before its site's last character, inside a mark
+ * that ends there (after the mark's closing placeholder, which
+ * `markSentinel`'s string ends with that character); `chipSentinel` is told
+ * which, so the render moves only those ({@link chipShifts}).
+ */
+export function applyChipsAndMarks(body: string, chips: readonly ChipInsertion[], marks: readonly KeyMark[], chipSentinel: (html: string, shifted: boolean) => string, markSentinel: (m: KeyMark) => string): string {
+  const sentinels = (c: ChipInsertion, shifted: boolean) => c.ids.map(({ id }) => chipSentinel(chipSpanHtml(id), shifted)).join("");
+  const pos = (c: ChipInsertion) => (c.shift ? c.at - 1 : c.at);
   const events = [
-    ...chips.map((c) => ({ pos: c.at, order: 0, chip: c, mark: null as KeyMark | null })),
+    ...chips.map((c) => ({ pos: pos(c), order: 0, chip: c, mark: null as KeyMark | null })),
     ...marks.map((m) => ({ pos: m.start, order: 1, chip: null as ChipInsertion | null, mark: m })),
   ].sort((a, b) => a.pos - b.pos || a.order - b.order);
+  const inMark = new Set<ChipInsertion>();
   let out = "";
   let cursor = 0;
   for (const e of events) {
     if (e.chip) {
-      out += body.slice(cursor, e.chip.at) + e.chip.ids.map(({ id }) => chipSentinel(chipSpanHtml(id))).join("");
-      cursor = e.chip.at;
+      if (inMark.has(e.chip)) continue;
+      out += body.slice(cursor, pos(e.chip)) + sentinels(e.chip, e.chip.shift === true);
+      cursor = pos(e.chip);
     } else if (e.mark && e.mark.start >= cursor) {
-      out += body.slice(cursor, e.mark.start) + markSentinel(e.mark);
-      cursor = e.mark.end;
+      const m = e.mark;
+      const s = markSentinel(m);
+      const here = chips.filter((c) => c.shift && c.at === m.end);
+      for (const c of here) inMark.add(c);
+      const last = body[m.end - 1]!;
+      out += body.slice(cursor, m.start) + (here.length && s.endsWith(last) ? s.slice(0, -1) + here.map((c) => sentinels(c, true)).join("") + last : s + here.map((c) => sentinels(c, false)).join(""));
+      cursor = m.end;
     }
   }
   return out + body.slice(cursor);

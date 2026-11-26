@@ -201,6 +201,8 @@ export function renderWikiHtml(
   const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
   if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars, ...(keyMarks.middle ? { middle: keyMarks.middle } : {}) });
   const markKeys: string[] = [];
+  // The chips parked one character early (`chipShifts`), moved after the inline pass.
+  const shifted = new Set<number>();
   if (chips.length || keyMarks?.marks.length) {
     const park = (html: string) => {
       literal.push("");
@@ -208,7 +210,12 @@ export function renderWikiHtml(
       rendered.push(html);
       return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
     };
-    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], park, (m) => {
+    const parkChip = (html: string, shift: boolean) => {
+      const token = park(html);
+      if (shift) shifted.add(rendered.length - 1);
+      return token;
+    };
+    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], parkChip, (m) => {
       const text = body.slice(m.start, m.end);
       const cps = [...text];
       if (text !== m.key || cps.length < 3) return text;
@@ -256,7 +263,7 @@ export function renderWikiHtml(
   // are uncoloured where the code around them is highlighted. In an attribute
   // value (a `<Question>` card echoes `choices=`/`to=` into `data-question-*`)
   // the source text goes back too: link HTML there would end the value.
-  const html = wrapKeyMarks(restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal), markKeys);
+  const html = wrapKeyMarks(restoreParkedSentinels(moveShiftedChips(renderedHtml, shifted), "WIKIPAGELINK", rendered, literal), markKeys);
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
   // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
@@ -271,6 +278,25 @@ export function renderWikiHtml(
   // Backstop: every sentinel is restored by now, and the body and the parsed
   // file values carry no NUL; one left (a source not yet covered) is never served.
   return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
+}
+
+const SENTINEL_RUN_BEFORE_CHAR_RE = /((?:\x00WIKIPAGELINK\d+\x00)+)([A-Za-z0-9])/g;
+
+/**
+ * Each shifted chip's sentinel (`chipShifts` in `live-facts.ts`: parked
+ * before its site's last character) moved past that character, on the
+ * rendered HTML before any sentinel is restored. Other sentinels in the same
+ * run (a key mark's closing placeholder) stay before it. A shifted sentinel
+ * the render did not leave right before a letter or digit stays where it is.
+ */
+export function moveShiftedChips(html: string, shifted: ReadonlySet<number>): string {
+  if (shifted.size === 0) return html;
+  return html.replace(SENTINEL_RUN_BEFORE_CHAR_RE, (whole, run: string, ch: string) => {
+    const parts = run.match(/\x00WIKIPAGELINK\d+\x00/g)!;
+    const moves = (p: string) => shifted.has(Number(p.slice("\x00WIKIPAGELINK".length, -1)));
+    if (!parts.some(moves)) return whole;
+    return parts.filter((p) => !moves(p)).join("") + ch + parts.filter(moves).join("");
+  });
 }
 
 export const keyMarkOpen = (n: number) => `\x00WIKIKEYOPEN${n}\x00`;

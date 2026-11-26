@@ -490,8 +490,10 @@ const LINK_OPEN_RE = /^\x00LINKOPEN\d+\x01$/;
 /** Rendered inline HTML with the before → after chips drawn in its text:
  *  never inside a tag (an `href`, an attribute) and never across a parked
  *  placeholder (`\x00…\x01`: inline code, an inline component; `\x00…\x00`:
- *  the reader's parked wikilink). */
-export function beforeAfterChipsHtml(html: string): string {
+ *  the reader's parked wikilink). A placeholder `silent` names (a live chip,
+ *  a key mark's half: no text, no source) reads as nothing, so the text
+ *  before a value is the page's (`[a][r]<chip>1 → 2` chips as without it). */
+export function beforeAfterChipsHtml(html: string, silent?: (placeholder: string) => boolean): string {
   if (!html.includes("→") && !html.includes("-&gt;")) return html;
   // The visible text so far, so a run's first value reads what precedes it
   // across a tag (`<em>v</em>1`); a parked placeholder reads as a letter
@@ -502,7 +504,7 @@ export function beforeAfterChipsHtml(html: string): string {
     .split(/(<[^>]*>|\x00[^\x00\x01]*[\x00\x01])/)
     .map((seg, k) => {
       const out = k % 2 === 1 || (!seg.includes("→") && !seg.includes("-&gt;")) ? seg : chipText(seg, earlier);
-      const read = k % 2 === 0 ? seg : LINK_OPEN_RE.test(seg) ? "" : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "";
+      const read = k % 2 === 0 ? seg : LINK_OPEN_RE.test(seg) || silent?.(seg) ? "" : seg.startsWith("\x00") ? "x" : /^<br\b/i.test(seg) ? " " : "";
       earlier = (earlier + read).slice(-48);
       return out;
     })
