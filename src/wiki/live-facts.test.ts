@@ -627,6 +627,14 @@ describe("key marks: the page's keys underlined for the hover peek", () => {
     expect(html).toContain('<span class="wiki-key" data-wiki-key="MEL-9">MEL-9</span> acme/acme-api#101<span class="fact-chip" data-live-fact="acme/acme-api#101"');
   });
 
+  test("a key must start with a letter: a `keys` kind's digit-first match (12-MEL, 1.2) is not marked, a letter-first one is (fix round 2 batch 4)", () => {
+    const kinds = parseKeyKinds([{ name: "rel", pattern: "\\d{2}-MEL" }, { name: "ver", pattern: "\\d\\.\\d" }, { name: "tag", pattern: "V\\d\\.\\d" }]).kinds;
+    expect(kinds.map((k) => k.name)).toEqual(["rel", "ver", "tag"]);
+    const body = "Release 12-MEL ships 1.2 as V3.4.";
+    const { marks: got } = planKeyMarks(body, body, { grammar: null, trackers: [], kinds, relPath: "x.md" });
+    expect(got.map((m) => m.key)).toEqual(["V3.4"]);
+  });
+
   test("without trackers or kinds nothing is scanned (mimir's case)", () => {
     expect(planKeyMarks("MEL-1 DEMO-2", "MEL-1 DEMO-2", { grammar: null, trackers: [], kinds: [], relPath: "x.md" })).toEqual({ marks: [], skippedLines: 0, skippedChars: 0 });
   });
@@ -680,6 +688,16 @@ describe("key marks: the marked render is the unmarked render plus the wrappers"
       expect([body, unwrap(marked)]).toEqual([body, plain]);
     }
     expect(markedCount).toBeGreaterThan(25);
+  });
+
+  test("a number column reads only a sentinel with no text AND no source as nothing: a wikilink that shows no text still counts (fix round 2 batch 4)", () => {
+    const table = (cell: string) => page(`| Kjøring | Hoppet over |\n|---|---:|\n| a | 0 |\n| b | 1 ${cell} |`);
+    // A key mark's two sentinels (empty text, empty source): still a number column.
+    expect(both(table("(MEL-604246)")).marked).toContain('<th class="num">Hoppet over</th>');
+    // `[[ ]]` parks a sentinel with empty link text but its source `[[ ]]`: not a number.
+    const { marked, plain } = both(table("[[ ]]"));
+    expect(marked).toContain("<th>Hoppet over</th>");
+    expect(plain).toContain("<th>Hoppet over</th>");
   });
 
   test("a key with no `-` or `.` join is an item id's shape and is not marked: the decision log keeps its ids", () => {

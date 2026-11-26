@@ -107,7 +107,7 @@ export function traceContextPack(wiki: string, b: MentionsBody): string[] {
   return out;
 }
 
-/** A trace turn's prompt: what the agent can read, the trace pack, the discussion so far and the question, last. */
+/** A trace turn's prompt: the trace pack, then what the agent can read, the discussion so far and the question, last. */
 export function renderTraceTurnPrompt(opts: { wiki: string; mentions: MentionsBody; reach: AgentReach; earlier: readonly EarlierTurn[]; question: string }): string {
   const cite = opts.mentions.files[0]?.relPath ?? "index.md";
   return [

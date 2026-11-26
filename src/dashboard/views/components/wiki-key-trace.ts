@@ -28,6 +28,12 @@
  *   running, with no «Summarize» or follow-up box, and the card reads the
  *   thread again every `TRACE_POLL_MS` until it has ended; a send refused
  *   409 `busy` goes to that read.
+ * - **Poll failures (fix round 2 batch 4):** a failed read is read again
+ *   with a growing wait, a bounded number of times (`tracePollStep`); a thread
+ *   that is gone clears the card back to «Summarize» with a note, and a
+ *   refusal (or reads failing past the bound) ends its running turns as
+ *   errors, so the follow-up box comes back. The read in flight aborts with
+ *   the card.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -36,7 +42,18 @@ import { renderStreamingBody } from "./wiki-ask-render.ts";
 import { discussAgentOn, discussSendBlocked, discussUserFor } from "./wiki-discuss-tab.ts";
 import { fetchMentions } from "./wiki-mentions-fetch.ts";
 import { inlineCardHtml } from "./wiki-selection-menu-model.ts";
-import { KEY_PEEK_ID, TRACE_SUMMARY_QUESTION, keyPeekHtml, traceBodyHtml, traceTurnHtml, traceTurnsFromThread, type TraceThreadMessage } from "./wiki-key-trace-model.ts";
+import {
+  KEY_PEEK_ID,
+  TRACE_SUMMARY_QUESTION,
+  TRACE_THREAD_GONE,
+  keyPeekHtml,
+  traceBodyHtml,
+  tracePollStep,
+  traceTurnHtml,
+  traceTurnsFromThread,
+  type TraceThreadMessage,
+  type TraceThreadRead,
+} from "./wiki-key-trace-model.ts";
 import { escHtml as esc } from "./escape.ts";
 import { KEY_PEEK_MARK_SELECTOR } from "../../../wiki/core/live-facts-chip.ts";
 
@@ -45,8 +62,6 @@ const THREAD_PATH = "/api/wiki/discuss/thread";
 const CONTINUE_PATH = "/api/wiki/discuss/continue";
 const PEEK_DELAY_MS = 300;
 const PEEK_HIDE_MS = 200;
-/** How often a card showing a turn still running on the server reads the thread again. */
-const TRACE_POLL_MS = 1500;
 
 export interface KeyTraceDeps {
   wiki(): string;
@@ -83,6 +98,10 @@ interface TraceState {
   /** The running send's stream, aborted when the card leaves for good. */
   ctl: AbortController | null;
   poll: ReturnType<typeof setTimeout> | null;
+  /** The thread read in flight, aborted when the card leaves for good or a newer read starts. */
+  pollCtl: AbortController | null;
+  /** Failed reads in a row (`tracePollStep`). */
+  pollFailures: number;
   dropped: boolean;
 }
 
@@ -99,8 +118,23 @@ function live(st: TraceState): boolean {
 function dropTrace(st: TraceState): void {
   st.dropped = true;
   st.ctl?.abort();
+  st.pollCtl?.abort();
   if (st.poll) clearTimeout(st.poll);
   st.poll = null;
+}
+
+/** The card's one note line, under the follow-up box. `end` marks the thread-gone
+ *  note, which a send clears. */
+function traceNote(st: TraceState, text: string, end = false): void {
+  let el = st.card.querySelector<HTMLElement>(".wiki-trace-note");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "wiki-discuss-hint wiki-trace-note";
+    el.setAttribute("role", "status");
+    st.card.querySelector(".wiki-trace-follow")?.after(el);
+  }
+  el.toggleAttribute("data-trace-end", end);
+  el.textContent = text;
 }
 
 function paintTurns(st: TraceState): void {
@@ -120,31 +154,64 @@ function paintTurns(st: TraceState): void {
 }
 
 /** The key's live trace thread, read back into the card from its ledger
- *  rows; again every `TRACE_POLL_MS` while a turn of it is still running. */
+ *  rows; again while a turn of it is still running, and after a failed read
+ *  ({@link tracePollStep}). */
 async function loadThread(st: TraceState): Promise<void> {
   if (st.poll) clearTimeout(st.poll);
   st.poll = null;
+  st.pollCtl?.abort();
+  if (!live(st)) return;
+  const ctl = new AbortController();
+  st.pollCtl = ctl;
   const q = new URLSearchParams({ wiki: st.wiki, traceKey: st.key });
   const user = discussUserFor(st.wiki);
   if (user) q.set("userId", user);
+  let read: TraceThreadRead;
+  type ThreadBody = { thread?: { id: string } | null; messages?: TraceThreadMessage[] };
+  let data: ThreadBody | null = null;
   try {
-    const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" } });
-    if (!res.ok || !live(st)) return;
-    const data = (await res.json()) as { thread?: { id: string } | null; messages?: TraceThreadMessage[] };
-    // A send started meanwhile owns the turns; no thread leaves what the card shows.
-    if (!data.thread || st.busy || !live(st)) return;
+    const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" }, signal: ctl.signal });
+    if (res.ok) {
+      data = (await res.json()) as ThreadBody | null;
+      read = data?.thread ? { kind: "thread", running: false } : { kind: "gone" };
+    } else {
+      const err = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      read = { kind: "refused", status: res.status, ...(typeof err?.error === "string" ? { error: err.error } : {}) };
+    }
+  } catch {
+    read = { kind: "unreachable" };
+  }
+  if (st.pollCtl === ctl) st.pollCtl = null;
+  // Dropped or superseded; or a send started meanwhile, which owns the turns.
+  if (ctl.signal.aborted || st.busy || !live(st)) return;
+  if (read.kind === "thread" && data?.thread) {
     st.discussionId = data.thread.id;
     st.turns = traceTurnsFromThread(data.messages ?? []);
     paintTurns(st);
-    if (st.turns.some((t) => t.state === "running")) st.poll = setTimeout(() => void loadThread(st), TRACE_POLL_MS);
-  } catch {
-    /* the card still shows the mentions; a send starts or continues the thread */
+    read = { kind: "thread", running: st.turns.some((t) => t.state === "running") };
+  }
+  const step = tracePollStep(read, st.pollFailures);
+  if (step.next === "again") {
+    st.pollFailures = step.failures;
+    st.poll = setTimeout(() => void loadThread(st), step.delayMs);
+    return;
+  }
+  st.pollFailures = 0;
+  if (step.next === "gone" && st.turns.length > 0) {
+    st.turns = [];
+    st.discussionId = null;
+    paintTurns(st);
+    traceNote(st, TRACE_THREAD_GONE, true);
+  } else if (step.next === "failed" && st.turns.some((t) => t.state === "running")) {
+    for (const t of st.turns) if (t.state === "running") Object.assign(t, { state: "error", text: step.message, status: undefined });
+    paintTurns(st);
   }
 }
 
 async function send(st: TraceState, question: string): Promise<void> {
   if (st.busy || !question.trim() || discussSendBlocked()) return;
   const turn: TraceTurn = { question: question.trim(), text: "", state: "running", turnId: null };
+  st.card.querySelector(".wiki-trace-note[data-trace-end]")?.remove();
   st.turns.push(turn);
   st.busy = true;
   paintTurns(st);
@@ -208,19 +275,10 @@ async function send(st: TraceState, question: string): Promise<void> {
   paintTurns(st);
 }
 
-async function continueInClaudeCode(st: TraceState, btn: HTMLElement): Promise<void> {
+async function continueInClaudeCode(st: TraceState, _btn: HTMLElement): Promise<void> {
   const last = [...st.turns].reverse().find((t) => t.turnId && t.state !== "running");
   if (!last?.turnId) return;
-  const note = (text: string) => {
-    let el = st.card.querySelector<HTMLElement>(".wiki-trace-note");
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "wiki-discuss-hint wiki-trace-note";
-      el.setAttribute("role", "status");
-      btn.closest(".wiki-trace-follow")?.after(el);
-    }
-    el.textContent = text;
-  };
+  const note = (text: string) => traceNote(st, text);
   try {
     const res = await fetch(CONTINUE_PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ turnId: last.turnId }) });
     const data = (await res.json().catch(() => null)) as { prompt?: unknown; error?: unknown } | null;
@@ -241,7 +299,7 @@ export function openTrace(key: string, range: Range | null): HTMLElement | null 
   });
   if (!card) return null;
   card.setAttribute("data-trace-key", key);
-  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, busy: false, ctl: null, poll: null, dropped: false });
+  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, busy: false, ctl: null, poll: null, pollCtl: null, pollFailures: 0, dropped: false });
   traces.set(card, state);
   void (async () => {
     const r = await fetchMentions(state.wiki, key);

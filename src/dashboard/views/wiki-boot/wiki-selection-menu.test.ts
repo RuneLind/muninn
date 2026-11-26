@@ -48,6 +48,11 @@
  *   `answer_html` painted, a failure's status or refusal shown (R2-3).
  *   Element assertions there compare text or identity: a failing
  *   `expect(element)` prints the whole DOM, gigabytes of it.
+ * - Discuss v2 PR 6 fix round 2 batch 4 (12c): a Trace card (`openTrace`,
+ *   placed by `placeInlineCard`) leaves for good when another inline card
+ *   replaces it, on the page or while out for a render, and its drop hook
+ *   aborts its stream at once; while out for a render of its own page it is
+ *   live (`inlineCardLive`), so a frame then neither aborts nor is lost.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -57,7 +62,9 @@ import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
+import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
+import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -70,6 +77,11 @@ let menuRel = REL;
 const posts: Record<string, unknown>[] = [];
 /** The stream a POST answers with: its frames are pushed by the test. */
 let push: ((event: string, data: unknown) => void) | null = null;
+/** The newest POST's abort signal. */
+let postSignal: AbortSignal | null = null;
+/** While set, a Trace card's thread read (`?traceKey=`) waits for it; its signal is kept. */
+let traceReadGate: Promise<void> | null = null;
+let traceReadSignal: AbortSignal | null = null;
 let close: (() => void) | null = null;
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
@@ -153,9 +165,14 @@ beforeAll(() => {
       const frames = `event: delta\ndata: {"text":"CLASSIC "}\n\nevent: done\ndata: ${JSON.stringify({ answer: `CLASSIC for ${u.searchParams.get("sel")}` })}\n\nevent: end\ndata: {}\n\n`;
       return new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }
+    if (url.startsWith("/api/wiki/discuss/thread?") && url.includes("traceKey=") && traceReadGate) {
+      traceReadSignal = init?.signal ?? null;
+      await traceReadGate;
+    }
     if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      postSignal = init.signal ?? null;
       const enc = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
@@ -1680,4 +1697,146 @@ test("class check S2: the page renders again while an inline Apply runs: the car
   expect(tabActive()).toBe(false);
   expect(card.querySelector(".wiki-discuss-edit")?.getAttribute("data-edit-state")).toBe("refused");
   expect(card.querySelector(".wiki-discuss-edit")?.textContent).toContain(STALE);
+});
+
+// ── The Trace card's place (fix round 2 batch 4, 12c) ─────────────────────
+
+let keyTraceWired = false;
+function wireKeyTrace(): void {
+  if (keyTraceWired) return;
+  keyTraceWired = true;
+  initKeyTrace({ wiki: () => "w", relPath: () => menuRel, hrefFor: (r) => `/wiki?relPath=${r}`, mentionsOn: () => true, place: placeInlineCard, live: inlineCardLive });
+}
+
+/** A range over `text` in the article. */
+function rangeOf(text: string): Range {
+  const walker = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, 4);
+  for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+    const i = (t.textContent ?? "").indexOf(text);
+    if (i === -1) continue;
+    const r = document.createRange();
+    r.setStart(t, i);
+    r.setEnd(t, i + text.length);
+    return r;
+  }
+  throw new Error(text);
+}
+
+/** A Trace card on MEL-12 under the night line (with no range: at the pane's
+ *  end, as an explainer's is, and not held), its «Summarize» streaming: the
+ *  card and its stream's signal. */
+async function streamingTrace(at: "passage" | "none" = "passage"): Promise<{ card: HTMLElement; signal: AbortSignal }> {
+  renderPage();
+  wireKeyTrace();
+  const card = openTrace("MEL-12", at === "passage" ? rangeOf(NIGHT) : null)!;
+  await settle();
+  const before = posts.length;
+  (card.querySelector("[data-trace-summarize]") as HTMLButtonElement).click();
+  await settle();
+  expect(posts.length).toBe(before + 1);
+  expect(posts.at(-1)).toMatchObject({ traceKey: "MEL-12" });
+  const signal = postSignal!;
+  expect(signal.aborted).toBe(false);
+  expect(inlineCardLive(card)).toBe(true);
+  return { card, signal };
+}
+
+const closeStream = async () => {
+  try {
+    close!();
+  } catch {
+    /* aborted already */
+  }
+  await settle();
+};
+
+test("12c: another inline card replaces a live Trace card, under a passage or with none: the Trace card leaves for good and its drop hook aborts its stream at once", async () => {
+  for (const at of ["passage", "none"] as const) {
+    try {
+      await replacedTrace(at);
+    } finally {
+      await closeStream();
+    }
+  }
+});
+
+/** A streaming Trace card at `at`, replaced by another inline card. */
+async function replacedTrace(at: "passage" | "none"): Promise<void> {
+  const { card, signal } = await streamingTrace(at);
+  expect([at, card.isConnected]).toEqual([at, true]);
+  let dropped = 0;
+  const next = placeInlineCard(rangeOf(EDIT_OLD), inlineCardHtml("where", "next", "<p>next</p>", null), () => dropped++)!;
+  expect(next.isConnected).toBe(true);
+  expect(card.isConnected).toBe(false);
+  expect(inlineCardLive(card)).toBe(false);
+  expect(inlineCardLive(next)).toBe(true);
+  // Aborted by the drop hook, before any frame could find the card gone.
+  expect(signal.aborted).toBe(true);
+  expect(dropped).toBe(0);
+  // The card that replaced it runs its own hook once when it goes in turn.
+  (next.querySelector("[data-sel-card-close]") as HTMLButtonElement).click();
+  expect(dropped).toBe(1);
+  expect(inlineCardLive(next)).toBe(false);
+}
+
+test("12c: a Trace card replaced while its thread read is in flight: the drop hook aborts that read", async () => {
+  let release: () => void = () => {};
+  traceReadGate = new Promise<void>((r) => (release = r));
+  traceReadSignal = null;
+  try {
+    renderPage();
+    wireKeyTrace();
+    const card = openTrace("MEL-12", rangeOf(NIGHT))!;
+    await settle();
+    const signal = traceReadSignal as AbortSignal | null;
+    expect(signal?.aborted).toBe(false);
+    placeInlineCard(rangeOf(EDIT_OLD), inlineCardHtml("where", "next", "<p>next</p>", null));
+    expect(card.isConnected).toBe(false);
+    expect(signal?.aborted).toBe(true);
+  } finally {
+    traceReadGate = null;
+    release();
+    await settle();
+  }
+});
+
+test("12c: a Trace card out for a render of its page is live: a frame meanwhile neither aborts its stream nor is lost; another page drops it", async () => {
+  try {
+    const { card, signal } = await streamingTrace();
+    // An Ask answer takes the pane: the card is out, held for the page's next render.
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-ask-view">An answer.</div>`;
+    expect(card.isConnected).toBe(false);
+    expect(inlineCardLive(card)).toBe(true);
+    push!("delta", { text: "TRACE-WHILE-OUT" });
+    await settle();
+    expect(signal.aborted).toBe(false);
+    renderPage();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector(".wiki-trace-a")?.textContent).toContain("TRACE-WHILE-OUT");
+    // Another page: dropped for good, its stream aborted.
+    menuRel = "plans/harbour.mdx";
+    renderPage();
+    await settle();
+    expect(inlineCardLive(card)).toBe(false);
+    expect(signal.aborted).toBe(true);
+  } finally {
+    menuRel = REL;
+    await closeStream();
+  }
+});
+
+test("12c: a new inline card while the Trace card is out for a render: the held card is dropped too, its stream aborted at once", async () => {
+  try {
+    const { card, signal } = await streamingTrace();
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-ask-view">An answer.</div>`;
+    expect(inlineCardLive(card)).toBe(true);
+    placeInlineCard(null, inlineCardHtml("where", "next", "<p>next</p>", null));
+    expect(inlineCardLive(card)).toBe(false);
+    expect(signal.aborted).toBe(true);
+  } finally {
+    await closeStream();
+    renderPage();
+    await settle();
+  }
 });

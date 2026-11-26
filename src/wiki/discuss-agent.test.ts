@@ -122,6 +122,12 @@ describe("the prompt", () => {
     expect(s).toContain("The context pack describes this turn");
     expect(s).not.toContain("one turn at a time");
   });
+  test("with MCP tools the reach section places the page above it and the rest of the pack below, as the prompt orders them (fix round 2 batch 4)", () => {
+    const p = renderAgentTurnPrompt({ pack, reach: { kind: "mcpTools", tools: { k: ["s"] } }, card: null, earlier: [], question: "Q?" });
+    expect(p).toContain("The context pack (the page above this section, the rest below it), and these tools only: k-s.");
+    expect(p.indexOf("## The page")).toBeLessThan(p.indexOf("## What you can read"));
+    expect(p.indexOf("## What you can read")).toBeLessThan(p.indexOf("## The question is about the whole page"));
+  });
   test("earlier turns are bounded to the newest few", () => {
     const earlier = Array.from({ length: 9 }, (_, i) => ({ question: `q${i}`, selection: null, answer: `a${i}`, endState: "done" }));
     const p = renderAgentTurnPrompt({ pack, reach: { kind: "mcpTools", tools: { k: ["s"] } }, card: null, earlier, question: "Q?" });

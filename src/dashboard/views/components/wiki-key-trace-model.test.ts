@@ -1,5 +1,19 @@
 import { expect, test } from "bun:test";
-import { PEEK_FILES_MAX, TRACE_RUNNING_STATUS, keyPeekHtml, traceBodyHtml, traceTimelineHtml, traceTurnHtml, traceTurnsFromThread, type TraceThreadMessage } from "./wiki-key-trace-model.ts";
+import {
+  PEEK_FILES_MAX,
+  TRACE_POLL_MAX_FAILURES,
+  TRACE_POLL_MAX_MS,
+  TRACE_POLL_MS,
+  TRACE_RUNNING_STATUS,
+  keyPeekHtml,
+  traceBodyHtml,
+  tracePollStep,
+  traceTimelineHtml,
+  traceTurnHtml,
+  traceTurnsFromThread,
+  type TracePollStep,
+  type TraceThreadMessage,
+} from "./wiki-key-trace-model.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
 
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
@@ -102,4 +116,31 @@ test("read-back turns: in seq order whatever the message order, one per row, an 
     msg("a1", "assistant", "A1", row("t1", 1, "done", { assistantMessageId: "a1" })),
   ];
   expect(traceTurnsFromThread(messages).map((t) => `${t.turnId}:${t.state}:${t.text}`)).toEqual(["t1:done:A1", "t2:error:The turn was abandoned: its run stopped before it ended."]);
+});
+
+test("the poll's next step: a running turn reads again at the poll interval, an ended one stops (fix round 2 batch 4)", () => {
+  expect(tracePollStep({ kind: "thread", running: true }, 3)).toEqual({ next: "again", delayMs: TRACE_POLL_MS, failures: 0 });
+  expect(tracePollStep({ kind: "thread", running: false }, 3)).toEqual({ next: "stop" });
+});
+
+test("the poll's next step: a network failure, a 5xx, 408 or 429 reads again with a doubling wait, capped, and ends the turn past the bound", () => {
+  const steps: TracePollStep[] = [];
+  let failures = 0;
+  for (let i = 0; i <= TRACE_POLL_MAX_FAILURES; i++) {
+    const step = tracePollStep(i % 2 ? { kind: "refused", status: 503 } : { kind: "unreachable" }, failures);
+    steps.push(step);
+    if (step.next === "again") failures = step.failures;
+  }
+  const waits = steps.flatMap((s) => (s.next === "again" ? [s.delayMs] : []));
+  expect(waits).toEqual([1500, 3000, 6000, 12000, 24000, 30000, 30000, 30000]);
+  expect(Math.max(...waits)).toBe(TRACE_POLL_MAX_MS);
+  expect(steps.at(-1)).toEqual({ next: "failed", message: "The thread could not be read: the server did not answer, so the turn's end is not known." });
+  for (const status of [500, 502, 408, 429]) expect(tracePollStep({ kind: "refused", status }, 0)).toEqual({ next: "again", delayMs: TRACE_POLL_MS, failures: 1 });
+  expect(tracePollStep({ kind: "refused", status: 502 }, TRACE_POLL_MAX_FAILURES)).toEqual({ next: "failed", message: "The thread could not be read (502): the turn's end is not known." });
+});
+
+test("the poll's next step: a thread that is gone, a 404 or another refusal ends the poll at once, whatever failed before", () => {
+  expect(tracePollStep({ kind: "gone" }, 2)).toEqual({ next: "gone" });
+  expect(tracePollStep({ kind: "refused", status: 404, error: "trace-off" }, 0)).toEqual({ next: "failed", message: "trace-off (404)." });
+  expect(tracePollStep({ kind: "refused", status: 422 }, 5)).toEqual({ next: "failed", message: "The thread could not be read (422)." });
 });

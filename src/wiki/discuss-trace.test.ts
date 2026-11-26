@@ -89,6 +89,18 @@ describe("traceContextPack", () => {
     }
   });
 
+  test("past the payload's 500 listed log lines each note has its own number: the log note counts logTotalLines, the where note the rest (fix round 2 batch 4)", () => {
+    const files = Array.from({ length: 30 }, (_, f) => ({ relPath: `notes/f${f}.md`, title: null, lines: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, text: `MELOSYS ${"y".repeat(120)}` })) }));
+    const log = Array.from({ length: 500 }, (_, i) => ({ date: "2026-11-20", kind: "note", line: `- MELOSYS ${"z".repeat(150)} ${i}`, n: i + 10 }));
+    const pack = traceContextPack("kode", body({ key: "MELOSYS", kind: null, files, log, logTotalLines: 650, totalLines: 3100, totalFiles: 31, truncated: true }));
+    const where = section(pack, "## Where it is mentioned");
+    const logSection = section(pack, "## Its log.md lines");
+    const whereShown = where.filter((l) => /^  \d+: /.test(l)).length;
+    const logShown = logSection.filter((l) => l.startsWith("- log.md:")).length;
+    expect(where.at(-1)).toBe(`- … ${3100 - 650 - whereShown} more mention lines not listed in this pack`);
+    expect(logSection.at(-1)).toBe(`- … ${650 - logShown} more log.md lines cut`);
+  });
+
   test("each log.md line appears once: under «Its log.md lines», not again under «Where it is mentioned»", () => {
     const b = body({
       files: [
@@ -143,4 +155,12 @@ test("renderTraceTurnPrompt with MCP tools: a wiki file's line is cited by its p
   });
   expect(prompt).not.toContain("a page line");
   expect(prompt).toContain("a wiki file's line as `<path in the wiki>:LINE`, e.g. `plans/ferry.mdx:12`");
+});
+
+test("renderTraceTurnPrompt with MCP tools: the reach section places the pack above it, where it is (fix round 2 batch 4)", () => {
+  const prompt = renderTraceTurnPrompt({ wiki: "kode", mentions: body(), reach: { kind: "mcpTools", tools: { knowledge: ["search_knowledge"] } }, earlier: [], question: "Where else?" });
+  const reach = prompt.slice(prompt.indexOf("## What you can read"), prompt.indexOf("## Question"));
+  expect(prompt.indexOf("## The key")).toBeLessThan(prompt.indexOf("## What you can read"));
+  expect(reach).toContain("The context pack above, and these tools only: knowledge-search_knowledge.");
+  expect(reach).not.toContain("below");
 });

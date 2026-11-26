@@ -116,6 +116,50 @@ export interface TraceTurnView {
   turnId: string;
 }
 
+/** How often a card showing a turn still running on the server reads the thread again. */
+export const TRACE_POLL_MS = 1500;
+/** The longest wait between reads after failed ones. */
+export const TRACE_POLL_MAX_MS = 30_000;
+/** Failed reads in a row (network, 5xx, 408, 429) before the card stops reading. */
+export const TRACE_POLL_MAX_FAILURES = 8;
+/** The note on a card whose thread is gone (Start over, or deleted from /chat). */
+export const TRACE_THREAD_GONE = "This key's trace thread is gone: it was started over or deleted. «Summarize» starts a new one.";
+
+/** What one read of the key's thread (`GET /api/wiki/discuss/thread?traceKey=`) came back with. */
+export type TraceThreadRead =
+  | { kind: "thread"; running: boolean }
+  | { kind: "gone" }
+  | { kind: "refused"; status: number; error?: string }
+  | { kind: "unreachable" };
+
+/** What the card does after a read: read again after `delayMs`, stop, show
+ *  the thread gone, or end its running turns with `message`. */
+export type TracePollStep =
+  | { next: "again"; delayMs: number; failures: number }
+  | { next: "stop" }
+  | { next: "gone" }
+  | { next: "failed"; message: string };
+
+const transientStatus = (s: number): boolean => s >= 500 || s === 408 || s === 429;
+
+/**
+ * The poll's next step (fix round 2 batch 4): a running turn reads again at
+ * {@link TRACE_POLL_MS}; a network failure or a transient status again with
+ * a doubling wait up to {@link TRACE_POLL_MAX_MS}, at most
+ * {@link TRACE_POLL_MAX_FAILURES} in a row; a thread that is gone or any
+ * other refusal (a 404 among them) ends the poll, so a card never shows
+ * «Still running» after its turn has ended.
+ */
+export function tracePollStep(read: TraceThreadRead, failures: number): TracePollStep {
+  if (read.kind === "thread") return read.running ? { next: "again", delayMs: TRACE_POLL_MS, failures: 0 } : { next: "stop" };
+  if (read.kind === "gone") return { next: "gone" };
+  if (read.kind === "refused" && !transientStatus(read.status)) return { next: "failed", message: `${read.error ?? "The thread could not be read"} (${read.status}).` };
+  const n = failures + 1;
+  if (n > TRACE_POLL_MAX_FAILURES)
+    return { next: "failed", message: read.kind === "refused" ? `The thread could not be read (${read.status}): the turn's end is not known.` : "The thread could not be read: the server did not answer, so the turn's end is not known." };
+  return { next: "again", delayMs: Math.min(TRACE_POLL_MS * 2 ** (n - 1), TRACE_POLL_MAX_MS), failures: n };
+}
+
 /** The status a read-back turn still running on the server shows. */
 export const TRACE_RUNNING_STATUS = "Still running on the server…";
 const TRACE_END_WORDS: Record<string, string> = {

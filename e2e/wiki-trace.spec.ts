@@ -27,6 +27,11 @@
  *   «Summarize» or follow-up box and pick up its answer (K2); read-back turns
  *   take their state from the ledger row and their answer by message id (K3).
  *   K2 and K3 write the thread, messages and ledger rows as the engine does.
+ * - Fix round 2 batch 4: a failed thread read (a network failure, a 500) is
+ *   read again until the turn is seen to end; a thread that is gone puts the
+ *   card back on «Summarize» with a note, and a 404 ends the running turn as
+ *   an error with the follow-up box back; a closed card reads no more. The
+ *   thread reads are answered by `page.route`.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`) with two commits, a `keys` kind, a Jira tracker and a facts
@@ -596,4 +601,88 @@ test("K3: read-back turns take their state from the ledger row and their answer 
   const posted = page.waitForRequest((r) => r.url().endsWith("/api/wiki/discuss/continue") && r.method() === "POST");
   await card.locator("[data-trace-continue]").click();
   expect(JSON.parse((await posted).postData() ?? "{}")).toEqual({ turnId: t3 });
+});
+
+// ── Poll failures (fix round 2 batch 4) ──────────────────────────────────────
+
+const POLL_Q = "POLL-Q1: is the night route open?";
+const runningThread = { thread: { id: "poll-thread" }, messages: [{ id: "pm1", role: "user", content: POLL_Q, turn: { id: "pt1", seq: 1, question: POLL_Q, answer: "", endState: "running", error: null, assistantMessageId: null } }] };
+const doneThread = {
+  thread: { id: "poll-thread" },
+  messages: [
+    { id: "pm1", role: "user", content: POLL_Q, turn: { id: "pt1", seq: 1, question: POLL_Q, answer: "POLL-A1", endState: "done", error: null, assistantMessageId: "pm2" } },
+    { id: "pm2", role: "assistant", content: "POLL-A1: the night route is open.", turn: null },
+  ],
+};
+
+/** Answer the Trace card's thread reads (`?traceKey=`) with `answer(n)`, n counting from 1. */
+async function routeTraceReads(page: Page, answer: (n: number) => "abort" | { status: number; body: unknown }): Promise<() => number> {
+  let n = 0;
+  await page.route(
+    (url) => url.pathname === "/api/wiki/discuss/thread" && url.searchParams.has("traceKey"),
+    async (route) => {
+      const a = answer(++n);
+      if (a === "abort") return route.abort("failed");
+      await route.fulfill({ status: a.status, contentType: "application/json", body: JSON.stringify(a.body) });
+    },
+  );
+  return () => n;
+}
+
+test("a failed thread read is read again: after a network failure and a 500 the card picks up the finished turn, with its follow-up box", async ({ page }) => {
+  const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : n === 2 ? "abort" : n === 3 ? { status: 500, body: { error: "could not read the thread" } } : { status: 200, body: doneThread }));
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(1);
+  // Reads at 1.5 s (aborted), 1.5 s later (500), then 3 s later (the finished turn).
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="done"]')).toHaveCount(1, { timeout: 15_000 });
+  await expect(card.locator(".wiki-trace-a")).toContainText("POLL-A1: the night route is open.");
+  await expect(card.locator(".wiki-trace-follow")).toBeVisible();
+  await expect(card.locator("[data-trace-summarize]")).toBeHidden();
+  expect(reads()).toBe(4);
+  // Ended: no more reads.
+  await page.waitForTimeout(2000);
+  expect(reads()).toBe(4);
+});
+
+test("a thread that is gone (Start over, deleted from /chat) puts the card back on «Summarize» with a note", async ({ page }) => {
+  const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : { status: 200, body: { thread: null, messages: [] } }));
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect.poll(reads).toBe(2);
+  await expect(card.locator(".wiki-trace-turn")).toHaveCount(0);
+  await expect(card.locator(".wiki-trace-note[data-trace-end]")).toHaveText("This key's trace thread is gone: it was started over or deleted. «Summarize» starts a new one.");
+  await expect(card.locator("[data-trace-summarize]")).toBeVisible();
+  await expect(card.locator("[data-trace-summarize]")).toBeEnabled();
+  await expect(card.locator(".wiki-trace-follow")).toBeHidden();
+  await page.waitForTimeout(2000);
+  expect(reads()).toBe(2);
+});
+
+test("a 404 ends the running turn as an error, with the follow-up box back", async ({ page }) => {
+  const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : { status: 404, body: { error: "trace-off", reason: "trace-off" } }));
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  const card = traceCard(page);
+  await expect.poll(reads).toBe(2);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(0);
+  await expect(card.locator('.wiki-trace-turn[data-trace-state="error"] .wiki-discuss-error')).toHaveText("trace-off (404).");
+  await expect(card.locator(".wiki-trace-follow")).toBeVisible();
+  await expect(card.locator("[data-trace-summarize]")).toBeHidden();
+  await page.waitForTimeout(2000);
+  expect(reads()).toBe(2);
+});
+
+test("a closed card reads no more: its read after a failure is never made", async ({ page }) => {
+  const reads = await routeTraceReads(page, (n) => (n === 1 ? { status: 200, body: runningThread } : { status: 500, body: { error: "could not read the thread" } }));
+  await openPage(page);
+  await traceFromPeek(page, KEY);
+  await expect(traceCard(page).locator('.wiki-trace-turn[data-trace-state="running"]')).toHaveCount(1);
+  await expect.poll(reads).toBe(2);
+  await traceCard(page).locator("[data-sel-card-close]").click();
+  // The next read was due 1.5 s after the failed one.
+  await page.waitForTimeout(3500);
+  expect(reads()).toBe(2);
 });

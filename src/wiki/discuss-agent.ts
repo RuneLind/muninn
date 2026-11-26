@@ -286,7 +286,10 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
     const tools = Object.entries(reach.tools).flatMap(([server, ts]) => ts.map((t) => `${server}-${t}`));
     return [
       "## What you can read",
-      `The context pack below, and these tools only: ${tools.join(", ")}.`,
+      // Where the pack sits: a page prompt puts «The page» above this section
+      // and the passage, section and headings below it; a trace prompt puts
+      // its whole pack above (`renderTraceTurnPrompt`).
+      `${subject === "trace" ? "The context pack above" : "The context pack (the page above this section, the rest below it)"}, and these tools only: ${tools.join(", ")}.`,
       "The knowledge server's search finds other pages of this wiki and the team's documents. yggdrasil's tools reach the indexed code: search finds it, file_outline lists a file's symbols, symbol_context shows a symbol's source and its callers.",
       ...(reach.wikiToolsWiki && reach.tools.research?.includes("wiki_grep")
         ? [

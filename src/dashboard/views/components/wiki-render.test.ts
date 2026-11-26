@@ -271,7 +271,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // (330,491 gzipped), so the pin moves to 972,400.
 // 2026-11-26, Discuss v2 PR 6 (the key peek and the Trace card: `wiki-key-trace.ts`, its model and the
 // mentions fetch, the only modules it adds): 986,426 (334,765 gzipped), so the pin moves to 986,500.
-const WIKI_CLIENT_MAX_BYTES = 986_500;
+// Its fix round 2 batch 4 (the Trace card's poll read again after a failure, ended on a gone thread
+// or a refusal, its read aborted with the card): 988,101 (335,407 gzipped), so the pin moves to 988,200.
+const WIKI_CLIENT_MAX_BYTES = 988_200;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
