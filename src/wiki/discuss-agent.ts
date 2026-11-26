@@ -279,8 +279,9 @@ function numbered(text: string, fromLine: number): string {
 }
 
 /** «What you can read»: the reach, with citations shown on `pack.relPath`
- *  (a page turn's page, a trace turn's first file). */
-export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">): string[] {
+ *  (a page turn's page, a trace turn's first file). A trace turn's subject is
+ *  its key, so its wording names no page. */
+export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">, subject: "page" | "trace" = "page"): string[] {
   if (reach.kind === "mcpTools") {
     const tools = Object.entries(reach.tools).flatMap(([server, ts]) => ts.map((t) => `${server}-${t}`));
     return [
@@ -292,7 +293,9 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
             `This wiki's own files: use research-wiki_grep for an exact key, id or a "where else" question (it finds every tracked file that holds it), research-wiki_read to read a file it returned, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`,
           ]
         : []),
-      "Cite code as `repo/path:line` from what a tool returned, and a page line as `" + pack.relPath + ":LINE`.",
+      subject === "trace"
+        ? "Cite code as `repo/path:line` from what a tool returned, and a wiki file's line as `<path in the wiki>:LINE`, e.g. `" + pack.relPath + ":12`."
+        : "Cite code as `repo/path:line` from what a tool returned, and a page line as `" + pack.relPath + ":LINE`.",
     ];
   }
   const lines = [
@@ -303,7 +306,7 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
   for (const r of reach.repos) lines.push(`- ${r.name}: ${r.dir} (${r.ref}). Cite a file at ${r.dir}/src/x.ts as \`${r.name}/src/x.ts:LINE\`.`);
   lines.push("");
   lines.push("## Code in reach");
-  if (reach.repos.length === 0) lines.push(`${NO_REPO_IN_REACH[0]!.toUpperCase()}${NO_REPO_IN_REACH.slice(1)}: no code repo's snapshot is given for this page.`);
+  if (reach.repos.length === 0) lines.push(`${NO_REPO_IN_REACH[0]!.toUpperCase()}${NO_REPO_IN_REACH.slice(1)}: no code repo's snapshot is given for ${subject === "trace" ? "a trace" : "this page"}.`);
   else lines.push(reach.repos.map((r) => `- ${r.name}: ${r.dir}`).join("\n"));
   for (const m of reach.missed) lines.push(`- ${m.name}: ${m.why}`);
   for (const o of reach.own) lines.push(`- ${o}: this wiki's own repo; its files are the wiki snapshot above`);

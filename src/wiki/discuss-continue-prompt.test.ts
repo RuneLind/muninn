@@ -50,9 +50,23 @@ describe("renderContinuePrompt", () => {
     expect(p).toContain("end 8");
     expect(p).not.toContain("end 1");
   });
-  test("a trace turn (no page) names no page path", () => {
-    const p = renderContinuePrompt({ path: null, turns: [turn(1, { selection: null, location: null })] });
+  test("a trace turn (no page): the key, the wiki and how to list the mentions again; no page wording", () => {
+    const trace = { wiki: "kode", root: "/w/kode", key: "MEL-77", mentionsUrl: "http://127.0.0.1:3010/api/wiki/mentions?wiki=kode&key=MEL-77" };
+    const p = renderContinuePrompt({ path: null, trace, turns: [turn(1, { selection: null, location: null }), turn(2, { selection: null, location: null })] });
     expect(p).not.toContain("Page:");
-    expect(p).toContain("Question: Question 1?");
+    expect(p).toContain("Key: MEL-77");
+    expect(p).toContain("Wiki: kode (/w/kode)");
+    expect(p).toContain("git -C '/w/kode' grep -n -w -F -e 'MEL-77'");
+    expect(p).toContain("http://127.0.0.1:3010/api/wiki/mentions?wiki=kode&key=MEL-77");
+    expect(p).toContain("Turn 1:\nQuestion: Question 1?");
+    expect(p).not.toContain("about the whole page");
+    expect(p).not.toContain("this wiki page");
+    expect(p).not.toContain("If the page turns out to be wrong");
+    expect(p.trimEnd().endsWith("Go on from the last answer.")).toBe(true);
+  });
+
+  test("a trace key with a quote is quoted for the shell", () => {
+    const p = renderContinuePrompt({ path: null, trace: { wiki: "kode", root: "/w/kode", key: "it's", mentionsUrl: "u" }, turns: [turn(1, { selection: null })] });
+    expect(p).toContain("grep -n -w -F -e 'it'\\''s'");
   });
 });

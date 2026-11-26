@@ -148,27 +148,50 @@ function cut(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}… [cut]`;
 }
 
+/** A trace turn's subject (Discuss v2, PR 6): the key, its wiki and where to list its mentions again. */
+export interface ContinueTrace {
+  wiki: string;
+  /** The wiki's root on this machine. */
+  root: string;
+  key: string;
+  /** The mentions route for this key on this dashboard. */
+  mentionsUrl: string;
+}
+
+const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
 /**
  * «Continue in Claude Code» (P3): the prompt that takes a Discuss discussion
- * on to Claude Code, up to and including the turn handed over. The page path,
- * then each turn's passage, question and answer, oldest first. When the whole
+ * on to Claude Code, up to and including the turn handed over. The page path
+ * (a trace's key, wiki and how to list its mentions), then each turn's
+ * passage, question and answer, oldest first. When the whole
  * is over {@link CONTINUE_PROMPT_MAX}, the oldest turns' answers go first, then
  * the oldest turns; the handed-over turn always stays. Pure.
  */
-export function renderContinuePrompt(input: { path: string | null; turns: ContinueTurn[] }): string {
-  // A trace turn (Discuss v2, PR 6) has no page: the prompt names none.
+export function renderContinuePrompt(input: { path: string | null; trace?: ContinueTrace | null; turns: ContinueTurn[] }): string {
+  // A trace turn (Discuss v2, PR 6) has no page: its subject is the key.
+  const trace = input.path === null ? (input.trace ?? null) : null;
   const head =
-    input.path === null
-      ? ["I discussed this with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the code and pages it names before you answer.", ""]
-      : [
-          "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+    trace !== null
+      ? [
+          "I traced a key across a wiki with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the files and code it names before you answer.",
           "",
-          `Page: ${input.path}`,
+          `Key: ${trace.key}`,
+          `Wiki: ${trace.wiki} (${trace.root})`,
+          `Where it is mentioned: \`git -C ${shellQuote(trace.root)} grep -n -w -F -e ${shellQuote(trace.key)}\` lists the tracked files and lines, \`git -C ${shellQuote(trace.root)} log -S ${shellQuote(trace.key)} --oneline\` the commits that changed it, and ${trace.mentionsUrl} returns both with its log.md lines and the state of the PRs they name.`,
           "",
-        ];
-  const tail = ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
+        ]
+      : input.path === null
+        ? ["I discussed this with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the code and pages it names before you answer.", ""]
+        : [
+            "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+            "",
+            `Page: ${input.path}`,
+            "",
+          ];
+  const tail = input.path === null ? ["", "Go on from the last answer."] : ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
   const block = (t: ContinueTurn, withAnswer: boolean): string[] => [
-    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : " (about the whole page):"}`,
+    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : input.path === null ? ":" : " (about the whole page):"}`,
     ...(t.selection ? [`> ${clampLine(t.selection, 1500)}`] : []),
     `Question: ${clampLine(t.question, HANDOFF_QUESTION_MAX)}`,
     withAnswer

@@ -944,10 +944,12 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       }
       const answer = res.result ?? "";
       const toolCalls: DiscussToolCall[] = (res.toolCalls ?? []).map((tc) => ({ name: tc.name, input: abbreviate(tc.input) }));
-      const proposedEdit = extractProposedEdit(answer);
+      // A trace has no page to edit and Apply refuses its turns: an edit block
+      // there is left in the answer as the model wrote it, and is no proposed edit.
+      const proposedEdit = p.traceKey !== null ? null : extractProposedEdit(answer);
       const durationMs = Math.round(performance.now() - t0);
       await store.finish(turn.id, { endState: "done", answer, card, toolCalls, proposedEdit, costUsd: res.costUsd ?? null, durationMs });
-      const assistantMessageId = await storeAnswer(stripProposedEdit(answer), "done", { model: res.model ?? p.bot.model ?? null, costUsd: res.costUsd ?? null, durationMs });
+      const assistantMessageId = await storeAnswer(p.traceKey !== null ? answer : stripProposedEdit(answer), "done", { model: res.model ?? p.bot.model ?? null, costUsd: res.costUsd ?? null, durationMs });
       log.info("discuss turn on {wiki} {relPath}: done", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, seq: turn.seq, threadId, mode: p.mode, bot: p.bot.name, connector: p.connector, tools: toolCalls.length, edit: proposedEdit !== null, ms: durationMs });
       emit("done", { turnId: turn.id, discussionId: threadId, threadId, assistantMessageId, endState: "done", answer, proposedEdit, toolCalls, costUsd: res.costUsd ?? null, durationMs });
     } catch (err) {
@@ -957,7 +959,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       await store
         .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools.slice(), durationMs })
         .catch((e) => log.error("discuss turn finish failed: {error}", { error: String(e) }));
-      await storeAnswer(unfinishedMessage(stripProposedEdit(streamed)), endState, { model: p.bot.model ?? null, durationMs });
+      await storeAnswer(unfinishedMessage(p.traceKey !== null ? streamed : stripProposedEdit(streamed)), endState, { model: p.bot.model ?? null, durationMs });
       log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, threadId, endState, error: message, ms: durationMs });
       emit("app_error", { type: "error", turnId: turn.id, endState, message: endState === "timeout" ? `The turn ran past ${Math.round(timeoutMs / 60000)} minutes and was stopped.` : `The turn failed: ${message}` });
     } finally {

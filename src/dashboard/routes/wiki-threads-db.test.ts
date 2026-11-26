@@ -45,6 +45,7 @@ const { STORED_EDIT_MARKER, WIKI_AGENT_RULES_FILE } = await import("../../wiki/d
 const { __resetWikiRegistryForTest, __setWikiRegistryForTest } = await import("../../wiki/registry-memo.ts");
 const { __resetWikiCacheForTest } = await import("../../wiki/store.ts");
 const { testTempDir } = await import("../../test/temp-dir.ts");
+const { TRACE_SUMMARY_QUESTION } = await import("../views/components/wiki-key-trace-model.ts");
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { OneShotOptions } from "../../ai/one-shot.ts";
@@ -91,6 +92,8 @@ interface Call {
 let calls: Call[] = [];
 let snaps = 0;
 let answer = "It opens at six.";
+/** The fake connector streams `answer` as text, then fails (a turn that ends `error`). */
+let streamThenFail = false;
 let events: ChatEvent[] = [];
 let unsubscribe: () => void = () => {};
 
@@ -114,6 +117,7 @@ beforeAll(async () => {
 beforeEach(() => {
   calls = [];
   answer = "It opens at six.";
+  streamThenFail = false;
   events = [];
   extractorCalls.length = 0;
   unsubscribe();
@@ -144,6 +148,10 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     },
     oneShot: async (prompt, _config, bot, opts) => {
       calls.push({ prompt, opts, bot });
+      if (streamThenFail) {
+        opts.onProgress?.({ type: "text_delta", text: answer });
+        throw new Error("the connector broke");
+      }
       opts.onProgress?.({ type: "tool_start", id: "t1", name: "Read", displayName: "Read", input: '{"file_path":"notes/harbour.md"}' });
       opts.onProgress?.({ type: "tool_end", id: "t1", name: "Read", displayName: "Read" });
       return { result: answer, costUsd: 0.01, toolCalls: [{ id: "t1", name: "Read", displayName: "Read", durationMs: 1, startOffsetMs: 0, input: "{}" }] } as never;
@@ -666,7 +674,8 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
   __resetWikiCacheForTest();
   try {
     const app = apps();
-    const evs = await frames(await tracePost(app, { question: "Summarize MEL-77" }));
+    // The Trace card's own «Summarize» question: it names no key, so the prompts must.
+    const evs = await frames(await tracePost(app, { question: TRACE_SUMMARY_QUESTION }));
     expect(evs.map((e) => (e.event === "status" ? `status:${e.data.phase}` : e.event))).toEqual(["turn", "status:snapshots", "status:mentions", "status:model", "tool", "status:writing", "done", "end"]);
     const threadId = evs[0]!.data.threadId as string;
     const thread = (await getThreadById(threadId))!;
@@ -696,7 +705,7 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     expect(sent.status).toBe(202);
     const rows = await settled(threadId, 2);
     expect(calls[1]!.prompt).toContain("MEL-77 also stops at the quay.");
-    expect(calls[1]!.prompt).toContain("Question: Summarize MEL-77");
+    expect(calls[1]!.prompt).toContain(`Question: ${TRACE_SUMMARY_QUESTION}`);
     expect(calls[1]!.prompt).toContain("Answer: It opens at six.");
 
     expect(rows.map((r) => ({ seq: r.seq, relPath: r.relPath, traceKey: r.traceKey, pageHash: r.pageHash, threadId: r.threadId }))).toEqual([
@@ -720,7 +729,7 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     const third = await frames(await tracePost(app, { question: "And now?" }));
     expect(third[0]!.data.threadId).toBe(threadId);
 
-    // Apply refuses a trace turn; Continue gives a prompt with no page path.
+    // Apply refuses a trace turn; Continue names the key and the wiki, and no page.
     const newest = (await settled(threadId, 3))[2]!;
     const apply = await app.request(WIKI_DISCUSS_APPLY_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id, preview: true }) });
     expect(apply.status).toBe(409);
@@ -728,8 +737,14 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     const cont = await app.request("/api/wiki/discuss/continue", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id }) });
     expect(cont.status).toBe(200);
     const prompt = ((await cont.json()) as { prompt: string }).prompt;
-    expect(prompt).toContain("Summarize MEL-77");
-    expect(prompt).not.toContain(wiki);
+    expect(prompt).toContain(TRACE_SUMMARY_QUESTION);
+    expect(prompt).toContain("Key: MEL-77");
+    expect(prompt).toContain(`Wiki: harbour (${wiki})`);
+    expect(prompt).toContain(`git -C '${wiki}' grep -n -w -F -e 'MEL-77'`);
+    expect(prompt).toContain("/api/wiki/mentions?wiki=harbour&key=MEL-77");
+    expect(prompt).not.toContain("Page:");
+    expect(prompt).not.toContain("about the whole page");
+    expect(prompt).not.toContain("If the page turns out to be wrong");
 
     // The thread read by key: the live trace thread and its messages.
     const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-77")).json()) as { thread: { id: string }; messages: { role: string }[] };
@@ -737,6 +752,41 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     expect(read.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user", "assistant"]);
   } finally {
     git("reset", "-q", "--hard", "HEAD~2");
+    __resetWikiCacheForTest();
+  }
+});
+
+// Fix round 1 (H2): a trace thread has no page and Apply refuses its turns, so an
+// edit block in a trace answer is no proposed edit and points at no page tab.
+test("a trace turn whose answer holds an edit block: no proposed edit on the row or the done event, the answer stored without the page-tab marker", async () => {
+  await Bun.write(path.join(wiki, "notes", "ferry.md"), "# Ferry note\n\nThe ferry case MEL-77 is open.\n");
+  gitc("add", ".");
+  gitc("commit", "-qm", "Ferry note names MEL-77");
+  __resetWikiCacheForTest();
+  try {
+    const app = apps();
+    answer = EDIT_ANSWER;
+    const evs = await frames(await tracePost(app, { question: TRACE_SUMMARY_QUESTION }));
+    const done = evs.find((e) => e.event === "done")!.data;
+    expect(done.proposedEdit).toBeNull();
+    const threadId = evs[0]!.data.threadId as string;
+    const [row] = await settled(threadId, 1);
+    expect(row!.proposedEdit).toBeNull();
+    const stored = (await messagesOf(threadId)).find((m) => m.id === row!.assistantMessageId)!;
+    expect(stored.content).not.toContain(STORED_EDIT_MARKER);
+    expect(stored.content).toBe(EDIT_ANSWER);
+
+    // A turn that fails after streaming the block stores what streamed, without the marker too.
+    streamThenFail = true;
+    const failed = await frames(await tracePost(app, { question: "Again?", discussionId: threadId }));
+    expect(failed.some((e) => e.event === "app_error")).toBe(true);
+    const rows = await settled(threadId, 2);
+    expect(rows[1]!.endState).toBe("error");
+    const partial = (await messagesOf(threadId)).find((m) => m.id === rows[1]!.assistantMessageId)!;
+    expect(partial.content).not.toContain(STORED_EDIT_MARKER);
+    expect(partial.content).toContain('"edits"');
+  } finally {
+    git("reset", "-q", "--hard", "HEAD~1");
     __resetWikiCacheForTest();
   }
 });

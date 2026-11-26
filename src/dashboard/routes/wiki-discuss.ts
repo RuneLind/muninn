@@ -60,6 +60,7 @@ import { chatWikiMirror, chatUsersFor, publishWikiRefusal } from "../../chat/wik
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { egressRefusal } from "./wiki-egress.ts";
+import { WIKI_MENTIONS_PATH } from "./wiki-mentions.ts";
 
 export {
   COPILOT_DISCUSS_TOOLS,
@@ -201,7 +202,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // wiki's egress prologue), since it marks a row and hands a model-written
   // answer on. Refusals: 403 role · 415 · 413 · 400 body · 404 unknown turn ·
   // 404 the turn's wiki is not configured here · 403 `readonly` · 409 the turn
-  // is still running · 500. A trace turn (no page) gets a prompt with no page path.
+  // is still running · 500. A trace turn (no page) gets a prompt that names its
+  // key, the wiki's root and how to list the key's mentions again.
   const contStore = deps.continueStore ?? { get: getDiscussTurn, list: listDiscussTurns, handedOver: markDiscussTurnHandedOver };
   const smallLimit = bodyLimit({
     maxSize: 1024,
@@ -229,8 +231,18 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       // A turn's lines were placed on the page it was stored with: against
       // another text they would name other lines of the file the prompt points at.
       const live = pagePath === null ? null : await readWikiText(pagePath).then(sha256, () => null);
+      const trace =
+        turn.traceKey === null
+          ? null
+          : {
+              wiki: turn.wiki,
+              root: path.resolve(resolveWikiRoot(entry?.root)),
+              key: turn.traceKey,
+              mentionsUrl: `${new URL(c.req.url).origin}${WIKI_MENTIONS_PATH}?wiki=${encodeURIComponent(turn.wiki)}&key=${encodeURIComponent(turn.traceKey)}`,
+            };
       const prompt = renderContinuePrompt({
         path: pagePath,
+        trace,
         turns: turns.map((t) => ({ seq: t.seq, selection: t.selection, location: t.location, question: t.question, answer: t.answer, endState: t.endState, pageChanged: live !== t.pageHash })),
       });
       const marked = await contStore.handedOver(turn.id);
