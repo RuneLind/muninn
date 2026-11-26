@@ -133,8 +133,10 @@ function ensureId(el: Element, title: string): string {
 
 const ID_TARGETS = ".dl-item[id] > .dl-id, section.query[id] .query-id, .cb-row[id] > .cb-id";
 const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
+/** A `RunChecklist` step with an anchor (`**R11 …**` → `#alpha-r11`). */
+const RUN_STEP = ".run-checklist li[id]";
 /** What a peek can show: the targets `peekParts` knows. */
-const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
+const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${RUN_STEP}, ${SECTIONS}`;
 
 /** Whether a chip's text can name its target in prose: two or more
  *  characters, at least one a letter (D4, S1, Q-14, Q-A, MEL-601780). A
@@ -548,6 +550,12 @@ export function peekParts(target: Element): { label: string; where: string; body
     const c = cloneBare(target);
     c.querySelector(".cb-id")?.remove();
     return { label: target.querySelector(".cb-id")?.textContent ?? "", where, body: [c], isTitle: false };
+  }
+  if (target.matches(RUN_STEP)) {
+    // The step's own line, without the steps nested under it.
+    const text = target.querySelector(":scope > .check-text") ?? target;
+    const label = /^[A-Z]+\d+/.exec((text.textContent ?? "").trim())?.[0] ?? "";
+    return { label, where, body: [cloneBare(text)], isTitle: false };
   }
   if (target.matches("details.fold")) {
     const body: Node[] = [];

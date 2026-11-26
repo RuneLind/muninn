@@ -371,8 +371,8 @@ export const COMPONENT_SPEC = {
   // tag at all and the section degrades to visible escaped text. `summary` is a
   // one-line teaser beside the title. `for` names who the fold is for (`dev`,
   // `agent`): the reader's Overview lens hides those two. The text renderers
-  // print every fold in full.
-  Fold: { attrs: { title: text, open: text, summary: text, for: text } },
+  // print every fold in full. `id` is the fold's anchor (`#alpha`).
+  Fold: { attrs: { title: text, open: text, summary: text, for: text, id: text } },
   // Sections the page keeps as history: `since` names what superseded them
   // (free text, e.g. `melosys-console#270`), `note` says how.
   Historic: { attrs: { since: text, note: text } },
@@ -405,7 +405,8 @@ export const COMPONENT_SPEC = {
   Tldr: { attrs: { label: text } },
   Timeline: { attrs: {} },
   DecisionLog: { attrs: {} },
-  RunChecklist: { attrs: {} },
+  // `id` prefixes each bold-id step's anchor: `id="alpha"` + `**R11 …**` → `#alpha-r11`.
+  RunChecklist: { attrs: { id: text } },
   // An open question as an answer card: `id` names its DecisionLog item, `choices`
   // and `to` are `|`-separated. See `src/format/question.ts`, which checks them.
   Question: { attrs: { id: text, choices: text, to: text } },

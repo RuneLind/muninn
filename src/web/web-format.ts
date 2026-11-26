@@ -475,9 +475,10 @@ export function formatWebHtml(
       }
     }
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
-    // Cases first: a Query card that collides with a case anchor yields; a
+    // Fold and RunChecklist-step anchors first, yielding to every other id;
+    // then cases: a Query card that collides with a case anchor yields; a
     // DecisionLog item yields to both.
-    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(collapseBlockSpacing(rendered).trim()))));
+    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(uniqueBlockAnchors(collapseBlockSpacing(rendered).trim())))));
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
@@ -859,6 +860,24 @@ function uniqueAnchors(html: string): string {
   return html.replace(ANCHOR_RE, (_m, _slug: string, between: string) => {
     const anchor = final[n++]!;
     return `<section class="query" id="${anchor}">${between}<a class="query-id" href="#${anchor}">`;
+  });
+}
+
+const BLOCK_ANCHOR_RE = /<(details class="fold[^"]*"(?: open)?|li class="check-[^"]*"(?: value="\d+")?) id="([^"]+)">/g;
+
+/** A `<Fold id>`'s and a `RunChecklist` step's anchor made unique in the
+ *  finished HTML. Runs FIRST and yields to every other id on the page as
+ *  written (a case row, a Query or Question card, a DecisionLog item), and a
+ *  repeat among these anchors yields to the first: it gets the first free
+ *  `-2`, `-3`. The later passes then see no collision with their own slugs. */
+function uniqueBlockAnchors(html: string): string {
+  if (!html.match(BLOCK_ANCHOR_RE)) return html;
+  const used = new Set([...html.replace(BLOCK_ANCHOR_RE, "<$1>").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!));
+  return html.replace(BLOCK_ANCHOR_RE, (_m, head: string, slug: string) => {
+    let anchor = slug;
+    for (let k = 2; used.has(anchor); k++) anchor = `${slug}-${k}`;
+    used.add(anchor);
+    return `<${head} id="${anchor}">`;
   });
 }
 
@@ -1374,6 +1393,9 @@ function childrenHtml(children: RenderedChild[] | undefined): string {
   return children?.map((c) => (c.kind === "para" ? `<p>${itemHtml(c.text)}</p>` : c.out)).join("") ?? "";
 }
 
+/** A `RunChecklist` step's id: the bold run its text opens with, `**R11 …**`. */
+const STEP_ID_RE = /^\*\*([A-Z]+\d+)(?![\p{L}\p{N}])/u;
+
 /** Checklist rows as `<ul class="checklist">`, a nested list inside its parent
  *  row. Every task row wraps its text in `check-text`: a flat row is a flex box,
  *  so the wrapper keeps its text one flex item, and on a parent row (`check-parent`,
@@ -1390,6 +1412,9 @@ function checklistHtml(
   /** A `RunChecklist` step list: an ordered one paints each step's number,
    *  since a flex row shows no list marker. */
   stepNumbers = false,
+  /** A `RunChecklist` step list's anchor prefix (`alpha-`, or empty): a step
+   *  led by a bold id (`**R11 …**`) gets `id="<prefix>r11"`. Undefined: no ids. */
+  anchorPrefix?: string,
 ): string {
   // A task row is a flex box, not a list item, so it does not advance an <ol>'s
   // counter: in an ordered sublist every row carries its number as `value`.
@@ -1408,7 +1433,10 @@ function checklistHtml(
         )
         .join("");
       const value = nums ? ` value="${nums[k]}"` : "";
-      if (it.plain) return `<li class="check-plain"${value}>${itemHtml(it.text)}${nested}</li>`;
+      // Last attribute on the `<li>`: `uniqueBlockAnchors` reads it there.
+      const stepId = anchorPrefix === undefined ? undefined : STEP_ID_RE.exec(it.text)?.[1];
+      const id = stepId ? ` id="${anchorPrefix}${stepId.toLowerCase()}"` : "";
+      if (it.plain) return `<li class="check-plain"${value}${id}>${itemHtml(it.text)}${nested}</li>`;
       const state = it.checked ? "done" : "todo";
       const mark = it.checked ? "✓" : "✗";
       // Always one wrapper: the row is a flex box, so unwrapped text runs, <code>
@@ -1416,7 +1444,7 @@ function checklistHtml(
       const text = `<span class="check-text">${itemHtml(it.text)}</span>`;
       const num = stepNumbers && nums ? `<span class="rc-num">${nums[k]}.</span>` : "";
       return (
-        `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}>` +
+        `<li class="check-item check-${state}${nested ? " check-parent" : ""}"${value}${id}>` +
         `${num}<span class="check-mark">${mark}</span> ${text}${nested}</li>`
       );
     })
@@ -2544,8 +2572,11 @@ const webRenderer: BlockRenderer = {
         // An untitled fold's «Details» is the reader's word, not the file's:
         // its own class keeps it out of Discuss's context (`DISCUSS_TEXT_SKIP`).
         const label = title ? escapeHtml(title) : `<span class="fold-label-default">Details</span>`;
+        // An authored anchor, last on the tag: `uniqueBlockAnchors` reads it there.
+        const anchor = anchorSlug(attrs.id ?? "");
+        const idAttr = anchor ? ` id="${anchor}"` : "";
         return (
-          `<details class="${foldClass(title, attrs.for)}"${openAttr}>` +
+          `<details class="${foldClass(title, attrs.for)}"${openAttr}${idAttr}>` +
           `<summary>${label}${teaserHtml}</summary>` +
           `<div class="fold-body">${foldBodyHtml(title, children, rawChildren)}</div>` +
           `</details>`
@@ -2683,10 +2714,13 @@ const webRenderer: BlockRenderer = {
         // direct-child list is a step list; other blocks render in place.
         const parts = runChecklistBody(rawChildren);
         if (!parts.some((p) => p.kind === "steps")) return children;
+        // `id="alpha"` prefixes each step anchor (`alpha-r11`); without it, `r11`.
+        const scope = anchorSlug(attrs.id ?? "");
+        const prefix = scope ? `${scope}-` : "";
         const body = parts
           .map((p) =>
             p.kind === "steps"
-              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml, true)
+              ? checklistHtml(p.list.rows, p.list.ordered, p.list.start, p.list.values, runListHtml, true, prefix)
               : renderBlocks([p.block], webRenderer),
           )
           .join("\n");

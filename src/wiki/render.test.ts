@@ -38,6 +38,23 @@ describe("renderWikiHtml", () => {
     expect(html).toContain(">CC</a>");
   });
 
+  test("a wikilink with #anchor resolves the page and carries the anchor", () => {
+    const html = renderWikiHtml("Se [[Claude Code#alpha-r11|R11]] og [[Claude Code#Kjøre plan]].", resolve, { wiki: "kw" });
+    expect(html).toContain(
+      '<a href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link" data-wiki-page="Claude Code" data-relpath="concepts/Claude Code.md" data-anchor="alpha-r11">R11</a>',
+    );
+    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#Kj%C3%B8re%20plan"');
+    expect(html).toContain('data-anchor="Kjøre plan">Claude Code#Kjøre plan</a>');
+    expect(html).not.toContain("wiki-link-missing");
+  });
+
+  test("a wikilink with an empty #, or a bare [[#x]], carries no anchor", () => {
+    const html = renderWikiHtml("[[Claude Code#]] og [[#x]]", resolve);
+    expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md" class="wiki-link"');
+    expect(html).not.toContain("data-anchor");
+    expect(html).toContain('class="wiki-link-missing"');
+  });
+
   test("unresolved wikilinks render as muted spans, not anchors", () => {
     const html = renderWikiHtml("See [[Nonexistent Page]].", resolve);
     expect(html).toContain('class="wiki-link-missing"');

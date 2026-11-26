@@ -49,6 +49,7 @@ import { parseQuestionPage, parseQuestionsTo, type QuestionRenderOptions } from 
 import { sha256 } from "../utils/date-hash.ts";
 import { DEFAULT_QUESTION_LANGUAGE, type QuestionLanguage } from "../format/question-labels.ts";
 import { pageDefaultLens, type IdLabels, type StoredLens, type WikiDefaultLens } from "../format/reader-lens.ts";
+import { NAV_ANCHOR_ATTR } from "./core/cross-ref.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -87,10 +88,24 @@ function readerCheckSlot(rawAttrs: string): string {
 }
 
 /** The reader's link to one page, showing `text` (escaped here). `wiki` is the
- *  registered wiki name for the `href`; omit it for the default wiki. */
-export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string): string {
+ *  registered wiki name for the `href`; omit it for the default wiki. `anchor`
+ *  is an element on that page (`[[plans/x#alpha-r11]]`): it rides the `href`'s
+ *  fragment and `data-anchor`, which the shell's click delegate carries into the
+ *  pushed URL so the page opens the folds around it. */
+export function wikiPageAnchor(meta: WikiPageMeta, text: string, wiki?: string, anchor?: string): string {
   const wikiQuery = wiki ? `wiki=${encodeURIComponent(wiki)}&` : "";
-  return `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`;
+  const hash = anchor ? `#${encodeURIComponent(anchor)}` : "";
+  const anchorAttr = anchor ? ` ${NAV_ANCHOR_ATTR}="${escapeHtml(anchor)}"` : "";
+  return `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}${hash}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}"${anchorAttr}>${escapeHtml(text)}</a>`;
+}
+
+/** A wikilink target split at its first `#`: the page part resolves, the rest
+ *  is an anchor on that page. A bare `[[#x]]` has no page part and stays whole. */
+function splitWikilinkAnchor(target: string): { page: string; anchor?: string } {
+  const hash = target.indexOf("#");
+  if (hash <= 0) return { page: target };
+  const anchor = target.slice(hash + 1).trim();
+  return { page: target.slice(0, hash), ...(anchor ? { anchor } : {}) };
 }
 
 export function renderWikiHtml(
@@ -176,7 +191,8 @@ export function renderWikiHtml(
     literal.push(whole);
     const text = wikiLinkText(target, label);
     linkTexts.push(text);
-    const meta = resolve(target);
+    const { page, anchor } = splitWikilinkAnchor(target);
+    const meta = resolve(page);
     const html = meta
       ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
         // delegate opens that exact page instead of re-resolving the stem
@@ -185,7 +201,7 @@ export function renderWikiHtml(
         // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
         // link on mimir opened jarvis) and the page (the stem re-resolved to
         // whichever registered first).
-        wikiPageAnchor(meta, text, opts?.wiki)
+        wikiPageAnchor(meta, text, opts?.wiki, anchor)
       : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);
