@@ -495,14 +495,26 @@ test("«Where else» lists the fixture's files and «History» its commits, with
 test("«Fact check» reaches the existing selection fact-check route", async ({ page }) => {
   await openPage(page);
   await dragSelect(page, NIGHT);
+  // The stream is answered in the page, not by this spec's server. A runner has
+  // no `claude`, so the real route's one-shot fails at once, and the client closes
+  // its EventSource on that `app_error` while the server ends the response: on
+  // that race Bun 1.3.10 segfaulted in uWS's socket-close handler (`panic(main
+  // thread): Segmentation fault at address 0x0`), hung ~25 s in its crash handler
+  // and died, so the next test's goto got ERR_CONNECTION_RESET. What is asserted
+  // here is the client's half: the request and where its answer lands.
+  const STUBBED = "stubbed fact-check end";
+  await page.route("**/api/wiki/factcheck?**", (r) =>
+    r.fulfill({ status: 200, contentType: "text/event-stream", body: `event: app_error\ndata: ${JSON.stringify({ type: "error", message: STUBBED })}\n\n` }),
+  );
   const fc = page.waitForRequest((r) => r.url().includes("/api/wiki/factcheck?"));
   await bar(page).locator("#wikiFactcheckBtn").click();
   const url = new URL((await fc).url());
   expect(url.searchParams.get("mode")).toBe("sel");
   expect(url.searchParams.get("sel")).toBe(NIGHT);
   expect(url.searchParams.get("relPath")).toBe(REL);
-  // The fact-check turn opens where it always has: the Ask tab.
+  // The fact-check turn opens where it always has: the Ask tab, which shows the stream's end.
   await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);
+  await expect(page.locator("#wikiAskStatus")).toContainText(STUBBED);
 });
 
 test("Enter with the bar open is the focused link's: the breadcrumb's ⌂ navigates and no turn starts", async ({ page }) => {
