@@ -214,6 +214,7 @@ const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
   prs: [{ repo: "navikt/x", number: 3625, state: "merged", mergedAt: "2026-11-17T09:00:00Z", url: "https://github.com/navikt/x/pull/3625", stale: false }],
   totalLines: 4,
   totalFiles: 3,
+  logTotalLines: 1,
   totalsAtLeast: false,
   truncated: false,
   ...over,

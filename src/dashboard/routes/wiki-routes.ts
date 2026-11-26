@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
-import { jiraTrackers, readWikiFacts, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import { jiraTrackers, readWikiFacts, type KeyMarksInput, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import type { SkippedMiddle } from "../../wiki/key-kinds.ts";
 import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
@@ -73,6 +74,7 @@ import { registerWikiDecisionInboxRoute } from "./wiki-decision-inbox.ts";
 import { registerWikiStepDoneRoutes } from "./wiki-step-done.ts";
 import { registerWikiStepChecksRoute } from "./wiki-step-checks.ts";
 import { registerWikiMentionsRoute } from "./wiki-mentions.ts";
+import { mentionsWorkTree } from "../../wiki/mentions.ts";
 import { registerChecksAnswerRoute } from "./checks-answer.ts";
 import { realBootLineDeps, registerWikiBootLineRoute } from "./wiki-boot-line.ts";
 import { registerChecksBootLineRoute } from "./checks-boot-line.ts";
@@ -1717,6 +1719,9 @@ export function registerWikiReadRoutes(
     owner: string | null,
     /** The live chips' pass: `GET /api/wiki/page` alone passes it. */
     liveFacts?: LiveFactsInput,
+    /** The key marks (Discuss v2 PR 6): `GET /api/wiki/page` alone, where the
+     *  mentions route answers for the viewer (the reader's `mentions` flag). */
+    keyMarks?: KeyMarksInput,
   ): Promise<string> {
     // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
     // a link opened on a non-default wiki lands on the DEFAULT one.
@@ -1739,6 +1744,7 @@ export function registerWikiReadRoutes(
       // Number columns, verdict cells, the label grid: styled in the article only.
       readerShapes: true,
       ...(liveFacts ? { liveFacts } : {}),
+      ...(keyMarks ? { keyMarks } : {}),
     });
   }
 
@@ -1761,13 +1767,50 @@ export function registerWikiReadRoutes(
     // Never a failed page open: a throw in the chip render renders the page
     // without chips and warns (on every open: nothing dedupes it). When the
     // plain render throws too, the cause is no chip's: its error surfaces.
+    // KEY MARKS (Discuss v2 PR 6, D5): each key the mentions route would
+    // answer a peek for, underlined; only where that route answers this viewer
+    // (`mentionsHere`, which PR 5's `mentions` flag shares): its tool group,
+    // MUNINN_AUTH off, a registered wiki (it 400s a `WIKI_DIR` override's
+    // empty name) on a git work tree with a commit (it 500s elsewhere). Fix round 1 J3.
+    // A render that throws with the marks is tried once more without them: a
+    // marks failure drops the marks alone (chips kept) and warns as the marks'.
     let liveFacts: LiveFactsPayload | undefined;
     let html: string | undefined;
     let chipError: unknown;
+    let marksError: unknown;
+    // What the `keys` scan skipped, from the last render with the marks: said
+    // once per page open, after the renders, and only when the page served
+    // carries the marks (a chip fault renders up to three times).
+    let scanSkips: { skippedLines: number; skippedChars: number; middle?: SkippedMiddle } | undefined;
+    const mentionsHere = tools && authMode() === "off" && !!entry?.name && (await mentionsWorkTree(entry.root));
+    const keyMarks: KeyMarksInput | undefined =
+      mentionsHere && (c.get("role") ?? "admin") === "admin"
+        ? {
+            grammar: index.readerConfig?.prGrammar ?? null,
+            trackers: jiraTrackers(index.readerConfig?.trackers),
+            kinds: index.readerConfig?.keys ?? [],
+            relPath: meta.relPath,
+            collect: ({ skippedLines, skippedChars, middle }) => {
+              scanSkips = { skippedLines, skippedChars, ...(middle ? { middle } : {}) };
+            },
+          }
+        : undefined;
+    const render = async (chips: LiveFactsInput | undefined): Promise<string> => {
+      const plain = () => renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, chips, undefined);
+      if (!keyMarks) return plain();
+      try {
+        return await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, chips, keyMarks);
+      } catch (err) {
+        // A throw without the marks too is not theirs: it propagates as before.
+        const out = await plain();
+        marksError = err;
+        return out;
+      }
+    };
     try {
       const loadedFacts = await readWikiFacts(index.root);
       if (loadedFacts) {
-        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, {
+        html = await render({
           loaded: loadedFacts,
           grammar: index.readerConfig?.prGrammar ?? null,
           trackers: jiraTrackers(index.readerConfig?.trackers),
@@ -1780,9 +1823,28 @@ export function registerWikiReadRoutes(
       chipError = err;
       liveFacts = undefined;
     }
-    html ??= await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined);
+    html ??= await render(undefined);
     if (chipError !== undefined)
       log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
+    if (marksError !== undefined)
+      log.warn("key marks failed on {relPath}; page rendered without them: {error}", { relPath: meta.relPath, error: marksError instanceof Error ? marksError.message : String(marksError) });
+    // Lines the `keys` scan skipped go unmarked (fix round 2, finding 5; sweep B): the
+    // middle past the page budget, in the file's lines, is a warning; over-long lines alone are info.
+    if (scanSkips && marksError === undefined) {
+      const { skippedLines, skippedChars, middle } = scanSkips;
+      const props = { wiki: entry?.name, relPath: meta.relPath };
+      if (middle)
+        log.warn("key marks: lines {fromLine}–{toLine} of {relPath} are unmarked: the page passed the scan budget ({middleLines} lines, {middleChars} chars skipped there; {longLines} over-long lines skipped elsewhere)", {
+          ...props,
+          fromLine: middle.fromLine,
+          toLine: middle.toLine,
+          middleLines: middle.lines,
+          middleChars: middle.chars,
+          longLines: skippedLines - middle.lines,
+          longChars: skippedChars - middle.chars,
+        });
+      else if (skippedLines > 0) log.info("key marks: {longLines} lines of {relPath} are over the line bound and unmarked ({longChars} chars)", { ...props, longLines: skippedLines, longChars: skippedChars });
+    }
 
     const listings = (relPaths: string[] | undefined) =>
       (relPaths ?? [])
@@ -1845,9 +1907,9 @@ export function registerWikiReadRoutes(
         // and counts only when the discuss route would accept it (not a symlink,
         // over the bound or unreadable: those it refuses with 422/503).
         tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok",
-        // Discuss v2 PR 5: «Where else» / «History» read the mentions route,
-        // which is in the same group and answers only with MUNINN_AUTH off.
-        tools && authMode() === "off",
+        // Discuss v2 PR 5: «Where else» / «History» read the mentions route:
+        // the key marks' gate above.
+        mentionsHere,
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

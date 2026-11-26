@@ -541,24 +541,59 @@ export async function getOrCreateWikiThread(
   relPath: string,
   nameFor: (suffix: string) => string,
 ): Promise<Thread> {
+  return getOrCreateWikiThreadOn({ relPath }, userId, botName, wiki, nameFor);
+}
+
+/** The live trace thread of a key (Discuss v2 PR 6), or null. */
+export async function getLiveWikiTraceThread(userId: string, botName: string, wiki: string, traceKey: string): Promise<Thread | null> {
+  const [row] = await getDb()`
+    SELECT * FROM threads
+    WHERE user_id = ${userId} AND bot_name = ${botName} AND kind = 'wiki'
+      AND wiki = ${wiki} AND trace_key = ${traceKey} AND closed_at IS NULL
+  `;
+  return row ? rowToThread(row) : null;
+}
+
+/** A key's live trace thread, created when there is none: {@link getOrCreateWikiThread}'s
+ *  race rules on the trace key's partial index (`rel_path` NULL). */
+export async function getOrCreateWikiTraceThread(
+  userId: string,
+  botName: string,
+  wiki: string,
+  traceKey: string,
+  nameFor: (suffix: string) => string,
+): Promise<Thread> {
+  return getOrCreateWikiThreadOn({ traceKey }, userId, botName, wiki, nameFor);
+}
+
+async function getOrCreateWikiThreadOn(
+  on: { relPath: string } | { traceKey: string },
+  userId: string,
+  botName: string,
+  wiki: string,
+  nameFor: (suffix: string) => string,
+): Promise<Thread> {
   const sql = getDb();
-  const live = await getLiveWikiThread(userId, botName, wiki, relPath);
+  const relPath = "relPath" in on ? on.relPath : null;
+  const traceKey = "traceKey" in on ? on.traceKey : null;
+  const liveNow = () => (relPath !== null ? getLiveWikiThread(userId, botName, wiki, relPath) : getLiveWikiTraceThread(userId, botName, wiki, traceKey!));
+  const live = await liveNow();
   if (live) return live;
   for (let attempt = 0; attempt < 5; attempt++) {
     const suffix = attempt === 0 ? "" : ` #${randomBytes(2).toString("hex")}`;
     const name = nameFor(suffix).toLowerCase().trim();
     if (!name || name.length > THREAD_NAME_MAX || /[\n\r\t]/.test(name)) throw new Error(`bad wiki thread name ${JSON.stringify(name)}`);
     const [row] = await sql`
-      INSERT INTO threads (user_id, bot_name, name, is_active, kind, wiki, rel_path)
-      VALUES (${userId}, ${botName}, ${name}, false, 'wiki', ${wiki}, ${relPath})
+      INSERT INTO threads (user_id, bot_name, name, is_active, kind, wiki, rel_path, trace_key)
+      VALUES (${userId}, ${botName}, ${name}, false, 'wiki', ${wiki}, ${relPath}, ${traceKey})
       ON CONFLICT DO NOTHING
       RETURNING *
     `;
     if (row) return rowToThread(row);
-    const again = await getLiveWikiThread(userId, botName, wiki, relPath);
+    const again = await liveNow();
     if (again) return again;
   }
-  throw new Error(`could not create a wiki thread for ${wiki}/${relPath}`);
+  throw new Error(`could not create a wiki thread for ${wiki}/${relPath ?? `trace ${traceKey}`}`);
 }
 
 /** «Start over»: close a live wiki thread. True when it was live. */

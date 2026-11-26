@@ -19,6 +19,15 @@
  *  is the fact-check marks'. */
 export const FACT_CHIP_CLASS = "fact-chip";
 export const LIVE_FACT_ATTR = "data-live-fact";
+/** A key mark (Discuss v2 PR 6, `planKeyMarks` in `src/wiki/live-facts.ts`). */
+export const KEY_MARK_CLASS = "wiki-key";
+export const KEY_MARK_ATTR = "data-wiki-key";
+/** A mark whose own chip shows right after it (the reader's chip paint):
+ *  that key's hover target is its chip, so the mark draws no underline and
+ *  opens no peek (fix round 1 J1). */
+export const KEY_MARK_CHIPPED_CLASS = "wiki-key-chipped";
+/** A key mark that is its key's hover target. */
+export const KEY_PEEK_MARK_SELECTOR = `.${KEY_MARK_CLASS}[${KEY_MARK_ATTR}]:not(.${KEY_MARK_CHIPPED_CLASS})`;
 /** A chip whose (oldest) entry is older than this dims. */
 export const CHIP_DIM_DAYS = 7;
 

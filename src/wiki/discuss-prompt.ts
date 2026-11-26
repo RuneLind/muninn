@@ -9,6 +9,8 @@
 
 import { HANDOFF_QUESTION_MAX } from "./discuss-bounds.ts";
 import { buildContextPack, type ContextPack, type PackInput } from "./discuss-pack.ts";
+import { MENTIONS_MAX_COMMITS, MENTIONS_MAX_LINES } from "./mentions.ts";
+import { ereEscape, GREP_LOCALE, HISTORY_WHOLE_KEY_SCAN, NO_USER_CONFIG, PINNED_CONFIG } from "./tracked-files.ts";
 
 export { HANDOFF_QUESTION_MAX };
 /** The whole prompt's bound, as the chat seeds' (`ASK_CHAT_SEED_MAX`). */
@@ -148,27 +150,119 @@ function cut(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max - 1).trimEnd()}… [cut]`;
 }
 
+/** A trace turn's subject (Discuss v2, PR 6): the key, its wiki and where to list its mentions again. */
+export interface ContinueTrace {
+  wiki: string;
+  /** The wiki's root on this machine. */
+  root: string;
+  key: string;
+  /** The mentions route for this key on this dashboard. */
+  mentionsUrl: string;
+  /** The mentions search the key as a whole key (it has a kind in this wiki, `mentionsKind`), else as a substring. */
+  wholeKey: boolean;
+}
+
+const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * One git command as the mentions payload runs it (`tracked-files.ts`
+ * through realGit): realGit's environment (`env -i` keeps only PATH and HOME,
+ * so no `GIT_DIR` or `GIT_CONFIG_PARAMETERS` of the agent's shell reaches git),
+ * no user or system config (`NO_USER_CONFIG`), the payload's `-c` pins
+ * (`PINNED_CONFIG`) over the repo's own `.git/config`, and realGit's
+ * `--no-pager --literal-pathspecs`. Without them the user's config could drop
+ * the root commit (`log.showRoot`), add renames (`diff.renames`), quote a
+ * non-ASCII path (`core.quotePath`, on by default) or print paths from the
+ * repo's top (`grep.fullName`). The table of keys is in
+ * `discuss-continue-prompt.test.ts`.
+ */
+function payloadGit(root: string, locale: string, args: readonly string[]): string {
+  const env = ["env -i", 'PATH="$PATH"', 'HOME="$HOME"', `LC_ALL=${locale}`, ...Object.entries(NO_USER_CONFIG).map(([k, v]) => `${k}=${v}`)];
+  return [...env, "git --no-pager --literal-pathspecs -C", shellQuote(root), ...PINNED_CONFIG, ...args].join(" ");
+}
+
+/** Lines as a fenced code block whose fence no run of backticks in them can close. */
+function fenced(lines: readonly string[]): string {
+  const longest = Math.max(0, ...lines.flatMap((l) => (l.match(/`+/g) ?? []).map((run) => run.length)));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [`${fence}sh`, ...lines, fence].join("\n");
+}
+
+/** realGit's locale (`decision-triage/git.ts`): `git log` runs under it. */
+const GIT_LOCALE = "C";
+
+/**
+ * The «where it is mentioned» part of a trace's Continue prompt, its commands
+ * in a fenced block (a key may hold a backtick, which would end a code span).
+ * A substring key gets the payload's own searches (`grep -F` under its
+ * `C.UTF-8`, `log -S`), so they list what the mentions do up to the payload's
+ * caps. A whole key has no git equivalent: the payload greps the key as a
+ * fixed string and keeps the lines that hold it whole (`wholeKeyCount`), and
+ * git's pickaxe takes no PCRE (`-S --pickaxe-regex` undercounts two copies one
+ * character apart). So the commands are supersets: an ERE grep under the C
+ * locale, and the payload's own candidate step, `log -G` with its ERE. Every
+ * command is scoped to the wiki (`-- .` from its root), and the grep skips
+ * binary files (`-I`) as the payload does.
+ */
+function traceWhereLines(trace: ContinueTrace): string[] {
+  const grep = ["grep", "--no-recurse-submodules", "--no-color", "-n", "-I"];
+  const log = ["log", "--no-show-signature", "--no-color", "--no-decorate"];
+  const caps = `${MENTIONS_MAX_LINES} lines and ${MENTIONS_MAX_COMMITS} commits`;
+  if (!trace.wholeKey) {
+    return [
+      `Where it is mentioned: the first command below lists the tracked files and lines that hold it, the second the commits that changed how often it occurs, as the answer of ${trace.mentionsUrl} does; that answer adds its log.md lines and the state of the PRs they name, and lists at most ${caps}, so for a busy key the commands list more.`,
+      fenced([
+        payloadGit(trace.root, GREP_LOCALE.LC_ALL, [...grep, "-F", "-e", shellQuote(trace.key), "--", "."]),
+        payloadGit(trace.root, GIT_LOCALE, [...log, "--relative", "--oneline", shellQuote(`-S${trace.key}`), "--", "."]),
+      ]),
+    ];
+  }
+  const ere = `(^|[^[:alnum:]])${ereEscape(trace.key)}([^[:alnum:]]|$)`;
+  return [
+    `Where it is mentioned: ${trace.mentionsUrl} returns the exact answer: the tracked files and lines that hold the key whole (no Unicode letter or digit right before or after it), the commits that changed how often it occurs, its log.md lines and the state of the PRs they name. ` +
+      "To look yourself, the first command below lists candidate lines and the second candidate commits:",
+    fenced([
+      payloadGit(trace.root, GIT_LOCALE, [...grep, "-E", "-e", shellQuote(ere), "--", "."]),
+      payloadGit(trace.root, GIT_LOCALE, [...log, "--no-ext-diff", "--no-textconv", "--relative", "--oneline", shellQuote(`-G${ere}`), "--", "."]),
+    ]),
+    "Both can list more than that answer: they read bytes, so a non-ASCII letter or digit right next to the key does not stop a match, and the log names every commit that edits a line holding the key, not only those that change how often it occurs. " +
+      `The answer also lists at most ${caps} and checks at most ${HISTORY_WHOLE_KEY_SCAN} candidate commits, so for a busy key they list more for that reason too.`,
+  ];
+}
+
 /**
  * «Continue in Claude Code» (P3): the prompt that takes a Discuss discussion
- * on to Claude Code, up to and including the turn handed over. The page path,
- * then each turn's passage, question and answer, oldest first. When the whole
+ * on to Claude Code, up to and including the turn handed over. The page path
+ * (a trace's key, wiki and how to list its mentions), then each turn's
+ * passage, question and answer, oldest first. When the whole
  * is over {@link CONTINUE_PROMPT_MAX}, the oldest turns' answers go first, then
  * the oldest turns; the handed-over turn always stays. Pure.
  */
-export function renderContinuePrompt(input: { path: string | null; turns: ContinueTurn[] }): string {
-  // A trace turn (Discuss v2, PR 6) has no page: the prompt names none.
+export function renderContinuePrompt(input: { path: string | null; trace?: ContinueTrace | null; turns: ContinueTurn[] }): string {
+  // A trace turn (Discuss v2, PR 6) has no page: its subject is the key.
+  const trace = input.path === null ? (input.trace ?? null) : null;
   const head =
-    input.path === null
-      ? ["I discussed this with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the code and pages it names before you answer.", ""]
-      : [
-          "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+    trace !== null
+      ? [
+          "I traced a key across a wiki with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the files and code it names before you answer.",
           "",
-          `Page: ${input.path}`,
+          `Key: ${trace.key}`,
+          // A root holding a line break is shown as a JSON string, so no line of it (a code fence) can reach the markdown.
+          `Wiki: ${trace.wiki} (${/[\u0000-\u001f]/.test(trace.root) ? JSON.stringify(trace.root) : trace.root})`,
+          ...traceWhereLines(trace),
           "",
-        ];
-  const tail = ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
+        ]
+      : input.path === null
+        ? ["I discussed this with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the code and pages it names before you answer.", ""]
+        : [
+            "I discussed this wiki page with muninn's wiki agent and want to go on here. Its answers below may be wrong: read the page and the code it names before you answer.",
+            "",
+            `Page: ${input.path}`,
+            "",
+          ];
+  const tail = input.path === null ? ["", "Go on from the last answer."] : ["", "Go on from the last answer. If the page turns out to be wrong, show me the edit before you write it."];
   const block = (t: ContinueTurn, withAnswer: boolean): string[] => [
-    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : " (about the whole page):"}`,
+    `Turn ${t.seq}${t.selection ? ` (passage, ${turnWhere(t.location, t.pageChanged)}):` : input.path === null ? ":" : " (about the whole page):"}`,
     ...(t.selection ? [`> ${clampLine(t.selection, 1500)}`] : []),
     `Question: ${clampLine(t.question, HANDOFF_QUESTION_MAX)}`,
     withAnswer

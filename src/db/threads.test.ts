@@ -13,6 +13,9 @@ import {
   getOrCreateSlackThread,
   getAllThreadsForBot,
   getOrCreateWikiThread,
+  getOrCreateWikiTraceThread,
+  getLiveWikiTraceThread,
+  getLiveWikiThread,
   closeWikiThread,
   listClosedWikiThreads,
   createThread,
@@ -21,7 +24,7 @@ import {
 } from "./threads.ts";
 import { getDb } from "./client.ts";
 import { startDiscussTurn } from "./wiki-discuss-turns.ts";
-import { wikiThreadName } from "../wiki/discuss-agent.ts";
+import { traceThreadName, wikiThreadName } from "../wiki/discuss-agent.ts";
 import { saveMemory, getMemoriesForUser } from "./memories.ts";
 
 setupTestDb();
@@ -497,6 +500,35 @@ describe("wiki threads (kind 'wiki', migration 094)", () => {
     const names = [wikiThreadName(long, ""), wikiThreadName(long, " #abcd")];
     expect(names.map((x) => x.length)).toEqual([50, 50]);
     expect(names[1]!.endsWith(" #abcd")).toBe(true);
+  });
+
+  test("getOrCreateWikiTraceThread (PR 6): one live trace thread for two requests at once, keyed apart from the page threads, never active", async () => {
+    await switchThread("u1", "bot1", "work");
+    const page = await getOrCreateWikiThread("u1", "bot1", "kode", "plans/ferry.mdx", nameFor);
+    const [a, b] = await Promise.all([
+      getOrCreateWikiTraceThread("u1", "bot1", "kode", "MEL-77", (s) => traceThreadName("MEL-77", s)),
+      getOrCreateWikiTraceThread("u1", "bot1", "kode", "MEL-77", (s) => traceThreadName("MEL-77", s)),
+    ]);
+    expect(a.id).toBe(b.id);
+    expect(a.id).not.toBe(page.id);
+    expect(a).toMatchObject({ kind: "wiki", wiki: "kode", traceKey: "MEL-77", name: "wiki trace: mel-77", isActive: false });
+    expect(a.relPath).toBeUndefined();
+    expect((await getActiveThread("u1", "bot1"))!.name).toBe("work");
+    expect((await getLiveWikiTraceThread("u1", "bot1", "kode", "MEL-77"))!.id).toBe(a.id);
+    // The page lookup never answers with the trace thread, nor the trace lookup with a page's.
+    expect((await getLiveWikiThread("u1", "bot1", "kode", "plans/ferry.mdx"))!.id).toBe(page.id);
+    expect(await getLiveWikiTraceThread("u1", "bot1", "kode", "MEL-78")).toBeNull();
+  });
+
+  test("a trace thread's name a chat thread or a closed trace thread holds gets a suffix; a closed one leaves room for a new live one", async () => {
+    await createThread("u1", "bot1", "wiki trace: mel-77");
+    const t = await getOrCreateWikiTraceThread("u1", "bot1", "kode", "MEL-77", (s) => traceThreadName("MEL-77", s));
+    expect(t.name).toMatch(/^wiki trace: mel-77 #[0-9a-f]{4}$/);
+    expect(await closeWikiThread(t.id)).toBe(true);
+    expect(await getLiveWikiTraceThread("u1", "bot1", "kode", "MEL-77")).toBeNull();
+    const again = await getOrCreateWikiTraceThread("u1", "bot1", "kode", "MEL-77", (s) => traceThreadName("MEL-77", s));
+    expect(again.id).not.toBe(t.id);
+    expect(traceThreadName("K".repeat(80), " #abcd")).toHaveLength(50);
   });
 
   test("switchThread, updateThreadConnector and createThread refuse a wiki thread; listThreads returns it with its kind", async () => {

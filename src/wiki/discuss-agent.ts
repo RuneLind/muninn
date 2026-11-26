@@ -145,6 +145,12 @@ export function wikiThreadName(title: string, suffix: string, max = 50): string 
   return `${WIKI_THREAD_NAME_PREFIX.toLowerCase()}${truncateUnits(flat, max - WIKI_THREAD_NAME_PREFIX.length - suffix.length).trimEnd()}${suffix}`;
 }
 
+/** A key's trace thread name: `wiki trace: <key>` lowercased, cut to fit `max` units with the suffix. */
+export function traceThreadName(key: string, suffix: string, max = 50): string {
+  const prefix = "wiki trace: ";
+  return `${prefix}${truncateUnits(key.replace(/\s+/g, " ").trim().toLowerCase(), max - prefix.length - suffix.length).trimEnd()}${suffix}`;
+}
+
 /**
  * The repos a page asks for: its `repos:` (an inline list or one name); without
  * that key, its `project` as the reader's listing computes it; otherwise none.
@@ -249,10 +255,14 @@ export interface EarlierTurn {
 
 /** The system prompt: a fixed frame and the wiki's own rules (for the turn's
  *  mode, {@link rulesForMode}). No persona. */
-export function renderAgentSystemPrompt(wiki: string, rules: string): string {
+export function renderAgentSystemPrompt(wiki: string, rules: string, traceKey?: string): string {
   return [
-    `You are the wiki agent behind Discuss in muninn's wiki reader. You discuss one page of the "${wiki}" wiki with the reader, in a thread.`,
-    "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
+    traceKey
+      ? `You are the wiki agent behind Discuss in muninn's wiki reader. You trace one key, «${traceKey}», across the "${wiki}" wiki with the reader, in a thread.`
+      : `You are the wiki agent behind Discuss in muninn's wiki reader. You discuss one page of the "${wiki}" wiki with the reader, in a thread.`,
+    traceKey
+      ? "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, and where the key is mentioned — the files and lines, the commits that changed it, its log.md lines and the PRs those lines name. There is no page to edit. You cannot write files or run commands."
+      : "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
     "The wiki's own rules follow. They decide how you answer.",
     "",
     "<wiki_rules>",
@@ -268,19 +278,27 @@ function numbered(text: string, fromLine: number): string {
     .join("\n");
 }
 
-function readSection(reach: AgentReach, pack: ContextPack): string[] {
+/** «What you can read»: the reach, with citations shown on `pack.relPath`
+ *  (a page turn's page, a trace turn's first file). A trace turn's subject is
+ *  its key, so its wording names no page. */
+export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">, subject: "page" | "trace" = "page"): string[] {
   if (reach.kind === "mcpTools") {
     const tools = Object.entries(reach.tools).flatMap(([server, ts]) => ts.map((t) => `${server}-${t}`));
     return [
       "## What you can read",
-      `The context pack below, and these tools only: ${tools.join(", ")}.`,
+      // Where the pack sits: a page prompt puts «The page» above this section
+      // and the passage, section and headings below it; a trace prompt puts
+      // its whole pack above (`renderTraceTurnPrompt`).
+      `${subject === "trace" ? "The context pack above" : "The context pack (the page above this section, the rest below it)"}, and these tools only: ${tools.join(", ")}.`,
       "The knowledge server's search finds other pages of this wiki and the team's documents. yggdrasil's tools reach the indexed code: search finds it, file_outline lists a file's symbols, symbol_context shows a symbol's source and its callers.",
       ...(reach.wikiToolsWiki && reach.tools.research?.includes("wiki_grep")
         ? [
             `This wiki's own files: use research-wiki_grep for an exact key, id or a "where else" question (it finds every tracked file that holds it), research-wiki_read to read a file it returned, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`,
           ]
         : []),
-      "Cite code as `repo/path:line` from what a tool returned, and a page line as `" + pack.relPath + ":LINE`.",
+      subject === "trace"
+        ? "Cite code as `repo/path:line` from what a tool returned, and a wiki file's line as `<path in the wiki>:LINE`, e.g. `" + pack.relPath + ":12`."
+        : "Cite code as `repo/path:line` from what a tool returned, and a page line as `" + pack.relPath + ":LINE`.",
     ];
   }
   const lines = [
@@ -291,7 +309,7 @@ function readSection(reach: AgentReach, pack: ContextPack): string[] {
   for (const r of reach.repos) lines.push(`- ${r.name}: ${r.dir} (${r.ref}). Cite a file at ${r.dir}/src/x.ts as \`${r.name}/src/x.ts:LINE\`.`);
   lines.push("");
   lines.push("## Code in reach");
-  if (reach.repos.length === 0) lines.push(`${NO_REPO_IN_REACH[0]!.toUpperCase()}${NO_REPO_IN_REACH.slice(1)}: no code repo's snapshot is given for this page.`);
+  if (reach.repos.length === 0) lines.push(`${NO_REPO_IN_REACH[0]!.toUpperCase()}${NO_REPO_IN_REACH.slice(1)}: no code repo's snapshot is given for ${subject === "trace" ? "a trace" : "this page"}.`);
   else lines.push(reach.repos.map((r) => `- ${r.name}: ${r.dir}`).join("\n"));
   for (const m of reach.missed) lines.push(`- ${m.name}: ${m.why}`);
   for (const o of reach.own) lines.push(`- ${o}: this wiki's own repo; its files are the wiki snapshot above`);
@@ -299,8 +317,9 @@ function readSection(reach: AgentReach, pack: ContextPack): string[] {
 }
 
 /**
- * The turn's prompt: what the agent can read, the context pack, the
- * discussion so far and the question, last.
+ * The turn's prompt: the page, what the agent can read, the rest of the
+ * context pack (passage, section, headings), the discussion so far and the
+ * question, last.
  */
 export function renderAgentTurnPrompt(opts: {
   pack: ContextPack;
@@ -351,10 +370,19 @@ export function renderAgentTurnPrompt(opts: {
     out.push(opts.cardNote);
     out.push("");
   }
-  const earlier = opts.earlier.slice(-DISCUSS_HISTORY_TURNS);
+  out.push(...discussionSoFar(opts.earlier));
+  out.push("## Question");
+  out.push(opts.question.trim());
+  return out.join("\n");
+}
+
+/** «The discussion so far»: the last {@link DISCUSS_HISTORY_TURNS} turns, each answer cut at {@link DISCUSS_HISTORY_ANSWER_MAX}. */
+export function discussionSoFar(all: readonly EarlierTurn[]): string[] {
+  const out: string[] = [];
+  const earlier = all.slice(-DISCUSS_HISTORY_TURNS);
   if (earlier.length) {
     out.push("## The discussion so far");
-    if (opts.earlier.length > earlier.length) out.push(`(${opts.earlier.length - earlier.length} earlier turns left out)`);
+    if (all.length > earlier.length) out.push(`(${all.length - earlier.length} earlier turns left out)`);
     for (const t of earlier) {
       out.push(`Question${t.selection ? ` about «${clampLine(t.selection, 200)}»` : ""}: ${clampLine(t.question, 2000)}`);
       const answer = t.answer.length > DISCUSS_HISTORY_ANSWER_MAX ? `${t.answer.slice(0, DISCUSS_HISTORY_ANSWER_MAX)} [… cut]` : t.answer;
@@ -362,9 +390,7 @@ export function renderAgentTurnPrompt(opts: {
       out.push("");
     }
   }
-  out.push("## Question");
-  out.push(opts.question.trim());
-  return out.join("\n");
+  return out;
 }
 
 /** Replace the live wiki root with the snapshot's in a card's text, so the

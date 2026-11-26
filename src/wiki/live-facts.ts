@@ -38,7 +38,7 @@ import { escapeHtml } from "../format/markdown-core.ts";
 import { escapeRegExp } from "../utils/escape-regexp.ts";
 import { READER_ONLY_ATTR } from "../format/reader-lens.ts";
 import { pageStemOf } from "./core/wiki-filter.ts";
-import { FACT_CHIP_CLASS, LIVE_FACT_ATTR, repoOfPr, type FactsKeyEntry, type FactsPrEntry, type LiveFactsPayload } from "./core/live-facts-chip.ts";
+import { FACT_CHIP_CLASS, KEY_MARK_ATTR, KEY_MARK_CLASS, LIVE_FACT_ATTR, repoOfPr, type FactsKeyEntry, type FactsPrEntry, type LiveFactsPayload } from "./core/live-facts-chip.ts";
 import { readOwns } from "./frontmatter-lists.ts";
 import { stateLineRoles } from "./lint-state.ts";
 import { WIKILINK_WITH_LABEL_RE } from "./page-text.ts";
@@ -46,6 +46,7 @@ import { noProdSet, qualifyRepo, type PrGrammar } from "./pr-grammar.ts";
 import { parseFrontmatter, stripFrontmatter } from "./store.ts";
 import { declaredKeys, stampedIssueKeys, stemKeys, titleKeys, valueStrings } from "./trackers/jira.ts";
 import type { TrackerConfig } from "./trackers/types.ts";
+import { keyCharAfter, keyCharBefore, scanKeyKinds, type KeyKind, type SkippedMiddle } from "./key-kinds.ts";
 
 const log = getLog("wiki", "live-facts");
 
@@ -207,13 +208,39 @@ function matchesNotAfter(body: string, re: RegExp, notAfter: RegExp | undefined)
   return out;
 }
 
-/** Every key mention in `body` with its offset, code included. */
-export function bodyKeyMentions(body: string, projects: readonly string[]): { key: string; start: number; end: number }[] {
+/**
+ * Every key mention in `body` with its offset, code included. With projects,
+ * `whole` (the default) is the mentions route's whole-key rule, so a marked
+ * key or chip opens a peek that counts it: no Unicode letter or digit, read as
+ * a whole code point, right before or after (`keyCharBefore`/`keyCharAfter`;
+ * `MEL-12_x` and `MEL-12-3` mention MEL-12, `åMEL-12` and `𝐀MEL-12` do not).
+ * `sweep` is plan-status-sweep's ASCII rule (`[A-Za-z0-9_]` either side, or
+ * `-digit` after), which the page key set keeps ({@link pageKeySet}). Without
+ * projects both are the sweep's generic pattern.
+ */
+export function bodyKeyMentions(body: string, projects: readonly string[], rule: "whole" | "sweep" = "whole"): { key: string; start: number; end: number }[] {
   const generic = projects.length === 0;
+  if (!generic && rule === "whole") return wholeKeyMentions(body, projects);
   const { re, notAfter } = bodyKeyRe(projects);
   return matchesNotAfter(body, re, notAfter)
     .filter((m) => !generic || !(m[0].startsWith("MEL-") || m[0].startsWith("Q-")))
     .map((m) => ({ key: m[0], start: m.index, end: m.index + m[0].length }));
+}
+
+/** {@link bodyKeyMentions}'s `whole` rule. A greedy digit run that a key
+ *  character follows is refused outright: every shorter match ends before a digit. */
+function wholeKeyMentions(body: string, projects: readonly string[]): { key: string; start: number; end: number }[] {
+  const re = new RegExp(`(?:${projects.map(escapeRegExp).join("|")})-[1-9][0-9]{0,7}`, "g");
+  const out: { key: string; start: number; end: number }[] = [];
+  for (let m: RegExpExecArray | null; (m = re.exec(body)); ) {
+    const end = m.index + m[0].length;
+    if (keyCharBefore(body, m.index) || keyCharAfter(body, end)) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    out.push({ key: m[0], start: m.index, end });
+  }
+  return out;
 }
 
 /** The sweep's generic entry rule: an entry that is exactly key-shaped, else
@@ -238,15 +265,9 @@ export function pageKeySet(markdown: string, relPath: string, trackers: readonly
   return pageKeySetOf(markdown, parseFrontmatter(markdown), relPath, trackers);
 }
 
-/** {@link pageKeySet} over an already-parsed frontmatter; `bodyKeys` gives
- *  the mentions of `stripFrontmatter(markdown)` when the caller has them. */
-function pageKeySetOf(
-  markdown: string,
-  fm: Record<string, string | string[]>,
-  relPath: string,
-  trackers: readonly TrackerConfig[],
-  bodyKeys?: (stripped: string) => { key: string }[] | undefined,
-): Set<string> {
+/** {@link pageKeySet} over an already-parsed frontmatter. Its body keys are
+ *  the sweep's rule, not the marks' (`bodyKeyMentions`' `sweep`). */
+function pageKeySetOf(markdown: string, fm: Record<string, string | string[]>, relPath: string, trackers: readonly TrackerConfig[]): Set<string> {
   const out = new Set<string>(readOwns(markdown).keys);
   const title = typeof fm.title === "string" ? fm.title.trim() : "";
   const stem = pageStemOf(relPath);
@@ -264,7 +285,7 @@ function pageKeySetOf(
     for (const m of stem.toUpperCase().matchAll(/MELOSYS-\d+/g)) out.add(m[0]);
   }
   const stripped = stripFrontmatter(markdown);
-  for (const m of bodyKeys?.(stripped) ?? bodyKeyMentions(stripped, projects)) out.add(m.key);
+  for (const m of bodyKeyMentions(stripped, projects, "sweep")) out.add(m.key);
   return out;
 }
 
@@ -467,10 +488,32 @@ export interface Mention {
   end: number;
 }
 
-/** One chip site: the offset in the body and the ids, in text order. */
+/** One chip site: the offset in the body and the ids, in text order. With
+ *  `shift` the render parks the chips before `body[at - 1]` and moves them
+ *  past it after the inline pass ({@link chipShifts}). */
 export interface ChipInsertion {
   at: number;
   ids: { id: string; kind: "pr" | "key" }[];
+  shift?: true;
+}
+
+/**
+ * Whether a chip at `at` is parked one character early, between the site's
+ * last two characters, and moved past the last one after the inline pass
+ * (`moveShiftedChips` in `render.ts`). Parked AT the site, the sentinel would
+ * be the neighbour the next character's rule reads: after a key's digit, a
+ * `*` or `_` cannot open emphasis, after the sentinel it can
+ * (`MELOSYS-4763*foo*`). Between a letter or digit and a letter, digit, `-`,
+ * `#` or `/`, it touches no character any inline rule reads as a delimiter,
+ * so the renderer reads every neighbour as it does without the chip; each of
+ * those is a character the before → after rule glues to the number after it,
+ * so no chain starts at the moved character either. ASCII, so the moved
+ * character is one code unit the escape leaves alone. Every key and PR
+ * mention ends in a digit after one of these, so only a link, a reference
+ * link, an autolink or an odd bare URL keeps its chip at the site.
+ */
+export function chipShifts(body: string, at: number): boolean {
+  return at >= 2 && /[A-Za-z0-9]/.test(body[at - 1]!) && /[A-Za-z0-9#/-]/.test(body[at - 2]!);
 }
 
 // A tag is a name and attributes in HTML's own grammar (`name`, `name=value`,
@@ -485,7 +528,9 @@ const REF_LINK_RE = /\[([^\]\n]+)\]\[([^\]\n]*)\]/g;
 const AUTOLINK_RE = /<https?:\/\/[^>\n]+>/g;
 /** The renderer's underscore italics (`renderInlineWith`), without its lookbehind. */
 const UNDERSCORE_EM_RE = /_([^_\n]+?)_(?!\w)/g;
-const URL_RE = /https?:\/\/[^\s<>()[\]]+/g;
+/** No `|`: a table splits its cells before any inline rule, so a URL ends at
+ *  a cell's edge (a chip past the `|` landed in the next cell). */
+const URL_RE = /https?:\/\/[^\s<>()[\]|]+/g;
 
 /**
  * The regions the reader shows as code: its fences (`readerFencedLines`:
@@ -586,22 +631,29 @@ export function markedMentions(
 }
 
 /** {@link markedMentions}, plus the body's code regions when it computed them
- *  (so {@link chipInsertions} need not scan again). */
-function markedMentionsWithCode(
+ *  (so {@link chipInsertions} need not scan again). With `kinds` (Discuss v2
+ *  PR 6, the key marks) the `keys` kinds' whole-word matches are key mentions
+ *  too, in the same never-marked regions; a span a tracker key already holds
+ *  is not added twice. `skippedLines`/`skippedChars` count what that scan
+ *  skipped, `middle` the lines it skipped past the page budget. */
+export function markedMentionsWithCode(
   body: string,
   markdown: string,
   relPath: string,
   grammar: PrGrammar | null,
   trackers: readonly TrackerConfig[],
   titleOf: (id: string) => string | undefined,
-): { mentions: Mention[]; code?: ProtectedRegion[] } {
+  kinds: readonly Pick<KeyKind, "name" | "pattern">[] = [],
+): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number; skippedChars?: number; middle?: SkippedMiddle } {
   const fm = parseFrontmatter(markdown);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
   const code = readerCodeRegions(body);
   const inCode = codeIntervals(code);
   // The patterns run on the italics view; the page key set (the sweep's) on `body`.
+  // Tracker keys by the whole-key rule: a chip and a mark are both peek targets.
   const view = emphasisView(body, code);
-  const bodyKeys = projects.length ? bodyKeyMentions(view, projects) : [];
+  const bodyKeys = projects.length ? bodyKeyMentions(view, projects, "whole") : [];
+  const scanned = kinds.length ? scanKeyKinds(view, kinds) : null;
   // The key set is read only by a bare `#n`, and its answer per id is fixed.
   let keySet: string[] | undefined;
   const belongs = new Map<string, boolean>();
@@ -609,7 +661,7 @@ function markedMentionsWithCode(
     let v = belongs.get(id);
     if (v === undefined) {
       const title = titleOf(id);
-      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers, (stripped) => (projects.length && stripped === body && view === body ? bodyKeys : undefined))];
+      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers)];
       const ks = keySet;
       v = title !== undefined && ks.some((k) => titleCarriesKey(title, k));
       belongs.set(id, v);
@@ -621,8 +673,14 @@ function markedMentionsWithCode(
     if (r.form === "bare" && !bareBelongs(r.id)) continue;
     all.push({ id: r.id, kind: "pr", start: r.start, end: r.end });
   }
-  for (const m of bodyKeys) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
-  if (all.length === 0) return { mentions: [] };
+  const key = (m: { key: string; start: number; end: number }): Mention => ({ id: m.key, kind: "key", start: m.start, end: m.end });
+  for (const m of bodyKeys) all.push(key(m));
+  if (scanned) {
+    const held = new Intervals(bodyKeys.map((m) => [m.start, m.end] as const));
+    for (const m of scanned.matches) if (!held.overlaps(m.start, m.end)) all.push(key(m));
+  }
+  const skipped = scanned ? { skippedLines: scanned.skippedLines, skippedChars: scanned.skippedChars, ...(scanned.middle ? { middle: scanned.middle } : {}) } : {};
+  if (all.length === 0) return { mentions: [], ...skipped };
 
   const blockedSpans: [number, number][] = [];
   for (const m of body.matchAll(TAG_RE)) blockedSpans.push([m.index!, m.index! + m[0].length]);
@@ -648,17 +706,12 @@ function markedMentionsWithCode(
     if (homes.has(line)) return true;
     return HEADING_RE.test(lines[line]!) && !inCode.contains(starts[line]!);
   };
-  return { mentions: all.filter((m) => !isBlocked(m)).sort((a, b) => a.start - b.start || a.end - b.end), code };
+  return { mentions: all.filter((m) => !isBlocked(m)).sort((a, b) => a.start - b.start || a.end - b.end), code, ...skipped };
 }
 
-/**
- * Where the chips go: after a mention, or after the markdown link or bare URL
- * that holds it, one chip per distinct id at each site, in text order. Only
- * ids with a facts entry (`has`) get one.
- */
-export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
-  if (mentions.length === 0) return [];
-  const inCode = codeIntervals(code ?? readerCodeRegions(body));
+/** The links and bare URLs of `body` outside code, as the chip pass reads
+ *  them: each list in text order and pairwise disjoint. */
+function linkSpans(body: string, inCode: Intervals): { links: [number, number][]; refs: [number, number][]; urls: [number, number][] } {
   // Each list is in text order and pairwise disjoint (one regex's matches,
   // or the kept ones; a URL's end stays within its match), so a lookup is a binary search; links first, as
   // a URL inside a link belongs to the link.
@@ -690,15 +743,30 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
       emphasis ??= readerEmphasisSpans(body);
       for (const [a, b] of emphasis) if (a >= start && a < end && b > end && b <= full) end = b;
     }
+    // A chip that cannot shift ({@link chipShifts}) after a word character
+    // would let a trimmed `*`/`_` open emphasis (`?a=_x*y*`): it goes past the
+    // trimmed run, where the next character is one no inline rule reads.
+    if (end < full && !chipShifts(body, end) && /\w/.test(body[end - 1]!) && /[*_]/.test(body[end]!)) end = full;
     urls.push([start, end]);
   }
+  return { links, refs, urls };
+}
+
+/**
+ * Where the chips go: after a mention, or after the markdown link or bare URL
+ * that holds it, one chip per distinct id at each site, in text order. Only
+ * ids with a facts entry (`has`) get one.
+ */
+export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
+  if (mentions.length === 0) return [];
+  const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
   const sites = new Map<number, ChipInsertion>();
   for (const m of mentions) {
     if (!has(m)) continue;
     const span = holdingSpan(links, m.start, m.end) ?? holdingSpan(refs, m.start, m.end) ?? holdingSpan(urls, m.start, m.end);
     const at = span ? span[1] : m.end;
     let site = sites.get(at);
-    if (!site) sites.set(at, (site = { at, ids: [] }));
+    if (!site) sites.set(at, (site = { at, ids: [], ...(chipShifts(body, at) ? { shift: true as const } : {}) }));
     // One chip per PR: GitHub ids ignore case, so the site keeps the first spelling.
     const lower = m.id.toLowerCase();
     if (!site.ids.some((x) => x.kind === m.kind && x.id.toLowerCase() === lower)) site.ids.push({ id: m.id, kind: m.kind });
@@ -790,14 +858,107 @@ export function planLiveChips(
   return { insertions, facts: out };
 }
 
-/** `body` with each insertion's sentinels in place; `sentinel(html)` registers
- *  one chip's HTML and returns its token. */
-export function applyChipInsertions(body: string, insertions: readonly ChipInsertion[], sentinel: (html: string) => string): string {
+
+// ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
+
+export { KEY_MARK_ATTR, KEY_MARK_CLASS };
+
+/** What the page render's key marks need (`renderWikiHtml`'s `keyMarks`). */
+export interface KeyMarksInput {
+  grammar: PrGrammar | null;
+  trackers: readonly TrackerConfig[];
+  kinds: readonly Pick<KeyKind, "name" | "pattern">[];
+  relPath: string;
+  /** Receives how many lines the `keys` scan skipped, and the middle it skipped past the page budget ({@link scanKeyKinds}),
+   *  whose `fromLine`/`toLine` `renderWikiHtml` gives as the page file's lines. */
+  collect?: (r: { marks: number; skippedLines: number; skippedChars: number; middle?: SkippedMiddle }) => void;
+}
+
+export interface KeyMark {
+  key: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * A key the render can mark without changing what the page renders: letters
+ * and digits in runs joined by single `-` or `.`, at least one join, a letter
+ * first. The mark keeps the key's first and last characters in the text it
+ * renders and parks only the inside, so every inline rule that reads a
+ * neighbour (an emphasis `*` or `_`, a before → after arrow) sees the page's
+ * characters, and none of these means anything to those rules; a leading
+ * letter is never the number a before → after chip reads. A key with no join
+ * (`D12`, `M10`) is an item id's shape, which the components read from the
+ * page's own text (a decision log's ids, a question's decision): a parked
+ * inside would hide it from them. Measured on both wikis with extra kinds
+ * (2026-11-26): joined keys, 0 renders changed; `[A-Z]\d{1,3}`, 52 pages.
+ */
+const MARKABLE_KEY_RE = /^\p{L}[\p{L}\p{N}]*(?:[-.][\p{L}\p{N}]+)+$/u;
+
+/**
+ * The key mentions the reader underlines: the tracker keys and the `keys`
+ * kinds' matches the mention parser marks ({@link markedMentionsWithCode}, so
+ * never in code, a tag, a link's title, a heading, a wikilink or a state
+ * home), less any inside a link or a bare URL (the mark would sit in the
+ * anchor or split the URL), any a chip would split and any
+ * {@link MARKABLE_KEY_RE} refuses. A key whose own fact chip follows it is
+ * marked too: the reader hides a chip with nothing to show (no counted PR, no
+ * Jira status yet), and its chip paint takes the mark's underline and peek
+ * only while the chip shows (fix round 1 J1).
+ */
+export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number; skippedChars: number; middle?: SkippedMiddle } {
+  if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0, skippedChars: 0 };
+  const { mentions, code, skippedLines = 0, skippedChars = 0, middle } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
+  const skipped = { skippedLines, skippedChars, ...(middle ? { middle } : {}) };
+  const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80 && MARKABLE_KEY_RE.test(m.id));
+  if (keys.length === 0) return { marks: [], ...skipped };
+  const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
+  const marks: KeyMark[] = [];
+  for (const m of keys) {
+    if (holdingSpan(links, m.start, m.end) || holdingSpan(refs, m.start, m.end) || holdingSpan(urls, m.start, m.end)) continue;
+    if (chips.some((c) => c.at > m.start && c.at < m.end)) continue;
+    marks.push({ key: m.id, start: m.start, end: m.end });
+  }
+  return { marks, ...skipped };
+}
+
+/** A key mark's span: the key's own text, underlined by the reader's CSS. */
+export function keyMarkHtml(key: string): string {
+  return `<span class="${KEY_MARK_CLASS}" ${KEY_MARK_ATTR}="${escapeHtml(key)}">${escapeHtml(key)}</span>`;
+}
+
+/**
+ * `body` with each chip inserted and each mark's text replaced, in one pass
+ * over its offsets (a chip at a mark's start goes before it, at its end
+ * after). A `shift` chip goes before its site's last character, inside a mark
+ * that ends there (after the mark's closing placeholder, which
+ * `markSentinel`'s string ends with that character); `chipSentinel` is told
+ * which, so the render moves only those ({@link chipShifts}).
+ */
+export function applyChipsAndMarks(body: string, chips: readonly ChipInsertion[], marks: readonly KeyMark[], chipSentinel: (html: string, shifted: boolean) => string, markSentinel: (m: KeyMark) => string): string {
+  const sentinels = (c: ChipInsertion, shifted: boolean) => c.ids.map(({ id }) => chipSentinel(chipSpanHtml(id), shifted)).join("");
+  const pos = (c: ChipInsertion) => (c.shift ? c.at - 1 : c.at);
+  const events = [
+    ...chips.map((c) => ({ pos: pos(c), order: 0, chip: c, mark: null as KeyMark | null })),
+    ...marks.map((m) => ({ pos: m.start, order: 1, chip: null as ChipInsertion | null, mark: m })),
+  ].sort((a, b) => a.pos - b.pos || a.order - b.order);
+  const inMark = new Set<ChipInsertion>();
   let out = "";
   let cursor = 0;
-  for (const site of insertions) {
-    out += body.slice(cursor, site.at) + site.ids.map(({ id }) => sentinel(chipSpanHtml(id))).join("");
-    cursor = site.at;
+  for (const e of events) {
+    if (e.chip) {
+      if (inMark.has(e.chip)) continue;
+      out += body.slice(cursor, pos(e.chip)) + sentinels(e.chip, e.chip.shift === true);
+      cursor = pos(e.chip);
+    } else if (e.mark && e.mark.start >= cursor) {
+      const m = e.mark;
+      const s = markSentinel(m);
+      const here = chips.filter((c) => c.shift && c.at === m.end);
+      for (const c of here) inMark.add(c);
+      const last = body[m.end - 1]!;
+      out += body.slice(cursor, m.start) + (here.length && s.endsWith(last) ? s.slice(0, -1) + here.map((c) => sentinels(c, true)).join("") + last : s + here.map((c) => sentinels(c, false)).join(""));
+      cursor = m.end;
+    }
   }
   return out + body.slice(cursor);
 }

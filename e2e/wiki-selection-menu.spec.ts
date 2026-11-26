@@ -5,8 +5,10 @@
  * in an inline card under the paragraph that is a turn of the page's thread
  * (the same turn in the pane, once, with the pane closed when it starts);
  * «Where else» and «History» list what the mentions route finds, with no
- * model; a key in the selection gets a chip; «Add to Oppfølging» shows only on
- * a page with that heading; «Fact check» reaches the existing route.
+ * model; a key in the selection gets a chip (its Trace since PR 6); «Add to Oppfølging» shows only on
+ * a page with that heading; «Fact check» calls the existing route (its stream is
+ * stubbed in the page here: a runner has no `claude`, and a fast-failing stream
+ * that the client closes crashed Bun 1.3.10's server).
  *
  * What the unit tests cannot reach: real mouse selection and a real
  * right-click in a browser, the bar's place at the selection, the card's
@@ -450,7 +452,7 @@ test("«Explain with context» answers in an inline card under the paragraph: a 
   await expect(page.locator("#discussBody .wiki-discuss-turn")).toHaveCount(1);
 });
 
-test("«Where else» lists the fixture's files and «History» its commits, with no model; a key chip opens its «Where else»", async ({ page }) => {
+test("«Where else» lists the fixture's files and «History» its commits, with no model; a key chip opens its Trace", async ({ page }) => {
   await openPage(page);
   const before = (await recorded()).length;
   await dragSelect(page, KEY);
@@ -479,30 +481,42 @@ test("«Where else» lists the fixture's files and «History» its commits, with
   await expect(hist.locator('.wiki-sel-ev[data-ev="log"]')).toHaveCount(1);
   await shot(page, "6-history-card");
 
-  // The key chip on a longer selection: its «Where else».
+  // The key chip on a longer selection: its Trace (PR 6), whose mentions list the same files.
   await dragSelect(page, NIGHT);
   const chip = bar(page).locator(`[data-selact="key"][data-selkey="${KEY}"]`);
-  await expect(chip).toHaveText(`🔗 ${KEY}`);
+  await expect(chip).toHaveText(`🧭 ${KEY}`);
   await shot(page, "7-key-chip");
   await chip.click();
-  const chipCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  const chipCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="trace"]');
   await expect(chipCard.locator(".wiki-sel-card-sub")).toContainText(KEY);
   await expect(chipCard.locator(".wiki-sel-file")).toHaveCount(4);
   // No model was asked for any of it.
   expect((await recorded()).length).toBe(before);
 });
 
-test("«Fact check» reaches the existing selection fact-check route", async ({ page }) => {
+test("«Fact check» calls the selection fact-check route (stream stubbed)", async ({ page }) => {
   await openPage(page);
   await dragSelect(page, NIGHT);
+  // The stream is answered in the page, not by this spec's server. A runner has
+  // no `claude`, so the real route's one-shot fails at once, and the client closes
+  // its EventSource on that `app_error` while the server ends the response: on
+  // that race Bun 1.3.10 segfaulted in uWS's socket-close handler (`panic(main
+  // thread): Segmentation fault at address 0x0`), hung ~25 s in its crash handler
+  // and died, so the next test's goto got ERR_CONNECTION_RESET. What is asserted
+  // here is the client's half: the request and where its answer lands.
+  const STUBBED = "stubbed fact-check end";
+  await page.route("**/api/wiki/factcheck?**", (r) =>
+    r.fulfill({ status: 200, contentType: "text/event-stream", body: `event: app_error\ndata: ${JSON.stringify({ type: "error", message: STUBBED })}\n\n` }),
+  );
   const fc = page.waitForRequest((r) => r.url().includes("/api/wiki/factcheck?"));
   await bar(page).locator("#wikiFactcheckBtn").click();
   const url = new URL((await fc).url());
   expect(url.searchParams.get("mode")).toBe("sel");
   expect(url.searchParams.get("sel")).toBe(NIGHT);
   expect(url.searchParams.get("relPath")).toBe(REL);
-  // The fact-check turn opens where it always has: the Ask tab.
+  // The fact-check turn opens where it always has: the Ask tab, which shows the stream's end.
   await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);
+  await expect(page.locator("#wikiAskStatus")).toContainText(STUBBED);
 });
 
 test("Enter with the bar open is the focused link's: the breadcrumb's ⌂ navigates and no turn starts", async ({ page }) => {
@@ -775,7 +789,8 @@ test("fix round 2 R2-6: «Where else» on a phrase of a page git does not track 
 test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on its first item; arrows move, Escape puts focus back on the page, Enter runs the item", async ({ page }) => {
   await openPage(page);
   // The night sentence's first character selected, extended with ⇧→ (a collapsed
-  // caret takes no ⇧→ outside caret browsing).
+  // caret takes no ⇧→ outside caret browsing). Found by its start: the key
+  // mark (PR 6) splits the sentence across text nodes.
   await page.evaluate((text) => {
     const walker = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
     for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
@@ -785,7 +800,7 @@ test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on 
       return;
     }
     throw new Error(text);
-  }, NIGHT);
+  }, NIGHT.slice(0, NIGHT.indexOf(KEY)));
   for (let i = 1; i < NIGHT.length; i++) await page.keyboard.press("Shift+ArrowRight");
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(NIGHT);
   const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-selact") ?? document.activeElement?.tagName ?? null);

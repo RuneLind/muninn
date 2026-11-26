@@ -420,8 +420,10 @@ describe("GET /api/wiki/html", () => {
       // The wiki's `.wiki-reader.json` sets no `discuss` block.
       discussHandoff: false,
       discussAgent: false,
-      // Tools registered and MUNINN_AUTH off: «Where else» / «History» (Discuss v2 PR 5).
-      mentions: true,
+      // Tools registered and MUNINN_AUTH off, but a `WIKI_DIR` override has no
+      // registry name, which the mentions route 400s: no «Where else» / «History»
+      // (Discuss v2 PR 6 fix round 1 J3).
+      mentions: false,
     });
     expect(body.html).toContain('data-q-state="open"><span class="id-noun" data-reader-only>Beslutning</span> <a class="dl-id" href="#d1">D1</a>');
   });

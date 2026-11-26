@@ -39,12 +39,14 @@ const { processMessage } = await import("../../core/message-processor.ts");
 const { chatState } = await import("../../chat/state.ts");
 const { createChatRoutes } = await import("../../chat/routes.ts");
 const { createDiscussEngine } = await import("../../wiki/discuss-engine.ts");
+const { mentionsWorkTree } = await import("../../wiki/mentions.ts");
 const { registerWikiDiscussRoute, WIKI_DISCUSS_PATH } = await import("./wiki-discuss.ts");
 const { registerWikiDiscussApplyRoute, WIKI_DISCUSS_APPLY_PATH } = await import("./wiki-discuss-apply.ts");
 const { STORED_EDIT_MARKER, WIKI_AGENT_RULES_FILE } = await import("../../wiki/discuss-agent.ts");
 const { __resetWikiRegistryForTest, __setWikiRegistryForTest } = await import("../../wiki/registry-memo.ts");
 const { __resetWikiCacheForTest } = await import("../../wiki/store.ts");
 const { testTempDir } = await import("../../test/temp-dir.ts");
+const { TRACE_SUMMARY_QUESTION } = await import("../views/components/wiki-key-trace-model.ts");
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { OneShotOptions } from "../../ai/one-shot.ts";
@@ -91,6 +93,8 @@ interface Call {
 let calls: Call[] = [];
 let snaps = 0;
 let answer = "It opens at six.";
+/** The fake connector streams `answer` as text, then fails (a turn that ends `error`). */
+let streamThenFail = false;
 let events: ChatEvent[] = [];
 let unsubscribe: () => void = () => {};
 
@@ -114,6 +118,7 @@ beforeAll(async () => {
 beforeEach(() => {
   calls = [];
   answer = "It opens at six.";
+  streamThenFail = false;
   events = [];
   extractorCalls.length = 0;
   unsubscribe();
@@ -138,11 +143,16 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     // A fresh snapshot directory per turn: a copy of the wiki as it is now.
     wikiSnapshot: async (d) => {
       const to = path.join(dir, "snaps", `wiki-${++snaps}`);
-      await Bun.write(path.join(to, "notes", "harbour.md"), Bun.file(path.join(d, "notes", "harbour.md")));
+      const note = Bun.file(path.join(d, "notes", "harbour.md"));
+      if (await note.exists()) await Bun.write(path.join(to, "notes", "harbour.md"), note);
       return { kind: "wiki", dir: to, key: `k${snaps}`, source: d };
     },
     oneShot: async (prompt, _config, bot, opts) => {
       calls.push({ prompt, opts, bot });
+      if (streamThenFail) {
+        opts.onProgress?.({ type: "text_delta", text: answer });
+        throw new Error("the connector broke");
+      }
       opts.onProgress?.({ type: "tool_start", id: "t1", name: "Read", displayName: "Read", input: '{"file_path":"notes/harbour.md"}' });
       opts.onProgress?.({ type: "tool_end", id: "t1", name: "Read", displayName: "Read" });
       return { result: answer, costUsd: 0.01, toolCalls: [{ id: "t1", name: "Read", displayName: "Read", durationMs: 1, startOffsetMs: 0, input: "{}" }] } as never;
@@ -150,7 +160,7 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     log: quiet,
   });
   const app = new Hono();
-  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar] });
+  registerWikiDiscussRoute(app, config, { engine, log: quiet, bots: () => [ivar], ...(extra.authMode ? { authMode: extra.authMode } : {}) });
   registerWikiDiscussApplyRoute(app, config, { readonlyRefusal: () => null, egressRefusal: () => null });
   app.route("/chat", createChatRoutes([ivar], config, { discussEngine: engine }));
   return app;
@@ -649,4 +659,278 @@ test("a concurrent-turn conflict on the requester's existing thread is mirrored 
   const mirrored = events.filter((e) => e.type === "transient_error");
   expect(mirrored).toHaveLength(1);
   expect(mirrored[0]).toMatchObject({ conversationId: conv.id, threadId: live });
+});
+
+// ── PR 6: a key's trace thread ───────────────────────────────────────────
+
+const gitc = (...args: string[]) => git("-c", "user.name=t", "-c", "user.email=t@example.com", ...args);
+const tracePost = (app: InstanceType<typeof Hono>, body: Record<string, unknown>) =>
+  app.request(WIKI_DISCUSS_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wiki: "harbour", traceKey: "MEL-77", mode: "explore", ...body }) });
+
+test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt from the mentions each turn, ledger rows with trace_key and no page, two 'wiki' messages a turn, no extractor, never active", async () => {
+  await Bun.write(path.join(wiki, "notes", "ferry.md"), "---\ntitle: Ferry note\n---\n\n# Ferry note\n\nThe ferry case MEL-77 is open.\n");
+  await Bun.write(path.join(wiki, "log.md"), "# Log\n\n## [2026-11-20] note | ferry\n\n- MEL-77 was filed.\n");
+  gitc("add", ".");
+  gitc("commit", "-qm", "Ferry note names MEL-77");
+  __resetWikiCacheForTest();
+  try {
+    const app = apps();
+    // The Trace card's own «Summarize» question: it names no key, so the prompts must.
+    const evs = await frames(await tracePost(app, { question: TRACE_SUMMARY_QUESTION }));
+    expect(evs.map((e) => (e.event === "status" ? `status:${e.data.phase}` : e.event))).toEqual(["turn", "status:snapshots", "status:mentions", "status:model", "tool", "status:writing", "done", "end"]);
+    const threadId = evs[0]!.data.threadId as string;
+    const thread = (await getThreadById(threadId))!;
+    expect(thread).toMatchObject({ kind: "wiki", wiki: "harbour", traceKey: "MEL-77", name: "wiki trace: mel-77", isActive: false });
+    expect(thread.relPath).toBeUndefined();
+
+    // The pack is the mentions payload's: the file, the log line and the commit, and no page.
+    const p1 = calls[0]!.prompt;
+    expect(p1).toContain("## The key");
+    expect(p1).toContain("Key: MEL-77");
+    expect(p1).toContain("- notes/ferry.md «Ferry note»");
+    expect(p1).toContain("The ferry case MEL-77 is open.");
+    expect(p1).toContain("log.md:5 [2026-11-20 note] - MEL-77 was filed.");
+    expect(p1).toContain("Ferry note names MEL-77");
+    expect(p1).not.toContain("## The page");
+    expect(calls[0]!.opts.systemPrompt).toContain("You trace one key, «MEL-77»");
+    expect(calls[0]!.opts.systemPrompt).not.toContain("EDIT-RULES-SENTINEL");
+    expect("readSearch" in (calls[0]!.opts.toolSurface as object)).toBe(true);
+
+    // The wiki changes; the /chat follow-up on the same thread sees it (the pack is rebuilt).
+    await Bun.write(path.join(wiki, "notes", "quay.md"), "# Quay\n\nMEL-77 also stops at the quay.\n");
+    gitc("add", ".");
+    gitc("commit", "-qm", "Quay names MEL-77");
+    __resetWikiCacheForTest();
+    const conv = await chatState.findOrCreateBotConversation({ botName: "ivar", userId: "kari" });
+    const sent = await app.request(`/chat/conversations/${conv.id}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "Where does it stop?", threadId }) });
+    expect(sent.status).toBe(202);
+    const rows = await settled(threadId, 2);
+    expect(calls[1]!.prompt).toContain("MEL-77 also stops at the quay.");
+    expect(calls[1]!.prompt).toContain(`Question: ${TRACE_SUMMARY_QUESTION}`);
+    expect(calls[1]!.prompt).toContain("Answer: It opens at six.");
+
+    expect(rows.map((r) => ({ seq: r.seq, relPath: r.relPath, traceKey: r.traceKey, pageHash: r.pageHash, threadId: r.threadId }))).toEqual([
+      { seq: 1, relPath: null, traceKey: "MEL-77", pageHash: null, threadId },
+      { seq: 2, relPath: null, traceKey: "MEL-77", pageHash: null, threadId },
+    ]);
+    const msgs = await messagesOf(threadId);
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(msgs.every((m) => m.source === "wiki" && m.platform === "web")).toBe(true);
+    for (const m of msgs) expect(m.content).not.toContain("## The key");
+
+    // D7: no extractor, not the active thread, and the chat pipeline refuses it.
+    expect(extractorCalls).toHaveLength(0);
+    expect((await getThreadById(threadId))!.isActive).toBe(false);
+    await expect(
+      processMessage({ text: "hi", userId: "kari", username: "Kari", platform: "web", botConfig: ivar, config, say: async () => {}, setStatus: async () => {}, threadId }),
+    ).rejects.toThrow(/wiki page's Discuss thread/);
+    expect(extractorCalls).toHaveLength(0);
+
+    // A pane turn without the id continues the live trace thread.
+    const third = await frames(await tracePost(app, { question: "And now?" }));
+    expect(third[0]!.data.threadId).toBe(threadId);
+
+    // Apply refuses a trace turn; Continue names the key and the wiki, and no page.
+    const newest = (await settled(threadId, 3))[2]!;
+    const apply = await app.request(WIKI_DISCUSS_APPLY_PATH, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id, preview: true }) });
+    expect(apply.status).toBe(409);
+    expect(((await apply.json()) as { reason: string }).reason).toBe("no-page");
+    const cont = await app.request("/api/wiki/discuss/continue", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id }) });
+    expect(cont.status).toBe(200);
+    const prompt = ((await cont.json()) as { prompt: string }).prompt;
+    expect(prompt).toContain(TRACE_SUMMARY_QUESTION);
+    expect(prompt).toContain("Key: MEL-77");
+    expect(prompt).toContain(`Wiki: harbour (${wiki})`);
+    // No kind in this wiki: the mentions search MEL-77 as a substring, and so do the commands.
+    expect(prompt).toContain(`git --no-pager --literal-pathspecs -C '${wiki}' `);
+    expect(prompt).toContain(" grep --no-recurse-submodules --no-color -n -I -F -e 'MEL-77' -- .");
+    expect(prompt).toContain(" --relative --oneline '-SMEL-77' -- .");
+    expect(prompt).toContain("/api/wiki/mentions?wiki=harbour&key=MEL-77");
+    expect(prompt).not.toContain("Page:");
+    expect(prompt).not.toContain("about the whole page");
+    expect(prompt).not.toContain("If the page turns out to be wrong");
+    // Once a `keys` kind claims it, the mentions search it whole, and the commands say they are candidates.
+    await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
+    __resetWikiCacheForTest();
+    const whole = ((await (await app.request("/api/wiki/discuss/continue", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id }) })).json()) as { prompt: string }).prompt;
+    expect(whole).toContain(`LC_ALL=C GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git --no-pager --literal-pathspecs -C '${wiki}' `);
+    expect(whole).toContain(" -n -I -E -e '(^|[^[:alnum:]])MEL-77([^[:alnum:]]|$)' -- .");
+    expect(whole).toContain("Both can list more than that answer");
+    expect(whole).not.toContain("-F -e");
+
+    // The thread read by key: the live trace thread and its messages.
+    const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-77")).json()) as { thread: { id: string }; messages: { role: string }[] };
+    expect(read.thread.id).toBe(threadId);
+    expect(read.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user", "assistant"]);
+  } finally {
+    git("reset", "-q", "--hard", "HEAD~2");
+    await rm(path.join(wiki, ".wiki-reader.json"), { force: true });
+    __resetWikiCacheForTest();
+  }
+});
+
+// Fix round 1 (H2): a trace thread has no page and Apply refuses its turns, so an
+// edit block in a trace answer is no proposed edit and points at no page tab.
+test("a trace turn whose answer holds an edit block: no proposed edit on the row or the done event, the answer stored without the page-tab marker", async () => {
+  await Bun.write(path.join(wiki, "notes", "ferry.md"), "# Ferry note\n\nThe ferry case MEL-77 is open.\n");
+  gitc("add", ".");
+  gitc("commit", "-qm", "Ferry note names MEL-77");
+  __resetWikiCacheForTest();
+  try {
+    const app = apps();
+    answer = EDIT_ANSWER;
+    const evs = await frames(await tracePost(app, { question: TRACE_SUMMARY_QUESTION }));
+    const done = evs.find((e) => e.event === "done")!.data;
+    expect(done.proposedEdit).toBeNull();
+    const threadId = evs[0]!.data.threadId as string;
+    const [row] = await settled(threadId, 1);
+    expect(row!.proposedEdit).toBeNull();
+    const stored = (await messagesOf(threadId)).find((m) => m.id === row!.assistantMessageId)!;
+    expect(stored.content).not.toContain(STORED_EDIT_MARKER);
+    expect(stored.content).toBe(EDIT_ANSWER);
+
+    // A turn that fails after streaming the block stores what streamed, without the marker too.
+    streamThenFail = true;
+    const failed = await frames(await tracePost(app, { question: "Again?", discussionId: threadId }));
+    expect(failed.some((e) => e.event === "app_error")).toBe(true);
+    const rows = await settled(threadId, 2);
+    expect(rows[1]!.endState).toBe("error");
+    const partial = (await messagesOf(threadId)).find((m) => m.id === rows[1]!.assistantMessageId)!;
+    expect(partial.content).not.toContain(STORED_EDIT_MARKER);
+    expect(partial.content).toContain('"edits"');
+  } finally {
+    git("reset", "-q", "--hard", "HEAD~1");
+    __resetWikiCacheForTest();
+  }
+});
+
+test("a trace body is refused with a page, a selection or Edit, and a page discussion id is another key's", async () => {
+  const app = apps();
+  for (const [extra, msg] of [
+    [{ relPath: "notes/harbour.md" }, "send relPath or traceKey, not both"],
+    [{ selection: "x" }, "a trace turn takes no selection"],
+    [{ mode: "edit" }, "a trace turn is an Explore turn: there is no page to edit"],
+    [{ traceKey: "ab" }, "traceKey: key must be 3–80 characters"],
+  ] as const) {
+    const res = await tracePost(app, { question: "Q", ...extra });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(msg);
+  }
+  const page = (await frames(await pane(app, { question: "When?" })))[0]!.data.threadId as string;
+  const other = await tracePost(app, { question: "Q", discussionId: page });
+  expect(other.status).toBe(409);
+  expect(((await other.json()) as { error: string }).error).toBe("that discussion is about another key");
+});
+
+// ── Fix round 1: a trace is refused before any thread, turn or mentions work ──
+
+const traceRows = async (wikiName: string, key: string) => {
+  const [t] = await getDb()`SELECT count(*)::int AS n FROM threads WHERE wiki = ${wikiName} AND trace_key = ${key}`;
+  const [r] = await getDb()`SELECT count(*)::int AS n FROM wiki_discuss_turns WHERE wiki = ${wikiName} AND trace_key = ${key}`;
+  return { threads: t!.n as number, turns: r!.n as number };
+};
+
+test("on an instance that authenticates, a trace turn and a trace thread read are refused: no thread, no turn, no mentions read", async () => {
+  let mentionsCalls = 0;
+  const app = apps(undefined, {
+    authMode: () => "entra",
+    mentions: async () => {
+      mentionsCalls++;
+      return { ok: false, error: "the mentions must not be read" };
+    },
+  });
+  const res = await tracePost(app, { traceKey: "MEL-88", question: "Summarize MEL-88" });
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ error: "Trace is not served on an instance that authenticates", reason: "trace-off" });
+  const read = await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-88");
+  expect(read.status).toBe(404);
+  expect(((await read.json()) as { reason: string }).reason).toBe("trace-off");
+  expect(mentionsCalls).toBe(0);
+  expect(calls).toHaveLength(0);
+  expect(await traceRows("harbour", "MEL-88")).toEqual({ threads: 0, turns: 0 });
+  // A page turn on the same instance is unchanged.
+  const page = await frames(await pane(app, { question: "When?" }));
+  expect(page.map((f) => f.event)).toContain("done");
+});
+
+test("a trace on a wiki that is no git work tree is refused before its thread exists", async () => {
+  const dune = path.join(dir, "dune");
+  await Bun.write(path.join(dune, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(dune, "notes", "sand.md"), "# Sand\n\nMEL-89 is here.\n");
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "dune", root: dune, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    const app = apps();
+    const res = await tracePost(app, { wiki: "dune", traceKey: "MEL-89", question: "Summarize MEL-89" });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { reason: string }).reason).toBe("no-snapshot");
+    expect(calls).toHaveLength(0);
+    expect(await traceRows("dune", "MEL-89")).toEqual({ threads: 0, turns: 0 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
+});
+
+// Fix round 2: a repo before its first commit is a work tree, but the mentions'
+// `git log` fails there; the trace is refused before its thread exists.
+test("a trace on a git work tree with no commit yet is refused before its thread exists", async () => {
+  const fresh = path.join(dir, "fresh");
+  await Bun.write(path.join(fresh, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(fresh, "notes", "sand.md"), "# Sand\n\nMEL-90 is here.\n");
+  for (const args of [["init", "-q"], ["add", "."]]) {
+    const r = Bun.spawnSync(["git", ...args], { cwd: fresh, stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  }
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "fresh", root: fresh, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    const app = apps();
+    const res = await tracePost(app, { wiki: "fresh", traceKey: "MEL-90", question: "Summarize MEL-90" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "a trace reads the wiki's history with git, and this wiki has no commit yet", reason: "no-snapshot" });
+    expect(calls).toHaveLength(0);
+    expect(await traceRows("fresh", "MEL-90")).toEqual({ threads: 0, turns: 0 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
+});
+
+// Class check (sweep A, mutant M17): the pre-flight asks git each time
+// (`mentionsGitState`), never the page route's answer kept 60 s per root
+// (`mentionsWorkTree`), so a wiki's first commit is seen by the next trace.
+test("the trace pre-flight reads the wiki's git state afresh: a first commit made after a page open's cached «no» is seen", async () => {
+  const late = path.join(dir, "late");
+  await Bun.write(path.join(late, WIKI_AGENT_RULES_FILE), RULES);
+  await Bun.write(path.join(late, "notes", "sand.md"), "# Sand\n\nMEL-91 is here.\n");
+  const run = (...args: string[]) => {
+    const r = Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: late, stdout: "pipe", stderr: "pipe" });
+    if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+  };
+  run("init", "-q");
+  run("add", ".");
+  // A page open on this wiki now: the page route's check answers «no» and keeps it.
+  expect(await mentionsWorkTree(late)).toBe(false);
+  run("commit", "-qm", "first commit");
+  __setWikiRegistryForTest([
+    { name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" },
+    { name: "late", root: late, source: "extra", synthesisBot: "ivar" },
+  ]);
+  try {
+    expect(await mentionsWorkTree(late)).toBe(false); // still the kept answer
+    const res = await tracePost(apps(), { wiki: "late", traceKey: "MEL-91", question: "Summarize MEL-91" });
+    expect(res.status).toBe(200);
+    const evs = await frames(res);
+    expect(evs.map((e) => e.event)).toContain("done");
+    expect(calls).toHaveLength(1);
+    expect(await traceRows("late", "MEL-91")).toEqual({ threads: 1, turns: 1 });
+  } finally {
+    __setWikiRegistryForTest([{ name: "harbour", root: wiki, source: "extra", synthesisBot: "ivar" }]);
+    __resetWikiCacheForTest();
+  }
 });

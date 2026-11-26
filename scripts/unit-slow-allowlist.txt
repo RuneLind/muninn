@@ -5,7 +5,7 @@ scripts/wiki-stale-handoff.test.ts  # real git at 12 sites and spawned drivers [
 scripts/wiki-work-replay.test.ts  # git per test, ps polling, 12 timers [23.1 s]
 src/dashboard/views/components/wiki-rail-work-cap.test.ts  # pure CPU property loops [20.8 s]
 src/dashboard/views/wiki-boot/wiki-discuss-cases.test.ts  # the bounded synthetic locate sweep plus 38 label-pair pages through the reader chain in happy-dom [10.6 s, CI run 44578525642]
-src/dashboard/views/wiki-boot/wiki-selection-menu.test.ts  # 51 boot tests through the reader chain in happy-dom, each a page render plus selection, card and Apply cycles [12.8 s, CI run 45791821753]
+src/dashboard/views/wiki-boot/wiki-selection-menu.test.ts  # 55 boot tests through the reader chain in happy-dom, each a page render plus selection, card and Apply cycles [12.8 s at 51 tests, CI run 45791821753; 16.2 s locally at 55]
 src/summaries/author-backfill-script.test.ts  # 9 bun <script> spawns and an oEmbed server [36.4 s]
 src/sync/wiki-file-lock.test.ts  # real git in temp dirs and a real lockfile [10.6 s]
 src/video/media.test.ts  # one test sleeps through a real 16 s retry budget [20.1 s]

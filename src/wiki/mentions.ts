@@ -6,7 +6,12 @@
  *
  * The key is a literal, searched as a fixed string (`grepTracked`, `historyFor`
  * in `tracked-files.ts`). Its `kind` comes from the wiki's `trackers` or its
- * `keys` (`key-kinds.ts`) and never decides whether it is searched.
+ * `keys` (`key-kinds.ts`) and never decides whether it is searched, only how:
+ * a classified key counts only where it stands whole (`wholeKey`: no Unicode
+ * letter or digit right before or after it), so `MEL-1` is not found inside
+ * `MEL-10` or `MEL-1029036`, in its lines, its totals, its commits or its log
+ * lines. A free phrase (`kind` null: «Where else» on a selection) is matched
+ * as a substring.
  *
  * Every read goes through `tracked-files.ts`: the whole-wiki grep, and the
  * root `log.md` on a grep of its own (`grepRootLog`, `rootLogHeaders`), so a
@@ -28,7 +33,7 @@
  */
 
 import { displayTitleOf } from "./core/wiki-filter.ts";
-import type { GitRun } from "./decision-triage/git.ts";
+import { realGit, type GitRun } from "./decision-triage/git.ts";
 import { classifyKey } from "./key-kinds.ts";
 import { prMentions } from "./live-facts.ts";
 import { parseLogEntries } from "./log-entries.ts";
@@ -64,6 +69,8 @@ export interface MentionsBody {
   /** Matching lines and files in the whole wiki, `log.md` included: every one the search saw, not only those listed. */
   totalLines: number;
   totalFiles: number;
+  /** Matching lines in the root `log.md`, from its own search: every one it saw, not only those in `log`. */
+  logTotalLines: number;
   /** The search stopped at its scan bound, so the totals are lower bounds. */
   totalsAtLeast: boolean;
   /** A bound cut the lines, the log lines or the commits: more exist than are listed. */
@@ -85,20 +92,62 @@ export interface MentionsDeps {
   now: () => number;
 }
 
+/** How long {@link mentionsWorkTree} keeps its answer for a root. */
+export const WORK_TREE_TTL_MS = 60_000;
+const workTrees = new Map<string, { at: number; inside: Promise<boolean> }>();
+
+/**
+ * Whether the mentions' `git grep` and `git log` can run in `root`: it is in a
+ * git work tree and its HEAD names a commit. A repo before its first commit (a
+ * new wiki before the wiki-committer's first daily commit) is a work tree, but
+ * `git log` fails there (fix round 2).
+ */
+export async function mentionsGitState(root: string, git: GitRun = realGit): Promise<"ok" | "not-a-work-tree" | "no-commit"> {
+  const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], { timeoutMs: 5_000 });
+  if (!inside.ok || inside.stdout.trim() !== "true") return "not-a-work-tree";
+  const head = await git(root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { timeoutMs: 5_000 });
+  return head.ok && head.exitCode === 0 ? "ok" : "no-commit";
+}
+
+/**
+ * Whether the mentions route can answer on `root` ({@link mentionsGitState}
+ * `ok`; it answers 500 elsewhere). The page route asks on every open before it
+ * marks a key (fix round 1 J3), so the answer is kept per root for
+ * {@link WORK_TREE_TTL_MS}.
+ */
+export function mentionsWorkTree(root: string, git: GitRun = realGit, now = Date.now()): Promise<boolean> {
+  const kept = workTrees.get(root);
+  if (kept && now - kept.at < WORK_TREE_TTL_MS) return kept.inside;
+  const inside = mentionsGitState(root, git).then(
+    (s) => s === "ok",
+    () => false,
+  );
+  workTrees.set(root, { at: now, inside });
+  return inside;
+}
+
 const stateWord = (s: "OPEN" | "MERGED" | "CLOSED"): PrStateWord => (s === "OPEN" ? "open" : s === "MERGED" ? "merged" : "closed");
+
+/** The key's kind in this wiki, which decides whether {@link buildMentions} searches it as a whole key (a kind) or a substring (null). */
+export function mentionsKind(key: string, index: Pick<WikiIndex, "readerConfig"> | null): string | null {
+  const cfg = index?.readerConfig ?? null;
+  return classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []);
+}
 
 export async function buildMentions(input: MentionsInput, deps: MentionsDeps): Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }> {
   const { root, key } = input;
+  const cfg = input.index?.readerConfig ?? null;
+  const kind = mentionsKind(key, input.index);
+  const wholeKey = kind !== null;
   const [grep, history, logGrep] = await Promise.all([
-    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true }),
+    grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true, wholeKey }),
     // One more than shown: only a 51st commit says there are more than 50.
-    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS + 1 }),
-    grepRootLog(root, key, { git: deps.git, max: MENTIONS_MAX_LOG, fullText: true }),
+    historyFor(root, key, { git: deps.git, limit: MENTIONS_MAX_COMMITS + 1, wholeKey }),
+    grepRootLog(root, key, { git: deps.git, max: MENTIONS_MAX_LOG, fullText: true, wholeKey }),
   ]);
   if (!grep.ok) return grep;
   if (!history.ok) return history;
   if (!logGrep.ok) return logGrep;
-  const cfg = input.index?.readerConfig ?? null;
 
   const byFile = new Map<string, MentionsBody["files"][number]>();
   for (const h of grep.hits) {
@@ -161,13 +210,14 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
     ok: true,
     body: {
       key,
-      kind: classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []),
+      kind,
       files: [...byFile.values()],
       commits: history.commits.slice(0, MENTIONS_MAX_COMMITS).map((c) => ({ sha: c.hash, date: c.date, subject: c.subject, files: c.files })),
       log,
       prs,
       totalLines: grep.totalLines,
       totalFiles: grep.totalFiles,
+      logTotalLines: logGrep.totalLines,
       totalsAtLeast: grep.atLeast,
       truncated:
         grep.atLeast ||

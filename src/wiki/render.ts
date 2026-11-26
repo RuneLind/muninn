@@ -40,9 +40,9 @@ import { markGlossaryTerms } from "../format/glossary-view.ts";
 import { parseBlocks } from "../format/markdown-ast.ts";
 import { renderedCodeRegions, inRenderedCode, restoreParkedSentinels } from "../format/rendered-code.ts";
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
-import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
+import { decisionText, liveSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
-import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
+import { applyChipsAndMarks, chipPassCollected, keyMarkHtml, planKeyMarks, planLiveChips, type ChipInsertion, type KeyMarksInput, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionPage, parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
@@ -65,7 +65,26 @@ export { WIKILINK_WITH_LABEL_RE } from "./decision-text.ts";
  * of the same text the reader drew its headings from.
  */
 export function readerBody(markdown: string, stripTitle?: string): string {
-  let body = stripFrontmatter(stripSentinelLines(withoutSentinelDelimiters(markdown)));
+  return readerBodyLines(markdown, stripTitle).body;
+}
+
+/**
+ * {@link readerBody}, and for each of its lines (0-based) the 1-based line of
+ * `markdown` it is read from. The body is the page less its live fact-check
+ * marker lines (whole lines), then a suffix of that: past the frontmatter
+ * (whole lines) and the repeated H1 (its `\s*` takes leading blank lines, and
+ * under CRLF the H1's `\r` stays, so the body may start mid-line). A line a
+ * render reports in the body's numbers is named by this in the file's.
+ */
+export function readerBodyLines(markdown: string, stripTitle?: string): { body: string; fileLine: (bodyLine: number) => number } {
+  const clean = withoutSentinelDelimiters(markdown);
+  const owned = liveSentinelLines(clean);
+  const lines = clean.split("\n");
+  // `stripSentinelLines`, keeping each kept line's index in `markdown`.
+  const kept: number[] = [];
+  for (let i = 0; i < lines.length; i++) if (!owned.has(i)) kept.push(i);
+  const text = owned.size === 0 ? clean : kept.map((i) => lines[i]).join("\n");
+  let body = stripFrontmatter(text);
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
@@ -75,7 +94,9 @@ export function readerBody(markdown: string, stripTitle?: string): string {
       body = body.slice(m.index! + m[0].length);
     }
   }
-  return body;
+  let first = 0;
+  for (let i = 0, end = text.length - body.length; i < end; i++) if (text.charCodeAt(i) === 10) first++;
+  return { body, fileLine: (bodyLine) => (kept[Math.min(first + bodyLine, kept.length - 1)] ?? 0) + 1 };
 }
 
 /** A step's trailing `<Check>` as the reader's slot. The inline scanner never
@@ -156,6 +177,10 @@ export function renderWikiHtml(
      *  alone: the walkthrough, the gardener preview, the component lint and
      *  `GET /api/wiki/ref` read the page without chips. */
     liveFacts?: LiveFactsInput;
+    /** Discuss v2 PR 6 (D5): underline the page's keys for the hover peek
+     *  (`planKeyMarks`). Set by `GET /api/wiki/page` alone, where the mentions
+     *  route answers for the viewer. */
+    keyMarks?: KeyMarksInput;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -170,7 +195,7 @@ export function renderWikiHtml(
   // body text; with none left, none can reassemble. The sibling files' parsers
   // drop both from every value they read (`withoutSentinelDelimiters`).
   markdown = withoutSentinelDelimiters(markdown);
-  const body = readerBody(markdown, opts?.stripTitle);
+  const { body, fileLine } = readerBodyLines(markdown, opts?.stripTitle);
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];
@@ -182,17 +207,44 @@ export function renderWikiHtml(
   // A chip rides the wikilink sentinel with an empty literal and an empty link
   // text, so code, an attribute value and every plain-text reader of a
   // sentinel give nothing for it. Inserted first: its offsets are `body`'s.
+  // A key mark rides two such empty sentinels INSIDE its key, after the first
+  // character and before the last, so every rule that reads a neighbour sees
+  // the page's own characters (`MEL-12*34*` keeps its literal stars); each
+  // sentinel renders a placeholder that `wrapKeyMarks` turns into the span.
   let marked = body;
+  let chips: ChipInsertion[] = [];
   if (opts?.liveFacts) {
     const plan = planLiveChips(body, markdown, opts.liveFacts);
-    marked = applyChipInsertions(body, plan.insertions, (html) => {
+    chips = plan.insertions;
+    opts.liveFacts.collect?.(plan.facts);
+    chipPassCollected();
+  }
+  const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
+  // The middle's lines are the body's: reported in the file's (`readerBodyLines`).
+  const middle = keyMarks?.middle && { ...keyMarks.middle, fromLine: fileLine(keyMarks.middle.fromLine - 1), toLine: fileLine(keyMarks.middle.toLine - 1) };
+  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars, ...(middle ? { middle } : {}) });
+  const markKeys: string[] = [];
+  // The chips parked one character early (`chipShifts`), moved after the inline pass.
+  const shifted = new Set<number>();
+  if (chips.length || keyMarks?.marks.length) {
+    const park = (html: string) => {
       literal.push("");
       linkTexts.push("");
       rendered.push(html);
       return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
+    };
+    const parkChip = (html: string, shift: boolean) => {
+      const token = park(html);
+      if (shift) shifted.add(rendered.length - 1);
+      return token;
+    };
+    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], parkChip, (m) => {
+      const text = body.slice(m.start, m.end);
+      const cps = [...text];
+      if (text !== m.key || cps.length < 3) return text;
+      const n = markKeys.push(m.key) - 1;
+      return cps[0] + park(keyMarkOpen(n)) + cps.slice(1, -1).join("") + park(keyMarkClose(n)) + cps.at(-1)!;
     });
-    opts.liveFacts.collect?.(plan.facts);
-    chipPassCollected();
   }
   const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);
@@ -234,7 +286,7 @@ export function renderWikiHtml(
   // are uncoloured where the code around them is highlighted. In an attribute
   // value (a `<Question>` card echoes `choices=`/`to=` into `data-question-*`)
   // the source text goes back too: link HTML there would end the value.
-  const html = restoreParkedSentinels(renderedHtml, "WIKIPAGELINK", rendered, literal);
+  const html = wrapKeyMarks(restoreParkedSentinels(moveShiftedChips(renderedHtml, shifted), "WIKIPAGELINK", rendered, literal), markKeys);
   // Park each `<Diagram>` picture behind an opaque token so NO string-level
   // post-pass over the rendered page can insert anything between its `<svg` and
   // its matching `</svg>` (the reported break-out was markGlossaryTerms; the
@@ -249,6 +301,47 @@ export function renderWikiHtml(
   // Backstop: every sentinel is restored by now, and the body and the parsed
   // file values carry no NUL; one left (a source not yet covered) is never served.
   return restoreDiagramPictures(glossed, parked).replaceAll("\0", "");
+}
+
+const SENTINEL_RUN_BEFORE_CHAR_RE = /((?:\x00WIKIPAGELINK\d+\x00)+)([A-Za-z0-9])/g;
+
+/**
+ * Each shifted chip's sentinel (`chipShifts` in `live-facts.ts`: parked
+ * before its site's last character) moved past that character, on the
+ * rendered HTML before any sentinel is restored. Other sentinels in the same
+ * run (a key mark's closing placeholder) stay before it. A shifted sentinel
+ * the render did not leave right before a letter or digit stays where it is.
+ */
+export function moveShiftedChips(html: string, shifted: ReadonlySet<number>): string {
+  if (shifted.size === 0) return html;
+  return html.replace(SENTINEL_RUN_BEFORE_CHAR_RE, (whole, run: string, ch: string) => {
+    const parts = run.match(/\x00WIKIPAGELINK\d+\x00/g)!;
+    const moves = (p: string) => shifted.has(Number(p.slice("\x00WIKIPAGELINK".length, -1)));
+    if (!parts.some(moves)) return whole;
+    return parts.filter((p) => !moves(p)).join("") + ch + parts.filter(moves).join("");
+  });
+}
+
+export const keyMarkOpen = (n: number) => `\x00WIKIKEYOPEN${n}\x00`;
+export const keyMarkClose = (n: number) => `\x00WIKIKEYCLOSE${n}\x00`;
+const KEY_MARK_RUN_RE = /(.)\x00WIKIKEYOPEN(\d+)\x00([^<>&\x00]*)\x00WIKIKEYCLOSE\2\x00(.)/gsu;
+const KEY_MARK_LEFTOVER_RE = /\x00WIKIKEY(?:OPEN|CLOSE)\d+\x00/g;
+
+/**
+ * Each key mark's two placeholders, with the key's first and last characters
+ * around them, as the mark's span — only where the render left exactly the
+ * key's own text there in one run of text. Anywhere else (code and attribute
+ * values already got the empty source text back) a placeholder is dropped, so
+ * the page reads as it would unmarked.
+ */
+export function wrapKeyMarks(html: string, keys: readonly string[]): string {
+  if (keys.length === 0) return html;
+  return html
+    .replace(KEY_MARK_RUN_RE, (whole, first: string, n: string, inner: string, last: string) => {
+      const key = keys[Number(n)];
+      return key !== undefined && first + inner + last === key ? keyMarkHtml(key) : whole;
+    })
+    .replace(KEY_MARK_LEFTOVER_RE, "");
 }
 
 /** A `<SystemMap>` node's page on the reader: a `repos/` page, or a declared

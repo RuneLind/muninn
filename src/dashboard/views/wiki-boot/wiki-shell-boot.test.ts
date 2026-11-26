@@ -406,14 +406,22 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
       "document click 13kk2", "document change 1typa", "document input smycp", "document keydown 2bnv5",
       "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s",
+      // The key peek and the Trace card (`initKeyTrace`, Discuss v2 PR 6), before the selection menu's: the
+      // peek shown on a key's hover; a press (its «Trace»/«Go to ↓» run with their default prevented, a press
+      // elsewhere hides it); the button let go; Escape and a scroll hide it; the Trace card's Summarize and
+      // Continue, and its follow-up form. No listener of the menu's reads what these do (their selectors
+      // are disjoint and its mousedown reads no `defaultPrevented`).
+      "document mouseover sv93w", "document mousedown tkbem", "document mouseup 2attz", "document keydown 1zyn7",
+      "document scroll capture 3ut2f", "document click 2pyi4", "document submit 34esa",
       // The selection menu (`initSelectionMenu`, Discuss v2 PR 5), where the Explain pill's listeners were:
       // the bar on a mouseup, the right-click menu, close on a collapsed selection, Escape and Enter, an
       // action's press, a keyboard click and the cards' buttons, the bar following a scroll or a resize;
       // then the whole-page Fact check's press, which the pill's mousedown used to hold. (PR 5 fix round 1
       // batch 4: the context menu on the document, where the keyboard's goes; ⇧F10 and the arrows in the
-      // keydown; a closed card let go; the menu closed on a scroll.)
+      // keydown; a closed card let go; the menu closed on a scroll. PR 6: a closed card runs its drop
+      // hook, which lets a Trace card go.)
       "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 2417h",
-      "document mousedown 2jzhg", "document click 37i4g", "document scroll capture 32kwe", "window resize 2k8ec",
+      "document mousedown 2jzhg", "document click 396t9", "document scroll capture 32kwe", "window resize 2k8ec",
       "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",

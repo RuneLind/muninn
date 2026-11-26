@@ -27,6 +27,7 @@ import {
   pageKeySet,
   prMentions,
   parseWikiFacts,
+  planKeyMarks,
   planLiveChips,
   readWikiFacts,
   resetWikiFactsCache,
@@ -34,8 +35,9 @@ import {
   type WikiFacts,
 } from "./live-facts.ts";
 import { chipView, countedKeyPrs, keySummary, prChipParts, repoOfPr, type LiveFactsPayload } from "./core/live-facts-chip.ts";
-import { readerBody, renderWikiHtml } from "./render.ts";
+import { keyMarkClose, keyMarkOpen, readerBody, renderWikiHtml, wrapKeyMarks } from "./render.ts";
 import { stripFrontmatter } from "./store.ts";
+import { KEY_SCAN_LINE_MAX, parseKeyKinds } from "./key-kinds.ts";
 
 const FIX = path.join(import.meta.dir, "__fixtures__");
 const json = async (name: string) => JSON.parse(await Bun.file(path.join(FIX, name)).text());
@@ -281,8 +283,12 @@ describe("mention forms the reader renders (fix round 1, k5)", () => {
     const { html } = render(page("Both _api #103_ and _DEMO-12_ merged."));
     expect(html).toContain(`<em>api #103${chipFor("acme/acme-api#103")}</em>`);
     expect(html).toContain(`<em>DEMO-12${chipFor("DEMO-12")}</em>`);
-    // Not italics in the reader (a word character outside), so no mention.
-    expect(chipIds(render(page("x_DEMO-12_ y")).html)).toEqual([]);
+    // Not italics in the reader (a word character outside): DEMO-12 is a whole
+    // key there, and its chip, parked before the `2` (sweep B, `chipShifts`),
+    // leaves that literal `_` literal.
+    const literal = render(page("x_DEMO-12_ y")).html;
+    expect(literal).toContain(`x_DEMO-12${chipFor("DEMO-12")}_ y`);
+    expect(stripChips(literal)).toBe(renderWikiHtml(page("x_DEMO-12_ y"), () => undefined));
   });
 });
 
@@ -347,8 +353,13 @@ describe("pinned edges (fix round 2: each kills a named mutant)", () => {
     expect(html).toContain('[api #101<span class="fact-chip" data-live-fact="acme/acme-api#101" data-reader-only></span>]<a href="https://e.com" target="_blank" rel="noopener">b</a>');
   });
 
-  test("an `_` followed by a word character closes no italics: `_api #103_x` and `_DEMO-12_y` get no chip", () => {
-    expect(chipIds(render(page("_api #103_x and _DEMO-12_y")).html)).toEqual([]);
+  // `_DEMO-12_y`: a whole key since fix round 2 batch 3; its chip leaves the literal `_` literal (sweep B).
+  test("an `_` followed by a word character closes no italics: `_api #103_x` is no mention, `_DEMO-12_y` chips with no italics", () => {
+    const md = page("_api #103_x and _DEMO-12_y");
+    const { html } = render(md);
+    expect(chipIds(html)).toEqual(["DEMO-12"]);
+    expect(html).not.toContain("<em>");
+    expect(stripChips(html)).toBe(renderWikiHtml(md, () => undefined));
   });
 });
 
@@ -574,5 +585,159 @@ describe("readWikiFacts", () => {
 
   test("a key list naming a missing entry is an error", () => {
     expect(parseWikiFacts(JSON.stringify({ version: 1, prs: {}, keys: { "DEMO-1": { prs: ["a/b#1"] } } }))).toEqual({ error: "keys.DEMO-1.prs names a/b#1, which has no prs entry" });
+  });
+});
+
+// ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
+
+describe("key marks: the page's keys underlined for the hover peek", () => {
+  const KINDS = parseKeyKinds([{ name: "case", pattern: "MEL-\\d+" }]).kinds;
+  const marks = { grammar: GRAMMAR, trackers: TRACKERS, kinds: KINDS, relPath: "plans/demo.mdx" };
+  const markIds = (html: string) => [...html.matchAll(/<span class="wiki-key" data-wiki-key="([^"]+)">\1<\/span>/g)].map((m) => m[1]);
+
+  test("tracker keys and `keys` kinds are marked; the text the reader reads is unchanged", () => {
+    const md = page("DEMO-20 and MEL-1029036 are open; MEL-5x is not a key.");
+    const html = renderWikiHtml(md, () => undefined, { keyMarks: marks });
+    expect(markIds(html)).toEqual(["DEMO-20", "MEL-1029036"]);
+    expect(html.replace(/<[^>]+>/g, "")).toBe(renderWikiHtml(md, () => undefined).replace(/<[^>]+>/g, ""));
+  });
+
+  test("never in a never-marked region: code spans and fences, a heading, a wikilink, a tag's attribute, a link or a bare URL", () => {
+    const body = [
+      "## MEL-1 in a heading",
+      "",
+      "`MEL-2` in a span, and [MEL-3](https://jira.example/MEL-3), and https://x.example/MEL-4 too, and [[MEL-5|the MEL-5 page]].",
+      "",
+      "```",
+      "MEL-6 in a fence",
+      "```",
+      "",
+      '<Fold title="MEL-7">',
+      "",
+      "MEL-8 in prose.",
+      "",
+      "</Fold>",
+    ].join("\n");
+    const { marks: got } = planKeyMarks(readerBody(page(body), "Demo"), page(body), marks);
+    expect(got.map((m) => m.key)).toEqual(["MEL-8"]);
+  });
+
+  test("a key with its own fact chip is marked too, the chip right after the mark: the reader hides a chip with nothing to show, and the key keeps a target (fix round 1 J1)", () => {
+    const { html } = render(page("DEMO-12 has facts, DEMO-20 has none."), "plans/demo.mdx", { keyMarks: marks });
+    expect(chipIds(html)).toEqual(["DEMO-12"]);
+    expect(markIds(html)).toEqual(["DEMO-12", "DEMO-20"]);
+    expect(html).toContain('<span class="wiki-key" data-wiki-key="DEMO-12">DEMO-12</span><span class="fact-chip" data-live-fact="DEMO-12" data-reader-only></span> has facts');
+  });
+
+  test("marks and chips share one pass: a mark right before a PR chip keeps both in text order", () => {
+    const { html } = render(page("MEL-9 acme/acme-api#101 merged."), "plans/demo.mdx", { keyMarks: marks });
+    expect(html).toContain('<span class="wiki-key" data-wiki-key="MEL-9">MEL-9</span> acme/acme-api#101<span class="fact-chip" data-live-fact="acme/acme-api#101"');
+  });
+
+  test("a key must start with a letter: a `keys` kind's digit-first match (12-MEL, 1.2) is not marked, a letter-first one is (fix round 2 batch 4)", () => {
+    const kinds = parseKeyKinds([{ name: "rel", pattern: "\\d{2}-MEL" }, { name: "ver", pattern: "\\d\\.\\d" }, { name: "tag", pattern: "V\\d\\.\\d" }]).kinds;
+    expect(kinds.map((k) => k.name)).toEqual(["rel", "ver", "tag"]);
+    const body = "Release 12-MEL ships 1.2 as V3.4.";
+    const { marks: got } = planKeyMarks(body, body, { grammar: null, trackers: [], kinds, relPath: "x.md" });
+    expect(got.map((m) => m.key)).toEqual(["V3.4"]);
+  });
+
+  test("without trackers or kinds nothing is scanned (mimir's case)", () => {
+    expect(planKeyMarks("MEL-1 DEMO-2", "MEL-1 DEMO-2", { grammar: null, trackers: [], kinds: [], relPath: "x.md" })).toEqual({ marks: [], skippedLines: 0, skippedChars: 0 });
+  });
+
+  test("a line over the scan bound is skipped for the `keys` kinds and counted", () => {
+    const long = `${"word ".repeat(KEY_SCAN_LINE_MAX / 5)} MEL-10`;
+    const r = planKeyMarks(`${long}\nMEL-11`, `${long}\nMEL-11`, marks);
+    expect(r.marks.map((m) => m.key)).toEqual(["MEL-11"]);
+    expect(r.skippedLines).toBe(1);
+  });
+});
+
+// ── Key marks change nothing but the wrapper (fix round 1, G3) ───────────────
+
+describe("key marks: the marked render is the unmarked render plus the wrappers", () => {
+  const KINDS = parseKeyKinds([{ name: "case", pattern: "MEL-\\d+" }]).kinds;
+  const marks = { grammar: GRAMMAR, trackers: TRACKERS, kinds: KINDS, relPath: "plans/demo.mdx" };
+  const unwrap = (html: string) => html.replace(/<span class="wiki-key" data-wiki-key="[^"]*">([^<]*)<\/span>/g, "$1");
+  // The page route's reader options: number columns and the views read the text too.
+  const both = (md: string) => {
+    const marked = renderWikiHtml(md, () => undefined, { views: true, readerShapes: true, keyMarks: marks });
+    return { marked, plain: renderWikiHtml(md, () => undefined, { views: true, readerShapes: true }) };
+  };
+
+  test("emphasis right after a key keeps its meaning: MEL-12*34*, a table cell's MEL-22*n*, DEMO-2*w*", () => {
+    for (const [body, key] of [
+      ["A MEL-12*34* b", "MEL-12"],
+      ["| a | b |\n|---|---|\n| MEL-22*n* | x |", "MEL-22"],
+      ["See DEMO-2*w* here.", "DEMO-2"],
+    ] as const) {
+      const { marked, plain } = both(page(body));
+      expect(marked).toContain(`data-wiki-key="${key}"`);
+      expect(marked).not.toContain("<em>");
+      expect(unwrap(marked)).toBe(plain);
+    }
+  });
+
+  test("every neighbour an inline rule reads sees the page's own characters", () => {
+    const bodies = [
+      "*MEL-1*", "**MEL-2**", "_MEL-3_", "~~MEL-4~~", "MEL-5_x_", "x_MEL-6_ y", "`a`MEL-7", "MEL-8`b`", "[MEL-9]", "(MEL-10)",
+      "MEL-11\\*x*", "<MEL-12>", "MEL-13 → 14", "1 → MEL-15", "MEL-16 -> 17", "MEL-17 → 18 ms", "- MEL-18 item", "> MEL-19 quote",
+      "MEL-20: x", "MEL-21.", "**MEL-22*x***", "*a MEL-23*b*", "MEL-24~~s~~", "MEL-25*", "*MEL-26", "_MEL-27", "MEL-28_",
+      "DEMO-29_a_", "*DEMO-30*x*", "a*DEMO-31*", "MEL-32 → MEL-33", "[[MEL-34]] MEL-35*a*", "| MEL-36 | 1 → 2 |\n|---|---|\n| x | y |",
+      // A number column with a key in a cell's short note (melosys-kode-wiki, `skarp-2024-2025-rapport`).
+      "| Kjøring | Hoppet over |\n|---|---:|\n| a | 0 |\n| b | 1 (MEL-604246) |",
+    ];
+    let markedCount = 0;
+    for (const body of bodies) {
+      const { marked, plain } = both(page(body));
+      markedCount += (marked.match(/class="wiki-key"/g) ?? []).length;
+      expect([body, unwrap(marked)]).toEqual([body, plain]);
+    }
+    expect(markedCount).toBeGreaterThan(25);
+  });
+
+  test("a number column reads only a sentinel with no text AND no source as nothing: a wikilink that shows no text still counts (fix round 2 batch 4)", () => {
+    const table = (cell: string) => page(`| Kjøring | Hoppet over |\n|---|---:|\n| a | 0 |\n| b | 1 ${cell} |`);
+    // A key mark's two sentinels (empty text, empty source): still a number column.
+    expect(both(table("(MEL-604246)")).marked).toContain('<th class="num">Hoppet over</th>');
+    // `[[ ]]` parks a sentinel with empty link text but its source `[[ ]]`: not a number.
+    const { marked, plain } = both(table("[[ ]]"));
+    expect(marked).toContain("<th>Hoppet over</th>");
+    expect(plain).toContain("<th>Hoppet over</th>");
+  });
+
+  test("a key with no `-` or `.` join is an item id's shape and is not marked: the decision log keeps its ids", () => {
+    const idKinds = { ...marks, kinds: parseKeyKinds([{ name: "id", pattern: "[A-Z]\\d{1,3}" }, { name: "case", pattern: "MEL-\\d+" }]).kinds };
+    const md = page(["<DecisionLog>", "", "- **D12** — Ship MEL-7 and D12 in prose.", "", "</DecisionLog>"].join("\n"));
+    const marked = renderWikiHtml(md, () => undefined, { views: true, keyMarks: idKinds });
+    expect([...marked.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1])).toEqual(["MEL-7"]);
+    expect(unwrap(marked)).toBe(renderWikiHtml(md, () => undefined, { views: true }));
+    expect(marked).toContain('id="d12"');
+  });
+
+  test("a mark's placeholders become its span only around the key's own text in one run; otherwise they are dropped", () => {
+    const o = keyMarkOpen(0);
+    const c = keyMarkClose(0);
+    expect(wrapKeyMarks(`a M${o}EL-1${c}2 b`, ["MEL-12"])).toBe('a <span class="wiki-key" data-wiki-key="MEL-12">MEL-12</span> b');
+    expect(wrapKeyMarks(`a M${o}EL<em>-1</em>${c}2 b`, ["MEL-12"])).toBe("a MEL<em>-1</em>2 b");
+    expect(wrapKeyMarks(`a M${o}EL-1${c}3 b`, ["MEL-12"])).toBe("a MEL-13 b");
+    expect(wrapKeyMarks(`a M${o}EL-1 b`, ["MEL-12"])).toBe("a MEL-1 b");
+  });
+
+  test("generated KEY<punct>… strings: parity on every one", () => {
+    const tokens = ["MEL-12", "DEMO-3", "MEL-4", "*", "**", "_", "~~", "~", "`", "<", ">", "\\", "[", "]", "(", ")", " ", "a", "æ", "1", "-", "→", "->", "|", "#", ".", ":", "https://x.example/", "&", "\n"];
+    let seed = 20261126;
+    const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    let markedCount = 0;
+    for (let n = 0; n < 1500; n++) {
+      const len = 3 + Math.floor(next() * 10);
+      let body = "";
+      for (let i = 0; i < len; i++) body += tokens[Math.floor(next() * tokens.length)];
+      const { marked, plain } = both(page(`x ${body} y`));
+      markedCount += (marked.match(/class="wiki-key"/g) ?? []).length;
+      expect([body, unwrap(marked)]).toEqual([body, plain]);
+    }
+    expect(markedCount).toBeGreaterThan(300);
   });
 });

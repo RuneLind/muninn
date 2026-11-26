@@ -433,6 +433,8 @@ export const E2E_PORTS = {
   "wiki-selection-menu": 3257,
   // A RunChecklist step and a Fold by their own anchors: a fresh load, an in-page link, a link from another page.
   "wiki-step-anchors": 3258,
+  // Discuss v2 PR 6: key marks beside a fact chip, the hover peek, the Trace view and its thread.
+  "wiki-trace": 3259,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
   // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.

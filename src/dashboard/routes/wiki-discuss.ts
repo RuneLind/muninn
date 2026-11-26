@@ -29,6 +29,7 @@ import { bodyLimit } from "hono/body-limit";
 import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
+import { authMode } from "../../auth/policy.ts";
 import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
 import {
   getDiscussTurn,
@@ -38,7 +39,9 @@ import {
   listThreadMessagesWithTurns,
   markDiscussTurnHandedOver,
 } from "../../db/wiki-discuss-turns.ts";
-import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
+import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getLiveWikiTraceThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
+import { parseMentionKey } from "../../wiki/mention-key.ts";
+import { mentionsKind } from "../../wiki/mentions.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
@@ -46,6 +49,7 @@ import {
   createDiscussEngine,
   parseDiscussBody,
   sharedDiscussEngine,
+  TRACE_AUTH_REFUSAL,
   type DiscussEngine,
   type DiscussEngineDeps,
   type DiscussMirrorFactory,
@@ -57,6 +61,7 @@ import { chatWikiMirror, chatUsersFor, publishWikiRefusal } from "../../chat/wik
 import { requireJsonRequest } from "./json-request.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { egressRefusal } from "./wiki-egress.ts";
+import { WIKI_MENTIONS_PATH } from "./wiki-mentions.ts";
 
 export {
   COPILOT_DISCUSS_TOOLS,
@@ -102,6 +107,19 @@ export interface DiscussRouteDeps extends DiscussEngineDeps {
   refusalMirror?: ((threadId: string, message: string) => Promise<void>) | null;
   /** The continue route's reads and its one write; default the DB's. */
   continueStore?: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; handedOver: typeof markDiscussTurnHandedOver };
+}
+
+/** A turn's ledger row goes out once, on the first of its two messages (the
+ *  tab builds a turn from the row, whichever message carries it). */
+function turnOnFirstMessage<M extends { turn: { id: string } | null }>(messages: M[]): M[] {
+  const sent = new Set<string>();
+  return messages.map((m) => {
+    if (!m.turn || !sent.has(m.turn.id)) {
+      if (m.turn) sent.add(m.turn.id);
+      return m;
+    }
+    return { ...m, turn: null };
+  });
 }
 
 export function registerWikiDiscussRoute(app: Hono, config: Config, deps: DiscussRouteDeps = {}): void {
@@ -185,7 +203,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // wiki's egress prologue), since it marks a row and hands a model-written
   // answer on. Refusals: 403 role · 415 · 413 · 400 body · 404 unknown turn ·
   // 404 the turn's wiki is not configured here · 403 `readonly` · 409 the turn
-  // is still running · 500. A trace turn (no page) gets a prompt with no page path.
+  // is still running · 500. A trace turn (no page) gets a prompt that names its
+  // key, the wiki's root and how to list the key's mentions again.
   const contStore = deps.continueStore ?? { get: getDiscussTurn, list: listDiscussTurns, handedOver: markDiscussTurnHandedOver };
   const smallLimit = bodyLimit({
     maxSize: 1024,
@@ -213,8 +232,20 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       // A turn's lines were placed on the page it was stored with: against
       // another text they would name other lines of the file the prompt points at.
       const live = pagePath === null ? null : await readWikiText(pagePath).then(sha256, () => null);
+      const trace =
+        turn.traceKey === null
+          ? null
+          : {
+              wiki: turn.wiki,
+              root: path.resolve(resolveWikiRoot(entry?.root)),
+              key: turn.traceKey,
+              mentionsUrl: `${new URL(c.req.url).origin}${WIKI_MENTIONS_PATH}?wiki=${encodeURIComponent(turn.wiki)}&key=${encodeURIComponent(turn.traceKey)}`,
+              // The mentions' own test, so the prompt's commands search the key the way the payload does.
+              wholeKey: mentionsKind(turn.traceKey, await getWikiIndex({ root: entry?.root })) !== null,
+            };
       const prompt = renderContinuePrompt({
         path: pagePath,
+        trace,
         turns: turns.map((t) => ({ seq: t.seq, selection: t.selection, location: t.location, question: t.question, answer: t.answer, endState: t.endState, pageChanged: live !== t.pageHash })),
       });
       const marked = await contStore.handedOver(turn.id);
@@ -234,7 +265,14 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // one-shot turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
   // prologue. Refusals: 403 role · 400 query · 404 unknown wiki or page · 503
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
+  //
+  // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
+  // the Trace view): the thread and its messages; a trace has no closed list
+  // or one-shot turns. 404 `trace-off` while `MUNINN_AUTH` is not `off`, then
+  // 400 a bad key (the mentions route's rules).
   app.get("/api/wiki/discuss/thread", admin, async (c) => {
+    const traceQ = c.req.query("traceKey");
+    if (traceQ !== undefined) return traceThreadRead(c, traceQ);
     const relPathQ = c.req.query("relPath");
     if (!relPathQ?.trim() || relPathQ.length > 1024) return c.json({ error: "relPath is required" }, 400);
     const postedUser = c.req.query("userId");
@@ -262,16 +300,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         closed.map((t) => t.id),
         DISCUSS_EARLIER_MESSAGES_MAX,
       );
-      // A turn's ledger row goes out once, on the first of its two messages
-      // (the tab builds a turn from the row, whichever message carries it).
-      const sent = new Set<string>();
-      const live = messages.map((m) => {
-        if (!m.turn || !sent.has(m.turn.id)) {
-          if (m.turn) sent.add(m.turn.id);
-          return m;
-        }
-        return { ...m, turn: null };
-      });
+      const live = turnOnFirstMessage(messages);
       return c.json({
         userId: who.userId,
         bot: bot.name,
@@ -289,6 +318,29 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       return c.json({ error: "could not read the thread" }, 500);
     }
   });
+
+  async function traceThreadRead(c: Context, raw: string): Promise<Response> {
+    // Absent where a trace turn is refused: an instance that authenticates.
+    if ((deps.authMode ?? authMode)() !== "off") return c.json(TRACE_AUTH_REFUSAL, 404);
+    const key = parseMentionKey(raw);
+    if ("error" in key) return c.json({ error: `traceKey: ${key.error}` }, 400);
+    try {
+      const { entry, unknownWiki, wiki } = resolveWikiRequest(getWikiRegistry(), c.req.query("wiki"), undefined, process.env.WIKI_DIR);
+      if (unknownWiki) return c.json({ error: `no wiki configured for "${wiki || "(none)"}"` }, 404);
+      const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
+      if (!bot || (entry?.synthesisBot && origin !== "pinned")) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
+      const postedUser = c.req.query("userId");
+      const who = await engine.resolveUser(bot.name, postedUser || undefined);
+      if ("refused" in who) return c.json(who.body, who.status);
+      const thread = await getLiveWikiTraceThread(who.userId, bot.name, entry?.name ?? "", key.key);
+      const messages = thread ? await listThreadMessagesWithTurns(thread.id) : [];
+      const live = turnOnFirstMessage(messages);
+      return c.json({ userId: who.userId, bot: bot.name, traceKey: key.key, thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null, messages: live, closed: [], closedTotal: 0, oneShot: [] });
+    } catch (err) {
+      log.error("discuss trace thread read failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "could not read the thread" }, 500);
+    }
+  }
 
   // «Start over»: close the page's live thread; it stays readable and
   // deletable under «Earlier discussions». Refusals: 403 role · 415 · 413 ·
