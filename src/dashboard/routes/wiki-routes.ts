@@ -1780,7 +1780,18 @@ export function registerWikiReadRoutes(
     const mentionsHere = tools && authMode() === "off" && !!entry?.name && (await mentionsWorkTree(entry.root));
     const keyMarks: KeyMarksInput | undefined =
       mentionsHere && (c.get("role") ?? "admin") === "admin"
-        ? { grammar: index.readerConfig?.prGrammar ?? null, trackers: jiraTrackers(index.readerConfig?.trackers), kinds: index.readerConfig?.keys ?? [], relPath: meta.relPath }
+        ? {
+            grammar: index.readerConfig?.prGrammar ?? null,
+            trackers: jiraTrackers(index.readerConfig?.trackers),
+            kinds: index.readerConfig?.keys ?? [],
+            relPath: meta.relPath,
+            // Lines the `keys` scan skipped go unmarked: said once per render (fix round 2, finding 5).
+            collect: ({ skippedLines, skippedChars, middle }) => {
+              const props = { wiki: entry?.name, relPath: meta.relPath, skippedLines, skippedChars };
+              if (middle) log.warn("key marks: {relPath} passed the scan budget; lines {fromLine}–{toLine} are unmarked ({skippedLines} lines, {skippedChars} chars skipped)", { ...props, ...middle });
+              else if (skippedLines > 0) log.info("key marks: {skippedLines} lines of {relPath} are over the line bound and unmarked ({skippedChars} chars)", props);
+            },
+          }
         : undefined;
     const render = async (chips: LiveFactsInput | undefined): Promise<string> => {
       const plain = () => renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, chips, undefined);

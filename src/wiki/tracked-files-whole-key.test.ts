@@ -14,9 +14,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { realGit, type GitRun } from "./decision-triage/git.ts";
 import { scanKeyKinds } from "./key-kinds.ts";
-import { planKeyMarks } from "./live-facts.ts";
+import { bodyKeyMentions, chipInsertions, jiraTrackers, markedMentions, planKeyMarks } from "./live-facts.ts";
+import { parseTrackersConfig } from "./trackers/index.ts";
 import { grepTracked, historyFor, wholeKeyCount } from "./tracked-files.ts";
 import { testTempDir } from "../test/temp-dir.ts";
+
+/** A key's neighbours on both sides: astral and BMP letters and digits, `_`, an emoji, punctuation. */
+const NEIGHBOURS = ["𝐀MEL-12", "MEL-12𝐀", "𝟏MEL-12", "MEL-12𝟏", "MEL-12_x", "xMEL-12", "åMEL-12", "MEL-12", "😀MEL-12", "(MEL-12)"];
 
 describe("wholeKeyCount", () => {
   test("a Unicode letter or digit on either side continues the key; `_`, `-` and punctuation do not", () => {
@@ -34,8 +38,7 @@ describe("wholeKeyCount", () => {
 
   test("the counter, the keys scan and the reader's marks agree on each neighbour", () => {
     const kinds = [{ name: "case", pattern: "MEL-\\d+" }];
-    const fixtures = ["𝐀MEL-12", "MEL-12𝐀", "𝟏MEL-12", "MEL-12𝟏", "MEL-12_x", "xMEL-12", "åMEL-12", "MEL-12", "😀MEL-12", "(MEL-12)"];
-    const rows = fixtures.map((t) => {
+    const rows = NEIGHBOURS.map((t) => {
       const line = `See ${t} here.`;
       return {
         t,
@@ -46,6 +49,27 @@ describe("wholeKeyCount", () => {
     });
     for (const r of rows) expect({ t: r.t, scan: r.scan, marks: r.marks }).toEqual({ t: r.t, scan: r.count, marks: r.count });
     expect(rows.filter((r) => r.count === 1).map((r) => r.t)).toEqual(["MEL-12_x", "MEL-12", "😀MEL-12", "(MEL-12)"]);
+  });
+
+  // Fix round 2 batch 3 (finding 4): tracker keys (`bodyKeyMentions`, the
+  // tracker marks and the chips' mentions) took an ASCII boundary, so
+  // `åMEL-12` and `𝐀MEL-12` were marked and `MEL-12_x` was not.
+  // A chip never sits where the peek counts nothing; it skips a key a literal
+  // `_` follows (`MEL-12_x`), where it would let the reader read that `_` as italics.
+  test("tracker keys: the counter, bodyKeyMentions and the reader's marks agree on each neighbour; a chip only where they count", () => {
+    const trackers = jiraTrackers(parseTrackersConfig([{ id: "jira", projects: ["MEL"] }], () => {}));
+    const rows = [...NEIGHBOURS, "MEL-12-3", "_MEL-12"].map((t) => {
+      const line = `See ${t} here.`;
+      return {
+        t,
+        count: wholeKeyCount(line, "MEL-12"),
+        body: bodyKeyMentions(line, ["MEL"]).filter((m) => m.key === "MEL-12").length,
+        marks: planKeyMarks(line, line, { grammar: null, trackers, kinds: [], relPath: "x.md" }).marks.filter((m) => m.key === "MEL-12").length,
+        chips: chipInsertions(line, markedMentions(line, line, "x.md", null, trackers, () => undefined), () => true).flatMap((c) => c.ids).filter((c) => c.id === "MEL-12").length,
+      };
+    });
+    for (const r of rows) expect({ t: r.t, body: r.body, marks: r.marks, chips: r.chips }).toEqual({ t: r.t, body: r.count, marks: r.count, chips: r.t.startsWith("MEL-12_") ? 0 : r.count });
+    expect(rows.filter((r) => r.count === 1).map((r) => r.t)).toEqual(["MEL-12_x", "MEL-12", "😀MEL-12", "(MEL-12)", "MEL-12-3", "_MEL-12"]);
   });
 
   test("grepTracked refuses wholeKey with a regex", async () => {

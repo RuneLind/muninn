@@ -69,6 +69,8 @@ export interface MentionsBody {
   /** Matching lines and files in the whole wiki, `log.md` included: every one the search saw, not only those listed. */
   totalLines: number;
   totalFiles: number;
+  /** Matching lines in the root `log.md`, from its own search: every one it saw, not only those in `log`. */
+  logTotalLines: number;
   /** The search stopped at its scan bound, so the totals are lower bounds. */
   totalsAtLeast: boolean;
   /** A bound cut the lines, the log lines or the commits: more exist than are listed. */
@@ -215,6 +217,7 @@ export async function buildMentions(input: MentionsInput, deps: MentionsDeps): P
       prs,
       totalLines: grep.totalLines,
       totalFiles: grep.totalFiles,
+      logTotalLines: logGrep.totalLines,
       totalsAtLeast: grep.atLeast,
       truncated:
         grep.atLeast ||

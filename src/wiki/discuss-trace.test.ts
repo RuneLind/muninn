@@ -15,6 +15,7 @@ const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
   ],
   totalLines: 3,
   totalFiles: 2,
+  logTotalLines: 1,
   totalsAtLeast: false,
   truncated: true,
   ...over,
@@ -33,7 +34,7 @@ describe("traceContextPack", () => {
   });
 
   test("a key no file names, with no kind and lower-bound totals", () => {
-    const pack = traceContextPack("mimir", body({ kind: null, files: [], commits: [], log: [], prs: [], totalLines: 0, totalFiles: 0, totalsAtLeast: true, truncated: false })).join("\n");
+    const pack = traceContextPack("mimir", body({ kind: null, files: [], commits: [], log: [], prs: [], totalLines: 0, totalFiles: 0, logTotalLines: 0, totalsAtLeast: true, truncated: false })).join("\n");
     expect(pack).toContain("Key: MEL-77\n");
     expect(pack).toContain("at least 0 lines in at least 0 files");
     expect(pack).toContain("(no tracked file names it)");
@@ -67,6 +68,25 @@ describe("traceContextPack", () => {
     expect(section(traceContextPack("kode", atLeast), "## Where it is mentioned").at(-1)).toBe("- … at least 38 more mention lines not listed in this pack");
     const all = body({ totalLines: 2, totalFiles: 2, truncated: false });
     expect(traceContextPack("kode", all).join("\n")).not.toContain("not listed in this pack");
+  });
+
+  // Fix round 2 batch 3 (finding 9): on melosys-kode-wiki, MELOSYS's where note
+  // counted the 324 log.md lines the log section had already reported as cut.
+  test("each mention line is reported once: shown, cut from the log section or cut from the where section, summing to totalLines", () => {
+    const files = Array.from({ length: 30 }, (_, f) => ({ relPath: `notes/f${f}.md`, title: null, lines: Array.from({ length: 10 }, (_, i) => ({ n: i + 1, text: `MELOSYS ${"y".repeat(120)}` })) }));
+    const logOf = (n: number) => Array.from({ length: n }, (_, i) => ({ date: "2026-11-20", kind: "note", line: `- MELOSYS ${"z".repeat(150)} ${i}`, n: i + 10 }));
+    const note = (lines: string[], re: RegExp) => Number(lines.find((l) => re.test(l))?.match(re)?.[1] ?? 0);
+    // The second: the log list stopped at its bound (500) with 650 log.md lines in the wiki.
+    for (const [listed, logTotalLines, totalLines] of [[395, 395, 2812], [500, 650, 3100]] as const) {
+      const pack = traceContextPack("kode", body({ key: "MELOSYS", kind: null, files, log: logOf(listed), logTotalLines, totalLines, totalFiles: 31, truncated: true }));
+      const where = section(pack, "## Where it is mentioned");
+      const logSection = section(pack, "## Its log.md lines");
+      const shown = where.filter((l) => /^  \d+: /.test(l)).length + logSection.filter((l) => l.startsWith("- log.md:")).length;
+      const whereCut = note(where, /^- … (?:at least )?(\d+) more mention lines? not listed in this pack$/);
+      const logCut = note(logSection, /^- … (?:at least )?(\d+) more log\.md lines? cut$/);
+      expect(logCut).toBeGreaterThan(0);
+      expect({ listed, sum: shown + whereCut + logCut }).toEqual({ listed, sum: totalLines });
+    }
   });
 
   test("each log.md line appears once: under «Its log.md lines», not again under «Where it is mentioned»", () => {

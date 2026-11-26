@@ -187,11 +187,14 @@ export function grammarReason(pattern: string): string | null {
 export const KEY_SCAN_LINE_MAX = 4000;
 
 /**
- * Characters × kinds one page may scan; the lines after the budget is spent
- * are skipped and counted. Measured 2026-11-26: the worst line above costs
- * ~0.5 µs per character per kind (515 ms for 250 such lines, one kind), so
- * this caps a page near 0.5 s whatever its kinds; the largest kode-wiki page
- * (`log.md`, 738,635 scannable characters, one kind) still scans whole.
+ * Characters × kinds one page may scan. Measured 2026-11-26: the worst line
+ * above costs ~0.5 µs per character per kind (515 ms for 250 such lines, one
+ * kind), so this caps a page near 0.5 s whatever its kinds; the largest
+ * kode-wiki page (`log.md`, 738,635 scannable characters, one kind) still
+ * scans whole. A page past it is scanned from both ends inward and its middle
+ * is skipped: both wikis' `log.md` take new entries at the bottom (their
+ * rule) and at the top (32 of kode-wiki's 158 November entries, 95 of
+ * mimir's 240), so the oldest sit in between.
  */
 export const KEY_SCAN_PAGE_MAX = 1_000_000;
 
@@ -216,6 +219,16 @@ const charAt = (text: string, i: number): string => String.fromCodePoint(text.co
  *  key passed it (fix round 2). `wholeKeyCount` uses it too. */
 export const keyCharBefore = (text: string, i: number): boolean => i > 0 && KEY_CHAR.test(charBefore(text, i));
 
+/** Whether the code point that starts at `i` continues a key (read whole, as {@link keyCharBefore} reads the one before). */
+export const keyCharAfter = (text: string, i: number): boolean => i < text.length && KEY_CHAR.test(charAt(text, i));
+
+/** Lines {@link scanKeyKinds} skipped once the page budget was spent: the
+ *  middle of the page, 1-based and inclusive. */
+export interface SkippedMiddle {
+  fromLine: number;
+  toLine: number;
+}
+
 /**
  * Every whole-key match of a `keys` kind in `text`, with its kind: a match
  * starts where no Unicode letter or digit comes before it and ends where none
@@ -223,53 +236,79 @@ export const keyCharBefore = (text: string, i: number): boolean => i > 0 && KEY_
  * and is a key the mentions route searches (3–80 characters).
  * Tried only at such starts, with a sticky copy of each pattern, so a run of
  * letters is tried once, not at each of its offsets. Overlaps keep the
- * earlier match (then the longer). Lines over `lineMax` are skipped, and so
- * is every line once `pageMax` characters × kinds are spent: both counted in
- * `skippedLines` (and their characters in `skippedChars`).
+ * earlier match (then the longer). Lines over `lineMax` are skipped. When the
+ * page's other lines cost more than `pageMax` characters × kinds, lines are
+ * taken from both ends inward, the end that has spent less next, until the
+ * next would pass it; the lines between are skipped and named in `middle`.
+ * Both kinds of skip count in `skippedLines` (their characters in `skippedChars`).
  */
 export function scanKeyKinds(
   text: string,
   kinds: readonly Pick<KeyKind, "name" | "pattern">[],
   lineMax = KEY_SCAN_LINE_MAX,
   pageMax = KEY_SCAN_PAGE_MAX,
-): { matches: { key: string; kind: string; start: number; end: number }[]; skippedLines: number; skippedChars: number } {
+): { matches: { key: string; kind: string; start: number; end: number }[]; skippedLines: number; skippedChars: number; middle?: SkippedMiddle } {
   if (kinds.length === 0) return { matches: [], skippedLines: 0, skippedChars: 0 };
   const sticky = kinds.map((k) => ({ name: k.name, re: new RegExp(k.pattern, "uy") }));
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let lineStart = 0; lineStart <= text.length; ) {
+    let lineEnd = text.indexOf("\n", lineStart);
+    if (lineEnd < 0) lineEnd = text.length;
+    starts.push(lineStart);
+    ends.push(lineEnd);
+    lineStart = lineEnd + 1;
+  }
+  const n = starts.length;
+  const cost = (i: number): number => (ends[i]! - starts[i]! > lineMax ? 0 : (ends[i]! - starts[i]!) * sticky.length);
+  let total = 0;
+  for (let i = 0; i < n; i++) total += cost(i);
+  // Lines [front, back) are the skipped middle; none when the page fits.
+  let front = n;
+  let back = n;
+  if (total > pageMax) {
+    let f = 0;
+    let b = n - 1;
+    let spentFront = 0;
+    let spentBack = 0;
+    while (f <= b) {
+      const fromFront = spentFront <= spentBack;
+      const c = cost(fromFront ? f : b);
+      if (spentFront + spentBack + c > pageMax) break;
+      if (fromFront) (spentFront += c), f++;
+      else (spentBack += c), b--;
+    }
+    front = f;
+    back = b + 1;
+  }
   const out: { key: string; kind: string; start: number; end: number }[] = [];
   let skippedLines = 0;
   let skippedChars = 0;
-  let spent = 0;
-  let lineStart = 0;
-  while (lineStart <= text.length) {
-    let lineEnd = text.indexOf("\n", lineStart);
-    if (lineEnd < 0) lineEnd = text.length;
-    const cost = (lineEnd - lineStart) * sticky.length;
-    if (lineEnd - lineStart > lineMax || spent + cost > pageMax) {
+  for (let line = 0; line < n; line++) {
+    const lineStart = starts[line]!;
+    const lineEnd = ends[line]!;
+    if ((line >= front && line < back) || lineEnd - lineStart > lineMax) {
       skippedLines++;
       skippedChars += lineEnd - lineStart;
-      // Once over the page budget, every later line is skipped too.
-      if (lineEnd - lineStart <= lineMax) spent = pageMax + 1;
-    } else {
-      spent += cost;
-      for (let i = lineStart; i < lineEnd; i++) {
-        if (i > lineStart && keyCharBefore(text, i)) continue;
-        let best: { key: string; kind: string; start: number; end: number } | null = null;
-        for (const k of sticky) {
-          k.re.lastIndex = i;
-          const m = k.re.exec(text);
-          if (!m) continue;
-          const end = i + m[0].length;
-          if (end > lineEnd || m[0].length < 3 || m[0].length > 80) continue;
-          if (end < lineEnd && KEY_CHAR.test(charAt(text, end))) continue;
-          if (!best || end > best.end) best = { key: m[0], kind: k.name, start: i, end };
-        }
-        if (best) {
-          out.push(best);
-          i = best.end - 1;
-        }
+      continue;
+    }
+    for (let i = lineStart; i < lineEnd; i++) {
+      if (i > lineStart && keyCharBefore(text, i)) continue;
+      let best: { key: string; kind: string; start: number; end: number } | null = null;
+      for (const k of sticky) {
+        k.re.lastIndex = i;
+        const m = k.re.exec(text);
+        if (!m) continue;
+        const end = i + m[0].length;
+        if (end > lineEnd || m[0].length < 3 || m[0].length > 80) continue;
+        if (end < lineEnd && keyCharAfter(text, end)) continue;
+        if (!best || end > best.end) best = { key: m[0], kind: k.name, start: i, end };
+      }
+      if (best) {
+        out.push(best);
+        i = best.end - 1;
       }
     }
-    lineStart = lineEnd + 1;
   }
-  return { matches: out, skippedLines, skippedChars };
+  return { matches: out, skippedLines, skippedChars, ...(front < back ? { middle: { fromLine: front + 1, toLine: back } } : {}) };
 }

@@ -290,3 +290,74 @@ describe("GET /api/wiki/page — marks and the mentions flag only where the ment
     }
   });
 });
+
+// Fix round 2 batch 3 (finding 5): a page past the `keys` scan's budget has an
+// unmarked middle, and the render says so once, with the counts; before, the
+// skipped lines (then the page's end) went unmarked with no signal.
+describe("GET /api/wiki/page — a page past the key scan's budget is logged once per render", () => {
+  let root = "";
+  let app: Hono;
+  let prevExtra: string | undefined;
+  const records: LogRecord[] = [];
+  // ~1.2 M characters of one-kind lines: past KEY_SCAN_PAGE_MAX (1,000,000).
+  const BIG = ["# Big", "", ...Array.from({ length: 6_000 }, (_, i) => `- MEL-${i + 1} ${"y".repeat(190)}`)].join("\n");
+
+  beforeAll(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-marks-budget-"));
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await writeFile(path.join(root, "notes/big.md"), BIG, "utf8");
+    await writeFile(path.join(root, "notes/small.md"), "# Small\n\nMEL-1 and MEL-2.\n", "utf8");
+    await writeFile(path.join(root, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }), "utf8");
+    gitInit(root);
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `budget=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+    await configure({
+      reset: true,
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [
+        { category: ["muninn"], sinks: ["capture"], lowestLevel: "info" },
+        { category: ["logtape", "meta"], sinks: [], lowestLevel: "error" },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    await reset();
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const open = async (rel: string) => {
+    records.length = 0;
+    const res = await app.request(`/api/wiki/page?wiki=budget&relPath=${encodeURIComponent(rel)}`);
+    expect(res.status).toBe(200);
+    const html = ((await res.json()) as { html: string }).html;
+    return { marks: [...html.matchAll(/data-wiki-key="([^"]+)"/g)].map((m) => m[1]), logged: records.filter((r) => String(r.rawMessage).startsWith("key marks:")) };
+  };
+
+  test("its first and last lines are marked, its middle is not, and one warning names the skipped lines", async () => {
+    const { marks, logged } = await open("notes/big.md");
+    expect([marks.includes("MEL-1"), marks.includes("MEL-6000"), marks.includes("MEL-3000")]).toEqual([true, true, false]);
+    expect(logged.length).toBe(1);
+    const p = logged[0]!.properties as { wiki: string; relPath: string; skippedLines: number; skippedChars: number; fromLine: number; toLine: number };
+    expect(logged[0]!.level).toBe("warning");
+    expect([p.wiki, p.relPath]).toEqual(["budget", "notes/big.md"]);
+    expect(p.skippedLines).toBe(p.toLine - p.fromLine + 1);
+    expect(p.skippedLines).toBeGreaterThan(0);
+    expect(p.skippedChars).toBeGreaterThan(0);
+  });
+
+  test("a page that fits logs nothing", async () => {
+    const { marks, logged } = await open("notes/small.md");
+    expect(marks).toEqual(["MEL-1", "MEL-2"]);
+    expect(logged).toEqual([]);
+  });
+});

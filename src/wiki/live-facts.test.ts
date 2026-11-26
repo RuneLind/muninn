@@ -283,7 +283,8 @@ describe("mention forms the reader renders (fix round 1, k5)", () => {
     const { html } = render(page("Both _api #103_ and _DEMO-12_ merged."));
     expect(html).toContain(`<em>api #103${chipFor("acme/acme-api#103")}</em>`);
     expect(html).toContain(`<em>DEMO-12${chipFor("DEMO-12")}</em>`);
-    // Not italics in the reader (a word character outside), so no mention.
+    // Not italics in the reader (a word character outside): DEMO-12 is a whole
+    // key there, but a chip before that literal `_` could make it italics, so none.
     expect(chipIds(render(page("x_DEMO-12_ y")).html)).toEqual([]);
   });
 });
@@ -349,6 +350,7 @@ describe("pinned edges (fix round 2: each kills a named mutant)", () => {
     expect(html).toContain('[api #101<span class="fact-chip" data-live-fact="acme/acme-api#101" data-reader-only></span>]<a href="https://e.com" target="_blank" rel="noopener">b</a>');
   });
 
+  // `_DEMO-12_y`: a whole key since fix round 2 batch 3, but chipless before the literal `_`.
   test("an `_` followed by a word character closes no italics: `_api #103_x` and `_DEMO-12_y` get no chip", () => {
     expect(chipIds(render(page("_api #103_x and _DEMO-12_y")).html)).toEqual([]);
   });

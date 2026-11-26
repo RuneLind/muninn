@@ -46,7 +46,7 @@ import { noProdSet, qualifyRepo, type PrGrammar } from "./pr-grammar.ts";
 import { parseFrontmatter, stripFrontmatter } from "./store.ts";
 import { declaredKeys, stampedIssueKeys, stemKeys, titleKeys, valueStrings } from "./trackers/jira.ts";
 import type { TrackerConfig } from "./trackers/types.ts";
-import { scanKeyKinds, type KeyKind } from "./key-kinds.ts";
+import { keyCharAfter, keyCharBefore, scanKeyKinds, type KeyKind, type SkippedMiddle } from "./key-kinds.ts";
 
 const log = getLog("wiki", "live-facts");
 
@@ -208,13 +208,39 @@ function matchesNotAfter(body: string, re: RegExp, notAfter: RegExp | undefined)
   return out;
 }
 
-/** Every key mention in `body` with its offset, code included. */
-export function bodyKeyMentions(body: string, projects: readonly string[]): { key: string; start: number; end: number }[] {
+/**
+ * Every key mention in `body` with its offset, code included. With projects,
+ * `whole` (the default) is the mentions route's whole-key rule, so a marked
+ * key or chip opens a peek that counts it: no Unicode letter or digit, read as
+ * a whole code point, right before or after (`keyCharBefore`/`keyCharAfter`;
+ * `MEL-12_x` and `MEL-12-3` mention MEL-12, `åMEL-12` and `𝐀MEL-12` do not).
+ * `sweep` is plan-status-sweep's ASCII rule (`[A-Za-z0-9_]` either side, or
+ * `-digit` after), which the page key set keeps ({@link pageKeySet}). Without
+ * projects both are the sweep's generic pattern.
+ */
+export function bodyKeyMentions(body: string, projects: readonly string[], rule: "whole" | "sweep" = "whole"): { key: string; start: number; end: number }[] {
   const generic = projects.length === 0;
+  if (!generic && rule === "whole") return wholeKeyMentions(body, projects);
   const { re, notAfter } = bodyKeyRe(projects);
   return matchesNotAfter(body, re, notAfter)
     .filter((m) => !generic || !(m[0].startsWith("MEL-") || m[0].startsWith("Q-")))
     .map((m) => ({ key: m[0], start: m.index, end: m.index + m[0].length }));
+}
+
+/** {@link bodyKeyMentions}'s `whole` rule. A greedy digit run that a key
+ *  character follows is refused outright: every shorter match ends before a digit. */
+function wholeKeyMentions(body: string, projects: readonly string[]): { key: string; start: number; end: number }[] {
+  const re = new RegExp(`(?:${projects.map(escapeRegExp).join("|")})-[1-9][0-9]{0,7}`, "g");
+  const out: { key: string; start: number; end: number }[] = [];
+  for (let m: RegExpExecArray | null; (m = re.exec(body)); ) {
+    const end = m.index + m[0].length;
+    if (keyCharBefore(body, m.index) || keyCharAfter(body, end)) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    out.push({ key: m[0], start: m.index, end });
+  }
+  return out;
 }
 
 /** The sweep's generic entry rule: an entry that is exactly key-shaped, else
@@ -239,15 +265,9 @@ export function pageKeySet(markdown: string, relPath: string, trackers: readonly
   return pageKeySetOf(markdown, parseFrontmatter(markdown), relPath, trackers);
 }
 
-/** {@link pageKeySet} over an already-parsed frontmatter; `bodyKeys` gives
- *  the mentions of `stripFrontmatter(markdown)` when the caller has them. */
-function pageKeySetOf(
-  markdown: string,
-  fm: Record<string, string | string[]>,
-  relPath: string,
-  trackers: readonly TrackerConfig[],
-  bodyKeys?: (stripped: string) => { key: string }[] | undefined,
-): Set<string> {
+/** {@link pageKeySet} over an already-parsed frontmatter. Its body keys are
+ *  the sweep's rule, not the marks' (`bodyKeyMentions`' `sweep`). */
+function pageKeySetOf(markdown: string, fm: Record<string, string | string[]>, relPath: string, trackers: readonly TrackerConfig[]): Set<string> {
   const out = new Set<string>(readOwns(markdown).keys);
   const title = typeof fm.title === "string" ? fm.title.trim() : "";
   const stem = pageStemOf(relPath);
@@ -265,7 +285,7 @@ function pageKeySetOf(
     for (const m of stem.toUpperCase().matchAll(/MELOSYS-\d+/g)) out.add(m[0]);
   }
   const stripped = stripFrontmatter(markdown);
-  for (const m of bodyKeys?.(stripped) ?? bodyKeyMentions(stripped, projects)) out.add(m.key);
+  for (const m of bodyKeyMentions(stripped, projects, "sweep")) out.add(m.key);
   return out;
 }
 
@@ -466,6 +486,10 @@ export interface Mention {
   kind: "pr" | "key";
   start: number;
   end: number;
+  /** A key a literal `_` follows (not italics, which the view reads as `*`):
+   *  a chip right after it would let the reader read that `_` as italics,
+   *  so it gets none there (fix round 2 batch 3); it is still marked. */
+  noChip?: true;
 }
 
 /** One chip site: the offset in the body and the ids, in text order. */
@@ -590,7 +614,8 @@ export function markedMentions(
  *  (so {@link chipInsertions} need not scan again). With `kinds` (Discuss v2
  *  PR 6, the key marks) the `keys` kinds' whole-word matches are key mentions
  *  too, in the same never-marked regions; a span a tracker key already holds
- *  is not added twice. `skippedLines`/`skippedChars` count what that scan skipped. */
+ *  is not added twice. `skippedLines`/`skippedChars` count what that scan
+ *  skipped, `middle` the lines it skipped past the page budget. */
 export function markedMentionsWithCode(
   body: string,
   markdown: string,
@@ -599,14 +624,15 @@ export function markedMentionsWithCode(
   trackers: readonly TrackerConfig[],
   titleOf: (id: string) => string | undefined,
   kinds: readonly Pick<KeyKind, "name" | "pattern">[] = [],
-): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number; skippedChars?: number } {
+): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number; skippedChars?: number; middle?: SkippedMiddle } {
   const fm = parseFrontmatter(markdown);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
   const code = readerCodeRegions(body);
   const inCode = codeIntervals(code);
   // The patterns run on the italics view; the page key set (the sweep's) on `body`.
+  // Tracker keys by the whole-key rule: a chip and a mark are both peek targets.
   const view = emphasisView(body, code);
-  const bodyKeys = projects.length ? bodyKeyMentions(view, projects) : [];
+  const bodyKeys = projects.length ? bodyKeyMentions(view, projects, "whole") : [];
   const scanned = kinds.length ? scanKeyKinds(view, kinds) : null;
   // The key set is read only by a bare `#n`, and its answer per id is fixed.
   let keySet: string[] | undefined;
@@ -615,7 +641,7 @@ export function markedMentionsWithCode(
     let v = belongs.get(id);
     if (v === undefined) {
       const title = titleOf(id);
-      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers, (stripped) => (projects.length && stripped === body && view === body ? bodyKeys : undefined))];
+      keySet ??= [...pageKeySetOf(markdown, fm, relPath, trackers)];
       const ks = keySet;
       v = title !== undefined && ks.some((k) => titleCarriesKey(title, k));
       belongs.set(id, v);
@@ -627,12 +653,13 @@ export function markedMentionsWithCode(
     if (r.form === "bare" && !bareBelongs(r.id)) continue;
     all.push({ id: r.id, kind: "pr", start: r.start, end: r.end });
   }
-  for (const m of bodyKeys) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
+  const key = (m: { key: string; start: number; end: number }): Mention => ({ id: m.key, kind: "key", start: m.start, end: m.end, ...(view[m.end] === "_" ? { noChip: true as const } : {}) });
+  for (const m of bodyKeys) all.push(key(m));
   if (scanned) {
     const held = new Intervals(bodyKeys.map((m) => [m.start, m.end] as const));
-    for (const m of scanned.matches) if (!held.overlaps(m.start, m.end)) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
+    for (const m of scanned.matches) if (!held.overlaps(m.start, m.end)) all.push(key(m));
   }
-  const skipped = scanned ? { skippedLines: scanned.skippedLines, skippedChars: scanned.skippedChars } : {};
+  const skipped = scanned ? { skippedLines: scanned.skippedLines, skippedChars: scanned.skippedChars, ...(scanned.middle ? { middle: scanned.middle } : {}) } : {};
   if (all.length === 0) return { mentions: [], ...skipped };
 
   const blockedSpans: [number, number][] = [];
@@ -713,6 +740,7 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
   for (const m of mentions) {
     if (!has(m)) continue;
     const span = holdingSpan(links, m.start, m.end) ?? holdingSpan(refs, m.start, m.end) ?? holdingSpan(urls, m.start, m.end);
+    if (!span && m.noChip) continue;
     const at = span ? span[1] : m.end;
     let site = sites.get(at);
     if (!site) sites.set(at, (site = { at, ids: [] }));
@@ -829,8 +857,8 @@ export interface KeyMarksInput {
   trackers: readonly TrackerConfig[];
   kinds: readonly Pick<KeyKind, "name" | "pattern">[];
   relPath: string;
-  /** Receives how many lines the `keys` scan skipped (the sweep's count). */
-  collect?: (r: { marks: number; skippedLines: number; skippedChars: number }) => void;
+  /** Receives how many lines the `keys` scan skipped, and the middle it skipped past the page budget ({@link scanKeyKinds}). */
+  collect?: (r: { marks: number; skippedLines: number; skippedChars: number; middle?: SkippedMiddle }) => void;
 }
 
 export interface KeyMark {
@@ -865,11 +893,12 @@ const MARKABLE_KEY_RE = /^\p{L}[\p{L}\p{N}]*(?:[-.][\p{L}\p{N}]+)+$/u;
  * Jira status yet), and its chip paint takes the mark's underline and peek
  * only while the chip shows (fix round 1 J1).
  */
-export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number; skippedChars: number } {
+export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number; skippedChars: number; middle?: SkippedMiddle } {
   if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0, skippedChars: 0 };
-  const { mentions, code, skippedLines = 0, skippedChars = 0 } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
+  const { mentions, code, skippedLines = 0, skippedChars = 0, middle } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
+  const skipped = { skippedLines, skippedChars, ...(middle ? { middle } : {}) };
   const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80 && MARKABLE_KEY_RE.test(m.id));
-  if (keys.length === 0) return { marks: [], skippedLines, skippedChars };
+  if (keys.length === 0) return { marks: [], ...skipped };
   const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
   const marks: KeyMark[] = [];
   for (const m of keys) {
@@ -877,7 +906,7 @@ export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMark
     if (chips.some((c) => c.at > m.start && c.at < m.end)) continue;
     marks.push({ key: m.id, start: m.start, end: m.end });
   }
-  return { marks, skippedLines, skippedChars };
+  return { marks, ...skipped };
 }
 
 /** A key mark's span: the key's own text, underlined by the reader's CSS. */

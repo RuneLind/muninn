@@ -199,7 +199,7 @@ export function renderWikiHtml(
     chipPassCollected();
   }
   const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
-  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars });
+  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines, skippedChars: keyMarks.skippedChars, ...(keyMarks.middle ? { middle: keyMarks.middle } : {}) });
   const markKeys: string[] = [];
   if (chips.length || keyMarks?.marks.length) {
     const park = (html: string) => {

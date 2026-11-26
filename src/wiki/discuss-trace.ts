@@ -11,23 +11,24 @@
 import { discussionSoFar, readSection, type AgentReach, type EarlierTurn } from "./discuss-agent.ts";
 import { PACK_SECTION_MAX } from "./discuss-pack.ts";
 import { clampLine } from "./discuss-prompt.ts";
-import { MENTIONS_MAX_COMMITS, MENTIONS_MAX_LOG, type MentionsBody } from "./mentions.ts";
+import { MENTIONS_MAX_COMMITS, type MentionsBody } from "./mentions.ts";
 
 export const TRACE_LINE_MAX = 300;
 
-/** Lines into a section until the next would pass the bound, then a note of how many `noun` were left out. */
-function bounded(lines: string[], noun: string, atLeast = false): string[] {
-  const out: string[] = [];
+/** The leading lines that fit a section: until the next would pass the bound. */
+function fitting(lines: string[]): string[] {
   let size = 0;
   for (let i = 0; i < lines.length; i++) {
     size += lines[i]!.length + 1;
-    if (size > PACK_SECTION_MAX) {
-      out.push(`- … ${atLeast ? "at least " : ""}${lines.length - i} more ${noun} cut`);
-      break;
-    }
-    out.push(lines[i]!);
+    if (size > PACK_SECTION_MAX) return lines.slice(0, i);
   }
-  return out;
+  return lines;
+}
+
+/** Lines into a section until the next would pass the bound, then a note of how many `noun` were left out. */
+function bounded(lines: string[], noun: string, atLeast = false): string[] {
+  const out = fitting(lines);
+  return out.length < lines.length ? [...out, `- … ${atLeast ? "at least " : ""}${lines.length - out.length} more ${noun} cut`] : out;
 }
 
 /** The root log.md: its lines have a section of their own ({@link MentionsBody.log}). */
@@ -67,12 +68,13 @@ const prState = (p: MentionsBody["prs"][number]): string => {
 };
 
 /**
- * The context pack of a trace turn, from the mentions payload. Each log.md
- * line is listed once, under «Its log.md lines». The note under «Where it is
- * mentioned» counts the mention lines the pack leaves out: the payload's total
- * (log.md included) less the lines both sections show, «at least» when the
- * totals are lower bounds. The log section's lines are root log.md hits of the
- * same search, so they are in that total.
+ * The context pack of a trace turn, from the mentions payload. Each mention
+ * line is reported once: listed under «Where it is mentioned» or «Its log.md
+ * lines», or counted in one cut note. The log section's note counts the root
+ * log.md lines its search saw (`logTotalLines`) less those it lists; the
+ * where note, the payload's total (log.md included) less every log.md line
+ * and the lines it lists. «At least» when the totals are lower bounds. Fix
+ * round 2 batch 3: the where note counted the log section's cut lines again.
  */
 export function traceContextPack(wiki: string, b: MentionsBody): string[] {
   const at = b.totalsAtLeast ? "at least " : "";
@@ -85,13 +87,10 @@ export function traceContextPack(wiki: string, b: MentionsBody): string[] {
     "## Where it is mentioned",
   ];
   const where = mentionLines(b.files);
-  const logLines = bounded(
-    b.log.map((l) => `- log.md:${l.n} [${l.date ?? "no date"}${l.kind ? ` ${l.kind}` : ""}] ${clampLine(l.line, TRACE_LINE_MAX)}`),
-    "log.md lines",
-    b.log.length >= MENTIONS_MAX_LOG,
-  );
-  const logShown = Math.min(b.log.length, logLines.filter((l) => !l.startsWith("- … ")).length);
-  const omitted = Math.max(0, b.totalLines - where.shown - logShown);
+  const logLines = fitting(b.log.map((l) => `- log.md:${l.n} [${l.date ?? "no date"}${l.kind ? ` ${l.kind}` : ""}] ${clampLine(l.line, TRACE_LINE_MAX)}`));
+  const logTotal = Math.max(b.logTotalLines, b.log.length);
+  const logCut = logTotal - logLines.length;
+  const omitted = Math.max(0, b.totalLines - logTotal - where.shown);
   if (where.lines.length === 0) out.push(b.files.length === 0 ? "(no tracked file names it)" : `(no tracked file but ${ROOT_LOG} names it)`);
   else out.push(...where.lines);
   if (omitted > 0) out.push(`- … ${at}${omitted} more mention line${omitted === 1 ? "" : "s"} not listed in this pack`);
@@ -99,8 +98,9 @@ export function traceContextPack(wiki: string, b: MentionsBody): string[] {
   if (b.commits.length === 0) out.push("(none)");
   else out.push(...bounded(b.commits.map((c) => `- ${c.date.slice(0, 10)} ${c.sha.slice(0, 10)} ${clampLine(c.subject, 200)}${c.files.length ? ` (${c.files.slice(0, 6).join(", ")}${c.files.length > 6 ? ", …" : ""})` : ""}`), "commits", b.commits.length >= MENTIONS_MAX_COMMITS));
   out.push("", "## Its log.md lines");
-  if (b.log.length === 0) out.push("(none)");
+  if (logTotal === 0) out.push("(none)");
   else out.push(...logLines);
+  if (logCut > 0) out.push(`- … ${at}${logCut} more log.md line${logCut === 1 ? "" : "s"} cut`);
   out.push("", "## PRs those lines name");
   if (b.prs.length === 0) out.push("(none)");
   else out.push(...bounded(b.prs.map((p) => `- ${p.repo}#${p.number}: ${prState(p)} (${p.url})`), "PRs"));

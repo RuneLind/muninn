@@ -176,11 +176,29 @@ describe("scanKeyKinds: the mentions route's whole-key rule and the page budget 
       }
   });
 
-  test("the page budget: lines past it are skipped and counted, characters too", () => {
-    const text = ["MEL-1 aaaa", "MEL-2 bbbb", "MEL-3 cccc", "", "MEL-4"].join("\n");
-    const r = scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 20);
-    expect(r.matches.map((m) => m.key)).toEqual(["MEL-1", "MEL-2"]);
-    expect({ skippedLines: r.skippedLines, skippedChars: r.skippedChars }).toEqual({ skippedLines: 3, skippedChars: 15 });
+  // Fix round 2 batch 3 (finding 5): past the budget the scan dropped every
+  // later line, so a growing log.md lost its newest entries at the bottom.
+  test("the page budget: past it, lines come from both ends inward and the middle is skipped, counted and named", () => {
+    const text = ["MEL-1 aaaa", "MEL-2 bbbb", "MEL-3 cccc", "MEL-4 dddd", "MEL-5"].join("\n");
+    const r = scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 25);
+    expect(r.matches.map((m) => m.key)).toEqual(["MEL-1", "MEL-4", "MEL-5"]);
+    expect({ skippedLines: r.skippedLines, skippedChars: r.skippedChars, middle: r.middle }).toEqual({ skippedLines: 2, skippedChars: 20, middle: { fromLine: 2, toLine: 3 } });
+    expect(scanKeyKinds(text, kinds, KEY_SCAN_LINE_MAX, 45).middle).toBeUndefined();
+  });
+
+  test("a 3 MB log.md past the default budget keeps the entries at both ends, where both wikis add new ones, and skips the oldest in between", () => {
+    // Newest entries prepended at the top and appended at the bottom, old ones in the middle.
+    const entry = (n: number, day: string) => `## [${day}] note | MEL-${n} entry\n\n- The case MEL-${n} moved on. ${"x".repeat(160)}\n`;
+    const old = Array.from({ length: 15_000 }, (_, i) => entry(100_000 + i, "2026-05-01")).join("\n");
+    const text = `# Log\n\n${entry(1, "2026-11-26")}\n${old}\n${entry(2, "2026-11-25")}`;
+    expect(text.length).toBeGreaterThan(3_000_000);
+    const r = scanKeyKinds(text, kinds);
+    const keys = new Set(r.matches.map((m) => m.key));
+    expect([keys.has("MEL-1"), keys.has("MEL-2"), keys.has("MEL-107500")]).toEqual([true, true, false]);
+    const lines = text.split("\n").length;
+    expect(r.middle!.fromLine).toBeGreaterThan(1);
+    expect(r.middle!.toLine).toBeLessThan(lines);
+    expect(r.skippedLines).toBe(r.middle!.toLine - r.middle!.fromLine + 1);
   });
 
   test("the default budget bounds a page whatever its kinds: 250 worst-case lines under 8 kinds scan 31 lines", () => {
@@ -193,6 +211,8 @@ describe("scanKeyKinds: the mentions route's whole-key rule and the page budget 
     // 31 lines × 3,999 characters × 8 kinds = 991,752 fits 1,000,000; a 32nd would not.
     expect(r.skippedLines).toBe(219);
     expect(r.skippedChars).toBe(219 * line.length);
+    // 16 from the top and 15 from the bottom: the end that has spent less goes next.
+    expect(r.middle).toEqual({ fromLine: 17, toLine: 235 });
     expect(ms).toBeLessThan(3000);
   });
 });

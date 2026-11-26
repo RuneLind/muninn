@@ -17,6 +17,7 @@ const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
   ],
   totalLines: 40,
   totalFiles: 9,
+  logTotalLines: 1,
   totalsAtLeast: true,
   truncated: true,
   ...over,
