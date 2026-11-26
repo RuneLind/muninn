@@ -477,8 +477,11 @@ export function formatWebHtml(
     rendered = fillCaseDots(rendered, currentCaseDotsPending);
     // Fold and RunChecklist-step anchors first, yielding to every other id;
     // then cases: a Query card that collides with a case anchor yields; a
-    // DecisionLog item yields to both.
-    const anchored = unlinkQueryIds(uniqueLogAnchors(uniqueAnchors(uniqueCaseAnchors(uniqueBlockAnchors(collapseBlockSpacing(rendered).trim())))));
+    // DecisionLog item yields to both. The block pass runs again after the
+    // cases, the one pass that reads only its own rows' ids.
+    const anchored = unlinkQueryIds(
+      uniqueLogAnchors(uniqueAnchors(uniqueBlockAnchors(uniqueCaseAnchors(uniqueBlockAnchors(collapseBlockSpacing(rendered).trim()))))),
+    );
     const questionLinked = currentQuestionPage?.options ? retargetQuestionLinks(anchored) : anchored;
     const linked = slot >= 0 || charted ? retargetViewLinks(questionLinked) : questionLinked;
     // Last, after both anchor passes, whose regexes read `<li …><a class="dl-id">`
@@ -869,7 +872,9 @@ const BLOCK_ANCHOR_RE = /<(details class="fold[^"]*"(?: open)?|li class="check-[
  *  finished HTML. Runs FIRST and yields to every other id on the page as
  *  written (a case row, a Query or Question card, a DecisionLog item), and a
  *  repeat among these anchors yields to the first: it gets the first free
- *  `-2`, `-3`. The later passes then see no collision with their own slugs. */
+ *  `-2`, `-3`. Runs again after `uniqueCaseAnchors`, which reads only case-row
+ *  ids and can hand a repeated case a suffix a fold holds; the Query and
+ *  DecisionLog passes avoid every other id themselves. */
 function uniqueBlockAnchors(html: string): string {
   if (!html.match(BLOCK_ANCHOR_RE)) return html;
   const used = new Set([...html.replace(BLOCK_ANCHOR_RE, "<$1>").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]!));

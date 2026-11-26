@@ -114,7 +114,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
     attrs: { src: { printRequired: true }, height: { printType: "pixels (1–5 digits)" } },
   },
   Fold: {
-    doc: "Collapsible section; `open=\"true\"` starts it expanded.",
+    doc: "Collapsible section; `open=\"true\"` starts it expanded; `id` is its anchor (`#id`).",
     teach: WIKI,
     // web-format.ts: only `open === "true"` expands; `for` gets a class for FOLD_FOR_CLASSES only.
     attrs: { open: { printType: '"true"' }, for: { printType: '"dev"|"agent"' } },
@@ -151,7 +151,7 @@ export const COMPONENT_DOCS: { readonly [K in ComponentName]: ComponentDoc<Compo
   Tldr: { doc: "The page's lead box over a short list.", teach: WIKI },
   Timeline: { doc: "A dated list of events.", teach: WIKI },
   DecisionLog: { doc: "A list of decisions, each with an id and status.", teach: WIKI },
-  RunChecklist: { doc: "Steps to run, with their checked state.", teach: WIKI },
+  RunChecklist: { doc: "Steps to run, with their checked state; a step led by `**R11 …**` is anchored `#<id>-r11` (`#r11` without `id`).", teach: WIKI },
   Question: { doc: "An open question as an answer card.", teach: WIKI },
   More: { doc: "The closed rest of a `Tldr`.", teach: WIKI },
   StatusRows: {

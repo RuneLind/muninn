@@ -117,7 +117,7 @@ test("closed vocabularies the spec leaves unchecked print their accepted values"
   expect(componentLine("DeltaTable", "wiki")).toStartWith(
     'DeltaTable(src?: string, better?: "lower"|"higher"|"<row>=lower|higher;…", decimal?: "comma"|"dot") — ',
   );
-  expect(componentLine("Fold", "wiki")).toStartWith('Fold(title?: string, open?: "true", summary?: string, for?: "dev"|"agent") — ');
+  expect(componentLine("Fold", "wiki")).toStartWith('Fold(title?: string, open?: "true", summary?: string, for?: "dev"|"agent", id?: string) — ');
 });
 
 test("chat prints no inline group: its prompt teaches all six as block-only", () => {

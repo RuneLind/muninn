@@ -205,6 +205,21 @@ describe("CaseBoard on the web", () => {
     for (const id of ["case-q-1", "case-q-1-2", "q-1"]) expect(html).toContain(`href="#${id}"`);
   });
 
+  test("a fold holding a later board's suffix never shares an id with that row", () => {
+    // The second board's repeat of `A` takes `case-a-2` only after the fold pass ran.
+    const html = formatWebHtml('<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />\n\n<Fold id="case-a-2" title="F">\n\nbody\n\n</Fold>', {
+      files: files({
+        "a.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+        "b.yaml": { ok: true, text: "- {id: A, status: ok}\n" },
+      }),
+    });
+    const ids = [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The case rows keep what their own pass gave them; the fold yields.
+    expect(html).toContain('<div class="cb-row" id="case-a-2"><a class="cb-id" href="#case-a-2">');
+    expect(html).toContain('<details class="fold" id="case-a-2-2">');
+  });
+
   test("a second board repeating an earlier board's id gets the next free suffix", () => {
     const html = formatWebHtml('<CaseBoard src="a.yaml" />\n\n<CaseBoard src="b.yaml" />', {
       files: files({
