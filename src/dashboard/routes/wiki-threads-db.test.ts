@@ -740,11 +740,20 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     expect(prompt).toContain(TRACE_SUMMARY_QUESTION);
     expect(prompt).toContain("Key: MEL-77");
     expect(prompt).toContain(`Wiki: harbour (${wiki})`);
-    expect(prompt).toContain(`git -C '${wiki}' grep -n -w -F -e 'MEL-77'`);
+    // No kind in this wiki: the mentions search MEL-77 as a substring, and so do the commands.
+    expect(prompt).toContain(`git -C '${wiki}' grep -n -I -F -e 'MEL-77' -- .`);
+    expect(prompt).toContain(`git -C '${wiki}' log --oneline '-SMEL-77' -- .`);
     expect(prompt).toContain("/api/wiki/mentions?wiki=harbour&key=MEL-77");
     expect(prompt).not.toContain("Page:");
     expect(prompt).not.toContain("about the whole page");
     expect(prompt).not.toContain("If the page turns out to be wrong");
+    // Once a `keys` kind claims it, the mentions search it whole, and the commands say they are candidates.
+    await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
+    __resetWikiCacheForTest();
+    const whole = ((await (await app.request("/api/wiki/discuss/continue", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ turnId: newest.id }) })).json()) as { prompt: string }).prompt;
+    expect(whole).toContain(`LC_ALL=C git -C '${wiki}' grep -n -I -E -e '(^|[^[:alnum:]])MEL-77([^[:alnum:]]|$)' -- .`);
+    expect(whole).toContain("Both can list more than that answer");
+    expect(whole).not.toContain("-F -e");
 
     // The thread read by key: the live trace thread and its messages.
     const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-77")).json()) as { thread: { id: string }; messages: { role: string }[] };
@@ -752,6 +761,7 @@ test("a trace turn, then a /chat follow-up: one trace thread, its pack rebuilt f
     expect(read.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user", "assistant"]);
   } finally {
     git("reset", "-q", "--hard", "HEAD~2");
+    await rm(path.join(wiki, ".wiki-reader.json"), { force: true });
     __resetWikiCacheForTest();
   }
 });

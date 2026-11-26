@@ -424,7 +424,7 @@ function parseHistory(res: GitResult): HistoryCommit[] {
 }
 
 /** `term` for git's POSIX ERE, every metacharacter escaped. */
-const ereEscape = (s: string) => s.replace(/[.[\]()*+?{}|^$\\]/g, "\\$&");
+export const ereEscape = (s: string): string => s.replace(/[.[\]()*+?{}|^$\\]/g, "\\$&");
 
 /**
  * The commits that change how often `key` occurs as a whole key, newest first.

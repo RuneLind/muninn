@@ -9,6 +9,7 @@
 
 import { HANDOFF_QUESTION_MAX } from "./discuss-bounds.ts";
 import { buildContextPack, type ContextPack, type PackInput } from "./discuss-pack.ts";
+import { ereEscape } from "./tracked-files.ts";
 
 export { HANDOFF_QUESTION_MAX };
 /** The whole prompt's bound, as the chat seeds' (`ASK_CHAT_SEED_MAX`). */
@@ -156,9 +157,34 @@ export interface ContinueTrace {
   key: string;
   /** The mentions route for this key on this dashboard. */
   mentionsUrl: string;
+  /** The mentions search the key as a whole key (it has a kind in this wiki, `mentionsKind`), else as a substring. */
+  wholeKey: boolean;
 }
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The «where it is mentioned» line of a trace's Continue prompt. A substring
+ * key gets the payload's own searches (`-F`, `-S`), so they list what the
+ * mentions do. A whole key has no git equivalent (git's pickaxe takes no PCRE,
+ * and `-S --pickaxe-regex` undercounts two copies one character apart, so it
+ * can miss a commit): the commands are the payload's candidate step, a `-G`
+ * with its ERE under the C locale, and the line says they can list more.
+ * Every command is scoped to the wiki (`-- .` from its root), and the grep
+ * skips binary files (`-I`) as the payload does.
+ */
+function traceWhereLine(trace: ContinueTrace): string {
+  const git = `git -C ${shellQuote(trace.root)}`;
+  if (!trace.wholeKey) {
+    return `Where it is mentioned: \`${git} grep -n -I -F -e ${shellQuote(trace.key)} -- .\` lists the tracked files and lines that hold it, \`${git} log --oneline ${shellQuote(`-S${trace.key}`)} -- .\` the commits that changed how often it occurs, and ${trace.mentionsUrl} returns both with its log.md lines and the state of the PRs they name.`;
+  }
+  const ere = `(^|[^[:alnum:]])${ereEscape(trace.key)}([^[:alnum:]]|$)`;
+  return (
+    `Where it is mentioned: ${trace.mentionsUrl} returns the exact answer: the tracked files and lines that hold the key whole (no Unicode letter or digit right before or after it), the commits that changed how often it occurs, its log.md lines and the state of the PRs they name. ` +
+    `To look yourself, \`LC_ALL=C ${git} grep -n -I -E -e ${shellQuote(ere)} -- .\` lists candidate lines and \`LC_ALL=C ${git} log --oneline ${shellQuote(`-G${ere}`)} -- .\` candidate commits. ` +
+    "Both can list more than that answer: they read bytes, so a non-ASCII letter or digit right next to the key does not stop a match, and the log names every commit that edits a line holding the key, not only those that change how often it occurs."
+  );
+}
 
 /**
  * «Continue in Claude Code» (P3): the prompt that takes a Discuss discussion
@@ -178,7 +204,7 @@ export function renderContinuePrompt(input: { path: string | null; trace?: Conti
           "",
           `Key: ${trace.key}`,
           `Wiki: ${trace.wiki} (${trace.root})`,
-          `Where it is mentioned: \`git -C ${shellQuote(trace.root)} grep -n -w -F -e ${shellQuote(trace.key)}\` lists the tracked files and lines, \`git -C ${shellQuote(trace.root)} log -S ${shellQuote(trace.key)} --oneline\` the commits that changed it, and ${trace.mentionsUrl} returns both with its log.md lines and the state of the PRs they name.`,
+          traceWhereLine(trace),
           "",
         ]
       : input.path === null

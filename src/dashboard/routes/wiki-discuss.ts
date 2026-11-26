@@ -41,6 +41,7 @@ import {
 } from "../../db/wiki-discuss-turns.ts";
 import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getLiveWikiTraceThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
 import { parseMentionKey } from "../../wiki/mention-key.ts";
+import { mentionsKind } from "../../wiki/mentions.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
@@ -239,6 +240,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
               root: path.resolve(resolveWikiRoot(entry?.root)),
               key: turn.traceKey,
               mentionsUrl: `${new URL(c.req.url).origin}${WIKI_MENTIONS_PATH}?wiki=${encodeURIComponent(turn.wiki)}&key=${encodeURIComponent(turn.traceKey)}`,
+              // The mentions' own test, so the prompt's commands search the key the way the payload does.
+              wholeKey: mentionsKind(turn.traceKey, await getWikiIndex({ root: entry?.root })) !== null,
             };
       const prompt = renderContinuePrompt({
         path: pagePath,

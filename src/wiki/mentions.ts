@@ -126,10 +126,16 @@ export function mentionsWorkTree(root: string, git: GitRun = realGit, now = Date
 
 const stateWord = (s: "OPEN" | "MERGED" | "CLOSED"): PrStateWord => (s === "OPEN" ? "open" : s === "MERGED" ? "merged" : "closed");
 
+/** The key's kind in this wiki, which decides whether {@link buildMentions} searches it as a whole key (a kind) or a substring (null). */
+export function mentionsKind(key: string, index: Pick<WikiIndex, "readerConfig"> | null): string | null {
+  const cfg = index?.readerConfig ?? null;
+  return classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []);
+}
+
 export async function buildMentions(input: MentionsInput, deps: MentionsDeps): Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }> {
   const { root, key } = input;
   const cfg = input.index?.readerConfig ?? null;
-  const kind = classifyKey(key, cfg?.trackers ?? [], cfg?.keys ?? []);
+  const kind = mentionsKind(key, input.index);
   const wholeKey = kind !== null;
   const [grep, history, logGrep] = await Promise.all([
     grepTracked(root, key, { git: deps.git, max: MENTIONS_MAX_LINES, fullText: true, wholeKey }),
