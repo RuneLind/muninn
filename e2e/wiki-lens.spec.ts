@@ -712,7 +712,7 @@ test.describe("Wiki reader: lenses", () => {
     expect(sent[0]!.sel).toBe("Se D2–D11 og S1, S2 og S6.");
 
     // A DecisionLog item with the server's noun, through the fact-check button.
-    // (The answer replaced the article; open the page again.)
+    // (Open the page again: a fresh article, no Explain card in it.)
     await open_(page, WIKI, COUNTS_REL);
     await select(".wiki-article li.dl-item#s1");
     await expect(page.locator("#wikiFactcheckBtn")).toBeVisible();

@@ -101,7 +101,7 @@
     "wiki-retired.spec.ts": 7.8,
     "wiki-rule-tree.spec.ts": 7.1,
     "wiki-section-bar.spec.ts": 8.7,
-    "wiki-selection-menu.spec.ts": 15,
+    "wiki-selection-menu.spec.ts": 20,
     "wiki-series-editor.spec.ts": 23.9,
     "wiki-share.spec.ts": 10,
     "wiki-stale-counts.spec.ts": 10.8,

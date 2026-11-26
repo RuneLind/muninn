@@ -40,6 +40,13 @@
  * classic stream's alike (F10); ⇧F10 opens the menu from the keyboard, its
  * arrows move and Escape closes it (F11); on a long page the bar hides while
  * its selection is scrolled away and a scroll closes the menu (F12).
+ *
+ * Fix round 2 batch 1: Enter and ⇧F10 inside an answerable `<Question>` card
+ * and an overflowing mermaid box (plain `[tabindex]` containers) are the
+ * bar's, and Escape puts focus back on the container (R2-1); a scroll of the
+ * Discuss pane leaves the menu open (R2-2); on a second wiki with no
+ * `.wiki-agent.md`, Explain answers in the inline card too (R2-3). The answer
+ * routes need `WIKI_ANSWER_WIKIS`, so the server names this wiki there.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -80,11 +87,22 @@ const LONG = "plans/long.mdx";
 const LONG_TARGET = "The long page keeps its target sentence near the top.";
 // Enough paragraphs that the article pane scrolls well past the first one.
 const PAGE_LONG = ["---", "title: Long plan", "---", "", "# Long plan", "", LONG_TARGET, "", ...Array.from({ length: 80 }, (_, i) => `Filler paragraph ${i + 1} about the harbour timetable and its berths.\n`)].join("\n");
+const CARDS = "plans/cards.mdx";
+const Q_TEXT = "Should the ferry wait for the late train?";
+// Sixteen nodes in a row: wider than the column, so the box is a scrolling tab stop.
+const WIDE_MERMAID = ["```mermaid", "graph LR", ...Array.from({ length: 15 }, (_, i) => `  N${i}[step ${i}] --> N${i + 1}[step ${i + 1}]`), "```"].join("\n");
+const PAGE_CARDS = ["---", "title: Cards plan", "---", "", "# Cards plan", "", '<Question id="Q1">', "", Q_TEXT, "", "</Question>", "", WIDE_MERMAID, "", "The line after the diagram.", ""].join("\n");
+const NOAGENT = "e2e-selection-noagent";
+const PLAIN = "plans/plain.mdx";
+const PLAIN_FIRST = "The plain wiki keeps its first sentence here.";
+const PLAIN_SECOND = "The second sentence follows it.";
+const PAGE_PLAIN = ["---", "title: Plain plan", "---", "", "# Plain plan", "", PLAIN_FIRST, "", PLAIN_SECOND, ""].join("\n");
 const PAGE_DECISIONS = ["---", "title: Decisions plan", "---", "", "# Decisions plan", "", "<DecisionLog>", "", `- **D1** — ${FLAT}. The berth list stays in one place.`, "- **D2** — Keep the night route.", "", "</DecisionLog>", ""].join("\n");
 
 let server: ChildProcess | undefined;
 let fake: ChildProcess | undefined;
 let root = "";
+let plainRoot = "";
 let scratch = "";
 let requestsUrl = "";
 let sql: ReturnType<typeof postgres> | null = null;
@@ -145,6 +163,11 @@ test.beforeAll(async () => {
   await writeFile(path.join(root, DECISIONS), PAGE_DECISIONS, "utf8");
   await writeFile(path.join(root, QUAY), PAGE_QUAY, "utf8");
   await writeFile(path.join(root, LONG), PAGE_LONG, "utf8");
+  await writeFile(path.join(root, CARDS), PAGE_CARDS, "utf8");
+  // A second wiki with no `.wiki-agent.md`: no thread to put a turn in.
+  plainRoot = path.join(scratch, "plain-wiki");
+  await mkdir(path.join(plainRoot, "plans"), { recursive: true });
+  await writeFile(path.join(plainRoot, PLAIN), PAGE_PLAIN, "utf8");
   await writeFile(path.join(root, "log.md"), `# Log\n\n## [2026-11-04] note | Q-3\n\n- ${KEY} is outside the data fix.\n`, "utf8");
   const init = spawnSync("git", ["init", "-q", "-b", "main", root], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
@@ -179,7 +202,9 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
-      WIKI_EXTRA: `${WIKI}=${root}`,
+      WIKI_EXTRA: `${WIKI}=${root},${NOAGENT}=${plainRoot}`,
+      WIKI_ANSWER_WIKIS: WIKI,
+      WIKI_ANSWER_OWNER: "E2E Owner (X000001)",
       MUNINN_BOTS_DIR: path.join(scratch, "bots"),
       RESEARCH_BOT: BOT,
       PLAN_CARD_BIN: "",
@@ -231,9 +256,9 @@ test.use({ viewport: { width: 1360, height: 1000 } });
 const bar = (page: Page) => page.locator("#wikiSelBar");
 const menu = (page: Page) => page.locator("#wikiSelMenu");
 
-async function openPage(page: Page, rel = REL): Promise<void> {
-  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(rel)}`);
-  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80" };
+async function openPage(page: Page, rel = REL, wiki = WIKI): Promise<void> {
+  await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(rel)}`);
+  const shown: Record<string, string> = { [REL]: "The morning route adds a stop.", [OTHER]: "The pier opens at six.", [DECISIONS]: "Keep the night route.", [QUAY]: "list is long.", [LONG]: "Filler paragraph 80", [CARDS]: "The line after the diagram.", [PLAIN]: PLAIN_SECOND };
   await expect(page.locator("#articleWrap .wiki-article")).toContainText(shown[rel]!);
 }
 
@@ -806,6 +831,130 @@ test("the bar hides while its selection is scrolled out of the article pane and 
   await page.mouse.wheel(0, 300);
   await expect(menu(page)).toBeHidden();
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(LONG_TARGET);
+});
+
+const focusedEl = (page: Page) =>
+  page.evaluate(() => {
+    const a = document.activeElement;
+    return a?.getAttribute("data-selact") ?? (a ? `${a.tagName}${a.className && typeof a.className === "string" ? `.${a.className.split(" ")[0]}` : ""}` : null);
+  });
+
+test("fix round 2 R2-1: Enter and ⇧F10 inside an answerable Question card and an overflowing diagram box are the bar's; Escape puts focus back on the box", async ({ page }) => {
+  const started: string[] = [];
+  // The inline turn never answers (it stays live); a classic stream answers at once.
+  await page.route("**/api/wiki/discuss", (route) => {
+    if (route.request().method() === "POST") started.push("turn");
+  });
+  await page.route("**/api/wiki/explain?**", (route) => {
+    started.push("classic");
+    return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: `event: done\ndata: {"answer":"CLASSIC"}\n\nevent: end\ndata: {}\n\n` });
+  });
+  await openPage(page, CARDS);
+  const question = page.locator("#articleWrap section.question");
+  // Wired as answerable: focusable from code (`tabindex="-1"`), no role of its own.
+  await expect(question).toHaveAttribute("tabindex", "-1");
+  const box = page.locator("#articleWrap .diagram-body");
+  await expect(box).toHaveAttribute("role", "region", { timeout: 20_000 });
+  await expect(box).toHaveAttribute("tabindex", "0");
+
+  for (const [name, text, holder] of [["question", Q_TEXT, "SECTION.question"], ["diagram", "step 2", "DIV.diagram-body"]] as const) {
+    // ⇧F10 there: our menu on its first item; Escape puts focus back on the container.
+    await dragSelect(page, text);
+    await expect(bar(page)).toBeVisible();
+    // The press inside it focused the container: the case the finding measured.
+    expect([name, await focusedEl(page)]).toEqual([name, holder]);
+    await page.keyboard.press("Shift+F10");
+    await expect(menu(page)).toBeVisible();
+    expect([name, await focusedEl(page)]).toEqual([name, "explain"]);
+    await page.keyboard.press("Escape");
+    await expect(menu(page)).toBeHidden();
+    expect([name, await focusedEl(page)]).toEqual([name, holder]);
+
+    // Enter there, the bar open: the Explain turn starts.
+    await dragSelect(page, text);
+    await expect(bar(page)).toBeVisible();
+    expect([name, await focusedEl(page)]).toEqual([name, holder]);
+    const before = started.length;
+    await page.keyboard.press("Enter");
+    await expect.poll(() => started.length, { message: name }).toBe(before + 1);
+    await expect(page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]')).toHaveCount(1);
+    await expect(bar(page)).toBeHidden();
+    await page.locator("#articleWrap .wiki-sel-card [data-sel-card-close]").click();
+  }
+  test.info().annotations.push({ type: "R2-1 started", description: started.join(",") });
+});
+
+test("fix round 2 R2-2: the menu stays open while the Discuss pane scrolls; the article's scroll still closes it", async ({ page }) => {
+  await openPage(page, LONG);
+  await page.locator('[data-conntab="discuss"]').click();
+  await expect(page.locator("#discussBody")).toBeVisible();
+  // As a streaming turn makes it: taller than the pane, so its follow scroll moves it.
+  await page.locator("#discussBody").evaluate((b) => b.insertAdjacentHTML("beforeend", `<div id="e2eTall" style="height:3000px;flex:none"></div>`));
+  const paneScroll = (to: number) => page.locator("#discussBody").evaluate((b, to) => ((b.scrollTop = to), b.scrollTop), to);
+  const at = await dragSelect(page, LONG_TARGET);
+  await expect(bar(page)).toBeVisible();
+
+  await page.mouse.click((at.x0 + at.x1) / 2, at.y0, { button: "right" });
+  await expect(menu(page)).toBeVisible();
+  expect(await paneScroll(600)).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  await expect(menu(page)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu(page)).toBeHidden();
+
+  // The keyboard's menu, being arrowed through: the pane's scroll leaves it and its focus.
+  await page.keyboard.press("Shift+F10");
+  await expect(menu(page)).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  expect(await focusedEl(page)).toBe("where");
+  expect(await paneScroll(0)).toBe(0);
+  await page.waitForTimeout(300);
+  await expect(menu(page)).toBeVisible();
+  expect(await focusedEl(page)).toBe("where");
+  await page.keyboard.press("Escape");
+
+  // The article's own scroll moves the selection: it still closes the menu, and the bar follows.
+  await page.mouse.click((at.x0 + at.x1) / 2, at.y0, { button: "right" });
+  await expect(menu(page)).toBeVisible();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 40));
+  await expect(menu(page)).toBeHidden();
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(LONG_TARGET);
+});
+
+test("fix round 2 R2-3: on a wiki with no agent, Explain answers in a card under the paragraph; the article stays and the pane does not switch to Ask", async ({ page }) => {
+  const discussPosts: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname.startsWith("/api/wiki/discuss")) discussPosts.push(r.url());
+  });
+  const explains: URL[] = [];
+  await page.route("**/api/wiki/explain?**", (route) => {
+    explains.push(new URL(route.request().url()));
+    // The route's order: deltas, done, the server's answer_html, end.
+    const body =
+      `event: delta\ndata: {"text":"PLAIN so far"}\n\n` +
+      `event: done\ndata: ${JSON.stringify({ answer: "PLAIN whole" })}\n\n` +
+      `event: answer_html\ndata: ${JSON.stringify({ html: "<p>PLAIN-ANSWER <strong>rendered</strong> by the server.</p>" })}\n\n` +
+      `event: end\ndata: {}\n\n`;
+    return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body });
+  });
+  await openPage(page, PLAIN, NOAGENT);
+  await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).not.toHaveClass(/active/);
+  await dragSelect(page, PLAIN_FIRST);
+  await bar(page).locator("#wikiExplainBtn").click();
+  await expect.poll(() => explains.length).toBe(1);
+  expect(explains[0]!.searchParams.get("sel")).toBe(PLAIN_FIRST);
+  expect(explains[0]!.searchParams.get("relPath")).toBe(PLAIN);
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"]');
+  await expect(card.locator(".wiki-sel-card-body strong")).toHaveText("rendered");
+  await expect(card.locator(".wiki-sel-card-body")).toContainText("PLAIN-ANSWER rendered by the server.");
+  expect(await card.getAttribute("data-sel-turn")).toBeNull();
+  // Under the first paragraph, before the second; the page is still there.
+  expect(await cardBetween(page, ".wiki-sel-card", PLAIN_FIRST, PLAIN_SECOND)).toBe(true);
+  await expect(page.locator("#articleWrap .wiki-article-head h1")).toHaveText("Plain plan");
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(PLAIN_SECOND);
+  await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).not.toHaveClass(/active/);
+  await shot(page, "15-explain-no-agent-card");
+  expect(discussPosts).toEqual([]);
 });
 
 const FOLLOW_OLD = "The morning route adds a stop.";

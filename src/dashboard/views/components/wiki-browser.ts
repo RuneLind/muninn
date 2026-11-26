@@ -34,7 +34,6 @@ import {
 } from "./wiki-series-menu.ts";
 import {
   buildExplainUrl,
-  explainLabel,
   buildFactcheckUrl,
   factcheckLabel,
 } from "./wiki-explain.ts";
@@ -326,7 +325,6 @@ import {
 } from "./wiki-menus-controller.ts";
 import {
   acceptFactcheckIntegrate,
-  askHistoryParam,
   askQuestion,
   cancelClaimRetryBatch,
   cancelFactcheckIntegrate,
@@ -2090,30 +2088,12 @@ function reloadPageInPlace(relPath: string | undefined, name?: string): void {
 // ── A selection's Explain and Fact check ───────────────────────────────
 // The selection menu (`wiki-selection-menu.ts`, Discuss v2 PR 5) offers them
 // on a bar at the selection and in a right-click menu. Its «Explain with
-// context» is a turn of the page's thread where the wiki has an agent; this
-// classic Explain is the rest (no agent, an explainer): the SAME research
-// stream as Ask (via `runAskStream`) against `/api/wiki/explain`, so the
-// explanation lands in the article pane + session history like any other Ask turn.
+// context» answers in an inline card under the paragraph (D3): a turn of the
+// page's thread where the wiki has an agent, else the classic
+// `/api/wiki/explain` stream, whose URL is built here.
 
-function activateExplain(sel: string, heading: string): void {
-  hideSelectionMenu();
-  if (!sel || !getCurrentName()) return;
-  const explainMeta = currentArticle;
-  const turn: AskTurn = {
-    question: explainLabel(sel),
-    // The page the passage was read on. The question is only a display LABEL, so
-    // without this an escalated Explain turn names neither the page nor the real
-    // question (`composeDeclineQuestion`). Title where there is one — it is what
-    // wikilinks and the bot's own notes search use.
-    explainPage: explainMeta?.title || getCurrentName()!,
-    answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
-  };
-  runAskStream(explainUrlFor(sel, heading, askHistoryParam()), turn);
-}
-
-/** The classic Explain's URL for the open page: here, and in the selection
- *  menu's inline card where the page's thread cannot take the turn. */
-function explainUrlFor(sel: string, heading: string, history?: string): string {
+/** The classic Explain's URL for the open page, for the selection menu's inline card. */
+function explainUrlFor(sel: string, heading: string): string {
   return buildExplainUrl({
     sel,
     page: getCurrentName()!,
@@ -2122,7 +2102,6 @@ function explainUrlFor(sel: string, heading: string, history?: string): string {
     ...(currentRelPath ? { relPath: currentRelPath } : {}),
     wiki: WIKI,
     ctx: heading,
-    ...(history ? { history } : {}),
   });
 }
 
@@ -3258,7 +3237,6 @@ export function boot(): { dispose(): void } {
     // `currentArticle`, never an `allPages` lookup by name (first match on a stem).
     pageType: () => currentArticle?.type ?? null,
     graphId: GRAPH_SECTION_ID,
-    explainClassic: activateExplain,
     explainUrl: (sel, heading) => explainUrlFor(sel, heading),
     factcheck: activateFactcheckSel,
     hrefFor: pageUrlByRelPath,

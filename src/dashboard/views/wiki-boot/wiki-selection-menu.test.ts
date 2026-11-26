@@ -10,7 +10,7 @@
  *   Explore/Edit toggle is left as the reader set it.
  * - On a read-only wiki, Enter (the default action, with no event the
  *   read-only guard sees) sends nothing, whether the default is the inline
- *   turn or the classic Explain (no agent).
+ *   turn or the classic Explain stream (no agent).
  * - An action's press does not bring the bar back on the release that follows.
  * - An inline card's edit controls that need the tab show it (fix round 1
  *   batch 2): «Change the wording» opens it before filling its box, and an
@@ -36,6 +36,14 @@
  *   its first item, ↑/↓ move, Escape closes with focus off the hidden menu,
  *   and the browser's `contextmenu` that may follow the gesture is prevented;
  *   on a link it is the link's.
+ * - Fix round 2 batch 1: Enter and ⇧F10 in a plain `[tabindex]` container
+ *   (a Question card, a scrolling diagram box, a focused heading) are the
+ *   bar's, and Escape puts focus back on it (R2-1); only a scroll that moves
+ *   the selection closes the menu (R2-2); with no wiki agent, and on an
+ *   explainer, Explain streams the classic answer into the card, its
+ *   `answer_html` painted, a failure's status or refusal shown (R2-3).
+ *   Element assertions there compare text or identity: a failing
+ *   `expect(element)` prints the whole DOM, gigabytes of it.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -45,7 +53,7 @@ import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { MENTIONS_FRESH_MS, initSelectionMenu, setSelectionMenuPage } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, initSelectionMenu, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -59,7 +67,6 @@ const posts: Record<string, unknown>[] = [];
 /** The stream a POST answers with: its frames are pushed by the test. */
 let push: ((event: string, data: unknown) => void) | null = null;
 let close: (() => void) | null = null;
-const classic: string[] = [];
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
 /** The pages rendered again after an Apply. */
@@ -81,6 +88,8 @@ const explainAsked: URL[] = [];
 /** While set, an explain stream's frames are pushed by the test (`explainCtl`). */
 let explainManual = false;
 let explainCtl: { push: (event: string, data: unknown) => void; close: () => void; signal: AbortSignal | null } | null = null;
+/** While set, an explain request is answered with this (a refusal, a failure). */
+let explainAnswer: (() => Response) | null = null;
 const EDIT_OLD = "The morning route adds a stop.";
 const EDIT_NEW = "The morning route adds two stops.";
 
@@ -126,6 +135,7 @@ beforeAll(() => {
     if (url.startsWith("/api/wiki/explain?")) {
       const u = new URL(url, "http://x");
       explainAsked.push(u);
+      if (explainAnswer) return explainAnswer();
       if (explainManual) {
         const enc = new TextEncoder();
         let ctl!: ReadableStreamDefaultController<Uint8Array>;
@@ -168,7 +178,6 @@ beforeAll(() => {
     currentName: () => "ferry",
     pageType: () => "plan",
     graphId: "wikiGraph",
-    explainClassic: (sel) => classic.push(sel),
     explainUrl: (sel, heading) => `/api/wiki/explain?${new URLSearchParams({ sel, ctx: heading }).toString()}`,
     factcheck: () => {},
     hrefFor: (r) => `/wiki?relPath=${r}`,
@@ -240,7 +249,7 @@ test("«Explain with context»: one turn through the pane's entry, drawn by the 
   expect(posts.length).toBe(1);
   expect(posts[0]).toMatchObject({ wiki: "w", relPath: REL, mode: "explore", selection: NIGHT, heading: "Brief" });
   expect(String(posts[0]!.question)).toContain("Explain this passage with context");
-  expect(classic).toEqual([]);
+  expect(explainAsked.length).toBe(0);
   // The pane was not opened: the shell was never asked to show the tab.
   expect(switched).toEqual([]);
 
@@ -293,12 +302,12 @@ test("a read-only wiki: Enter on the bar sends nothing, inline or classic", asyn
     await settle();
     expect(posts.length).toBe(before);
     expect(barEl().style.display).toBe("none");
-    // No agent: Enter's default is the classic Explain, an Ask stream; refused too.
+    // No agent: Enter's default is the classic Explain stream; refused too.
     setDiscussAgentEnabled(false);
     await selectText(NIGHT);
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await settle();
-    expect(classic).toEqual([]);
+    expect(explainAsked.length).toBe(0);
   } finally {
     delete g.__WIKI_READONLY_WIKI__;
   }
@@ -306,7 +315,8 @@ test("a read-only wiki: Enter on the bar sends nothing, inline or classic", asyn
   await selectText(NIGHT);
   document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
   await settle();
-  expect(classic).toEqual([NIGHT]);
+  expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual([NIGHT]);
+  explainAsked.length = 0;
   // With the agent: Enter runs the default, an inline Explain turn.
   setDiscussAgentEnabled(true);
   await selectText(NIGHT);
@@ -324,13 +334,13 @@ test("Enter on a link, a summary or another control is that control's: no turn, 
   renderPage();
   document.querySelector(".wiki-article")!.insertAdjacentHTML(
     "beforeend",
-    `<p>See <a id="inLink" href="#x">the link</a>.</p><details><summary id="inSummary">More</summary>Folded.</details><span id="inTab" tabindex="0">widget</span><span id="inRole" role="button">act</span>`,
+    `<p>See <a id="inLink" href="#x">the link</a>.</p><details><summary id="inSummary">More</summary>Folded.</details><span id="inTab" tabindex="0" role="slider">widget</span><span id="inKeys" tabindex="0" onkeydown="">keys</span><span id="inRole" role="button">act</span>`,
   );
   // Outside the article: the breadcrumb's «⌂» link.
   document.body.insertAdjacentHTML("afterbegin", `<div id="wikiBreadcrumb"><a id="crumbHome" href="/wiki">⌂</a></div>`);
   const before = posts.length;
   await selectText(NIGHT);
-  for (const id of ["crumbHome", "inLink", "inSummary", "inTab", "inRole"]) {
+  for (const id of ["crumbHome", "inLink", "inSummary", "inTab", "inKeys", "inRole"]) {
     expect(barEl().style.display).toBe("flex");
     const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
     document.getElementById(id)!.dispatchEvent(ev);
@@ -338,7 +348,6 @@ test("Enter on a link, a summary or another control is that control's: no turn, 
     expect([id, ev.defaultPrevented]).toEqual([id, false]);
     expect([id, posts.length]).toEqual([id, before]);
   }
-  expect(classic).toEqual([NIGHT]);
   // On the article's own text Enter is the bar's: the instrument fires.
   const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
   document.querySelector(".wiki-article")!.dispatchEvent(ev);
@@ -630,7 +639,6 @@ async function whereElseStart(): Promise<void> {
 
 test("Explain while the first inline Explain streams: the classic stream in its own card, no refusal; «Add to Oppfølging» is still refused", async () => {
   renderPage();
-  classic.length = 0;
   explainAsked.length = 0;
   const before = posts.length;
   await selectText(NIGHT);
@@ -645,8 +653,7 @@ test("Explain while the first inline Explain streams: the classic stream in its 
   await settle();
   expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual([EDIT_OLD]);
   expect(posts.length).toBe(before + 1);
-  // In a card under its paragraph, not in place of the page (the Ask path).
-  expect(classic).toEqual([]);
+  // In a card under its paragraph, not in place of the page.
   const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
   expect(card.hasAttribute("data-sel-turn")).toBe(false);
   expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toContain("busy");
@@ -666,7 +673,6 @@ test("Explain while the first inline Explain streams: the classic stream in its 
 
 test("Explain on a selection in the article head (no passage of the page): the classic stream in a card under the head", async () => {
   renderPage();
-  classic.length = 0;
   explainAsked.length = 0;
   const before = posts.length;
   document.querySelector(".wiki-article")!.insertAdjacentHTML("beforebegin", `<div class="wiki-article-head"><h1>The ferry plan head</h1></div>`);
@@ -676,7 +682,6 @@ test("Explain on a selection in the article head (no passage of the page): the c
   await settle();
   expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual(["The ferry plan head"]);
   expect(posts.length).toBe(before);
-  expect(classic).toEqual([]);
   const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
   expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toContain("outside the page's text");
   expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("CLASSIC for The ferry plan head");
@@ -939,4 +944,183 @@ test("⇧F10 and the ContextMenu key: the menu with focus on its first item, ↓
   link.focus();
   expect(key(link, "F10", true).defaultPrevented).toBe(false);
   expect(menuEl().style.display).toBe("none");
+});
+
+// ── Fix round 2 batch 1 ──────────────────────────────────────────────────
+
+test("R2-1: Enter and ⇧F10 in a plain [tabindex] container (a Question card, a scrolling diagram box, a jumped-to heading) are the bar's; Escape puts focus back on the container", async () => {
+  renderPage();
+  const article = document.querySelector(".wiki-article")!;
+  article.insertAdjacentHTML(
+    "beforeend",
+    `<section class="question" id="inQuestion" tabindex="-1"><p>QUESTION card text here.</p></section>` +
+      `<div class="diagram-body" id="inBox" role="region" aria-label="Diagram" tabindex="0"><p>DIAGRAM box text here.</p></div>` +
+      `<h3 id="inHeading" tabindex="-1">HEADING jumped to</h3>`,
+  );
+  const menuEl = () => document.getElementById("wikiSelMenu")!;
+  for (const [id, text] of [["inQuestion", "QUESTION card text"], ["inBox", "DIAGRAM box text"], ["inHeading", "HEADING jumped"]] as const) {
+    const box = document.getElementById(id)!;
+    await selectText(text, `#${id}`);
+    // A mouse selection inside it focuses it.
+    box.focus();
+    expect(document.activeElement === box).toBe(true);
+    const before = posts.length + explainAsked.length;
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    box.dispatchEvent(enter);
+    await settle();
+    expect([id, enter.defaultPrevented]).toEqual([id, true]);
+    expect([id, posts.length + explainAsked.length]).toEqual([id, before + 1]);
+    await endTurn();
+    // ⇧F10 there: our menu on its first item; Escape puts focus back on the container.
+    await selectText(text, `#${id}`);
+    box.focus();
+    expect([id, key(box, "F10", true).defaultPrevented]).toEqual([id, true]);
+    expect([id, menuEl().style.display]).toEqual([id, "block"]);
+    expect((document.activeElement as HTMLElement).getAttribute("data-selact")).toBe("explain");
+    key(document.activeElement!, "Escape");
+    expect([id, menuEl().style.display]).toEqual([id, "none"]);
+    expect([id, document.activeElement === box]).toEqual([id, true]);
+  }
+  // The menu opened from the page itself: Escape leaves focus on the page, as before.
+  (document.activeElement as HTMLElement).blur();
+  await selectText(NIGHT);
+  key(document.body, "F10", true);
+  key(document.activeElement!, "Escape");
+  expect(document.activeElement === document.body).toBe(true);
+});
+
+test("R2-2: a scroll that does not move the selection leaves the menu open; the article's, the document's or its own scroller's closes it", async () => {
+  renderPage();
+  document.querySelector(".wiki-article")!.insertAdjacentHTML("beforeend", `<pre id="inCode"><code>CODE line that scrolls sideways</code></pre>`);
+  const menuEl = () => document.getElementById("wikiSelMenu")!;
+  const scroll = (t: EventTarget) => t.dispatchEvent(new Event("scroll", { bubbles: false }));
+  const openMenu = async (text = NIGHT, within?: string) => {
+    await selectText(text, within);
+    key(document.body, "F10", true);
+    expect(menuEl().style.display).toBe("block");
+  };
+  await openMenu();
+  // The Discuss pane following its stream, and a code block beside the selection.
+  scroll(document.getElementById("discussBody")!);
+  scroll(document.getElementById("inCode")!);
+  await settle();
+  expect(menuEl().style.display).toBe("block");
+  scroll(document.getElementById("articleWrap")!);
+  expect(menuEl().style.display).toBe("none");
+  await openMenu();
+  scroll(document);
+  expect(menuEl().style.display).toBe("none");
+  // A selection in the code block: its own sideways scroll moves it.
+  await openMenu("CODE line", "#inCode");
+  scroll(document.getElementById("inCode")!);
+  expect(menuEl().style.display).toBe("none");
+});
+
+test("R2-3: no wiki agent: Explain streams the classic answer into a card under the paragraph, its answer_html rendered; no turn", async () => {
+  renderPage();
+  setDiscussAgentEnabled(false);
+  explainAsked.length = 0;
+  const before = posts.length;
+  explainManual = true;
+  try {
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(explainAsked.map((u) => u.searchParams.get("sel"))).toEqual([NIGHT]);
+    expect(posts.length).toBe(before);
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+    expect(card.hasAttribute("data-sel-turn")).toBe(false);
+    // Under the paragraph, the page kept; no sub line (no discussion to be outside of).
+    expect(card.previousSibling?.nodeName).toBe("BR");
+    expect(card.nextSibling?.textContent).toBe(EDIT_OLD);
+    expect(card.querySelector(".wiki-sel-card-sub")?.textContent ?? null).toBeNull();
+    const body = card.querySelector(".wiki-sel-card-body")!;
+    // The route's order: deltas, done, the server's answer_html, end.
+    explainCtl!.push("delta", { text: "plain **so far**" });
+    await settle();
+    expect(body.textContent).toContain("plain");
+    explainCtl!.push("done", { answer: "plain **whole**" });
+    explainCtl!.push("answer_html", { html: `<p>SERVER <strong id="srvHtml">rendered</strong> answer</p>` });
+    explainCtl!.push("end", {});
+    explainCtl!.close();
+    await settle();
+    expect(body.querySelector("#srvHtml")?.textContent).toBe("rendered");
+    expect(body.textContent).toContain("SERVER rendered answer");
+    expect(body.querySelector(".wiki-discuss-error")?.textContent ?? null).toBeNull();
+  } finally {
+    explainManual = false;
+    setDiscussAgentEnabled(true);
+  }
+});
+
+test("R2-3: no wiki agent, a passage the page shows twice: the classic card comes back under the copy it was on", async () => {
+  const twice = () => {
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2><p>First: ${NIGHT}</p><p>Second: ${NIGHT}</p></div>`;
+    setSelectionMenuPage({ mentions: true });
+  };
+  // Another page first: no card an earlier test holds comes back here.
+  menuRel = "plans/harbour.mdx";
+  renderPage();
+  await settle();
+  menuRel = REL;
+  setDiscussAgentEnabled(false);
+  explainManual = true;
+  try {
+    twice();
+    await settle();
+    expect(document.querySelector("#articleWrap .wiki-sel-card")?.textContent ?? null).toBeNull();
+    await selectText(NIGHT, ".wiki-article p:nth-of-type(2)");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]:not([data-sel-turn])')!;
+    expect(card.previousElementSibling?.textContent).toBe(`Second: ${NIGHT}`);
+    twice();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.previousElementSibling?.textContent).toBe(`Second: ${NIGHT}`);
+    explainCtl!.close();
+  } finally {
+    explainManual = false;
+    setDiscussAgentEnabled(true);
+  }
+});
+
+test("R2-3: the classic card names a failed request's status, and a refusal's own message; never «ended before its answer»", async () => {
+  renderPage();
+  setDiscussAgentEnabled(false);
+  const body = () => document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"] .wiki-sel-card-body')!;
+  try {
+    for (const [answer, want] of [
+      [() => new Response("Internal Server Error", { status: 500 }), "The explanation failed (500)."],
+      [() => json({ error: "This wiki is read-only." }, 403), "The explanation failed: This wiki is read-only. (403)."],
+    ] as const) {
+      explainAnswer = answer;
+      await selectText(NIGHT);
+      act(document.getElementById("wikiExplainBtn")!);
+      await settle();
+      expect(body().querySelector(".wiki-discuss-error")?.textContent).toBe(want);
+    }
+  } finally {
+    explainAnswer = null;
+    setDiscussAgentEnabled(true);
+  }
+});
+
+test("R2-3: an explainer's Explain is a card before its frame, the page kept", async () => {
+  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article-head"><h1>Explainer</h1></div><iframe class="wiki-explainer-frame"></iframe>`;
+  setSelectionMenuPage({ mentions: true });
+  explainAsked.length = 0;
+  const before = posts.length;
+  showSelectionBarForExplainer("A passage in the frame", "Frame heading");
+  expect(barEl().style.display).toBe("flex");
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  expect(explainAsked.map((u) => [u.searchParams.get("sel"), u.searchParams.get("ctx")])).toEqual([["A passage in the frame", "Frame heading"]]);
+  expect(posts.length).toBe(before);
+  const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"]')!;
+  expect(card.nextElementSibling?.className).toBe("wiki-explainer-frame");
+  // Straight to the classic stream: not a refused thread turn's fallback, which names why.
+  expect(card.querySelector(".wiki-sel-card-sub")?.textContent ?? null).toBeNull();
+  expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("CLASSIC for A passage in the frame");
+  expect(document.querySelector("#articleWrap .wiki-article-head h1")?.textContent).toBe("Explainer");
 });

@@ -224,37 +224,51 @@ test.describe("Wiki pane toggles", () => {
     await page.evaluate((k) => localStorage.removeItem(k), PANES_KEY);
   });
 
-  test("Explain reveals a collapsed pane for THIS sitting and keeps the stored collapse (fix round 2)", async ({ page }) => {
-    // The stream is stubbed: the reveal happens before the connection opens, so
+  test("Fact check reveals a collapsed pane for THIS sitting and keeps the stored collapse; Explain leaves it folded (fix round 2)", async ({ page }) => {
+    // The streams are stubbed: the reveal happens before the connection opens, so
     // one terminal app_error event is all the server needs to say.
-    await page.route("**/api/wiki/explain*", (route) =>
-      route.fulfill({
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-        body: 'event: app_error\ndata: {"message":"stubbed"}\n\n',
-      }),
-    );
+    for (const p of ["**/api/wiki/explain*", "**/api/wiki/factcheck*"]) {
+      await page.route(p, (route) =>
+        route.fulfill({
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: 'event: app_error\ndata: {"message":"stubbed"}\n\n',
+        }),
+      );
+    }
     await open(page);
     await page.locator("body").press("]");
     expect(await width(page, CONN)).toBe(STRIP_WIDTH);
     // Select a passage the way a reader does: a range over the paragraph, then
     // the mouseup the article pane listens for.
-    await page.evaluate(() => {
-      // A one-line body renders as bare text inside .wiki-article (no <p>), so
-      // select the body container's contents.
-      const body = document.querySelector("#articleWrap .wiki-article");
-      if (!body) throw new Error("no article body");
-      const r = document.createRange();
-      r.selectNodeContents(body);
-      const sel = window.getSelection()!;
-      sel.removeAllRanges();
-      sel.addRange(r);
-      document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-    });
+    const select = () =>
+      page.evaluate(() => {
+        // A one-line body renders as bare text inside .wiki-article (no <p>), so
+        // select the body container's contents.
+        const body = document.querySelector("#articleWrap .wiki-article");
+        if (!body) throw new Error("no article body");
+        const r = document.createRange();
+        r.selectNodeContents(body);
+        const sel = window.getSelection()!;
+        sel.removeAllRanges();
+        sel.addRange(r);
+        document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      });
+    // Discuss v2 PR 5 fix round 2: Explain answers in a card under the passage
+    // (D3), so it shows nothing in the pane and leaves it folded.
+    await select();
     const explain = page.locator("#wikiExplainBtn");
     await expect(explain).toBeVisible();
     await explain.dispatchEvent("mousedown");
-    // The pane is back on screen, on the Ask tab, with the answer streaming…
+    // The press's release, which the bar takes as its own (a reader's click always sends one).
+    await page.locator("#articleWrap").dispatchEvent("mouseup");
+    await expect(page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"] .wiki-discuss-error')).toHaveText("stubbed");
+    expect(await width(page, CONN)).toBe(STRIP_WIDTH);
+    // Fact check streams into the Ask tab: the pane is back on screen, on that tab…
+    await select();
+    const factcheck = page.locator("#wikiFactcheckBtn");
+    await expect(factcheck).toBeVisible();
+    await factcheck.dispatchEvent("mousedown");
     await expect(page.locator(".wiki-conn-tabs")).toBeVisible();
     expect(await width(page, CONN)).toBeGreaterThan(STRIP_WIDTH + 100);
     await expect(page.locator(".wiki-conn-tab[data-conntab='ask']")).toHaveClass(/active/);

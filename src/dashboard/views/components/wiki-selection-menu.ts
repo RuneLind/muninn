@@ -18,7 +18,8 @@
  *   turn in the pane. Where the thread cannot take it (the selection is no
  *   passage, or a turn of the discussion is still running) the card streams
  *   the classic `/api/wiki/explain` answer instead. Without an agent (and on
- *   an explainer) it is the classic Explain, an Ask turn in the article pane.
+ *   an explainer, whose card goes before its frame) the card streams that
+ *   classic answer too: never in place of the page.
  * - «Where else» and «History» read `GET /api/wiki/mentions` (no model), for
  *   a selection the route accepts as a key (one line, 3–80 characters); a key
  *   found in the selection gets its own chip, which opens its «Where else».
@@ -36,8 +37,9 @@
  *   and not on another page.
  * - Keyboard: the ContextMenu key or ⇧F10 opens the menu at the selection
  *   with focus on its first item; arrows move (↑/↓ in the menu, ←/→ in the
- *   bar), Escape closes with focus back on the page. The bar hides while its
- *   selection is scrolled out of the article pane; a scroll closes the menu.
+ *   bar), Escape closes with focus back where it was. The bar hides while its
+ *   selection is scrolled out of the article pane; a scroll that moves the
+ *   selection closes the menu.
  *
  * The bar's Explain and Fact check keep the ids `#wikiExplainBtn` and
  * `#wikiFactcheckBtn`, and every egress action carries `data-selact`, which
@@ -96,10 +98,9 @@ export interface SelectionMenuDeps {
   pageType(): string | null;
   /** The graph section's id: never a selection from there. */
   graphId: string;
-  /** The classic Explain (an Ask turn in the article pane) and the selection fact check. */
-  explainClassic(sel: string, heading: string): void;
   /** The classic Explain's `/api/wiki/explain` URL, for an inline card. */
   explainUrl(sel: string, heading: string): string;
+  /** The selection fact check (an Ask turn in the article pane). */
   factcheck(sel: string, heading: string): void;
   hrefFor(relPath: string): string;
 }
@@ -137,6 +138,8 @@ let reattachQueued = false;
 /** Until then a `contextmenu` belongs to the keyboard gesture that opened the menu. */
 let keyMenuUntil = 0;
 const KEY_MENU_MS = 500;
+/** The article element that had focus when the keyboard opened the menu. */
+let keyOpener: HTMLElement | null = null;
 
 function bar(): HTMLElement {
   let el = document.getElementById(SEL_BAR_ID);
@@ -171,18 +174,21 @@ export function selectionMenuOpen(): boolean {
   });
 }
 
-/** Hide both. Focus inside them goes back to the page: the keyboard opens the
- *  menu only from there (`enterIsOurs`: the page or the article's own text,
- *  which holds no focusable element). */
+/** Hide both. Focus inside them goes back where the keyboard opened the menu
+ *  from (a `[tabindex]` container in the article, `keyOpener`), else to the page. */
 export function hideSelectionMenu(): void {
   shown = null;
+  const back = keyOpener;
+  keyOpener = null;
   const b = document.getElementById(SEL_BAR_ID);
   const m = document.getElementById(SEL_MENU_ID);
   const active = document.activeElement as HTMLElement | null;
   const focusIn = !!active && (!!b?.contains(active) || !!m?.contains(active));
   if (b) b.style.display = "none";
   if (m) m.style.display = "none";
-  if (focusIn) active?.blur?.();
+  if (!focusIn) return;
+  if (back?.isConnected) back.focus({ preventScroll: true });
+  else active?.blur?.();
 }
 
 /** Per page render: the reader payload's mentions flag, tracker projects and key kinds. */
@@ -402,6 +408,7 @@ function onContextMenu(e: MouseEvent): void {
 
 function showMenu(s: { text: string; heading: string; range: Range }, items: SelMenuItem[], x: number, y: number): HTMLElement {
   shown = { ...s, explainer: false, items };
+  keyOpener = null;
   const b = document.getElementById(SEL_BAR_ID);
   if (b) b.style.display = "none";
   const m = menu();
@@ -422,7 +429,9 @@ function openMenuFromKeyboard(): boolean {
   const items = itemsFor(s.text, false);
   if (!selMenuOffers(items)) return false;
   const box = selectionBox(s.range);
+  const from = document.activeElement;
   const m = showMenu(s, items, box?.left ?? 0, box ? box.bottom + 6 : 0);
+  keyOpener = from instanceof HTMLElement && from !== document.body && !!document.getElementById("articleWrap")?.contains(from) ? from : null;
   keyMenuUntil = Date.now() + KEY_MENU_MS;
   m.querySelector<HTMLElement>("[data-selact]")?.focus({ preventScroll: true });
   return true;
@@ -456,7 +465,8 @@ function activate(act: SelAction, key: string | null): void {
   if (EGRESS.has(act) && discussSendBlocked()) return;
   switch (act) {
     case "explain":
-      if (s.explainer || !discussAgentOn()) deps.explainClassic(s.text, s.heading);
+      // No thread to take the turn (no wiki agent, an explainer): the classic answer, still in a card.
+      if (s.explainer || !discussAgentOn()) classicExplainCard(s, "", passageContext(s));
       else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why, context) => classicExplainCard(s, why, context));
       return;
     case "follow":
@@ -523,6 +533,13 @@ function holdCard(card: HTMLElement, s: Shown, context: PassageContext | null): 
   held = { el: card, wiki: deps.wiki(), relPath: rel, passage: renderedPassageText(s.range), context };
 }
 
+/** The passage's surroundings, so a re-attached card finds its own copy (none on an explainer). */
+function passageContext(s: Shown): PassageContext | null {
+  const live = window.getSelection();
+  const p = live && s.range ? readSelectionPassage(live) : null;
+  return p ? { before: p.before, after: p.after } : null;
+}
+
 /** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread.
  *  `fallback` runs instead of an error card, with the reason, when the
  *  selection is no passage or a turn of the discussion is still running. */
@@ -548,9 +565,10 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
   paintTurnCard(card);
 }
 
-/** Explain where the page's thread cannot take the turn: the classic
- *  `/api/wiki/explain` stream, painted into an inline card (D3) rather than in
- *  place of the page. Not a turn of the discussion; `why` is its sub line. A
+/** Explain where no thread takes the turn (no wiki agent, an explainer) or
+ *  the page's thread cannot: the classic `/api/wiki/explain` stream, painted
+ *  into an inline card (D3) rather than in place of the page. Not a turn of
+ *  the discussion; `why` is its sub line (none without an agent). A
  *  card that leaves the page (replaced, closed, another page) aborts its
  *  stream; one a render of its page took out keeps it, for `reattachCard`. */
 function classicExplainCard(s: Shown, why: string, context: PassageContext | null): void {
@@ -591,7 +609,11 @@ function classicExplainCard(s: Shown, why: string, context: PassageContext | nul
   void (async () => {
     try {
       const res = await fetch(d.explainUrl(s.text, s.heading), { signal: ctl.signal, headers: { Accept: "text/event-stream" } });
-      if (!res.ok || !res.body) return fail(`The explanation failed (${res.status}).`);
+      if (!res.ok || !res.body) {
+        // A refusal (400, a read-only or zone guard) names itself in `{ error }`.
+        const err = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        return fail(typeof err?.error === "string" && err.error ? `The explanation failed: ${err.error} (${res.status}).` : `The explanation failed (${res.status}).`);
+      }
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       for (let r = await reader.read(); !r.done; r = await reader.read()) parser.push(dec.decode(r.value, { stream: true }));
@@ -668,21 +690,42 @@ function selActOf(t: EventTarget | null): HTMLElement | null {
   return el?.closest?.<HTMLElement>(`#${SEL_BAR_ID} [data-selact], #${SEL_MENU_ID} [data-selact]`) ?? null;
 }
 
-/** What Enter already means something on: links, controls, widgets. */
+/** What Enter already means something on: links, controls, widgets. A bare
+ *  `[tabindex]` is none: the reader gives one to a `<Question>` card, a
+ *  scrolling diagram box and a jumped-to heading, and none of them takes Enter. */
 const ENTER_OWNERS =
   "a[href], area[href], button, input, select, textarea, summary, label, iframe, [contenteditable]:not([contenteditable='false']), " +
-  "[role=button], [role=link], [role=menuitem], [role=option], [role=tab], [role=checkbox], [role=radio], [role=switch], [role=treeitem], [role=combobox], [role=textbox], [tabindex]";
+  "[role=button], [role=link], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=option], [role=tab], [role=checkbox], [role=radio], " +
+  "[role=switch], [role=treeitem], [role=combobox], [role=textbox], [role=searchbox], [role=slider], [role=spinbutton]";
 
-/** Is Enter the bar's? Only with focus on the page itself or on the
- *  article's own text: never on a control, and never outside the article
- *  (the rail, the breadcrumb, the panes). */
+/** A focusable element with key handling of its own, as far as the DOM shows it
+ *  (an inline handler; an `addEventListener` one is invisible). */
+function ownsKeys(el: Element): boolean {
+  if (!el.hasAttribute("tabindex")) return false;
+  const h = el as HTMLElement;
+  return ["onkeydown", "onkeyup", "onkeypress"].some((k) => el.hasAttribute(k)) || !!(h.onkeydown || h.onkeyup || h.onkeypress);
+}
+
+/** Is Enter the bar's? Only with focus on the page itself or in the
+ *  article's own text (a plain `[tabindex]` container counts): never on a
+ *  control, and never outside the article (the rail, the breadcrumb, the panes). */
 function enterIsOurs(t: EventTarget | null): boolean {
   const el = t as Element | null;
   if (!el || el === document.body || el === document.documentElement) return true;
   const wrap = document.getElementById("articleWrap");
   if (!wrap || typeof el.closest !== "function" || !wrap.contains(el)) return false;
-  const hit = el.closest(ENTER_OWNERS);
-  return !hit || hit === wrap || !wrap.contains(hit);
+  for (let n: Element | null = el; n && n !== wrap; n = n.parentElement) if (n.matches(ENTER_OWNERS) || ownsKeys(n)) return false;
+  return true;
+}
+
+/** Does a scroll of `t` move what the bar or menu is shown for? The document's,
+ *  or a scroller holding the selection (`#articleWrap`, a code block it is in)
+ *  or the explainer's frame; not the panes, nor a scroller beside the selection. */
+function scrollMovesSelection(t: EventTarget | null): boolean {
+  if (!shown) return false;
+  if (!(t instanceof Node) || t === document || t === document.documentElement || t === document.body) return true;
+  const at = shown.range ? shown.range.startContainer : document.querySelector(".wiki-explainer-frame");
+  return !!at && t.contains(at);
 }
 
 /** Wire the menu once, at boot. */
@@ -711,8 +754,8 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   document.addEventListener("keydown", (e) => {
     // The keyboard's context-menu gesture: our menu for a selection that offers it.
     const gesture = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
-    // Taken where Enter is (focus on the page or the article's own text): on a
-    // link or a control it is that element's menu.
+    // Taken where Enter is (focus on the page or in the article's own text):
+    // on a link or a control it is that element's menu.
     if (gesture && !e.ctrlKey && !e.metaKey && !e.altKey && !e.defaultPrevented) {
       if (enterIsOurs(e.target) && openMenuFromKeyboard()) e.preventDefault();
       return;
@@ -771,10 +814,12 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
     if (pane) showTurnInDiscuss(pane.dataset.selCardPane ?? "");
   });
   // The bar is placed in the viewport: it follows the selection when the page
-  // scrolls or resizes. The menu closes on a scroll, as the browser's own does.
+  // scrolls or resizes. The menu closes on a scroll that moves the selection,
+  // as the browser's own does; the Discuss pane following its stream does not.
   document.addEventListener(
     "scroll",
-    () => {
+    (e) => {
+      if (!scrollMovesSelection(e.target)) return;
       // (The menu itself never scrolls: it has no overflow.)
       const m = document.getElementById(SEL_MENU_ID);
       if (m && m.style.display !== "none") return hideSelectionMenu();
