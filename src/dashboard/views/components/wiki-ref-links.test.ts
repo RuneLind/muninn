@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { findRefs, headingSlug, isRefId, linkRefs, nounRuns, refTargets } from "./wiki-ref-links.ts";
+import { findRefs, headingSlug, isRefId, linkRefs, nounRuns, peekParts, refTargets } from "./wiki-ref-links.ts";
 import { foldSizeLabel, formatChars, readingMinutes } from "./wiki-lens.ts";
 import { Window } from "happy-dom";
 import { renderWikiHtml } from "../../../wiki/render.ts";
@@ -375,5 +375,50 @@ describe("refTargets: an untitled fold", () => {
     }
     expect(fold.id).toBe("details");
     expect(titles.get("Details")).toBe(fold as unknown as Element);
+  });
+});
+
+describe("linkRefs: a fragment link to a RunChecklist step", () => {
+  test("joins as a ref link, and the step's peek shows its id, its fold and its own line", () => {
+    const win = new Window();
+    const article = win.document.createElement("div");
+    article.className = "wiki-article";
+    article.innerHTML = renderWikiHtml(
+      [
+        "Se [R11 i alpha](#alpha-r11), [samme steg](#ALPHA-R11) og [noe annet](#ingen).",
+        "",
+        '<Fold id="alpha" title="service-a">',
+        "",
+        '<RunChecklist id="alpha">',
+        "",
+        "- [ ] **R11 Release.** Tag the release.",
+        "  - [ ] et understeg",
+        "",
+        "</RunChecklist>",
+        "",
+        "</Fold>",
+      ].join("\n"),
+      () => undefined,
+    );
+    win.document.body.appendChild(article);
+    const g = globalThis as Record<string, unknown>;
+    // `peekParts` clones through the DOM globals: lend this window's.
+    const lent = ["document", "NodeFilter", "Element", "HTMLElement", "HTMLInputElement"] as const;
+    const saved = lent.map((k) => g[k]);
+    const w = win as unknown as Record<string, unknown>;
+    for (const k of lent) g[k] = w[k];
+    let parts: ReturnType<typeof peekParts>;
+    try {
+      linkRefs(article as unknown as Element);
+      parts = peekParts(article.querySelector("#alpha-r11") as unknown as Element);
+    } finally {
+      lent.forEach((k, i) => (g[k] = saved[i]));
+    }
+    const refs = [...article.querySelectorAll("a.wiki-ref")].map((a) => (a as unknown as HTMLElement).dataset.ref);
+    // An upper-case fragment joins too: the reveal's own lookup decides.
+    expect(refs).toEqual(["alpha-r11", "alpha-r11"]);
+    expect(parts.label).toBe("R11");
+    expect(parts.where).toBe("service-a");
+    expect(parts.body.map((n) => n.textContent).join("")).toBe("R11 Release. Tag the release.");
   });
 });

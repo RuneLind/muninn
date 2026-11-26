@@ -431,6 +431,8 @@ export const E2E_PORTS = {
   "wiki-discuss-thread": 3256,
   // Discuss v2 PR 5: the selection menu's bar, right-click menu and inline cards.
   "wiki-selection-menu": 3257,
+  // A RunChecklist step and a Fold by their own anchors: a fresh load, an in-page link, a link from another page.
+  "wiki-step-anchors": 3258,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
   // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.

@@ -26,7 +26,7 @@
  *   the article, so the next page render takes them away.
  */
 
-import { HASH_FLASH_CLASS, RANGE_FLASH_HIGHLIGHT, revealHashTarget } from "./wiki-hash-target.ts";
+import { HASH_FLASH_CLASS, hashTarget, headingSlug, RANGE_FLASH_HIGHLIGHT, revealHashTarget } from "./wiki-hash-target.ts";
 import { adoptMermaidCopies } from "./wiki-mermaid.ts";
 import { RUN_GAP_SRC, XREF_CLASS } from "../../../wiki/core/cross-ref.ts";
 import { fetchAndResolveXrefs, wrapXrefRuns, XREF_PEEK_ID, xrefFetchVia, xrefPeekParts } from "./wiki-cross-refs.ts";
@@ -57,16 +57,8 @@ export const ID_NOUN_CLASS = "id-noun";
 export const REF_CLASS = "wiki-ref";
 export const BACK_CLASS = "wiki-ref-back";
 
-/** GitHub's heading slug: lowercase, punctuation dropped, each space a hyphen
- *  (so `Runde 3 — 18.08` gives `runde-3--1808`). Letters outside ASCII stay. */
-export function headingSlug(text: string): string {
-  return text
-    .normalize("NFC")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
-    .replace(/\s/g, "-");
-}
+/** GitHub's heading slug, defined beside the reveal that resolves to it. */
+export { headingSlug };
 
 export interface RefMatch {
   start: number;
@@ -133,8 +125,10 @@ function ensureId(el: Element, title: string): string {
 
 const ID_TARGETS = ".dl-item[id] > .dl-id, section.query[id] .query-id, .cb-row[id] > .cb-id";
 const SECTIONS = "details.fold, h1, h2, h3, h4, h5, h6";
+/** A `RunChecklist` step with an anchor (`**R11 …**` → `#alpha-r11`). */
+const RUN_STEP = ".run-checklist li[id]";
 /** What a peek can show: the targets `peekParts` knows. */
-const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${SECTIONS}`;
+const TARGET_KINDS = `.dl-item, section.query, .cb-row, ${RUN_STEP}, ${SECTIONS}`;
 
 /** Whether a chip's text can name its target in prose: two or more
  *  characters, at least one a letter (D4, S1, Q-14, Q-A, MEL-601780). A
@@ -295,8 +289,9 @@ export function linkRefs(root: Element, idLabels?: IdLabels): number {
   // A server-rendered fragment link to a known kind of target joins in.
   root.querySelectorAll<HTMLAnchorElement>('a[href^="#"]:not(.dl-id):not(.query-id):not(.cb-id)').forEach((a) => {
     const id = decodeHash(a.getAttribute("href")!);
-    const target = id ? document.getElementById(id) : null;
-    if (target && root.contains(target) && target.matches(TARGET_KINDS)) {
+    // The reveal's own lookup, so a link joins exactly when its click would land.
+    const target = id ? hashTarget(root, id) : null;
+    if (target && target.matches(TARGET_KINDS)) {
       a.classList.add(REF_CLASS);
       a.dataset.ref = target.id;
     }
@@ -548,6 +543,12 @@ export function peekParts(target: Element): { label: string; where: string; body
     const c = cloneBare(target);
     c.querySelector(".cb-id")?.remove();
     return { label: target.querySelector(".cb-id")?.textContent ?? "", where, body: [c], isTitle: false };
+  }
+  if (target.matches(RUN_STEP)) {
+    // The step's own line, without the steps nested under it.
+    const text = target.querySelector(":scope > .check-text") ?? target;
+    const label = /^[A-Z]+\d+/.exec((text.textContent ?? "").trim())?.[0] ?? "";
+    return { label, where, body: [cloneBare(text)], isTitle: false };
   }
   if (target.matches("details.fold")) {
     const body: Node[] = [];

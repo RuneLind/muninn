@@ -8,6 +8,8 @@
  * Generic: any id in the article, not only a `<Query>` card.
  */
 
+import { anchorSlug } from "../../../format/query-block.ts";
+
 /** Dispatched (bubbling) on the element a hash names, before the folds open:
  *  a filter that hid it (the Query explorer) shows it again. */
 export const REVEAL_EVENT = "wiki:reveal";
@@ -15,6 +17,40 @@ export const REVEAL_EVENT = "wiki:reveal";
 /** Set on the target for one tint animation. `:target` cannot do this on a
  *  fresh load: the article renders after the browser matched the hash. */
 export const HASH_FLASH_CLASS = "wiki-hash-flash";
+
+/** GitHub's slug for a heading, the id `ensureId` (`wiki-ref-links.ts`) gives
+ *  a heading or an untitled fold: lower case, punctuation dropped, each white
+ *  space a `-`, so it can lead or trail with one (`🎯 Next Steps` → `-next-steps`). */
+export function headingSlug(text: string): string {
+  return text
+    .normalize("NFC")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+    .replace(/\s/g, "-");
+}
+
+/** The ids a written fragment may name, in the order tried: as written, lower
+ *  case, then each producer's slug of it as source text. A Query card,
+ *  DecisionLog item or Fold is `anchorSlug` of its id, a case row `case-` and a
+ *  RunChecklist step `<checklist anchor>-` before one, so a link to those
+ *  writes the prefix; a Question card keeps a safe id lower-cased, dots and
+ *  spaces included (not NFC); a heading is `headingSlug` of its text. The
+ *  server passes a wikilink's `#anchor` through as written, since only the
+ *  page knows which form exists. */
+function hashCandidates(id: string): string[] {
+  return [...new Set([id, id.toLowerCase(), anchorSlug(id), headingSlug(id)])].filter(Boolean);
+}
+
+/** The element inside `root` that a fragment's id names, by the first of its
+ *  {@link hashCandidates} the page has; an id outside `root` (page chrome) never counts. */
+export function hashTarget(root: Element, id: string): Element | null {
+  for (const c of hashCandidates(id)) {
+    const el = document.getElementById(c);
+    if (el && root.contains(el)) return el;
+  }
+  return null;
+}
 
 /** Resolve a `#fragment` to an element inside `root` and reveal it
  *  ({@link revealElement}). Returns whether a target was found. */
@@ -26,8 +62,8 @@ export function revealHashTarget(root: Element, hash: string = location.hash): b
   } catch {
     return false;
   }
-  const el = document.getElementById(id);
-  if (!el || !root.contains(el)) return false;
+  const el = hashTarget(root, id);
+  if (!el) return false;
   revealElement(root, el);
   return true;
 }

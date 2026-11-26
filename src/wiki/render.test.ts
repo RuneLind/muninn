@@ -38,6 +38,54 @@ describe("renderWikiHtml", () => {
     expect(html).toContain(">CC</a>");
   });
 
+  test("a wikilink with #anchor resolves the page and carries the anchor", () => {
+    const html = renderWikiHtml("Se [[Claude Code#alpha-r11|R11]] og [[Claude Code#Kjøre plan]].", resolve, { wiki: "kw" });
+    expect(html).toContain(
+      '<a href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#alpha-r11" class="wiki-link" data-wiki-page="Claude Code" data-relpath="concepts/Claude Code.md" data-anchor="alpha-r11">R11</a>',
+    );
+    expect(html).toContain('href="/wiki?wiki=kw&relPath=concepts%2FClaude%20Code.md#Kj%C3%B8re%20plan"');
+    expect(html).toContain('data-anchor="Kjøre plan">Claude Code#Kjøre plan</a>');
+    expect(html).not.toContain("wiki-link-missing");
+  });
+
+  test("the anchor goes on as written: the reader resolves it against the page's ids", () => {
+    // Exact ids that are no slug (`-next-steps`, `qcard-o1.2`) and source text alike.
+    const html = renderWikiHtml("[[Claude Code#-next-steps|a]] [[Claude Code#qcard-o1.2|b]] [[Claude Code#Alpha-R11|c]]", resolve);
+    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#-next-steps" class="wiki-link"');
+    expect(html).toContain('data-anchor="-next-steps">a</a>');
+    expect(html).toContain('data-anchor="qcard-o1.2">b</a>');
+    expect(html).toContain('data-anchor="Alpha-R11">c</a>');
+  });
+
+  test("a missing page's title names the page part alone", () => {
+    expect(renderWikiHtml("[[Nope#x]]", resolve)).toContain('title="No page named Nope"');
+  });
+
+  test("in a pipe table, a missing page's title carries no backslash", () => {
+    const html = renderWikiHtml("| a |\n|---|\n| [[Nope\\|x]] |\n", resolve);
+    expect(html).toContain('<span class="wiki-link-missing" title="No page named Nope">x</span>');
+  });
+
+  test("in a pipe table, the escaped pipe's backslash stays out of the page and the anchor", () => {
+    const html = renderWikiHtml("| a | b |\n|---|---|\n| [[Claude Code#r1\\|R1]] | [[Claude Code\\|CC]] |\n", resolve);
+    expect(html).toContain('relPath=concepts%2FClaude%20Code.md#r1" class="wiki-link"');
+    expect(html).toContain('data-anchor="r1">R1</a>');
+    expect(html).toContain(">CC</a>");
+    expect(html).not.toContain("wiki-link-missing");
+  });
+
+  test("a backslash anywhere in the target goes, as wikilinkTarget drops it", () => {
+    const html = renderWikiHtml("[[Claude\\ Code#a\\_b|x]]", resolve);
+    expect(html).toContain('data-relpath="concepts/Claude Code.md" data-anchor="a_b">x</a>');
+  });
+
+  test("a wikilink with an empty #, or a bare [[#x]], carries no anchor", () => {
+    const html = renderWikiHtml("[[Claude Code#]] og [[#x]]", resolve);
+    expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md" class="wiki-link"');
+    expect(html).not.toContain("data-anchor");
+    expect(html).toContain('class="wiki-link-missing"');
+  });
+
   test("unresolved wikilinks render as muted spans, not anchors", () => {
     const html = renderWikiHtml("See [[Nonexistent Page]].", resolve);
     expect(html).toContain('class="wiki-link-missing"');

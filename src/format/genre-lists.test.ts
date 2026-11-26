@@ -511,6 +511,84 @@ describe("web: RunChecklist", () => {
   });
 });
 
+describe("web: anchors on RunChecklist steps and Fold", () => {
+  const ids = (html: string) => [...html.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
+  const steps = (attrs: string) =>
+    [
+      `<RunChecklist${attrs}>`,
+      "",
+      "- [x] **R1 Vindu.** Teamet er varslet.",
+      "  - [ ] **R9 nested** steps under a step get none",
+      "- [ ] **R11 Release.** Tag the release.",
+      "- [ ] Uten fet id",
+      "- [ ] **r12 small** lower case is not an id",
+      "- [ ] **R12x** a letter after the digits is not one",
+      "- [ ] Midt i **R13** teksten",
+      "",
+      "</RunChecklist>",
+    ].join("\n");
+
+  test("a step led by a bold id gets the RunChecklist's id as prefix, lower case", () => {
+    const html = formatWebHtml(steps(' id="alpha"'));
+    expect(ids(html)).toEqual(["alpha-r1", "alpha-r11"]);
+    expect(html).toContain('<li class="check-item check-done check-parent" id="alpha-r1">');
+    expect(html).toContain('<li class="check-item check-todo" id="alpha-r11">');
+  });
+
+  test("without an id on the RunChecklist the anchor is the step id alone", () => {
+    expect(ids(formatWebHtml(steps("")))).toEqual(["r1", "r11"]);
+  });
+
+  test("an ordered step list keeps its value before the id", () => {
+    expect(formatWebHtml('<RunChecklist id="x">\n\n3. [ ] **R3** tre\n\n</RunChecklist>')).toContain(
+      '<li class="check-item check-todo" value="3" id="x-r3">',
+    );
+  });
+
+  test("a Fold's id lands on its details element, after open", () => {
+    expect(formatWebHtml('<Fold id="alpha" title="service-a">\n\nbody\n\n</Fold>')).toContain('<details class="fold" id="alpha">');
+    expect(formatWebHtml('<Fold id="Kjøre Plan" title="t" open="true">\n\nbody\n\n</Fold>')).toContain('<details class="fold" open id="kjøre-plan">');
+    expect(formatWebHtml('<Fold title="t">\n\nbody\n\n</Fold>')).toContain('<details class="fold">');
+  });
+
+  test("a repeat among fold and step anchors gets -2, -3 in page order", () => {
+    const html = formatWebHtml(
+      [
+        "<RunChecklist>\n\n- [ ] **R1** a\n\n</RunChecklist>",
+        "<RunChecklist>\n\n- [ ] **R1** b\n\n</RunChecklist>",
+        '<Fold id="r1" title="t">\n\nbody\n\n</Fold>',
+      ].join("\n\n"),
+    );
+    expect(ids(html)).toEqual(["r1", "r1-2", "r1-3"]);
+  });
+
+  test("a repeat's suffix never takes an id another fold or step was given by its author", () => {
+    const fold = (id: string) => `<Fold id="${id}" title="t">\n\nbody\n\n</Fold>`;
+    expect(ids(formatWebHtml([fold("a"), fold("a"), fold("a-2")].join("\n\n")))).toEqual(["a", "a-3", "a-2"]);
+    // The authored id comes after the repeat that would have taken it.
+    expect(ids(formatWebHtml(["<RunChecklist>\n\n- [ ] **R1** a\n- [ ] **R1** b\n\n</RunChecklist>", fold("r1-2")].join("\n\n")))).toEqual([
+      "r1",
+      "r1-3",
+      "r1-2",
+    ]);
+  });
+
+  test("a fold or step anchor yields to a DecisionLog item and a Query card, which keep their slugs", () => {
+    const html = formatWebHtml(
+      [
+        '<Fold id="d1" title="t">\n\nbody\n\n</Fold>',
+        "<RunChecklist>\n\n- [ ] **S1** steg\n\n</RunChecklist>",
+        "<DecisionLog>\n\n- **D1** — avgjort\n\n</DecisionLog>",
+        '<Query id="S1" question="q" />',
+      ].join("\n\n"),
+    );
+    expect(html).toContain('<details class="fold" id="d1-2">');
+    expect(html).toContain('<li class="check-item check-todo" id="s1-2">');
+    expect(html).toContain('id="d1"><a class="dl-id" href="#d1">D1</a>');
+    expect(html).toContain('<section class="query" id="s1">');
+  });
+});
+
 describe("NextMoves lane: a RunChecklist's open steps", () => {
   const lane = (md: string) => laneFromAttrs({ kind: "you" }, parseBlocks(md)).items;
 
