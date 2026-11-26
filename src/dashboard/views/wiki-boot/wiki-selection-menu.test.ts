@@ -1231,10 +1231,22 @@ const closeCard = (card: Element) => async () => {
   expect(card.isConnected).toBe(false);
 };
 
-test("R2-4: an inline Apply refused after its card was closed: the Discuss tab shows the turn's refusal", async () => {
+test("R2-4: an inline Apply refused after its card was closed: the Discuss tab shows the turn's refusal, scrolled to", async () => {
   const card = await followCardWithEdit("turn-45", 45);
   const key = card.getAttribute("data-sel-turn");
-  await applyHeld(card, stale, closeCard(card));
+  // Which turns the pane scrolls into view.
+  const proto = (globalThis as unknown as { HTMLElement: { prototype: { scrollIntoView: (...a: unknown[]) => void } } }).HTMLElement.prototype;
+  const realScroll = proto.scrollIntoView;
+  const scrolled: (string | null)[] = [];
+  proto.scrollIntoView = function (this: Element) {
+    if (this.closest("#discussBody")) scrolled.push(this.getAttribute("data-turn-key"));
+  };
+  try {
+    await applyHeld(card, stale, closeCard(card));
+  } finally {
+    proto.scrollIntoView = realScroll;
+  }
+  expect(scrolled).toContain(key);
   expect(document.querySelectorAll("#articleWrap .wiki-sel-card").length).toBe(0);
   expect(switched).toEqual([DISCUSS_TAB]);
   expect(tabActive()).toBe(true);

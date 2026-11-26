@@ -311,6 +311,10 @@ describe("findSamePassage", () => {
     expect(findSamePassage(a, P, { before: "Outro", after: ctx.after })).toBeNull();
     expect(parent(findSamePassage(a, P, { before: "", after: ctx.after }))).toBe("own");
   });
+  test("two copies matching equally: the first in page order", () => {
+    const a = article(`<p id="one">Intro ${P} tail.</p><p id="two">Intro ${P} tail.</p>`);
+    expect(parent(findSamePassage(a, P, { before: "Intro ", after: " tail." }))).toBe("one");
+  });
   test("without context: a sole copy only", () => {
     expect(parent(findSamePassage(article(`<p id="own">Read ${P} here.</p>`), P, null))).toBe("own");
     expect(findSamePassage(article(`<p>Read ${P} here.</p><p>And ${P} again.</p>`), P, null)).toBeNull();
