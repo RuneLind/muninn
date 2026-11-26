@@ -116,6 +116,7 @@
     "wiki-system-map.spec.ts": 4.5,
     "wiki-theme-card.spec.ts": 10.9,
     "wiki-theme-page.spec.ts": 4.8,
+    "wiki-trace.spec.ts": 12,
     "wiki-tracker-board.spec.ts": 5.1,
     "wiki-tracker-connections.spec.ts": 18.2,
     "wiki-tracker-graph.spec.ts": 17.2,

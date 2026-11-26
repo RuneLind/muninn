@@ -385,7 +385,8 @@ import {
 import { getCurrentName, getWorkMapRunAt, setCurrentName, setRevealOnRender, setWorkMapRunAt, type WorkFacts } from "./wiki-shell-state.ts";
 import { initDiscussHandoff, setDiscussHandoffEnabled } from "./wiki-discuss-handoff.ts";
 import { initDiscussTab } from "./wiki-discuss-tab.ts";
-import { SEL_MAX_CHARS, SEL_MIN_CHARS, hideSelectionMenu, initSelectionMenu, selectionMenuOpen, setSelectionMenuPage, showSelectionBarForExplainer } from "./wiki-selection-menu.ts";
+import { SEL_MAX_CHARS, SEL_MIN_CHARS, hideSelectionMenu, initSelectionMenu, placeInlineCard, selectionMenuMentionsOn, selectionMenuOpen, setSelectionMenuPage, showSelectionBarForExplainer } from "./wiki-selection-menu.ts";
+import { initKeyTrace } from "./wiki-key-trace.ts";
 import { beginPageEntry, enterView, setViewTeardown, viewIsLive, type PaneViewKind } from "./wiki-pane-view.ts";
 
 /** The URL parameter that opens a page in a lens (`?lens=overview`). */
@@ -3230,6 +3231,14 @@ export function boot(): { dispose(): void } {
   });
   // A selection's bar and right-click menu (Discuss v2 PR 5): its own
   // listeners, registered here where the Explain pill's were.
+  // The key peek and the Trace view (Discuss v2 PR 6): Trace cards are placed as the menu's are.
+  initKeyTrace({
+    wiki: () => FIND_SELF_WIKI || WIKI,
+    relPath: () => currentRelPath,
+    hrefFor: pageUrlByRelPath,
+    mentionsOn: selectionMenuMentionsOn,
+    place: placeInlineCard,
+  });
   initSelectionMenu({
     wiki: () => FIND_SELF_WIKI || WIKI,
     relPath: () => currentRelPath,

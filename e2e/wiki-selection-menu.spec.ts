@@ -5,7 +5,7 @@
  * in an inline card under the paragraph that is a turn of the page's thread
  * (the same turn in the pane, once, with the pane closed when it starts);
  * «Where else» and «History» list what the mentions route finds, with no
- * model; a key in the selection gets a chip; «Add to Oppfølging» shows only on
+ * model; a key in the selection gets a chip (its Trace since PR 6); «Add to Oppfølging» shows only on
  * a page with that heading; «Fact check» reaches the existing route.
  *
  * What the unit tests cannot reach: real mouse selection and a real
@@ -450,7 +450,7 @@ test("«Explain with context» answers in an inline card under the paragraph: a 
   await expect(page.locator("#discussBody .wiki-discuss-turn")).toHaveCount(1);
 });
 
-test("«Where else» lists the fixture's files and «History» its commits, with no model; a key chip opens its «Where else»", async ({ page }) => {
+test("«Where else» lists the fixture's files and «History» its commits, with no model; a key chip opens its Trace", async ({ page }) => {
   await openPage(page);
   const before = (await recorded()).length;
   await dragSelect(page, KEY);
@@ -479,13 +479,13 @@ test("«Where else» lists the fixture's files and «History» its commits, with
   await expect(hist.locator('.wiki-sel-ev[data-ev="log"]')).toHaveCount(1);
   await shot(page, "6-history-card");
 
-  // The key chip on a longer selection: its «Where else».
+  // The key chip on a longer selection: its Trace (PR 6), whose mentions list the same files.
   await dragSelect(page, NIGHT);
   const chip = bar(page).locator(`[data-selact="key"][data-selkey="${KEY}"]`);
-  await expect(chip).toHaveText(`🔗 ${KEY}`);
+  await expect(chip).toHaveText(`🧭 ${KEY}`);
   await shot(page, "7-key-chip");
   await chip.click();
-  const chipCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="where"]');
+  const chipCard = page.locator('#articleWrap .wiki-sel-card[data-sel-card="trace"]');
   await expect(chipCard.locator(".wiki-sel-card-sub")).toContainText(KEY);
   await expect(chipCard.locator(".wiki-sel-file")).toHaveCount(4);
   // No model was asked for any of it.
@@ -775,7 +775,8 @@ test("fix round 2 R2-6: «Where else» on a phrase of a page git does not track 
 test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on its first item; arrows move, Escape puts focus back on the page, Enter runs the item", async ({ page }) => {
   await openPage(page);
   // The night sentence's first character selected, extended with ⇧→ (a collapsed
-  // caret takes no ⇧→ outside caret browsing).
+  // caret takes no ⇧→ outside caret browsing). Found by its start: the key
+  // mark (PR 6) splits the sentence across text nodes.
   await page.evaluate((text) => {
     const walker = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
     for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
@@ -785,7 +786,7 @@ test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on 
       return;
     }
     throw new Error(text);
-  }, NIGHT);
+  }, NIGHT.slice(0, NIGHT.indexOf(KEY)));
   for (let i = 1; i < NIGHT.length; i++) await page.keyboard.press("Shift+ArrowRight");
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(NIGHT);
   const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-selact") ?? document.activeElement?.tagName ?? null);

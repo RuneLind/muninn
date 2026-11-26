@@ -173,3 +173,64 @@ export function grammarReason(pattern: string): string | null {
   }
   return null;
 }
+
+// ── Marking keys in page text (Discuss v2 PR 6) ─────────────────────────
+
+/**
+ * Lines longer than this are not scanned for `keys` kinds. Measured
+ * 2026-11-26 over the tracked pages: the longest lines are tables in
+ * `index.md` (kode-wiki 30,896 characters, mimir 26,017), and 4 kode-wiki and
+ * 13 mimir lines pass 4,000. A worst grammar-legal case (`[-A]+` over `-A`
+ * repeated, then a letter) costs 2.1 ms at 4,000 characters and 155 ms at
+ * 32,000: quadratic, since each start runs to the same letter.
+ */
+export const KEY_SCAN_LINE_MAX = 4000;
+
+const WORD_CHAR = /[A-Za-z0-9_]/;
+
+/**
+ * Every whole-word match of a `keys` kind in `text`, with its kind: a match
+ * starts where no letter, digit or `_` comes before it and ends where none
+ * comes after, and is a key the mentions route searches (3–80 characters).
+ * Tried only at such starts, with a sticky copy of each pattern, so a run of
+ * letters is tried once, not at each of its offsets. Overlaps keep the
+ * earlier match (then the longer). Lines over `lineMax` are skipped, counted
+ * in `skippedLines`.
+ */
+export function scanKeyKinds(
+  text: string,
+  kinds: readonly Pick<KeyKind, "name" | "pattern">[],
+  lineMax = KEY_SCAN_LINE_MAX,
+): { matches: { key: string; kind: string; start: number; end: number }[]; skippedLines: number } {
+  if (kinds.length === 0) return { matches: [], skippedLines: 0 };
+  const sticky = kinds.map((k) => ({ name: k.name, re: new RegExp(k.pattern, "uy") }));
+  const out: { key: string; kind: string; start: number; end: number }[] = [];
+  let skippedLines = 0;
+  let lineStart = 0;
+  while (lineStart <= text.length) {
+    let lineEnd = text.indexOf("\n", lineStart);
+    if (lineEnd < 0) lineEnd = text.length;
+    if (lineEnd - lineStart > lineMax) skippedLines++;
+    else {
+      for (let i = lineStart; i < lineEnd; i++) {
+        if (i > lineStart && WORD_CHAR.test(text[i - 1]!)) continue;
+        let best: { key: string; kind: string; start: number; end: number } | null = null;
+        for (const k of sticky) {
+          k.re.lastIndex = i;
+          const m = k.re.exec(text);
+          if (!m) continue;
+          const end = i + m[0].length;
+          if (end > lineEnd || m[0].length < 3 || m[0].length > 80) continue;
+          if (end < lineEnd && WORD_CHAR.test(text[end]!)) continue;
+          if (!best || end > best.end) best = { key: m[0], kind: k.name, start: i, end };
+        }
+        if (best) {
+          out.push(best);
+          i = best.end - 1;
+        }
+      }
+    }
+    lineStart = lineEnd + 1;
+  }
+  return { matches: out, skippedLines };
+}

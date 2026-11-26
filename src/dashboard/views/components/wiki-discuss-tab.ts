@@ -747,6 +747,13 @@ function endPress(): void {
 
 // ── The page's thread (Discuss v2, PR 4) ─────────────────────────────────
 
+/** The user kept for the wiki's bot, for another sender on that wiki (the
+ *  Trace view's turns, PR 6): the same rule as {@link sendUser}. */
+export function discussUserFor(wiki: string): string | null {
+  const bot = lsGet(botKey(wiki));
+  return bot ? lsGet(userKey(bot)) : null;
+}
+
 /** The user a turn or a read sends: only one kept for the wiki's bot, which a
  *  thread holds or the reader picked (so /chat lists it and the route takes
  *  it). Otherwise none, and the route uses the bot's default user. */

@@ -145,6 +145,12 @@ export function wikiThreadName(title: string, suffix: string, max = 50): string 
   return `${WIKI_THREAD_NAME_PREFIX.toLowerCase()}${truncateUnits(flat, max - WIKI_THREAD_NAME_PREFIX.length - suffix.length).trimEnd()}${suffix}`;
 }
 
+/** A key's trace thread name: `wiki trace: <key>` lowercased, cut to fit `max` units with the suffix. */
+export function traceThreadName(key: string, suffix: string, max = 50): string {
+  const prefix = "wiki trace: ";
+  return `${prefix}${truncateUnits(key.replace(/\s+/g, " ").trim().toLowerCase(), max - prefix.length - suffix.length).trimEnd()}${suffix}`;
+}
+
 /**
  * The repos a page asks for: its `repos:` (an inline list or one name); without
  * that key, its `project` as the reader's listing computes it; otherwise none.
@@ -249,10 +255,14 @@ export interface EarlierTurn {
 
 /** The system prompt: a fixed frame and the wiki's own rules (for the turn's
  *  mode, {@link rulesForMode}). No persona. */
-export function renderAgentSystemPrompt(wiki: string, rules: string): string {
+export function renderAgentSystemPrompt(wiki: string, rules: string, traceKey?: string): string {
   return [
-    `You are the wiki agent behind Discuss in muninn's wiki reader. You discuss one page of the "${wiki}" wiki with the reader, in a thread.`,
-    "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
+    traceKey
+      ? `You are the wiki agent behind Discuss in muninn's wiki reader. You trace one key, «${traceKey}», across the "${wiki}" wiki with the reader, in a thread.`
+      : `You are the wiki agent behind Discuss in muninn's wiki reader. You discuss one page of the "${wiki}" wiki with the reader, in a thread.`,
+    traceKey
+      ? "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, and where the key is mentioned — the files and lines, the commits that changed it, its log.md lines and the PRs those lines name. There is no page to edit. You cannot write files or run commands."
+      : "Earlier exchanges of the thread come in the prompt as the discussion so far. The context pack describes this turn: what you can read, the page's place, the marked passage, its section with line numbers, the heading list and, for a plan page, its card. You cannot write files or run commands.",
     "The wiki's own rules follow. They decide how you answer.",
     "",
     "<wiki_rules>",
@@ -268,7 +278,9 @@ function numbered(text: string, fromLine: number): string {
     .join("\n");
 }
 
-function readSection(reach: AgentReach, pack: ContextPack): string[] {
+/** «What you can read»: the reach, with citations shown on `pack.relPath`
+ *  (a page turn's page, a trace turn's first file). */
+export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">): string[] {
   if (reach.kind === "mcpTools") {
     const tools = Object.entries(reach.tools).flatMap(([server, ts]) => ts.map((t) => `${server}-${t}`));
     return [
@@ -351,10 +363,19 @@ export function renderAgentTurnPrompt(opts: {
     out.push(opts.cardNote);
     out.push("");
   }
-  const earlier = opts.earlier.slice(-DISCUSS_HISTORY_TURNS);
+  out.push(...discussionSoFar(opts.earlier));
+  out.push("## Question");
+  out.push(opts.question.trim());
+  return out.join("\n");
+}
+
+/** «The discussion so far»: the last {@link DISCUSS_HISTORY_TURNS} turns, each answer cut at {@link DISCUSS_HISTORY_ANSWER_MAX}. */
+export function discussionSoFar(all: readonly EarlierTurn[]): string[] {
+  const out: string[] = [];
+  const earlier = all.slice(-DISCUSS_HISTORY_TURNS);
   if (earlier.length) {
     out.push("## The discussion so far");
-    if (opts.earlier.length > earlier.length) out.push(`(${opts.earlier.length - earlier.length} earlier turns left out)`);
+    if (all.length > earlier.length) out.push(`(${all.length - earlier.length} earlier turns left out)`);
     for (const t of earlier) {
       out.push(`Question${t.selection ? ` about «${clampLine(t.selection, 200)}»` : ""}: ${clampLine(t.question, 2000)}`);
       const answer = t.answer.length > DISCUSS_HISTORY_ANSWER_MAX ? `${t.answer.slice(0, DISCUSS_HISTORY_ANSWER_MAX)} [… cut]` : t.answer;
@@ -362,9 +383,7 @@ export function renderAgentTurnPrompt(opts: {
       out.push("");
     }
   }
-  out.push("## Question");
-  out.push(opts.question.trim());
-  return out.join("\n");
+  return out;
 }
 
 /** Replace the live wiki root with the snapshot's in a card's text, so the

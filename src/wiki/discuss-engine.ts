@@ -6,7 +6,9 @@
  * persona, no memory or goal block, no extractor, no personal tools (D7).
  *
  * A turn runs on a wiki thread (`threads.kind = 'wiki'`, one live per user,
- * bot and page). The thread id is the discussion id, so the ledger
+ * bot and page, or per user, bot and key for a trace thread: PR 6, whose
+ * every turn's pack is rebuilt from the key's mentions payload, `mentions.ts`,
+ * with no page, no card and no repo, and only in Explore). The thread id is the discussion id, so the ledger
  * (`wiki_discuss_turns`) stays the prompt's history, and each turn stores two
  * `messages` rows on the thread (`platform 'web'`, `source 'wiki'`): the
  * question (plus one quoted line for the selection) and the answer with its
@@ -54,7 +56,7 @@ import { parseMcpConfig } from "../ai/connectors/copilot-mcp.ts";
 import { botExcludesMcpTool } from "../ai/connectors/copilot-sdk.ts";
 import { authMode } from "../auth/policy.ts";
 import { getBotDefaultUser } from "../db/chat-preferences.ts";
-import { getLiveWikiThread, getOrCreateWikiThread, getThreadById, type Thread } from "../db/threads.ts";
+import { getLiveWikiThread, getLiveWikiTraceThread, getOrCreateWikiThread, getOrCreateWikiTraceThread, getThreadById, type Thread } from "../db/threads.ts";
 import {
   closeAbandonedDiscussTurns,
   finishDiscussTurn,
@@ -86,6 +88,7 @@ import {
   reposInReach,
   rulesForMode,
   stripProposedEdit,
+  traceThreadName,
   wikiAgentRulesRefusal,
   wikiThreadName,
   type AgentReach,
@@ -93,12 +96,15 @@ import {
   type PackRepo,
 } from "./discuss-agent.ts";
 import { parseRepoRoots, realGit, type GitRun } from "./decision-triage/git.ts";
+import { renderTraceTurnPrompt } from "./discuss-trace.ts";
+import { buildMentions, parseMentionKey, type MentionsBody, type MentionsInput } from "./mentions.ts";
+import { realGhCheckDeps, type GhCheckDeps } from "./work-map/gh-check.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "./plan-card.ts";
 import { planCardFromOutcome, runPlanCard } from "./plan-card-run.ts";
 import { getWikiRegistry } from "./registry-memo.ts";
 import { botWikis, resolveWikiRequest } from "./registry.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "./readonly.ts";
-import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot } from "./store.ts";
+import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot, type WikiIndex } from "./store.ts";
 
 /** The Copilot surface (D2): the knowledge server's search for other pages,
  *  and yggdrasil's listing and graph tools. Never `read_source`,
@@ -238,9 +244,12 @@ export interface DiscussThreadStore {
   get: typeof getThreadById;
   live: typeof getLiveWikiThread;
   getOrCreate: typeof getOrCreateWikiThread;
+  /** A key's trace thread (PR 6); default the DB's. */
+  liveTrace?: typeof getLiveWikiTraceThread;
+  getOrCreateTrace?: typeof getOrCreateWikiTraceThread;
 }
 
-const dbThreads: DiscussThreadStore = { get: getThreadById, live: getLiveWikiThread, getOrCreate: getOrCreateWikiThread };
+const dbThreads: DiscussThreadStore = { get: getThreadById, live: getLiveWikiThread, getOrCreate: getOrCreateWikiThread, liveTrace: getLiveWikiTraceThread, getOrCreateTrace: getOrCreateWikiTraceThread };
 
 export interface DiscussEngineDeps {
   store?: DiscussStore;
@@ -263,6 +272,9 @@ export interface DiscussEngineDeps {
    *  for the bot; default `researchMcpServer.servesWikiTools`. */
   researchWikiTools?: (botName: string) => boolean;
   planCard?: typeof runPlanCard;
+  /** A trace turn's mentions payload (PR 6); default `buildMentions` with the
+   *  work map's `gh` refresh and this engine's `git`. */
+  mentions?: (input: MentionsInput) => Promise<{ ok: true; body: MentionsBody } | { ok: false; error: string }>;
   planCardConfig?: () => PlanCardConfig;
   /** `DECISION_TRIAGE_REPO_ROOTS`'s raw value; default the config's. */
   repoRoots?: () => string | null;
@@ -274,6 +286,9 @@ export interface DiscussEngineDeps {
 }
 
 export interface DiscussBody extends HandoffBody {
+  /** A trace turn (PR 6): the key, in place of a page (`relPath` is then "",
+   *  and no selection is taken). */
+  traceKey?: string;
   discussionId?: string;
   /** Explore (the default) or Edit: the rules file's edit section only in Edit. */
   mode?: DiscussMode;
@@ -284,12 +299,28 @@ export interface DiscussBody extends HandoffBody {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const USER_ID_MAX = 200;
 
-/** The handoff body plus `discussionId`, `mode` and `userId`; a string is the 400 message. */
+/** The handoff body plus `discussionId`, `mode` and `userId`; a string is the
+ *  400 message. A trace body names `traceKey` (the mentions route's key rule)
+ *  instead of `relPath`, with no selection fields, and only in Explore. */
 export function parseDiscussBody(raw: unknown): DiscussBody | string {
-  const body = parseHandoffBody(raw);
+  const r0 = raw as Record<string, unknown> | null;
+  const traced = !!r0 && typeof r0 === "object" && !Array.isArray(r0) && r0.traceKey !== undefined && r0.traceKey !== null;
+  let traceKey: string | undefined;
+  if (traced) {
+    const r = r0!;
+    if (typeof r.traceKey !== "string") return "traceKey must be a string";
+    if (r.relPath !== undefined && r.relPath !== null) return "send relPath or traceKey, not both";
+    for (const k of ["selection", "before", "after", "atStart", "atEnd", "edge", "heading"]) if (r[k] !== undefined && r[k] !== null) return `a trace turn takes no ${k}`;
+    if (r.mode === "edit") return "a trace turn is an Explore turn: there is no page to edit";
+    const key = parseMentionKey(r.traceKey);
+    if ("error" in key) return `traceKey: ${key.error}`;
+    traceKey = key.key;
+  }
+  // A trace body passes the handoff checks on a stand-in page, which nothing reads.
+  const body = parseHandoffBody(traced ? { ...r0, relPath: "(trace)" } : raw);
   if (typeof body === "string") return body;
   const r = raw as Record<string, unknown>;
-  const out: DiscussBody = { ...body };
+  const out: DiscussBody = traceKey !== undefined ? { ...body, relPath: "", traceKey } : { ...body };
   const id = r.discussionId;
   if (id !== undefined && id !== null) {
     if (typeof id !== "string" || !UUID_RE.test(id)) return "discussionId must be a uuid";
@@ -391,6 +422,9 @@ interface Prepared {
   earlier: DiscussTurn[];
   wiki: string;
   wikiRoot: string;
+  /** A trace turn's key (PR 6); then `relPath`, `raw`, `pageHash` are "" and `title` is the key. */
+  traceKey: string | null;
+  index: WikiIndex;
   relPath: string;
   title: string;
   raw: string;
@@ -423,6 +457,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
   const heartbeatMs = deps.heartbeatMs ?? DISCUSS_HEARTBEAT_MS;
   const staleRunningMs = deps.staleRunningMs ?? DISCUSS_STALE_RUNNING_MS;
   const defaultUser = deps.defaultUser ?? getBotDefaultUser;
+  let gh: GhCheckDeps | undefined;
+  // Read-only roots never get here (the egress prologue refuses them), so a miss may start the refresh.
+  const defaultMentions = (input: MentionsInput) => buildMentions(input, { git, gh: (gh ??= realGhCheckDeps()), now: Date.now });
   let inflight = 0;
 
   async function resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null } | DiscussRefusal> {
@@ -463,10 +500,16 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
 
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return refuse(503, { error: "wiki directory not found" });
-    const meta = index.resolveRelPath(body.relPath);
-    if (!meta) return refuse(404, { error: `no wiki page for relPath "${body.relPath}"` });
-    const raw = await readWikiPage(index, meta);
-    if (raw === null) return refuse(503, { error: "page file unreadable" });
+    // A trace turn (PR 6) has no page: no page ladder, no snapshot check of one.
+    const traceKey = body.traceKey ?? null;
+    let page: { meta: NonNullable<ReturnType<WikiIndex["resolveRelPath"]>>; raw: string } | null = null;
+    if (traceKey === null) {
+      const meta = index.resolveRelPath(body.relPath);
+      if (!meta) return refuse(404, { error: `no wiki page for relPath "${body.relPath}"` });
+      const raw = await readWikiPage(index, meta);
+      if (raw === null) return refuse(503, { error: "page file unreadable" });
+      page = { meta, raw };
+    }
 
     const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
     // A pinned wiki runs on its pinned bot or not at all: the resolver's
@@ -497,10 +540,10 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     const probe: ToolSurface = copilot ? { mcpTools: copilot.tools } : { readSearch: [path.join(snapshotRootDir(), "preflight")] };
     const refused = await blocker(connector, probe);
     if (refused) return refuse(503, { error: `the wiki agent cannot run on ${bot.name}: ${refused}`, reason: "surface" });
-    if (kind === "readSearch") {
+    if (kind === "readSearch" && page) {
       // The agent reads the page from the wiki's snapshot: refuse a page the
       // snapshot would not hold before a turn is stored for it.
-      const holds = await wikiSnapshotHolds(wikiRoot, meta.relPath, git);
+      const holds = await wikiSnapshotHolds(wikiRoot, page.meta.relPath, git);
       if (!holds.ok && holds.reason === "not-a-work-tree") {
         return refuse(503, { error: "the wiki agent reads a snapshot of the wiki, and this wiki is not a git work tree", reason: "no-snapshot" });
       }
@@ -531,7 +574,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       if (!thread || thread.kind !== "wiki") {
         return refuse(404, { error: "no live wiki discussion with that id (an old discussion stays read-only; ask without it to start the page's thread)", reason: "unknown-discussion" });
       }
-      if (thread.wiki !== wikiName || thread.relPath !== meta.relPath) return refuse(409, { error: "that discussion is about another page", reason: "other-page" });
+      if (thread.wiki !== wikiName || (page ? thread.relPath !== page.meta.relPath : thread.traceKey !== traceKey)) {
+        return refuse(409, { error: page ? "that discussion is about another page" : "that discussion is about another key", reason: "other-page" });
+      }
       if (thread.closedAt !== undefined) {
         // Answered first for everyone, as before; marked as the requester's own only when it is.
         const own = thread.userId === userId && thread.botName === bot.name;
@@ -541,8 +586,10 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       if (thread.botName !== bot.name) {
         return refuse(409, { error: `that discussion ran on ${thread.botName}, and the wiki now answers on ${bot.name}; start over`, reason: "other-bot" });
       }
+    } else if (page) {
+      thread = await threads.live(userId, bot.name, wikiName, page.meta.relPath);
     } else {
-      thread = await threads.live(userId, bot.name, wikiName, meta.relPath);
+      thread = await (threads.liveTrace ?? getLiveWikiTraceThread)(userId, bot.name, wikiName, traceKey!);
     }
     const earlier = thread ? await store.list(thread.id) : [];
     const last = earlier[earlier.length - 1];
@@ -551,11 +598,12 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       return refuse(409, { error: "the discussion's last turn is still running", reason: "busy" }, thread?.id);
     }
 
-    const pageHash = sha256(raw);
-    const fm = parseFrontmatter(raw);
-    const location = body.selection
+    const raw = page?.raw ?? "";
+    const pageHash = page ? sha256(raw) : "";
+    const fm = page ? parseFrontmatter(raw) : {};
+    const location = page && body.selection
       ? (() => {
-          const pack = buildContextPack({ wiki: wikiName, relPath: meta.relPath, title: meta.title, absPath: "", raw, ...packSelection(body) });
+          const pack = buildContextPack({ wiki: wikiName, relPath: page.meta.relPath, title: page.meta.title, absPath: "", raw, ...packSelection(body) });
           const loc = pack.location;
           return loc ? { found: loc.found, reason: loc.reason, tier: loc.tier, fromLine: loc.fromLine, toLine: loc.toLine, ambiguous: loc.ambiguous } : null;
         })()
@@ -565,12 +613,14 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       earlier,
       wiki: wikiName,
       wikiRoot,
-      relPath: meta.relPath,
-      title: meta.title,
+      traceKey,
+      index,
+      relPath: page?.meta.relPath ?? "",
+      title: page?.meta.title ?? traceKey ?? "",
       raw,
       pageHash,
       fm,
-      project: meta.project,
+      project: page?.meta.project,
       allow: index.readerConfig?.discuss?.repos ?? null,
       rules: rules.text,
       mode: body.mode ?? "explore",
@@ -628,15 +678,20 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     const userText = threadUserMessage(question, p.body.selection);
     try {
       // Created only now, after every refusal: a refused request leaves no empty thread.
-      const thread = p.thread ?? (await threads.getOrCreate(p.userId, p.bot.name, p.wiki, p.relPath, (suffix) => wikiThreadName(p.title, suffix)));
+      const thread =
+        p.thread ??
+        (p.traceKey !== null
+          ? await (threads.getOrCreateTrace ?? getOrCreateWikiTraceThread)(p.userId, p.bot.name, p.wiki, p.traceKey, (suffix) => traceThreadName(p.traceKey!, suffix))
+          : await threads.getOrCreate(p.userId, p.bot.name, p.wiki, p.relPath, (suffix) => wikiThreadName(p.title, suffix)));
       threadId = thread.id;
       turn = await store.start(
         {
           discussionId: threadId,
           threadId,
           wiki: p.wiki,
-          relPath: p.relPath,
-          pageHash: p.pageHash,
+          relPath: p.traceKey !== null ? null : p.relPath,
+          pageHash: p.traceKey !== null ? null : p.pageHash,
+          traceKey: p.traceKey,
           selection: p.body.selection?.trim() || null,
           question,
           location: p.location,
@@ -763,7 +818,20 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       const earlier = (await store.list(threadId).catch(() => p.earlier)).filter((t) => t.id !== turn.id);
       let reach: AgentReach;
       let pagePath: string;
-      if (p.kind === "readSearch") {
+      if (p.traceKey !== null) {
+        // A trace turn (PR 6): the wiki's snapshot or the Copilot tools, no page
+        // and no repo (a key belongs to no page's `repos:`), and the pack below.
+        if (p.kind === "readSearch") {
+          emit("status", { phase: "snapshots" });
+          const wiki = await (deps.wikiSnapshot ?? wikiSnapshot)(p.wikiRoot);
+          releases.push(leaseSnapshot(wiki));
+          reach = { kind: "readSearch", wikiSnapshot: wiki.dir, repos: [], missed: [], own: [] };
+        } else {
+          const copilot = p.copilot ?? { tools: COPILOT_DISCUSS_TOOLS };
+          reach = { kind: "mcpTools", tools: copilot.tools, ...(copilot.wikiToolsWiki ? { wikiToolsWiki: copilot.wikiToolsWiki } : {}) };
+        }
+        pagePath = "";
+      } else if (p.kind === "readSearch") {
         emit("status", { phase: "snapshots" });
         const wiki = await (deps.wikiSnapshot ?? wikiSnapshot)(p.wikiRoot);
         releases.push(leaseSnapshot(wiki));
@@ -799,20 +867,22 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         pagePath = p.relPath;
       }
 
-      emit("status", { phase: "card" });
-      const c = await cardFor(p, earlier, turn.id);
-      card = c.card;
-      const cardText = card && reach.kind === "readSearch" ? cardForSnapshot(card, p.wikiRoot, reach.wikiSnapshot) : card;
-
-      const pack = buildContextPack({ wiki: p.wiki, relPath: p.relPath, title: p.title, absPath: pagePath, raw: p.raw, ...packSelection(p.body) });
-      const prompt = renderAgentTurnPrompt({
-        pack,
-        reach,
-        card: cardText,
-        cardNote: c.note,
-        earlier: earlier.map((t) => ({ question: t.question, selection: t.selection, answer: t.answer, endState: t.endState })),
-        question: p.body.question,
-      });
+      const history = earlier.map((t) => ({ question: t.question, selection: t.selection, answer: t.answer, endState: t.endState }));
+      let prompt: string;
+      if (p.traceKey !== null) {
+        // Rebuilt every turn, as a page turn's pack is: a follow-up sees the files and PR states as they are now.
+        emit("status", { phase: "mentions" });
+        const m = await (deps.mentions ?? defaultMentions)({ wiki: p.wiki, root: p.wikiRoot, key: p.traceKey, index: p.index });
+        if (!m.ok) throw new Error(`the key's mentions could not be read (${m.error})`);
+        prompt = renderTraceTurnPrompt({ wiki: p.wiki, mentions: m.body, reach, earlier: history, question: p.body.question });
+      } else {
+        emit("status", { phase: "card" });
+        const c = await cardFor(p, earlier, turn.id);
+        card = c.card;
+        const cardText = card && reach.kind === "readSearch" ? cardForSnapshot(card, p.wikiRoot, reach.wikiSnapshot) : card;
+        const pack = buildContextPack({ wiki: p.wiki, relPath: p.relPath, title: p.title, absPath: pagePath, raw: p.raw, ...packSelection(p.body) });
+        prompt = renderAgentTurnPrompt({ pack, reach, card: cardText, cardNote: c.note, earlier: history, question: p.body.question });
+      }
       const surface: ToolSurface = reach.kind === "readSearch" ? { readSearch: [reach.wikiSnapshot, ...reach.repos.map((r) => r.dir)] } : { mcpTools: reach.tools };
       emit("status", { phase: "model", read: reach.kind === "readSearch" ? { wiki: true, repos: reach.repos.map((r) => r.name), missed: reach.missed.map((m) => m.name) } : { tools: reach.tools } });
 
@@ -829,7 +899,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       });
       const call = oneShot(prompt, config, p.bot, {
         toolSurface: surface,
-        systemPrompt: renderAgentSystemPrompt(p.wiki, rulesForMode(p.rules, p.mode, (msg) => log.warn(msg, { wiki: p.wiki }))),
+        systemPrompt: renderAgentSystemPrompt(p.wiki, rulesForMode(p.rules, p.mode, (msg) => log.warn(msg, { wiki: p.wiki })), p.traceKey ?? undefined),
         timeoutMs: timeoutMs + DISCUSS_CONNECTOR_GRACE_MS,
         onProgress: (ev) => {
           if (pastDeadline) return;
@@ -861,7 +931,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       const durationMs = Math.round(performance.now() - t0);
       await store.finish(turn.id, { endState: "done", answer, card, toolCalls, proposedEdit, costUsd: res.costUsd ?? null, durationMs });
       const assistantMessageId = await storeAnswer(stripProposedEdit(answer), "done", { model: res.model ?? p.bot.model ?? null, costUsd: res.costUsd ?? null, durationMs });
-      log.info("discuss turn on {wiki} {relPath}: done", { wiki: p.wiki, relPath: p.relPath, turnId: turn.id, seq: turn.seq, threadId, mode: p.mode, bot: p.bot.name, connector: p.connector, tools: toolCalls.length, edit: proposedEdit !== null, ms: durationMs });
+      log.info("discuss turn on {wiki} {relPath}: done", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, seq: turn.seq, threadId, mode: p.mode, bot: p.bot.name, connector: p.connector, tools: toolCalls.length, edit: proposedEdit !== null, ms: durationMs });
       emit("done", { turnId: turn.id, discussionId: threadId, threadId, assistantMessageId, endState: "done", answer, proposedEdit, toolCalls, costUsd: res.costUsd ?? null, durationMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -871,7 +941,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools.slice(), durationMs })
         .catch((e) => log.error("discuss turn finish failed: {error}", { error: String(e) }));
       await storeAnswer(unfinishedMessage(stripProposedEdit(streamed)), endState, { model: p.bot.model ?? null, durationMs });
-      log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.relPath, turnId: turn.id, threadId, endState, error: message, ms: durationMs });
+      log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, threadId, endState, error: message, ms: durationMs });
       emit("app_error", { type: "error", turnId: turn.id, endState, message: endState === "timeout" ? `The turn ran past ${Math.round(timeoutMs / 60000)} minutes and was stopped.` : `The turn failed: ${message}` });
     } finally {
       for (const release of releases) release();

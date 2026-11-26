@@ -13,6 +13,7 @@ import { walkthroughStyles } from "./components/wiki-walkthrough-view.ts";
 import { stepDoneStyles } from "./components/wiki-step-done.ts";
 import { discussHandoffStyles } from "./components/wiki-discuss-handoff.ts";
 import { selectionMenuStyles } from "./components/wiki-selection-menu-model.ts";
+import { keyTraceStyles } from "./components/wiki-key-trace-model.ts";
 import { discussTabBodyHtml, discussTabStyles } from "./components/wiki-discuss-tab-view.ts";
 import { findPaletteStyles } from "./components/wiki-find-view.ts";
 import { fellesPublishStyles } from "./components/wiki-felles-publish.ts";
@@ -3838,6 +3839,7 @@ ${FACTCHECK_CONF_CHIP_CSS}    /* Compact per-claim fact-check tool log — a scr
     ${discussHandoffStyles()}
     ${discussTabStyles()}
     ${selectionMenuStyles()}
+    ${keyTraceStyles()}
     ${findPaletteStyles()}
     ${fellesPublishStyles()}
     ${mirrorStatusStyles()}

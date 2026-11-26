@@ -57,7 +57,8 @@ export async function publishWikiRefusal(threadId: string, message: string): Pro
 }
 
 /**
- * /chat's send on a wiki thread: an Explore turn on the engine. The bot and
+ * /chat's send on a wiki thread: an Explore turn on the engine, on the
+ * thread's page or, for a trace thread, its key. The bot and
  * connector are the wiki's (`resolveWikiSynthesisBot`, D6): the body's
  * `connector` and the thread's `connector_id` are never read. A refusal is
  * published as a transient error event (never a stored row) and returned for
@@ -80,11 +81,13 @@ export async function runWikiThreadTurnFromChat(opts: {
   // `wiki === ""` is the default root (the WIKI_DIR override, or a registry with
   // no default): what the engine stores when the pane names no wiki. Sent as no
   // wiki, it resolves the same way the pane's request did.
-  if (thread.wiki === undefined || !thread.relPath) {
+  if (thread.wiki === undefined || (!thread.relPath && !thread.traceKey)) {
     return refused({ refused: true, status: 409, body: { error: "this wiki thread has no page to discuss", reason: "no-page" } });
   }
-  // The pane's body rules (the question's bound among them), as the pane would send it.
-  const body = parseDiscussBody({ wiki: thread.wiki || undefined, relPath: thread.relPath, question: opts.text, discussionId: thread.id, mode: "explore" });
+  // The pane's body rules (the question's bound among them), as the pane would
+  // send it; a trace thread (PR 6) sends its key, to the engine's trace branch.
+  const target = thread.relPath ? { relPath: thread.relPath } : { traceKey: thread.traceKey };
+  const body = parseDiscussBody({ wiki: thread.wiki || undefined, ...target, question: opts.text, discussionId: thread.id, mode: "explore" });
   if (typeof body === "string") return refused({ refused: true, status: 400, body: { error: body } });
   const started = await opts.engine.start({ role: opts.role, threadUser: thread.userId, mirror: opts.mirror ?? chatWikiMirror(), body });
   if (started.refused) return refused(started);

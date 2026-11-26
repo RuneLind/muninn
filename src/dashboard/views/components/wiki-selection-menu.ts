@@ -22,9 +22,9 @@
  *   classic answer too: never in place of the page.
  * - «Where else» and «History» read `GET /api/wiki/mentions` (no model), for
  *   a selection the route accepts as a key (one line, 3–80 characters); a key
- *   found in the selection gets its own chip, which opens its «Where else».
- *   An answer is reused for {@link MENTIONS_FRESH_MS} at most, never one with
- *   a PR row still being refreshed, and a page render drops them all.
+ *   found in the selection gets its own chip, which opens its Trace
+ *   (`wiki-key-trace.ts`, PR 6). The answers are cached in
+ *   `wiki-mentions-fetch.ts`, which a page render clears.
  * - «Fact check» is the existing selection fact check; «Add to Oppfølging»
  *   (a page with an `Oppfølging` heading and an agent) is an Edit turn whose
  *   proposed-edit card and Apply are the pane's.
@@ -84,11 +84,13 @@ import {
 } from "./wiki-selection-menu-model.ts";
 import { WIKI_READ_SLICE_HIDDEN_SELECTOR, wikiToolsFlag } from "./wiki-read-slice.ts";
 import type { KeyKind } from "../../../wiki/key-kinds.ts";
-import type { MentionsBody } from "../../../wiki/mentions.ts";
+import { clearMentionsCache, fetchMentions } from "./wiki-mentions-fetch.ts";
+import { hideKeyPeek, openTrace } from "./wiki-key-trace.ts";
+
+export { MENTIONS_FRESH_MS } from "./wiki-mentions-fetch.ts";
 
 export const SEL_MIN_CHARS = 3;
 export const SEL_MAX_CHARS = 1500;
-const MENTIONS_PATH = "/api/wiki/mentions";
 /** A right-click this close to the selection's text counts as on it. */
 const ON_SELECTION_PX = 4;
 
@@ -122,13 +124,6 @@ let deps: SelectionMenuDeps | null = null;
 let shown: Shown | null = null;
 /** The page's reader flags (`setSelectionMenuPage`). */
 let page: { mentions: boolean; trackerProjects: string[]; kinds: KeyKind[] } = { mentions: false, trackerProjects: [], kinds: [] };
-type MentionsAnswer = { ok: true; body: MentionsBody } | { ok: false; message: string };
-/** How long a mentions answer is reused: «Where else» then «History» on one
- *  key is one request, and a commit made elsewhere shows within this. */
-export const MENTIONS_FRESH_MS = 30_000;
-/** Mentions answers per wiki and key: `at` null while the request is in
- *  flight (asks share it), else when it answered. */
-const mentionsCache = new Map<string, { p: Promise<MentionsAnswer>; at: number | null }>();
 /** The markup each turn card body was drawn from. */
 const drawnBody = new WeakMap<Element, string>();
 let repositionQueued = false;
@@ -196,6 +191,11 @@ export function hideSelectionMenu(): void {
   else active?.blur?.();
 }
 
+/** Does the mentions route answer this viewer on the page shown? (The key peek's gate.) */
+export function selectionMenuMentionsOn(): boolean {
+  return page.mentions;
+}
+
 /** Per page render: the reader payload's mentions flag, tracker projects and key kinds. */
 export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjects?: unknown; keyKinds?: unknown } | null | undefined): void {
   page = {
@@ -205,7 +205,8 @@ export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjec
   };
   // The page rendered again (navigation, a reload, an Apply's commit): what
   // the files and history say may have moved.
-  mentionsCache.clear();
+  clearMentionsCache();
+  hideKeyPeek();
   if (held && !reattachQueued) {
     reattachQueued = true;
     // After the rest of the render: its enhancements must not run over the card.
@@ -498,9 +499,16 @@ function activate(act: SelAction, key: string | null): void {
       void mentionsCard(act, s, s.text);
       return;
     case "key":
-      if (key) void mentionsCard("where", s, key);
+      // A detected key's chip opens its Trace (PR 6), not «Where else».
+      if (key) openTrace(key, s.range);
       return;
   }
+}
+
+/** An inline card at `range` (before an explainer's frame when null): the
+ *  Trace view's place (`wiki-key-trace.ts`), the same as every other card's. */
+export function placeInlineCard(range: Range | null, html: string): HTMLElement | null {
+  return placeCard({ text: "", heading: "", range, explainer: range === null, items: [] }, html);
 }
 
 /** Put a card under the selection's paragraph (before the frame on an
@@ -693,31 +701,6 @@ function paintTurnCard(card: Element): void {
 
 function paintTurnCards(): void {
   for (const card of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn]`))) paintTurnCard(card);
-}
-
-function fetchMentions(wiki: string, key: string): Promise<MentionsAnswer> {
-  const k = `${wiki}\n${key}`;
-  const hit = mentionsCache.get(k);
-  if (hit && (hit.at === null || Date.now() - hit.at < MENTIONS_FRESH_MS)) return hit.p;
-  const p = (async (): Promise<MentionsAnswer> => {
-    try {
-      const res = await fetch(`${MENTIONS_PATH}?${new URLSearchParams({ wiki, key }).toString()}`, { headers: { Accept: "application/json" } });
-      const data = (await res.json().catch(() => null)) as (MentionsBody & { error?: string }) | null;
-      if (res.ok && data && Array.isArray(data.files)) return { ok: true as const, body: data };
-      return { ok: false as const, message: data?.error ? `The search failed: ${data.error} (${res.status}).` : `The search failed (${res.status}).` };
-    } catch {
-      return { ok: false as const, message: "The search failed: the server did not answer." };
-    }
-  })();
-  const entry: { p: Promise<MentionsAnswer>; at: number | null } = { p, at: null };
-  mentionsCache.set(k, entry);
-  // Neither a failure nor a PR row the route is still refreshing is kept: the next ask asks again.
-  void p.then((r) => {
-    if (mentionsCache.get(k) !== entry) return;
-    if (r.ok && !r.body.prs.some((pr) => pr.stale)) entry.at = Date.now();
-    else mentionsCache.delete(k);
-  });
-  return p;
 }
 
 /** «Where else» / «History» (no model): the card at once, its body when the route answers. */

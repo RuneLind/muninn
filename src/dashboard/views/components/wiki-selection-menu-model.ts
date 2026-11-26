@@ -80,7 +80,7 @@ export function selMenuItems(s: SelMenuInput): SelMenuItem[] {
   items.push({ act: "copy", label: "⧉ Copy", title: "Copy the selected text" });
   if (s.follow && !s.explainer) items.push({ act: "follow", label: "＋ Add to Oppfølging", title: "Propose this as a point under the page's Oppfølging heading (an Edit turn)" });
   if (s.mentions) {
-    for (const key of s.keys) if (!(searchable && key === s.text.trim())) items.push({ act: "key", key, label: `🔗 ${key}`, title: `Where else ${key} is mentioned` });
+    for (const key of s.keys) if (!(searchable && key === s.text.trim())) items.push({ act: "key", key, label: `🧭 ${key}`, title: `Trace ${key}: its mentions and timeline` });
   }
   return items;
 }
@@ -256,13 +256,14 @@ export function inlineCardAnchor(range: Range, article: Element): { parent: Node
 
 // ── The inline cards' markup ─────────────────────────────────────────────
 
-export type CardKind = "explain" | "where" | "history" | "follow";
+export type CardKind = "explain" | "where" | "history" | "follow" | "trace";
 
 const CARD_TITLES: Record<CardKind, string> = {
   explain: "✨ Explain with context",
   where: "🔗 Where else",
   history: "🕘 History",
   follow: "＋ Add to Oppfølging",
+  trace: "🧭 Trace",
 };
 
 /** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
@@ -283,7 +284,7 @@ const LINE_MAX = 160;
 const cut = (s: string, n = LINE_MAX) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const day = (d: string | null) => (d ? d.slice(0, 10) : "");
 
-function prsHtml(b: MentionsBody): string {
+export function prsHtml(b: MentionsBody): string {
   if (!b.prs.length) return "";
   const words: Record<string, string> = { open: "open", merged: "merged", closed: "closed", unknown: "not known yet", "not-a-pr": "not a PR", "not-checked": "not checked" };
   return (

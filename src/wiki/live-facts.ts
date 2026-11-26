@@ -46,6 +46,7 @@ import { noProdSet, qualifyRepo, type PrGrammar } from "./pr-grammar.ts";
 import { parseFrontmatter, stripFrontmatter } from "./store.ts";
 import { declaredKeys, stampedIssueKeys, stemKeys, titleKeys, valueStrings } from "./trackers/jira.ts";
 import type { TrackerConfig } from "./trackers/types.ts";
+import { scanKeyKinds, type KeyKind } from "./key-kinds.ts";
 
 const log = getLog("wiki", "live-facts");
 
@@ -586,15 +587,19 @@ export function markedMentions(
 }
 
 /** {@link markedMentions}, plus the body's code regions when it computed them
- *  (so {@link chipInsertions} need not scan again). */
-function markedMentionsWithCode(
+ *  (so {@link chipInsertions} need not scan again). With `kinds` (Discuss v2
+ *  PR 6, the key marks) the `keys` kinds' whole-word matches are key mentions
+ *  too, in the same never-marked regions; a span a tracker key already holds
+ *  is not added twice. `skippedLines` counts the lines that scan skipped. */
+export function markedMentionsWithCode(
   body: string,
   markdown: string,
   relPath: string,
   grammar: PrGrammar | null,
   trackers: readonly TrackerConfig[],
   titleOf: (id: string) => string | undefined,
-): { mentions: Mention[]; code?: ProtectedRegion[] } {
+  kinds: readonly Pick<KeyKind, "name" | "pattern">[] = [],
+): { mentions: Mention[]; code?: ProtectedRegion[]; skippedLines?: number } {
   const fm = parseFrontmatter(markdown);
   const projects = [...new Set(trackers.flatMap((t) => t.projects))];
   const code = readerCodeRegions(body);
@@ -602,6 +607,7 @@ function markedMentionsWithCode(
   // The patterns run on the italics view; the page key set (the sweep's) on `body`.
   const view = emphasisView(body, code);
   const bodyKeys = projects.length ? bodyKeyMentions(view, projects) : [];
+  const scanned = kinds.length ? scanKeyKinds(view, kinds) : null;
   // The key set is read only by a bare `#n`, and its answer per id is fixed.
   let keySet: string[] | undefined;
   const belongs = new Map<string, boolean>();
@@ -622,7 +628,12 @@ function markedMentionsWithCode(
     all.push({ id: r.id, kind: "pr", start: r.start, end: r.end });
   }
   for (const m of bodyKeys) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
-  if (all.length === 0) return { mentions: [] };
+  if (scanned) {
+    const held = new Intervals(bodyKeys.map((m) => [m.start, m.end] as const));
+    for (const m of scanned.matches) if (!held.overlaps(m.start, m.end)) all.push({ id: m.key, kind: "key", start: m.start, end: m.end });
+  }
+  const skipped = scanned ? { skippedLines: scanned.skippedLines } : {};
+  if (all.length === 0) return { mentions: [], ...skipped };
 
   const blockedSpans: [number, number][] = [];
   for (const m of body.matchAll(TAG_RE)) blockedSpans.push([m.index!, m.index! + m[0].length]);
@@ -648,17 +659,12 @@ function markedMentionsWithCode(
     if (homes.has(line)) return true;
     return HEADING_RE.test(lines[line]!) && !inCode.contains(starts[line]!);
   };
-  return { mentions: all.filter((m) => !isBlocked(m)).sort((a, b) => a.start - b.start || a.end - b.end), code };
+  return { mentions: all.filter((m) => !isBlocked(m)).sort((a, b) => a.start - b.start || a.end - b.end), code, ...skipped };
 }
 
-/**
- * Where the chips go: after a mention, or after the markdown link or bare URL
- * that holds it, one chip per distinct id at each site, in text order. Only
- * ids with a facts entry (`has`) get one.
- */
-export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
-  if (mentions.length === 0) return [];
-  const inCode = codeIntervals(code ?? readerCodeRegions(body));
+/** The links and bare URLs of `body` outside code, as the chip pass reads
+ *  them: each list in text order and pairwise disjoint. */
+function linkSpans(body: string, inCode: Intervals): { links: [number, number][]; refs: [number, number][]; urls: [number, number][] } {
   // Each list is in text order and pairwise disjoint (one regex's matches,
   // or the kept ones; a URL's end stays within its match), so a lookup is a binary search; links first, as
   // a URL inside a link belongs to the link.
@@ -692,6 +698,17 @@ export function chipInsertions(body: string, mentions: readonly Mention[], has: 
     }
     urls.push([start, end]);
   }
+  return { links, refs, urls };
+}
+
+/**
+ * Where the chips go: after a mention, or after the markdown link or bare URL
+ * that holds it, one chip per distinct id at each site, in text order. Only
+ * ids with a facts entry (`has`) get one.
+ */
+export function chipInsertions(body: string, mentions: readonly Mention[], has: (m: Mention) => boolean, code?: readonly ProtectedRegion[]): ChipInsertion[] {
+  if (mentions.length === 0) return [];
+  const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
   const sites = new Map<number, ChipInsertion>();
   for (const m of mentions) {
     if (!has(m)) continue;
@@ -798,6 +815,78 @@ export function applyChipInsertions(body: string, insertions: readonly ChipInser
   for (const site of insertions) {
     out += body.slice(cursor, site.at) + site.ids.map(({ id }) => sentinel(chipSpanHtml(id))).join("");
     cursor = site.at;
+  }
+  return out + body.slice(cursor);
+}
+
+// ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
+
+export const KEY_MARK_CLASS = "wiki-key";
+export const KEY_MARK_ATTR = "data-wiki-key";
+
+/** What the page render's key marks need (`renderWikiHtml`'s `keyMarks`). */
+export interface KeyMarksInput {
+  grammar: PrGrammar | null;
+  trackers: readonly TrackerConfig[];
+  kinds: readonly Pick<KeyKind, "name" | "pattern">[];
+  relPath: string;
+  /** Receives how many lines the `keys` scan skipped (the sweep's count). */
+  collect?: (r: { marks: number; skippedLines: number }) => void;
+}
+
+export interface KeyMark {
+  key: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * The key mentions the reader underlines: the tracker keys and the `keys`
+ * kinds' matches the mention parser marks ({@link markedMentionsWithCode}, so
+ * never in code, a tag, a link's title, a heading, a wikilink or a state
+ * home), less any inside a link or a bare URL (the mark would sit in the
+ * anchor or split the URL) and any whose own fact chip follows it: that key's
+ * peek is on the chip.
+ */
+export function planKeyMarks(body: string, markdown: string, input: Pick<KeyMarksInput, "grammar" | "trackers" | "kinds" | "relPath">, chips: readonly ChipInsertion[] = []): { marks: KeyMark[]; skippedLines: number } {
+  if (input.trackers.length === 0 && input.kinds.length === 0) return { marks: [], skippedLines: 0 };
+  const { mentions, code, skippedLines = 0 } = markedMentionsWithCode(body, markdown, input.relPath, input.grammar, input.trackers, () => undefined, input.kinds);
+  const keys = mentions.filter((m) => m.kind === "key" && m.id.length >= 3 && m.id.length <= 80);
+  if (keys.length === 0) return { marks: [], skippedLines };
+  const { links, refs, urls } = linkSpans(body, codeIntervals(code ?? readerCodeRegions(body)));
+  const chipAt = new Map(chips.map((c) => [c.at, c] as const));
+  const marks: KeyMark[] = [];
+  for (const m of keys) {
+    if (holdingSpan(links, m.start, m.end) || holdingSpan(refs, m.start, m.end) || holdingSpan(urls, m.start, m.end)) continue;
+    if (chipAt.get(m.end)?.ids.some((x) => x.kind === "key" && x.id === m.id)) continue;
+    if (chips.some((c) => c.at > m.start && c.at < m.end)) continue;
+    marks.push({ key: m.id, start: m.start, end: m.end });
+  }
+  return { marks, skippedLines };
+}
+
+/** A key mark's span: the key's own text, underlined by the reader's CSS. */
+export function keyMarkHtml(key: string): string {
+  return `<span class="${KEY_MARK_CLASS}" ${KEY_MARK_ATTR}="${escapeHtml(key)}">${escapeHtml(key)}</span>`;
+}
+
+/** `body` with each chip inserted and each mark's text replaced, in one pass
+ *  over its offsets (a chip at a mark's start goes before it, at its end after). */
+export function applyChipsAndMarks(body: string, chips: readonly ChipInsertion[], marks: readonly KeyMark[], chipSentinel: (html: string) => string, markSentinel: (m: KeyMark) => string): string {
+  const events = [
+    ...chips.map((c) => ({ pos: c.at, order: 0, chip: c, mark: null as KeyMark | null })),
+    ...marks.map((m) => ({ pos: m.start, order: 1, chip: null as ChipInsertion | null, mark: m })),
+  ].sort((a, b) => a.pos - b.pos || a.order - b.order);
+  let out = "";
+  let cursor = 0;
+  for (const e of events) {
+    if (e.chip) {
+      out += body.slice(cursor, e.chip.at) + e.chip.ids.map(({ id }) => chipSentinel(chipSpanHtml(id))).join("");
+      cursor = e.chip.at;
+    } else if (e.mark && e.mark.start >= cursor) {
+      out += body.slice(cursor, e.mark.start) + markSentinel(e.mark);
+      cursor = e.mark.end;
+    }
   }
   return out + body.slice(cursor);
 }

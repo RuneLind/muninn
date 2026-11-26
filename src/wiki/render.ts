@@ -42,7 +42,7 @@ import { renderedCodeRegions, inRenderedCode, restoreParkedSentinels } from "../
 import { parseFrontmatter, readStatusDate, stripFrontmatter, type WikiPageMeta, type WikiReaderConfig } from "./store.ts";
 import { decisionText, stripSentinelLines, WIKILINK_WITH_LABEL_RE, wikiLinkText } from "./decision-text.ts";
 import { chipLineRefs, codeAtFromPage } from "./code-refs.ts";
-import { applyChipInsertions, chipPassCollected, planLiveChips, type LiveFactsInput } from "./live-facts.ts";
+import { applyChipsAndMarks, chipPassCollected, keyMarkHtml, planKeyMarks, planLiveChips, type ChipInsertion, type KeyMarksInput, type LiveFactsInput } from "./live-facts.ts";
 import { itemDateReference, renderDay } from "../format/item-dates.ts";
 import type { PageFiles } from "../format/query-block.ts";
 import { parseQuestionPage, parseQuestionsTo, type QuestionRenderOptions } from "../format/question.ts";
@@ -156,6 +156,10 @@ export function renderWikiHtml(
      *  alone: the walkthrough, the gardener preview, the component lint and
      *  `GET /api/wiki/ref` read the page without chips. */
     liveFacts?: LiveFactsInput;
+    /** Discuss v2 PR 6 (D5): underline the page's keys for the hover peek
+     *  (`planKeyMarks`). Set by `GET /api/wiki/page` alone, where the mentions
+     *  route answers for the viewer. */
+    keyMarks?: KeyMarksInput;
   },
 ): string {
   // The fact-check sentinels are internal write markers, never content — but
@@ -182,17 +186,25 @@ export function renderWikiHtml(
   // A chip rides the wikilink sentinel with an empty literal and an empty link
   // text, so code, an attribute value and every plain-text reader of a
   // sentinel give nothing for it. Inserted first: its offsets are `body`'s.
+  // A key mark rides it too, with the key as its literal and link text.
   let marked = body;
+  let chips: ChipInsertion[] = [];
   if (opts?.liveFacts) {
     const plan = planLiveChips(body, markdown, opts.liveFacts);
-    marked = applyChipInsertions(body, plan.insertions, (html) => {
-      literal.push("");
-      linkTexts.push("");
-      rendered.push(html);
-      return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
-    });
+    chips = plan.insertions;
     opts.liveFacts.collect?.(plan.facts);
     chipPassCollected();
+  }
+  const keyMarks = opts?.keyMarks ? planKeyMarks(body, markdown, opts.keyMarks, chips) : null;
+  if (keyMarks) opts?.keyMarks?.collect?.({ marks: keyMarks.marks.length, skippedLines: keyMarks.skippedLines });
+  if (chips.length || keyMarks?.marks.length) {
+    const park = (html: string, text: string) => {
+      literal.push(text);
+      linkTexts.push(text);
+      rendered.push(html);
+      return `\x00WIKIPAGELINK${rendered.length - 1}\x00`;
+    };
+    marked = applyChipsAndMarks(body, chips, keyMarks?.marks ?? [], (html) => park(html, ""), (m) => park(keyMarkHtml(m.key), m.key));
   }
   const withTokens = marked.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
     literal.push(whole);

@@ -27,6 +27,7 @@ import {
   pageKeySet,
   prMentions,
   parseWikiFacts,
+  planKeyMarks,
   planLiveChips,
   readWikiFacts,
   resetWikiFactsCache,
@@ -36,6 +37,7 @@ import {
 import { chipView, countedKeyPrs, keySummary, prChipParts, repoOfPr, type LiveFactsPayload } from "./core/live-facts-chip.ts";
 import { readerBody, renderWikiHtml } from "./render.ts";
 import { stripFrontmatter } from "./store.ts";
+import { KEY_SCAN_LINE_MAX, parseKeyKinds } from "./key-kinds.ts";
 
 const FIX = path.join(import.meta.dir, "__fixtures__");
 const json = async (name: string) => JSON.parse(await Bun.file(path.join(FIX, name)).text());
@@ -574,5 +576,63 @@ describe("readWikiFacts", () => {
 
   test("a key list naming a missing entry is an error", () => {
     expect(parseWikiFacts(JSON.stringify({ version: 1, prs: {}, keys: { "DEMO-1": { prs: ["a/b#1"] } } }))).toEqual({ error: "keys.DEMO-1.prs names a/b#1, which has no prs entry" });
+  });
+});
+
+// ── Key marks (Discuss v2 PR 6, D5) ──────────────────────────────────────────
+
+describe("key marks: the page's keys underlined for the hover peek", () => {
+  const KINDS = parseKeyKinds([{ name: "case", pattern: "MEL-\\d+" }]).kinds;
+  const marks = { grammar: GRAMMAR, trackers: TRACKERS, kinds: KINDS, relPath: "plans/demo.mdx" };
+  const markIds = (html: string) => [...html.matchAll(/<span class="wiki-key" data-wiki-key="([^"]+)">\1<\/span>/g)].map((m) => m[1]);
+
+  test("tracker keys and `keys` kinds are marked; the text the reader reads is unchanged", () => {
+    const md = page("DEMO-20 and MEL-1029036 are open; MEL-5x is not a key.");
+    const html = renderWikiHtml(md, () => undefined, { keyMarks: marks });
+    expect(markIds(html)).toEqual(["DEMO-20", "MEL-1029036"]);
+    expect(html.replace(/<[^>]+>/g, "")).toBe(renderWikiHtml(md, () => undefined).replace(/<[^>]+>/g, ""));
+  });
+
+  test("never in a never-marked region: code spans and fences, a heading, a wikilink, a tag's attribute, a link or a bare URL", () => {
+    const body = [
+      "## MEL-1 in a heading",
+      "",
+      "`MEL-2` in a span, and [MEL-3](https://jira.example/MEL-3), and https://x.example/MEL-4 too, and [[MEL-5|the MEL-5 page]].",
+      "",
+      "```",
+      "MEL-6 in a fence",
+      "```",
+      "",
+      '<Fold title="MEL-7">',
+      "",
+      "MEL-8 in prose.",
+      "",
+      "</Fold>",
+    ].join("\n");
+    const { marks: got } = planKeyMarks(readerBody(page(body), "Demo"), page(body), marks);
+    expect(got.map((m) => m.key)).toEqual(["MEL-8"]);
+  });
+
+  test("a key with its own fact chip gets no underline (its peek is on the chip); one without a facts entry is underlined", () => {
+    const { html } = render(page("DEMO-12 has facts, DEMO-20 has none."), "plans/demo.mdx", { keyMarks: marks });
+    expect(chipIds(html)).toEqual(["DEMO-12"]);
+    expect(markIds(html)).toEqual(["DEMO-20"]);
+    expect(html).toContain('DEMO-12<span class="fact-chip" data-live-fact="DEMO-12" data-reader-only></span> has facts');
+  });
+
+  test("marks and chips share one pass: a mark right before a PR chip keeps both in text order", () => {
+    const { html } = render(page("MEL-9 acme/acme-api#101 merged."), "plans/demo.mdx", { keyMarks: marks });
+    expect(html).toContain('<span class="wiki-key" data-wiki-key="MEL-9">MEL-9</span> acme/acme-api#101<span class="fact-chip" data-live-fact="acme/acme-api#101"');
+  });
+
+  test("without trackers or kinds nothing is scanned (mimir's case)", () => {
+    expect(planKeyMarks("MEL-1 DEMO-2", "MEL-1 DEMO-2", { grammar: null, trackers: [], kinds: [], relPath: "x.md" })).toEqual({ marks: [], skippedLines: 0 });
+  });
+
+  test("a line over the scan bound is skipped for the `keys` kinds and counted", () => {
+    const long = `${"word ".repeat(KEY_SCAN_LINE_MAX / 5)} MEL-10`;
+    const r = planKeyMarks(`${long}\nMEL-11`, `${long}\nMEL-11`, marks);
+    expect(r.marks.map((m) => m.key)).toEqual(["MEL-11"]);
+    expect(r.skippedLines).toBe(1);
   });
 });

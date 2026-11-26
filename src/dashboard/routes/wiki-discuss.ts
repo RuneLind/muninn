@@ -38,7 +38,8 @@ import {
   listThreadMessagesWithTurns,
   markDiscussTurnHandedOver,
 } from "../../db/wiki-discuss-turns.ts";
-import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
+import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getLiveWikiTraceThread, getThreadById, listClosedWikiThreads } from "../../db/threads.ts";
+import { parseMentionKey } from "../../wiki/mention-key.ts";
 import { sha256 } from "../../utils/date-hash.ts";
 import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
@@ -102,6 +103,19 @@ export interface DiscussRouteDeps extends DiscussEngineDeps {
   refusalMirror?: ((threadId: string, message: string) => Promise<void>) | null;
   /** The continue route's reads and its one write; default the DB's. */
   continueStore?: { get: typeof getDiscussTurn; list: typeof listDiscussTurns; handedOver: typeof markDiscussTurnHandedOver };
+}
+
+/** A turn's ledger row goes out once, on the first of its two messages (the
+ *  tab builds a turn from the row, whichever message carries it). */
+function turnOnFirstMessage<M extends { turn: { id: string } | null }>(messages: M[]): M[] {
+  const sent = new Set<string>();
+  return messages.map((m) => {
+    if (!m.turn || !sent.has(m.turn.id)) {
+      if (m.turn) sent.add(m.turn.id);
+      return m;
+    }
+    return { ...m, turn: null };
+  });
 }
 
 export function registerWikiDiscussRoute(app: Hono, config: Config, deps: DiscussRouteDeps = {}): void {
@@ -234,7 +248,13 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // one-shot turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
   // prologue. Refusals: 403 role · 400 query · 404 unknown wiki or page · 503
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
+  //
+  // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
+  // the Trace view): the thread and its messages; a trace has no closed list
+  // or one-shot turns. 400 a bad key (the mentions route's rule).
   app.get("/api/wiki/discuss/thread", admin, async (c) => {
+    const traceQ = c.req.query("traceKey");
+    if (traceQ !== undefined) return traceThreadRead(c, traceQ);
     const relPathQ = c.req.query("relPath");
     if (!relPathQ?.trim() || relPathQ.length > 1024) return c.json({ error: "relPath is required" }, 400);
     const postedUser = c.req.query("userId");
@@ -262,16 +282,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
         closed.map((t) => t.id),
         DISCUSS_EARLIER_MESSAGES_MAX,
       );
-      // A turn's ledger row goes out once, on the first of its two messages
-      // (the tab builds a turn from the row, whichever message carries it).
-      const sent = new Set<string>();
-      const live = messages.map((m) => {
-        if (!m.turn || !sent.has(m.turn.id)) {
-          if (m.turn) sent.add(m.turn.id);
-          return m;
-        }
-        return { ...m, turn: null };
-      });
+      const live = turnOnFirstMessage(messages);
       return c.json({
         userId: who.userId,
         bot: bot.name,
@@ -289,6 +300,27 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       return c.json({ error: "could not read the thread" }, 500);
     }
   });
+
+  async function traceThreadRead(c: Context, raw: string): Promise<Response> {
+    const key = parseMentionKey(raw);
+    if ("error" in key) return c.json({ error: `traceKey: ${key.error}` }, 400);
+    try {
+      const { entry, unknownWiki, wiki } = resolveWikiRequest(getWikiRegistry(), c.req.query("wiki"), undefined, process.env.WIKI_DIR);
+      if (unknownWiki) return c.json({ error: `no wiki configured for "${wiki || "(none)"}"` }, 404);
+      const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
+      if (!bot || (entry?.synthesisBot && origin !== "pinned")) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
+      const postedUser = c.req.query("userId");
+      const who = await engine.resolveUser(bot.name, postedUser || undefined);
+      if ("refused" in who) return c.json(who.body, who.status);
+      const thread = await getLiveWikiTraceThread(who.userId, bot.name, entry?.name ?? "", key.key);
+      const messages = thread ? await listThreadMessagesWithTurns(thread.id) : [];
+      const live = turnOnFirstMessage(messages);
+      return c.json({ userId: who.userId, bot: bot.name, traceKey: key.key, thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null, messages: live, closed: [], closedTotal: 0, oneShot: [] });
+    } catch (err) {
+      log.error("discuss trace thread read failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "could not read the thread" }, 500);
+    }
+  }
 
   // «Start over»: close the page's live thread; it stays readable and
   // deletable under «Earlier discussions». Refusals: 403 role · 415 · 413 ·

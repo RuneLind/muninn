@@ -1,5 +1,5 @@
 import type { Context, Hono } from "hono";
-import { jiraTrackers, readWikiFacts, type LiveFactsInput } from "../../wiki/live-facts.ts";
+import { jiraTrackers, readWikiFacts, type KeyMarksInput, type LiveFactsInput } from "../../wiki/live-facts.ts";
 import type { LiveFactsPayload } from "../../wiki/core/live-facts-chip.ts";
 import { bucketMirrorPayloadField } from "../../wiki/bucket-mirror-status.ts";
 import { compress } from "hono/compress";
@@ -1717,6 +1717,9 @@ export function registerWikiReadRoutes(
     owner: string | null,
     /** The live chips' pass: `GET /api/wiki/page` alone passes it. */
     liveFacts?: LiveFactsInput,
+    /** The key marks (Discuss v2 PR 6): `GET /api/wiki/page` alone, where the
+     *  mentions route answers for the viewer (the reader's `mentions` flag). */
+    keyMarks?: KeyMarksInput,
   ): Promise<string> {
     // `wiki` is for the wikilink HREFs only (the middle-click path) — without it
     // a link opened on a non-default wiki lands on the DEFAULT one.
@@ -1739,6 +1742,7 @@ export function registerWikiReadRoutes(
       // Number columns, verdict cells, the label grid: styled in the article only.
       readerShapes: true,
       ...(liveFacts ? { liveFacts } : {}),
+      ...(keyMarks ? { keyMarks } : {}),
     });
   }
 
@@ -1764,6 +1768,12 @@ export function registerWikiReadRoutes(
     let liveFacts: LiveFactsPayload | undefined;
     let html: string | undefined;
     let chipError: unknown;
+    // KEY MARKS (Discuss v2 PR 6, D5): each key the mentions route would
+    // answer a peek for, underlined; only where that route answers this viewer.
+    const keyMarks: KeyMarksInput | undefined =
+      tools && authMode() === "off" && (c.get("role") ?? "admin") === "admin"
+        ? { grammar: index.readerConfig?.prGrammar ?? null, trackers: jiraTrackers(index.readerConfig?.trackers), kinds: index.readerConfig?.keys ?? [], relPath: meta.relPath }
+        : undefined;
     try {
       const loadedFacts = await readWikiFacts(index.root);
       if (loadedFacts) {
@@ -1773,14 +1783,23 @@ export function registerWikiReadRoutes(
           trackers: jiraTrackers(index.readerConfig?.trackers),
           relPath: meta.relPath,
           collect: (f) => (liveFacts = f),
-        });
+        }, keyMarks);
       }
     } catch (err) {
       // `html` is still unset: the render's return is the try's last step.
       chipError = err;
       liveFacts = undefined;
     }
-    html ??= await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined);
+    if (html === undefined) {
+      try {
+        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined, keyMarks);
+      } catch (err) {
+        // Never a failed page open over the marks either: the page without them.
+        if (!keyMarks) throw err;
+        log.warn("key marks failed on {relPath}; page rendered without them: {error}", { relPath: meta.relPath, error: err instanceof Error ? err.message : String(err) });
+        html = await renderPageArticle(entry, index, meta, markdown, answerable, answerCfg.owner ?? null, undefined, undefined);
+      }
+    }
     if (chipError !== undefined)
       log.warn("live chips failed on {relPath}; page rendered without chips: {error}", { relPath: meta.relPath, error: chipError instanceof Error ? chipError.message : String(chipError) });
 
