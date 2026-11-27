@@ -940,6 +940,7 @@ test("the trace pre-flight reads the wiki's git state afresh: a first commit mad
 test("a page turn naming a key gets its mentions in the prompt, from the real mentions builder; a keyless one reads no mentions", async () => {
   await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
   await Bun.write(path.join(wiki, "notes", "berth.md"), "# Berth note\n\nThe berth case MEL-95 waits on the crane.\n");
+  await Bun.write(path.join(wiki, "notes", "harbour.md"), NOTE + "\nThe crane for MEL-95 is late.\n");
   gitc("add", ".");
   gitc("commit", "-qm", "Berth note names MEL-95");
   __resetWikiCacheForTest();
@@ -970,6 +971,12 @@ test("a page turn naming a key gets its mentions in the prompt, from the real me
     // The block sits before the question, which stays last.
     expect(p.indexOf("## The key this question names")).toBeLessThan(p.indexOf("## Question"));
     expect(p.trimEnd().endsWith("Where else is MEL-95?")).toBe(true);
+
+    // A key named only in the selection counts too (fix round 1, finding 7).
+    calls = [];
+    const sel = await frames(await pane(real, { question: "Where else?", selection: "The crane for MEL-95 is late." }));
+    expect(sel.map((f) => f.event)).toContain("done");
+    expect(calls[0]!.prompt).toContain("## The key this question names: MEL-95");
 
     // On an instance that authenticates, no mentions are read for a page turn either (fix round 1, finding 1).
     calls = [];

@@ -18,6 +18,10 @@ describe("discussTurnKey", () => {
     expect(discussTurnKey({ question: "where else is MEL-1?", selection: "MEL-2" }, cfg)).toBe("MEL-1");
   });
 
+  test("a tracker key's place is where it stands whole, not inside a longer token (fix round 1, finding 4)", () => {
+    expect(discussTurnKey({ question: "see XMELOSYS-8351, then MEL-5, then MELOSYS-8351" }, cfg)).toBe("MEL-5");
+  });
+
   test("a whole key only, and a wiki with no key patterns gets none", () => {
     expect(discussTurnKey({ question: "is XMEL-1029036 a key?" }, cfg)).toBeNull();
     expect(discussTurnKey({ question: "where else is MEL-1029036?" }, { trackers: [], keys: [] })).toBeNull();

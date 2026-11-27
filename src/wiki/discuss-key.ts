@@ -18,6 +18,16 @@ import type { TrackerConfig } from "./trackers/types.ts";
 /** The longest text scanned: a question is capped well under this, a selection may not be. */
 export const DISCUSS_KEY_SCAN_MAX = 4000;
 
+/** Where `key` first stands whole in `t` (the tracker rule's edges: no ASCII word character before it, none or `-` and a digit after it); -1 when it never does. A bare `indexOf` found MELOSYS-8351 inside `XMELOSYS-8351` and called it first. */
+function wholeIndexOf(t: string, key: string): number {
+  for (let at = t.indexOf(key); at >= 0; at = t.indexOf(key, at + 1)) {
+    const before = at > 0 ? t[at - 1]! : "";
+    const after = t.slice(at + key.length, at + key.length + 2);
+    if (!/[A-Za-z0-9_]/.test(before) && !/^(?:[A-Za-z0-9_]|-[0-9])/.test(after)) return at;
+  }
+  return -1;
+}
+
 /** The earliest key in `text`: a `keys` kind match or an uppercase tracker key, whichever starts first. */
 function firstKeyIn(text: string, trackers: readonly TrackerConfig[], kinds: readonly Pick<KeyKind, "name" | "pattern">[]): string | null {
   const t = text.slice(0, DISCUSS_KEY_SCAN_MAX);
@@ -26,7 +36,7 @@ function firstKeyIn(text: string, trackers: readonly TrackerConfig[], kinds: rea
     if (at >= 0 && (best === null || at < best.at)) best = { key, at };
   };
   for (const m of scanKeyKinds(t, kinds).matches) take(m.key, m.start);
-  for (const tr of trackers) for (const k of titleKeys(t, tr)) take(k, t.indexOf(k));
+  for (const tr of trackers) for (const k of titleKeys(t, tr)) take(k, wholeIndexOf(t, k));
   return (best as { key: string } | null)?.key ?? null;
 }
 
