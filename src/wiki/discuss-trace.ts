@@ -158,7 +158,7 @@ export function keyMentionsSection(wiki: string, b: MentionsBody): { lines: stri
   const body = traceContextPack(wiki, b, KEY_PACK_BUDGET).map((l) => (l.startsWith("## ") ? `#${l}` : l));
   const complete = !b.truncated && !b.totalsAtLeast && !body.some((l) => CUT_NOTE.test(l));
   const lead = complete
-    ? `Already gathered for you from this wiki's tracked files: every file and line that names ${b.key}, the commits that changed it, its log.md lines and the PRs those lines name. Answer from it; do not search the wiki for ${b.key} again.`
-    : `Gathered for you from this wiki's tracked files, but cut where it says so: the files and lines that name ${b.key}, the commits that changed it, its log.md lines and the PRs those lines name. Answer from it, and search the wiki for ${b.key} only for what it leaves out.`;
+    ? `Already gathered for you from this wiki's tracked files: every file and line that names ${b.key} (a long line shortened with …), the commits that changed it, its log.md lines and the PRs those lines name. Answer from it; do not search the wiki for ${b.key} again. Use a tool only for what it does not hold.`
+    : `Gathered for you from this wiki's tracked files, but cut where it says so: the files and lines that name ${b.key} (a long line shortened with …), the commits that changed it, its log.md lines and the PRs those lines name. Answer from it, and search the wiki for ${b.key} only for what it leaves out.`;
   return { lines: [`## The key this question names: ${b.key}`, lead, "", ...body], complete };
 }

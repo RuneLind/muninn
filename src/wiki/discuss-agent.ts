@@ -294,7 +294,7 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
       ...(reach.wikiToolsWiki && reach.tools.research?.includes("wiki_grep")
         ? [
             packedKey
-              ? `This wiki's own files: ${packedKey.key}'s mentions are in the context pack below${packedKey.complete ? ", so do not grep for it" : ", cut where it says so: grep for it only for what the pack leaves out"}. For another exact key or id use research-wiki_grep (it finds every tracked file that holds it), research-wiki_read to read a file, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`
+              ? `This wiki's own files: ${packedKey.key}'s mentions are already in the context pack below${packedKey.complete ? ", so do not grep for it" : ", cut where it says so: grep for it only for what the pack leaves out"}. For another exact key or id use research-wiki_grep (it finds every tracked file that holds it), research-wiki_read to read a file, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`
               : `This wiki's own files: use research-wiki_grep for an exact key, id or a "where else" question (it finds every tracked file that holds it), research-wiki_read to read a file it returned, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`,
           ]
         : []),

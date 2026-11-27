@@ -186,7 +186,8 @@ describe("keyMentionsSection (pane room PR 2)", () => {
     const b = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
     expect(b.complete).toBe(true);
     expect(b.lines[0]).toBe("## The key this question names: MEL-77");
-    expect(b.lines[1]).toContain("do not search the wiki for MEL-77 again");
+    expect(b.lines[1]).toContain("do not search the wiki for MEL-77 again. Use a tool only for what it does not hold.");
+    expect(b.lines[1]).toContain("(a long line shortened with …)");
     expect(b.lines).toContain("### Where it is mentioned");
     expect(b.lines.filter((l) => l.startsWith("## "))).toHaveLength(1);
     expect(b.lines.join("\n")).toContain("12: The ferry case MEL-77 is open.");
@@ -215,7 +216,7 @@ describe("keyMentionsSection (pane room PR 2)", () => {
     // A whole block keeps the plain «do not grep» on the same reach (finding 6: the prompt passes the key on to readSection).
     const whole = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
     const p2 = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...whole } });
-    expect(p2).toContain("MEL-77's mentions are in the context pack below, so do not grep for it.");
+    expect(p2).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
   });
 });
 
@@ -264,7 +265,7 @@ describe("readSection with a key in the pack (pane room PR 2)", () => {
     const { readSection } = await import("./discuss-agent.ts");
     const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
     const packed = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }, "page", { key: "MEL-77", complete: true }).join("\n");
-    expect(packed).toContain("MEL-77's mentions are in the context pack below, so do not grep for it.");
+    expect(packed).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
     expect(packed).not.toContain('"where else" question');
     const plain = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }).join("\n");
     expect(plain).toContain('research-wiki_grep for an exact key, id or a "where else" question');
