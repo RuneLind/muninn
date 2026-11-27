@@ -11,6 +11,7 @@ import {
   tracePollStep,
   traceReadOf,
   traceReadTransient,
+  traceStatusFrom,
   traceTimelineHtml,
   traceTurnHtml,
   traceTurnsFromThread,
@@ -196,4 +197,11 @@ test("class check C: a 200 answer is the thread, `thread: null` (gone), or no th
   expect(traceReadOf({ thread: null, messages: [] })).toEqual({ read: { kind: "gone" }, thread: null });
   for (const bad of [undefined, null, "x", {}, { thread: { id: 5 }, messages: [] }, { thread: { id: "th" } }, { thread: { id: "th" }, messages: "no" }, { thread: "th", messages: [] }])
     expect([bad, traceReadOf(bad)]).toEqual([bad, { read: { kind: "malformed" }, thread: null }]);
+});
+
+test("a Trace turn's status line uses the pane's words for a phase, not «Working: <phase>»", () => {
+  expect(traceStatusFrom({ phase: "mentions" }, undefined)).toBe("Reading the key's mentions…");
+  expect(traceStatusFrom({ phase: "writing", text: "writing the answer" }, "x")).toBe("Writing the answer…");
+  expect(traceStatusFrom({ text: "a line of its own" }, "x")).toBe("a line of its own");
+  expect(traceStatusFrom({}, "kept")).toBe("kept");
 });

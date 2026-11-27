@@ -44,7 +44,7 @@ export interface DiscussTurnView {
   /** The streamed text so far, replaced by the final answer on `done`. */
   text: string;
   state: DiscussTurnState;
-  /** The route's phase (`snapshots`, `card`, `model`) while it runs. */
+  /** The route's phase (`snapshots`, `mentions`, `card`, `model`, `writing`) while it runs. */
   phase: string | null;
   tools: string[];
   /** A refusal's or failure's words. */
@@ -560,10 +560,17 @@ export function discussRefusalMessage(status: number, body: { error?: unknown; r
 
 const PHASE_WORDS: Record<string, string> = {
   snapshots: "Taking snapshots of the wiki and the code…",
+  mentions: "Reading the key's mentions…",
   card: "Reading the plan card…",
   model: "The agent is reading…",
   writing: "Writing the answer…",
 };
+
+/** The status line for the engine's `status` phase. The pane's turn and the
+ *  Trace card both show it, so a phase reads the same in each. */
+export function discussPhaseWords(phase: string | null | undefined): string {
+  return phase != null && Object.hasOwn(PHASE_WORDS, phase) ? PHASE_WORDS[phase]! : "Working…";
+}
 
 /** The quote a chip shows; the chip itself carries the whole passage. */
 const CHIP_MAX = 160;
@@ -636,7 +643,7 @@ export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
 export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): string[] {
   const parts: string[] = [];
   if (turnLive(t)) {
-    const phase = t.state === "sending" ? "Starting the turn…" : (PHASE_WORDS[t.phase ?? ""] ?? "Working…");
+    const phase = t.state === "sending" ? "Starting the turn…" : discussPhaseWords(t.phase);
     parts.push(`<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(phase)}</span></div>`);
   }
   if (t.tools.length) {

@@ -59,6 +59,7 @@ import {
   traceBodyHtml,
   tracePollStep,
   traceReadOf,
+  traceStatusFrom,
   traceTurnHtml,
   traceTurnsFromThread,
   type TraceThreadMessage,
@@ -284,7 +285,7 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
         if (f.event === "turn") {
           if (typeof m.discussionId === "string") st.discussionId = m.discussionId;
           if (typeof m.turnId === "string") turn.turnId = m.turnId;
-        } else if (f.event === "status") turn.status = typeof m.text === "string" ? m.text : typeof m.phase === "string" ? `Working: ${m.phase}` : turn.status;
+        } else if (f.event === "status") turn.status = traceStatusFrom(m, turn.status);
         else if (f.event === "delta" && typeof m.text === "string") turn.text += m.text;
         else if (f.event === "done") {
           turn.state = "done";

@@ -10,7 +10,9 @@ import {
   applyDiscussFrame,
   currentTurn,
   discussionLive,
+  discussPhaseWords,
   discussRefusalMessage,
+  discussTurnBodyParts,
   discussTurnHtml,
   discussTurnsHtml,
   findPassage,
@@ -31,6 +33,21 @@ import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
 import { STORED_EDIT_MARKER, extractProposedEdit, stripProposedEdit } from "../../../wiki/discuss-agent.ts";
 
 const passage = { selection: "The summer route adds a stop.", before: "", after: "", atStart: true, atEnd: true, heading: "Design" };
+
+describe("the status line for a phase", () => {
+  test("a page turn that names a key says it reads the key's mentions, not «Working…»", () => {
+    const t = newTurn("t1", "where else is MEL-1029036?", passage);
+    applyDiscussFrame(t, "turn", { turnId: "id-1", discussionId: "d-1", seq: 1 });
+    applyDiscussFrame(t, "status", { phase: "mentions" });
+    expect(discussTurnBodyParts(t, true).join("")).toContain("Reading the key&#39;s mentions…");
+  });
+  test("an unknown phase, and a name every object has, fall back to «Working…»", () => {
+    expect(discussPhaseWords("mentions")).toBe("Reading the key's mentions…");
+    expect(discussPhaseWords("later-phase")).toBe("Working…");
+    expect(discussPhaseWords("constructor")).toBe("Working…");
+    expect(discussPhaseWords(null)).toBe("Working…");
+  });
+});
 
 describe("a turn moved by the stream", () => {
   test("turn, status, deltas, a tool, then done: the answer replaces the streamed text", () => {
