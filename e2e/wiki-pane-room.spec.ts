@@ -241,10 +241,10 @@ test("a drag that loses its pointer capture ends: the width it reached is stored
 test("a wider rail narrows the pane to what it leaves the article, and a narrower one gives the stored width back", async ({ page }) => {
   await page.setViewportSize({ width: 1400, height: 1000 });
   await openPage(page);
-  await page.evaluate(([p, r]) => {
+  await page.evaluate(({ p, r }) => {
     localStorage.setItem(p, "720");
     localStorage.removeItem(r);
-  }, [PANE_WIDTH_KEY, RAIL_WIDTH_KEY]);
+  }, { p: PANE_WIDTH_KEY, r: RAIL_WIDTH_KEY });
   await page.reload();
   await expect(article(page)).toContainText("The harbour opens at six.");
   // 40% of 1400 is 560; the 300px rail leaves 1400 − 300 − 500 = 600.
@@ -261,10 +261,10 @@ test("a wider rail narrows the pane to what it leaves the article, and a narrowe
   // The rail reset: the stored 720 is bounded by the window again.
   await page.locator("#wikiRailResizer").dblclick();
   await expect.poll(() => paneWidth(page)).toBe(560);
-  await page.evaluate(([p, r]) => {
+  await page.evaluate(({ p, r }) => {
     localStorage.removeItem(p);
     localStorage.removeItem(r);
-  }, [PANE_WIDTH_KEY, RAIL_WIDTH_KEY]);
+  }, { p: PANE_WIDTH_KEY, r: RAIL_WIDTH_KEY });
 });
 
 for (const theme of ["light", "dark"] as const) {
