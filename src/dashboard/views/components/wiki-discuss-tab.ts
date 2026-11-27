@@ -798,6 +798,8 @@ function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null
   const users = Array.isArray(data?.users)
     ? (data.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" ? u.name : (u.id as string) }))
     : [];
+  // The refusal's picker takes the menu's place: «as <name> ▾» is closed.
+  d.userMenu = false;
   d.userPick = {
     users,
     message: users.length
@@ -806,10 +808,20 @@ function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null
   };
 }
 
-/** Read the thread once per page per session, when the tab is shown or a turn starts. */
+/** Read the thread once per page per session, when the tab is shown or a turn starts.
+ *  A page read before a user was picked for the bot on another page is read
+ *  again for that user, its old thread dropped here first: every send runs
+ *  this, so no turn pairs one user's thread with another user's id (the
+ *  engine refuses that as `other-user`). Not while a turn of it runs. */
 function maybeLoad(): void {
   const d = ensureHere();
-  if (d && !d.load) void loadThread(d);
+  if (!d) return;
+  const kept = d.userId && !discussionLive(d) ? sendUser(d) : null;
+  if (kept && kept !== d.userId) {
+    for (const t of d.turns) anchors.delete(t.key);
+    Object.assign(d, { turns: [], discussionId: null, earlier: null, userId: kept, userName: null, userMenu: false, load: undefined });
+  }
+  if (!d.load) void loadThread(d);
 }
 
 async function getThread(d: DiscussionView, user: string | null): Promise<{ ok: boolean; status: number; body: Record<string, unknown> | null }> {
@@ -1006,11 +1018,13 @@ async function deleteEarlier(threadId: string): Promise<void> {
   reloadThread(d);
 }
 
-/** «as <name> ▾»: open or close the user picker. */
+/** «as <name> ▾»: open or close the user picker. Opening it takes the place
+ *  of a refusal's picker, as a refusal's picker closes it. */
 function toggleUserMenu(): void {
   const d = here();
   if (!d?.userChoosable) return;
   d.userMenu = !d.userMenu;
+  if (d.userMenu) d.userPick = null;
   paint();
 }
 
@@ -1034,6 +1048,7 @@ function pickUser(): void {
   const sel = document.querySelector<HTMLSelectElement>(`#${DISCUSS_BODY_ID} .wiki-discuss-user-select`);
   if (!d || !sel?.value) return;
   // «as <name> ▾»: another user's own thread of this page (never moves a thread).
+  // Never open beside a refusal's picker (`userPick`): each closes the other.
   if (d.userMenu) {
     if (discussionLive(d)) {
       noteActionError(d, "A turn is still running: switch the user when it has ended.");

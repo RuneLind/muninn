@@ -441,3 +441,124 @@ test("not choosable (an authenticating instance): the name shows with no picker 
   expect(document.querySelector("[data-discuss-as]")).toBe(null);
   document.body.innerHTML = "";
 });
+
+// ── PR 913 fix round 1 batch 1 ───────────────────────────────────────────
+
+/** A thread read per user: Popp holds a live thread with a turn on every page, Rune none. */
+function perUserReads(users = [{ id: "popp", name: "Popp" }, { id: "rune", name: "Rune" }]) {
+  return (url: string) => {
+    const q = new URL(url, "http://x").searchParams;
+    const userId = q.get("userId") ?? "popp";
+    const page = q.get("relPath")!;
+    const name = users.find((u) => u.id === userId)?.name ?? userId;
+    const row = { id: `${userId}-${page}`, discussionId: `th-${userId}-${page}`, seq: 1, selection: null, question: `${name}'s question on ${page}`, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 };
+    const held = userId === "popp";
+    return json({
+      userId, userName: name, userChoosable: true, users, bot: "f1-bot",
+      thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null,
+      messages: held ? [{ id: `m-${row.id}`, role: "user", content: row.question, createdAt: 1, turn: row }] : [],
+      closed: [], closedTotal: 0, oneShot: [],
+    });
+  };
+}
+
+test("F1: a user picked on another page of the wiki: back on a page read before, its discussion is that user's, and a turn never pairs one user's thread with another's id", async () => {
+  wiki = "f1";
+  relPath = "plans/a.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const posts: Record<string, unknown>[] = [];
+  const threadRead = perUserReads();
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return threadRead(url);
+    if (url === "/api/wiki/discuss" && init?.method === "POST") posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return json({ error: "stub" }, 404);
+  };
+  await openTab(); // page A: Popp's live thread
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Popp ▾");
+  relPath = "plans/b.mdx";
+  await openTab(); // page B, then «as Rune» there
+  (document.querySelector("[data-discuss-as]") as HTMLButtonElement).click();
+  document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!.value = "rune";
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
+
+  relPath = "plans/a.mdx";
+  const before = reads.length;
+  await openTab(); // back on page A
+  expect(reads.slice(before).map((u) => new URL(u, "http://x").searchParams.get("userId"))).toEqual(["rune"]);
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
+  expect(document.querySelector(".wiki-discuss-turns")!.textContent).not.toContain("Popp's question");
+  // Read once: showing the tab again reads nothing more.
+  const after = reads.length;
+  await openTab();
+  expect(reads.length).toBe(after);
+  // The next turn: Rune's id, and no thread of Popp's.
+  (document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement).value = "Hello?";
+  (document.getElementById(DISCUSS_ASK_BTN_ID) as HTMLButtonElement).click();
+  await settle();
+  expect(posts.length).toBe(1);
+  expect(posts[0]!.userId).toBe("rune");
+  expect(posts[0]!.discussionId).toBeUndefined();
+  document.body.innerHTML = "";
+});
+
+test("F5: a refusal's picker while «as <name> ▾» was open: the menu closes, and the refusal's user is taken", async () => {
+  wiki = "f5";
+  relPath = "plans/r.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const threadRead = perUserReads();
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return threadRead(url);
+    if (url === "/api/wiki/discuss" && init?.method === "POST") return json({ error: "not a chat user", reason: "unknown-user", bot: "f1-bot", users: [{ id: "kari", name: "Kari" }] }, 422);
+    return json({}, 404);
+  };
+  await openTab();
+  (document.querySelector("[data-discuss-as]") as HTMLButtonElement).click();
+  expect(document.querySelector("[data-discuss-as]")!.getAttribute("aria-expanded")).toBe("true");
+  (document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement).value = "Hello?";
+  (document.getElementById(DISCUSS_ASK_BTN_ID) as HTMLButtonElement).click();
+  await settle();
+  // The refusal's picker replaced the menu: the button says the menu is closed.
+  expect(document.querySelector("[data-discuss-as]")!.getAttribute("aria-expanded")).toBe("false");
+  const sel = document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!;
+  expect(Array.from(sel.options).map((o) => o.value)).toEqual(["kari"]);
+  sel.value = "kari";
+  const before = reads.length;
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  expect(reads.slice(before).map((u) => new URL(u, "http://x").searchParams.get("userId"))).toEqual(["kari"]);
+  expect(localStorage.getItem("muninn-discuss-user-f1-bot")).toBe("kari");
+  document.body.innerHTML = "";
+});
+
+test("F5: «as <name> ▾» opened over a refusal's picker replaces it: the menu's users, and a pick from it switches", async () => {
+  wiki = "f5b";
+  relPath = "plans/r.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const threadRead = perUserReads();
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return threadRead(url);
+    if (url === "/api/wiki/discuss" && init?.method === "POST") return json({ error: "not a chat user", reason: "unknown-user", bot: "f1-bot", users: [{ id: "kari", name: "Kari" }] }, 422);
+    return json({}, 404);
+  };
+  await openTab();
+  (document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement).value = "Hello?";
+  (document.getElementById(DISCUSS_ASK_BTN_ID) as HTMLButtonElement).click();
+  await settle();
+  expect(Array.from(document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!.options).map((o) => o.value)).toEqual(["kari"]);
+  (document.querySelector("[data-discuss-as]") as HTMLButtonElement).click();
+  expect(document.querySelector("[data-discuss-as]")!.getAttribute("aria-expanded")).toBe("true");
+  const sel = document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!;
+  expect(Array.from(sel.options).map((o) => o.value)).toEqual(["popp", "rune"]);
+  sel.value = "rune";
+  const before = reads.length;
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  expect(reads.slice(before).map((u) => new URL(u, "http://x").searchParams.get("userId"))).toEqual(["rune"]);
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
+  document.body.innerHTML = "";
+});

@@ -732,11 +732,13 @@ function paintTurnCard(card: Element): void {
   const key = card.getAttribute("data-sel-turn");
   const body = card.querySelector(".wiki-sel-card-body");
   if (!key || !body) return;
-  // The thread read may name the user after the card was placed.
+  const found = discussTurnForCard(key);
+  // The thread read may name the user after the card was placed. Only while
+  // the turn is in the page's discussion, whose turns are all the current
+  // user's: after a switch the card keeps the name its turn ran as.
   const sub = card.querySelector(".wiki-sel-card-sub");
   const subText = `· ${inlineTurnSub(discussUserNameHere())}`;
-  if (sub && sub.textContent !== subText) sub.textContent = subText;
-  const found = discussTurnForCard(key);
+  if (found && sub && sub.textContent !== subText) sub.textContent = subText;
   const html = found
     ? discussTurnBodyParts(found.turn, found.current).join("") || ""
     : `<div class="wiki-discuss-hint">This turn is no longer in the page's discussion.</div>`;
