@@ -904,9 +904,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         const pack = buildContextPack({ wiki: p.wiki, relPath: p.relPath, title: p.title, absPath: pagePath, raw: p.raw, ...packSelection(p.body) });
         // A question (or its selection) that names a key gets that key's
         // mentions up front, as a trace turn does: no grep, so the answer can stream.
-        // Not on an instance that authenticates: there the mentions route, a trace
-        // and the Copilot wiki tools are all off (`TRACE_AUTH_REFUSAL`), since
-        // mentions spawn git and a background gh refresh.
+        // Not on an instance that authenticates: there the mentions route 404s,
+        // a trace is refused (`TRACE_AUTH_REFUSAL`) and the Copilot wiki tools are
+        // left out (`authOff`), since mentions spawn git and a background gh refresh.
         let keyMentions: { key: string; lines: string[]; complete: boolean } | null = null;
         const key = (deps.authMode ?? authMode)() === "off" ? discussTurnKey({ question: p.body.question, selection: p.body.selection }, p.index.readerConfig) : null;
         if (key) {

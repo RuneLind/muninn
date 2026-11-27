@@ -67,15 +67,6 @@ const prState = (p: MentionsBody["prs"][number]): string => {
   return p.state;
 };
 
-/**
- * The context pack of a trace turn, from the mentions payload. Each mention
- * line is reported once: listed under «Where it is mentioned» or «Its log.md
- * lines», or counted in one cut note. The log section's note counts the root
- * log.md lines its search saw (`logTotalLines`) less those it lists; the
- * where note, the payload's total (log.md included) less every log.md line
- * and the lines it lists. «At least» when the totals are lower bounds. Fix
- * round 2 batch 3: the where note counted the log section's cut lines again.
- */
 /** Each section's character bound; a trace turn gives every section {@link PACK_SECTION_MAX}. */
 export interface TracePackBudget {
   where: number;
@@ -85,6 +76,15 @@ export interface TracePackBudget {
 }
 const TRACE_BUDGET: TracePackBudget = { where: PACK_SECTION_MAX, commits: PACK_SECTION_MAX, log: PACK_SECTION_MAX, prs: PACK_SECTION_MAX };
 
+/**
+ * The context pack of a trace turn, from the mentions payload. Each mention
+ * line is reported once: listed under «Where it is mentioned» or «Its log.md
+ * lines», or counted in one cut note. The log section's note counts the root
+ * log.md lines its search saw (`logTotalLines`) less those it lists; the
+ * where note, the payload's total (log.md included) less every log.md line
+ * and the lines it lists. «At least» when the totals are lower bounds. Fix
+ * round 2 batch 3: the where note counted the log section's cut lines again.
+ */
 export function traceContextPack(wiki: string, b: MentionsBody, budget: TracePackBudget = TRACE_BUDGET): string[] {
   const at = b.totalsAtLeast ? "at least " : "";
   const out = [

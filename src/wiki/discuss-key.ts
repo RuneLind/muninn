@@ -18,7 +18,7 @@ import type { TrackerConfig } from "./trackers/types.ts";
 /** The longest text scanned: a question is capped well under this, a selection may not be. */
 export const DISCUSS_KEY_SCAN_MAX = 4000;
 
-/** Where `key` first stands whole in `t` (the tracker rule's edges: no ASCII word character before it, none or `-` and a digit after it); -1 when it never does. A bare `indexOf` found MELOSYS-8351 inside `XMELOSYS-8351` and called it first. */
+/** Where `key` first stands whole in `t`, by the tracker rule's edges (`LEFT`, `END_RE` in `trackers/jira.ts`): no ASCII word character before it, and after it neither a word character nor `-` and a digit; -1 when it never does. A bare `indexOf` found MELOSYS-8351 inside `XMELOSYS-8351` and called it first. */
 function wholeIndexOf(t: string, key: string): number {
   for (let at = t.indexOf(key); at >= 0; at = t.indexOf(key, at + 1)) {
     const before = at > 0 ? t[at - 1]! : "";
