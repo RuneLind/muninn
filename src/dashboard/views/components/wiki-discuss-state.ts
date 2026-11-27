@@ -85,6 +85,22 @@ export interface DiscussTurnView {
   handover: { state: "busy" | "done" | "failed"; note: string; prompt?: string } | null;
   /** The chip found no such passage in the page as it is now. */
   passageGone: boolean;
+  /** The send's request had no answer after {@link DISCUSS_WAITING_MS}. */
+  waiting?: boolean;
+}
+
+/** How long a Discuss send may wait for response headers before the turn says so. */
+export const DISCUSS_WAITING_MS = 5000;
+/** The line a turn shows then: a browser holds a request back when its
+ *  connections to the host are all taken (6 over HTTP/1.1, and every muninn
+ *  tab with a live stream holds one). The pane, its inline card and the Trace card say the same. */
+export const DISCUSS_WAITING_TEXT = "Still waiting for the server to take this turn. If several muninn tabs are open, the browser may be holding it back: closing one sends it.";
+export const DISCUSS_WAITING_HTML = `<div class="wiki-discuss-hint" data-discuss-waiting role="status">${DISCUSS_WAITING_TEXT}</div>`;
+
+/** Run `onSlow` once `ms` pass unless the returned stop runs first. */
+export function whenSlow(onSlow: () => void, ms = DISCUSS_WAITING_MS): () => void {
+  const t = setTimeout(onSlow, ms);
+  return () => clearTimeout(t);
 }
 
 /** What `POST /api/wiki/discuss/apply` previewed: the diff and what Apply must send back. */
@@ -785,6 +801,7 @@ export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): stri
   if (turnLive(t)) {
     const phase = t.state === "sending" ? "Starting the turn…" : discussPhaseWords(t.phase);
     parts.push(`<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(phase)}</span></div>`);
+    if (t.state === "sending" && t.waiting) parts.push(DISCUSS_WAITING_HTML);
   }
   if (t.tools.length) parts.push(discussToolsHtml(t));
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${breakablePaths(renderStreamingBody(t.text))}</div>`);

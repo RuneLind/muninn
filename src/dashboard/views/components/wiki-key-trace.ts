@@ -66,6 +66,7 @@ import {
   type TraceThreadRead,
 } from "./wiki-key-trace-model.ts";
 import { escHtml as esc } from "./escape.ts";
+import { whenSlow } from "./wiki-discuss-state.ts";
 import { KEY_PEEK_MARK_SELECTOR } from "../../../wiki/core/live-facts-chip.ts";
 
 const DISCUSS_PATH = "/api/wiki/discuss";
@@ -97,6 +98,8 @@ interface TraceTurn {
   state: "running" | "done" | "error";
   status?: string;
   turnId: string | null;
+  /** The send's request has had no answer for {@link DISCUSS_WAITING_MS}. */
+  waiting?: boolean;
 }
 
 interface TraceState {
@@ -166,7 +169,7 @@ function paintTurns(st: TraceState): void {
   const el = turnsEl(st);
   if (!el) return;
   el.innerHTML = st.turns
-    .map((t) => traceTurnHtml({ question: t.question, answerHtml: t.state === "error" ? esc(t.text) : t.text ? renderStreamingBody(t.text) : "", state: t.state, status: t.status, turnId: t.turnId }))
+    .map((t) => traceTurnHtml({ question: t.question, answerHtml: t.state === "error" ? esc(t.text) : t.text ? renderStreamingBody(t.text) : "", state: t.state, status: t.status, turnId: t.turnId, waiting: t.waiting }))
     .join("");
   const started = st.turns.length > 0;
   // A turn running (this card's or one read back): nothing to send until it ends.
@@ -285,8 +288,19 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
   const ctl = new AbortController();
   st.ctl = ctl;
   let busyRead = false;
+  const stopWait = whenSlow(() => {
+    turn.waiting = true;
+    if (live(st)) paintTurns(st);
+  });
+  const answered = () => {
+    stopWait();
+    if (!turn.waiting) return;
+    turn.waiting = false;
+    if (live(st)) paintTurns(st);
+  };
   try {
     const res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body), signal: ctl.signal });
+    answered();
     if (!res.ok || !res.body) {
       const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
       // A turn of the thread still runs (another tab, /chat): show that turn, not this refusal.
@@ -327,6 +341,7 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
   } catch {
     if (!ctl.signal.aborted) fail("The turn failed: the server did not answer.");
   }
+  answered();
   if (st.ctl === ctl) st.ctl = null;
   st.busy = false;
   if (ctl.signal.aborted || !live(st)) return;
