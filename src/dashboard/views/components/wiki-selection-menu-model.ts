@@ -266,15 +266,15 @@ const CARD_TITLES: Record<CardKind, string> = {
   trace: "🧭 Trace",
 };
 
-/** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
- *  `data-reader-only` keeps it out of every read of the page's own text (a
- *  later selection's context, Explain, fact check). */
 /** A thread turn card's sub line: whose discussion the turn is in, once the
  *  thread read named the user. */
 export function inlineTurnSub(userName: string | null | undefined): string {
   return userName ? `a turn in ${userName}'s discussion of this page` : "a turn in this page's discussion";
 }
 
+/** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
+ *  `data-reader-only` keeps it out of every read of the page's own text (a
+ *  later selection's context, Explain, fact check). */
 export function inlineCardHtml(kind: CardKind, sub: string, body: string, turnKey: string | null): string {
   return (
     `<div class="${SEL_CARD_CLASS}" data-sel-card="${kind}" data-reader-only role="region" aria-label="${esc(CARD_TITLES[kind].replace(/^\S+\s/, ""))}"${turnKey ? ` data-sel-turn="${esc(turnKey)}"` : ""}>` +

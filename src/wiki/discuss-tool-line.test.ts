@@ -66,6 +66,27 @@ describe("discussToolLine", () => {
     expect(discussToolLine(undefined as unknown as string, null as unknown as string)).toEqual({ label: "tool", detail: "" });
     expect(discussToolLine("x", '{"a":"\\u12')).toEqual({ label: "x", detail: "a: \\u12" });
   });
+  // The engine cuts a tool input at 200 chars (`abbreviate`): a path cut there
+  // has no file name left, so its tail would be middle directories.
+  const cutAt = (s: string, max = 200) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
+  test("PR 913 R1: a path cut by the 200-char limit keeps its head, never a tail of middle directories", () => {
+    const deep = "/Users/rune/source/private/snapshot/" + "d/".repeat(80) + "file.ts";
+    const line = discussToolLine("Read", cutAt(j({ file_path: deep })));
+    expect(line.detail.startsWith("/Users/rune/source/private/snapshot/")).toBe(true);
+    expect(line.detail.endsWith("…")).toBe(true);
+    // An uncut absolute path still shows its tail.
+    expect(discussToolLine("Read", j({ file_path: "/a/b/c/d/e.ts" })).detail).toBe("…/c/d/e.ts");
+  });
+
+  test("PR 913 R1: on a cut input a nested key never shadows the top-level one", () => {
+    const input = cutAt(j({ nested: { pattern: "inner" }, pattern: "outer", path: "p/" + "x".repeat(300) }));
+    expect(discussToolLine("Grep", input).detail.startsWith('"outer"')).toBe(true);
+    // …nor one inside an array of objects.
+    expect(discussToolLine("Grep", cutAt(j({ list: [{ pattern: "in-array" }], pattern: "outer", path: "p/" + "x".repeat(300) }))).detail.startsWith('"outer"')).toBe(true);
+    // A key named like an Object.prototype member is read, not skipped.
+    expect(discussToolLine("mystery", cutAt(j({ constructor: "c", pad: "y".repeat(300) }))).detail).toContain("constructor: c");
+  });
+
   test("discussToolText joins label and detail the way /chat's tool line splits it", () => {
     expect(discussToolText("yggdrasil-search", j({ query: "q" }))).toBe("Searching code: q");
     expect(discussToolText("yggdrasil-list_repos", "")).toBe("Listing repos");

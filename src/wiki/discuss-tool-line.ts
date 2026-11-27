@@ -22,6 +22,26 @@ function cut(s: string, n = DETAIL_MAX): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
+/** Brace depth at each index of `s`, braces inside strings not counted. */
+function depths(s: string): number[] {
+  const out: number[] = new Array(s.length);
+  let depth = 0;
+  let inStr = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (c === "\\") {
+        out[i] = depth;
+        i++;
+      } else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") depth--;
+    out[i] = depth;
+  }
+  return out;
+}
+
 /** The input's top-level string and number fields. */
 function readFields(input: string): Fields {
   const out: Fields = {};
@@ -36,11 +56,12 @@ function readFields(input: string): Fields {
   } catch {
     /* cut or not JSON: the regex below */
   }
-  // A string value may be unterminated where the input was cut.
+  // Only keys at depth 1 count: a nested object's key must not shadow a top-level one.
+  const depth = depths(input);
   const re = /"([A-Za-z_][\w]*)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"?|(-?\d+(?:\.\d+)?|true|false))/g;
   for (const m of input.matchAll(re)) {
     const key = m[1]!;
-    if (key in out) continue;
+    if (depth[m.index] !== 1 || Object.hasOwn(out, key)) continue;
     if (m[2] !== undefined) {
       let s = m[2];
       try {
@@ -54,8 +75,11 @@ function readFields(input: string): Fields {
   return out;
 }
 
-/** An absolute path (a snapshot's, a repo's) shows only its last three segments. */
+/** An absolute path (a snapshot's, a repo's) shows only its last three
+ *  segments. One the engine's 200-char cut reached ends in its «…» and keeps
+ *  its head: the file name is gone, so a tail would be middle directories. */
 function tail(p: string): string {
+  if (p.endsWith("…")) return p;
   if (!p.startsWith("/") && !p.startsWith("~") && !/^[A-Za-z]:[\\/]/.test(p)) return p;
   const segs = p.split(/[\\/]+/).filter(Boolean);
   return segs.length <= 3 ? p : `…/${segs.slice(-3).join("/")}`;
