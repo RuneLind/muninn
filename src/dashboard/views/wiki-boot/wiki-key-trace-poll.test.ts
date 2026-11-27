@@ -61,6 +61,8 @@ interface HeldRead {
 }
 /** Every thread read (`?traceKey=`), in order; each waits for its `answer`. */
 const reads: HeldRead[] = [];
+/** Each thread read's URL, in order (PR 913 D3c reads its userId). */
+const readUrls: URL[] = [];
 interface HeldPost {
   body: Record<string, unknown>;
   signal: AbortSignal | null;
@@ -121,6 +123,7 @@ beforeAll(() => {
     const url = String(input);
     if (url.startsWith("/api/wiki/mentions?")) return json(MENTIONS);
     if (url.startsWith("/api/wiki/discuss/thread?") && url.includes("traceKey=")) {
+      readUrls.push(new URL(url, "http://x"));
       return new Promise<Response>((resolve, reject) => {
         const held: HeldRead = {
           signal: init?.signal ?? null,
@@ -684,4 +687,76 @@ test("D9 no range, taken off the page by a render not yet swept while a read is 
   await r.answer(running());
   expect(pending()).toEqual([]);
   expect(reads.length).toBe(2);
+});
+
+// ── PR 913 fix round 2 batch 1 (D3) ─────────────────────────────────────────
+
+test("D3 a follow-up on a trace thread read for one user carries that user's id, though another user was picked since", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  localStorage.setItem("muninn-discuss-user-b", "popp");
+  try {
+    const card = await openCard();
+    await reads[0]!.answer(
+      json({
+        userId: "popp",
+        bot: "b",
+        traceKey: KEY,
+        thread: { id: "th-popp" },
+        messages: [
+          { id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "A1", endState: "done", error: null, assistantMessageId: "m2" } },
+          { id: "m2", role: "assistant", content: "A1: it is open.", turn: null },
+        ],
+      }),
+    );
+    expect(actionable(card)).toBe("follow");
+    // «as Rune» picked on a page meanwhile.
+    localStorage.setItem("muninn-discuss-user-b", "rune");
+    const input = card.querySelector<HTMLInputElement>(".wiki-trace-input")!;
+    input.value = "And on Sundays?";
+    follow(card).dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(posts.length).toBe(1);
+    expect(posts[0]!.body.discussionId).toBe("th-popp");
+    expect(posts[0]!.body.userId).toBe("popp");
+  } finally {
+    localStorage.clear();
+  }
+});
+
+test("D3b a follow-up after «Summarize» started the thread carries the turn's user, though another user was picked since", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  localStorage.setItem("muninn-discuss-user-b", "popp");
+  try {
+    const card = await openCard();
+    await reads[0]!.answer(gone());
+    summarize(card).click();
+    await settle();
+    const s = await posts[0]!.stream();
+    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp" });
+    await s.push("done", { answer: "SUMMARY." });
+    await s.end();
+    localStorage.setItem("muninn-discuss-user-b", "rune");
+    card.querySelector<HTMLInputElement>(".wiki-trace-input")!.value = "And on Sundays?";
+    follow(card).dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(posts.length).toBe(2);
+    expect(posts[1]!.body).toMatchObject({ discussionId: "th-popp", userId: "popp" });
+  } finally {
+    localStorage.clear();
+  }
+});
+
+test("D3c a running turn's poll reads the thread for the user it was read for, though another user was picked since", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  localStorage.setItem("muninn-discuss-user-b", "popp");
+  try {
+    await openCard();
+    await reads[0]!.answer(json({ userId: "popp", thread: { id: "th-1" }, messages: [{ id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "", endState: "running", error: null, assistantMessageId: null } }] }));
+    localStorage.setItem("muninn-discuss-user-b", "rune");
+    await fire();
+    expect(reads.length).toBe(2);
+    expect(readUrls.at(-1)!.searchParams.get("userId")).toBe("popp");
+  } finally {
+    localStorage.clear();
+  }
 });

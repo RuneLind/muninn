@@ -105,6 +105,8 @@ interface TraceState {
   card: HTMLElement;
   turns: TraceTurn[];
   discussionId: string | null;
+  /** The user of the read or turn that gave `discussionId`: a send naming the thread names this user. */
+  userId: string | null;
   busy: boolean;
   /** The running send's stream, aborted when the card leaves for good. */
   ctl: AbortController | null;
@@ -189,15 +191,18 @@ async function loadThread(st: TraceState): Promise<void> {
   const ctl = new AbortController();
   st.pollCtl = ctl;
   const q = new URLSearchParams({ wiki: st.wiki, traceKey: st.key });
-  const user = discussUserFor(st.wiki);
+  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki);
   if (user) q.set("userId", user);
   let read: TraceThreadRead;
   let thread: { id: string; messages: TraceThreadMessage[] } | null = null;
+  let readUser: string | null = null;
   try {
     const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" }, signal: ctl.signal });
     if (res.ok) {
       // Not JSON, or JSON that is no thread: `malformed`, read again under the bound.
-      ({ read, thread } = traceReadOf(await res.json().catch(() => undefined)));
+      const b = (await res.json().catch(() => undefined)) as { userId?: unknown } | undefined;
+      ({ read, thread } = traceReadOf(b));
+      readUser = typeof b?.userId === "string" ? b.userId : null;
     } else {
       const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
       read = {
@@ -215,6 +220,7 @@ async function loadThread(st: TraceState): Promise<void> {
   if (ctl.signal.aborted || !live(st)) return;
   if (thread) {
     st.discussionId = thread.id;
+    st.userId = readUser;
     st.turns = traceTurnsFromThread(thread.messages);
     paintTurns(st);
     read = { kind: "thread", running: st.turns.some((t) => t.state === "running") };
@@ -257,7 +263,9 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
   paintTurns(st);
   const body: Record<string, unknown> = { wiki: st.wiki, traceKey: st.key, question: turn.question, mode: "explore" };
   if (st.discussionId) body.discussionId = st.discussionId;
-  const user = discussUserFor(st.wiki);
+  // A send naming a thread names the user of the read or turn that gave it;
+  // the user kept for the bot goes only with no thread (409 `other-user` otherwise).
+  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki);
   if (user) body.userId = user;
   const fail = (msg: string) => {
     turn.state = "error";
@@ -284,6 +292,7 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
         }
         if (f.event === "turn") {
           if (typeof m.discussionId === "string") st.discussionId = m.discussionId;
+          if (typeof m.userId === "string") st.userId = m.userId;
           if (typeof m.turnId === "string") turn.turnId = m.turnId;
         } else if (f.event === "status") turn.status = traceStatusFrom(m, turn.status);
         else if (f.event === "delta" && typeof m.text === "string") turn.text += m.text;
@@ -339,7 +348,7 @@ export function openTrace(key: string, range: Range | null): HTMLElement | null 
   });
   if (!card) return null;
   card.setAttribute("data-trace-key", key);
-  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, busy: false, ctl: null, poll: null, pollCtl: null, pollFailures: 0, dropped: false });
+  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, userId: null, busy: false, ctl: null, poll: null, pollCtl: null, pollFailures: 0, dropped: false });
   traces.set(card, state);
   void (async () => {
     const r = await fetchMentions(state.wiki, key);

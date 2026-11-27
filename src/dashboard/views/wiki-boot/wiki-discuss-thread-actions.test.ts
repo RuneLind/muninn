@@ -562,3 +562,176 @@ test("F5: «as <name> ▾» opened over a refusal's picker replaces it: the menu
   expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
   document.body.innerHTML = "";
 });
+
+// ── PR 913 fix round 2 batch 1 ───────────────────────────────────────────
+
+/** A POST answered with an SSE stream the test feeds. */
+function heldStream() {
+  const enc = new TextEncoder();
+  let ctl!: ReadableStreamDefaultController<Uint8Array>;
+  const res = new Response(new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  return {
+    res,
+    push: (event: string, data: unknown) => ctl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)),
+    end: () => ctl.close(),
+  };
+}
+
+/** Popp holds a live thread (with a closed one under «Earlier discussions») on every page, Rune none; `failFor` reads answer 500. */
+function d1Reads(failFor: Set<string>) {
+  const users = [{ id: "popp", name: "Popp" }, { id: "rune", name: "Rune" }];
+  return (url: string) => {
+    const q = new URL(url, "http://x").searchParams;
+    const userId = q.get("userId") ?? "popp";
+    const page = q.get("relPath")!;
+    if (failFor.has(`${userId}:${page}`)) return json({ error: "boom" }, 500);
+    const name = users.find((u) => u.id === userId)!.name;
+    const row = { id: `${userId}-${page}`, discussionId: `th-${userId}-${page}`, seq: 1, selection: null, question: `${name}'s question on ${page}`, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 };
+    const held = userId === "popp";
+    return json({
+      userId, userName: name, userChoosable: true, users, bot: "d-bot",
+      thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null,
+      messages: held ? [{ id: `m-${row.id}`, role: "user", content: row.question, createdAt: 1, turn: row }] : [],
+      closed: held ? [{ id: `closed-${page}`, name: "old", createdAt: 1, closedAt: 2, messages: [{ id: "c1", role: "user", content: "Popp's closed question", createdAt: 1 }], messageTotal: 1 }] : [],
+      closedTotal: held ? 1 : 0,
+      oneShot: [],
+    });
+  };
+}
+
+async function pickAs(userId: string): Promise<void> {
+  (document.querySelector("[data-discuss-as]") as HTMLButtonElement).click();
+  document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!.value = userId;
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+}
+
+async function askBox(text: string): Promise<void> {
+  (document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement).value = text;
+  (document.getElementById(DISCUSS_ASK_BTN_ID) as HTMLButtonElement).click();
+  await settle();
+}
+
+test("D1: a user picked elsewhere while a page's turn runs: the follow-up after it stays on that thread and user; the page moves when shown next with no turn running", async () => {
+  wiki = "d1";
+  relPath = "plans/a.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const fail = new Set<string>();
+  const threadRead = d1Reads(fail);
+  const posts: Record<string, unknown>[] = [];
+  let stream: ReturnType<typeof heldStream> | null = null;
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return threadRead(url);
+    if (url === "/api/wiki/discuss" && init?.method === "POST") {
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      if (posts.length === 1) return (stream = heldStream()).res;
+      return json({ error: "stub" }, 404);
+    }
+    return json({}, 404);
+  };
+  await openTab(); // page A, Popp's thread
+  await askBox("First?");
+  // First visit, nothing kept: the read's default user, paired with the thread it read.
+  expect(posts[0]).toMatchObject({ discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe(null);
+  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  await settle();
+  relPath = "plans/b.mdx";
+  await openTab();
+  await pickAs("rune");
+  relPath = "plans/a.mdx";
+  const before = reads.length;
+  await openTab(); // back on A while its turn runs: no switch
+  expect(reads.length).toBe(before);
+  stream!.push("done", { answer: "Done.", proposedEdit: null });
+  stream!.end();
+  await settle();
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Popp ▾");
+  await askBox("Follow-up?");
+  expect(posts[1]).toMatchObject({ discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Popp ▾");
+  expect(document.querySelector(".wiki-discuss-turns")!.textContent).toContain("Popp's question");
+
+  // Shown again with no turn running: Rune's discussion. Its read fails here,
+  // so nothing of Popp's is left: no name, no earlier discussions.
+  fail.add("rune:plans/a.mdx");
+  await openTab();
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("rune");
+  expect(document.querySelector(".wiki-discuss-as")).toBe(null);
+  expect(document.querySelector(".wiki-discuss-earlier")).toBe(null);
+  expect(document.querySelector(".wiki-discuss-turns")!.textContent).not.toContain("Popp's question");
+  document.body.innerHTML = "";
+});
+
+test("D2a: a turn event for one user never writes the kept user back over a pick made meanwhile", async () => {
+  wiki = "d2";
+  relPath = "plans/a.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const threadRead = d1Reads(new Set());
+  let stream: ReturnType<typeof heldStream> | null = null;
+  route = (url, init) => {
+    if (url.startsWith("/api/wiki/discuss/thread?")) return threadRead(url);
+    if (url === "/api/wiki/discuss" && init?.method === "POST") return (stream = heldStream()).res;
+    return json({}, 404);
+  };
+  await openTab(); // page A
+  await askBox("First?"); // its stream is open, no turn event yet
+  relPath = "plans/b.mdx";
+  await openTab();
+  await pickAs("rune");
+  expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe("rune");
+  // A's turn event names Popp: the pick stands.
+  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  await settle();
+  expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe("rune");
+  stream!.push("done", { answer: "Done.", proposedEdit: null });
+  stream!.end();
+  await settle();
+  document.body.innerHTML = "";
+});
+
+test("D2b: a read for one user never writes the kept user back over a pick made while it was in flight", async () => {
+  wiki = "d2b";
+  reads.length = 0;
+  localStorage.clear();
+  const threadRead = d1Reads(new Set());
+  let gate: (() => void) | null = null;
+  route = (url) => {
+    if (!url.startsWith("/api/wiki/discuss/thread?")) return json({}, 404);
+    if (url.includes("plans%2Fc.mdx")) return new Promise<Response>((r) => (gate = () => r(threadRead(url))));
+    return threadRead(url);
+  };
+  localStorage.setItem("muninn-discuss-bot-d2b", "d-bot");
+  // A read started for Popp (page C), a pick of Rune lands before it answers.
+  localStorage.setItem("muninn-discuss-user-d-bot", "popp");
+  relPath = "plans/c.mdx";
+  await openTab();
+  localStorage.setItem("muninn-discuss-user-d-bot", "rune"); // the pick, as pickUser writes it
+  gate!();
+  await settle();
+  expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe("rune");
+  document.body.innerHTML = "";
+});
+
+test("D1b: a page render with the tab shown follows a user picked elsewhere (no turn running)", async () => {
+  wiki = "d1b";
+  relPath = "plans/a.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  route = (url) => (url.startsWith("/api/wiki/discuss/thread?") ? d1Reads(new Set())(url) : json({}, 404));
+  await openTab(); // A, Popp's
+  relPath = "plans/b.mdx";
+  await openTab();
+  await pickAs("rune");
+  // Navigation back to A with the Discuss tab still shown: the shell renders A and turns the agent on.
+  relPath = "plans/a.mdx";
+  document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`)!.classList.add("active");
+  setDiscussAgentEnabled(true);
+  await settle();
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("relPath")).toBe("plans/a.mdx");
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("rune");
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
+  document.body.innerHTML = "";
+});

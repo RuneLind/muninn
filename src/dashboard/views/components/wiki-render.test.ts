@@ -287,7 +287,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // (a page re-read for a user picked elsewhere, the card's owner kept, the two pickers apart): 998,873
 // (338,667 gzipped), so the pin moves to 999,000. Batch 2 (a cut path keeps its head, top-level keys
 // only): 999,171 as the test measures it, so the pin moves to 999,300.
-const WIKI_CLIENT_MAX_BYTES = 999_300;
+// Fix round 2 batch 1 (a send names the user of its thread's read, only a pick keeps a user, a page
+// follows a pick when shown): 999,339 as the test measures it, so the pin moves to 999,400.
+const WIKI_CLIENT_MAX_BYTES = 999_400;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
