@@ -38,6 +38,8 @@ export interface SharedSseDeps {
   channel: ((name: string) => SharedSseChannel) | null;
   eventSource: (url: string) => EventSource;
   id: () => string;
+  /** Where a handler's exception goes; it never stops the dispatch. */
+  report?: (err: unknown) => void;
 }
 
 export interface SharedSseOptions {
@@ -130,10 +132,38 @@ export function sharedSseClient(url: string, handlers: SseHandlers = {}, opts: S
   let release: (() => void) | null = null;
   let buffer: Frame[] = [];
   const listening = new Set<string>();
+  /** Per history name, the data this tab's handlers last got (at most the cap).
+   *  A new stream opens with the server's replay of rows already shown (a
+   *  takeover, a reconnect), and the consumers prepend without deduping. */
+  const delivered = new Map<string, string[]>();
+  // By default as an EventSource listener's throw: reported as uncaught, the next one still runs.
+  const report =
+    deps.report ??
+    ((err: unknown) =>
+      setTimeout(() => {
+        throw err;
+      }, 0));
 
   const fire = (key: string, ev: Event): void => {
     const fn = handlers[key];
-    if (typeof fn === "function") (fn as (e: Event) => void)(ev);
+    if (typeof fn !== "function") return;
+    try {
+      (fn as (e: Event) => void)(ev);
+    } catch (err) {
+      report(err);
+    }
+  };
+  /** A frame to this tab's own handler, unless it repeats a history row it already delivered. */
+  const deliver = (event: string, data: string, ev: () => Event): void => {
+    const cap = history[event] ?? 0;
+    if (cap > 0) {
+      const seen = delivered.get(event) ?? [];
+      if (seen.includes(data)) return;
+      seen.push(data);
+      if (seen.length > cap) seen.shift();
+      delivered.set(event, seen);
+    }
+    fire(event, ev());
   };
   const post = (m: Msg): void => {
     if (closed || role === "done") return;
@@ -162,7 +192,7 @@ export function sharedSseClient(url: string, handlers: SseHandlers = {}, opts: S
       const f: Frame = { event: n, data: String(msg.data ?? ""), lastEventId: msg.lastEventId ?? "" };
       remember(f);
       post({ t: "frame", ...f });
-      fire(n, ev);
+      deliver(n, f.data, () => ev);
     });
   };
   const stepDown = (): void => {
@@ -222,7 +252,7 @@ export function sharedSseClient(url: string, handlers: SseHandlers = {}, opts: S
       synced = true;
       rs = m.rs;
       if (m.rs === 1) fire("onopen", lifecycleEvent("open"));
-      for (const f of m.frames) fire(f.event, frameEvent(f));
+      for (const f of m.frames) deliver(f.event, f.data, () => frameEvent(f));
     } else if (m.t === "open") {
       // A new leader's stream: its opening burst follows on the channel.
       synced = true;
@@ -233,21 +263,29 @@ export function sharedSseClient(url: string, handlers: SseHandlers = {}, opts: S
     } else if (m.t === "error") {
       rs = m.rs;
       fire("onerror", lifecycleEvent("error"));
-    } else if (m.t === "frame") fire(m.event, frameEvent(m));
+    } else if (m.t === "frame") deliver(m.event, m.data, () => frameEvent(m));
   };
 
   post({ t: "hello", from: me, events: [...names] });
   deps.locks.request(name, { signal: abort.signal }, lead).catch(() => {
-    /* withdrawn by close() */
+    if (abort.signal.aborted || closed) return; // withdrawn by close()
+    // The lock manager refused (not our abort): stream on our own, as without it.
+    role = "solo";
+    try {
+      ch.close();
+    } catch {
+      /* already closed */
+    }
+    es = sseClient(url, handlers, deps.eventSource).source;
   });
 
   return {
     get source() {
-      return role === "leader" || role === "done" ? es : null;
+      return role === "follower" ? null : es;
     },
     get readyState() {
       if (closed) return 2;
-      return es && (role === "leader" || role === "done") ? es.readyState : rs;
+      return es && role !== "follower" ? es.readyState : rs;
     },
     get role() {
       return role;

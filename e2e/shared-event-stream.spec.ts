@@ -96,3 +96,33 @@ test("home and /agents tabs in one browser share one /api/events stream; the nex
   await home.waitForTimeout(500);
   expect(streams).toHaveLength(2);
 });
+
+test("a takeover does not add the activity feed's rows again on the remaining home tab", async ({ context }) => {
+  const streams: string[] = [];
+  context.on("request", (r) => {
+    if (new URL(r.url()).pathname === "/api/events") streams.push(r.url());
+  });
+  const rows = (p: Page) => p.locator("#feed [data-feed-event]").count();
+
+  const leader = await context.newPage();
+  await recordHandlers(leader);
+  await leader.goto("/");
+  await expect(leader.locator("#statusText")).toHaveText("Connected");
+  const home = await context.newPage();
+  await recordHandlers(home);
+  await home.goto("/");
+  await expect(home.locator("#statusText")).toHaveText("Connected");
+  // The server's startup lines are in its activity replay, so the feed is not empty.
+  await expect.poll(async () => count(await seen(home), "activity")).toBeGreaterThan(0);
+  await home.waitForTimeout(500);
+  const before = await rows(home);
+  expect(before).toBeGreaterThan(0);
+
+  const runsBefore = count(await seen(home), "agent_runs");
+  await leader.close();
+  await expect.poll(() => streams.length).toBe(2);
+  // The new stream's burst (activity replay first, agent_runs last) has reached this tab.
+  await expect.poll(async () => count(await seen(home), "agent_runs")).toBeGreaterThan(runsBefore);
+  await home.waitForTimeout(300);
+  expect(await rows(home)).toBe(before);
+});

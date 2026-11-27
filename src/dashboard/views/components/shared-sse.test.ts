@@ -90,8 +90,11 @@ function origin(opts: { locks?: boolean; channel?: boolean } = {}) {
   const bus = new Bus();
   const locks = new FakeLocks();
   const opened: FakeES[] = [];
+  /** What a throwing handler reported (the deps' `report`). */
+  const reported: unknown[] = [];
   let n = 0;
   const deps: SharedSseDeps = {
+    report: (err) => reported.push(err),
     locks: opts.locks === false ? null : locks,
     channel: opts.channel === false ? null : (name) => new FakeChannel(bus, name),
     eventSource: (u) => {
@@ -101,7 +104,7 @@ function origin(opts: { locks?: boolean; channel?: boolean } = {}) {
     },
     id: () => `tab${++n}`,
   };
-  return { deps, opened };
+  return { deps, opened, reported };
 }
 
 /** A tab's handlers that log what they see; `readyStateOnError` reads the handle inside onerror. */
@@ -312,4 +315,111 @@ describe("sharedSseClient", () => {
       expect(hb.readyState).toBe(0);
     });
   }
+
+  // ── Fix round 1 ──────────────────────────────────────────────────────
+
+  test("takeover: the new stream's activity replay is not delivered again to the tabs that already had it", async () => {
+    const o = origin();
+    const ha = sharedSseClient(URL, recorder([]).handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    o.opened[0]!.open();
+    o.opened[0]!.emit("activity", "1");
+    o.opened[0]!.emit("activity", "2");
+    const b = recorder(["activity"]);
+    sharedSseClient(URL, b.handlers, { ...OPTS, deps: o.deps });
+    const c = recorder(["activity"]);
+    sharedSseClient(URL, c.handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    ha.close();
+    await flush();
+    // B leads now; its own stream opens with the server's replay, then a new row.
+    const es = o.opened[1]!;
+    es.open();
+    es.emit("activity", "1");
+    es.emit("activity", "2");
+    es.emit("activity", "3");
+    await flush();
+    expect(b.log).toEqual(["open", "activity:1", "activity:2", "open", "activity:3"]);
+    expect(c.log).toEqual(["open", "activity:1", "activity:2", "open", "activity:3"]);
+  });
+
+  test("a leader's own reconnect: the replayed activity rows are not delivered twice", async () => {
+    const o = origin();
+    const a = recorder(["activity"]);
+    a.h.handle = sharedSseClient(URL, a.handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    const es = o.opened[0]!;
+    es.open();
+    es.emit("activity", "1");
+    es.emit("activity", "2");
+    es.fail(0);
+    es.open();
+    es.emit("activity", "1");
+    es.emit("activity", "2");
+    es.emit("activity", "3");
+    expect(a.log).toEqual(["open", "activity:1", "activity:2", "error:0", "open", "activity:3"]);
+  });
+
+  test("a handler that throws during the welcome replay does not skip the later replayed frames; the error is reported", async () => {
+    const o = origin();
+    sharedSseClient(URL, recorder([]).handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    o.opened[0]!.open();
+    o.opened[0]!.emit("activity", "1");
+    o.opened[0]!.emit("stats", "s1");
+    const log: string[] = [];
+    const boom = new Error("handler bug");
+    sharedSseClient(
+      URL,
+      {
+        activity: () => {
+          throw boom;
+        },
+        stats: (ev: Event) => log.push(`stats:${(ev as MessageEvent).data}`),
+      },
+      { ...OPTS, deps: o.deps },
+    );
+    await flush();
+    expect(log).toEqual(["stats:s1"]);
+    expect(o.reported).toEqual([boom]);
+  });
+
+  test("a consumer onerror that throws on a dead leader still steps it down: the next tab leads", async () => {
+    const o = origin();
+    const ha = sharedSseClient(
+      URL,
+      {
+        onerror: () => {
+          throw new Error("onerror bug");
+        },
+      },
+      { ...OPTS, deps: o.deps },
+    );
+    await flush();
+    o.opened[0]!.open();
+    const hb = sharedSseClient(URL, recorder([]).handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    o.opened[0]!.fail(2);
+    await flush();
+    expect(ha.role).toBe("done");
+    expect(hb.role).toBe("leader");
+    expect(o.opened.length).toBe(2);
+    expect(o.reported.length).toBe(1);
+  });
+
+  test("a lock request that rejects (not our close) falls back to the tab's own stream", async () => {
+    const o = origin();
+    o.deps.locks = { request: () => Promise.reject(new Error("SecurityError")) };
+    const a = recorder(["stats"]);
+    const ha = sharedSseClient(URL, a.handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    expect(ha.role).toBe("solo");
+    expect(o.opened.length).toBe(1);
+    o.opened[0]!.open();
+    o.opened[0]!.emit("stats", "s");
+    expect(a.log).toEqual(["open", "stats:s"]);
+    expect(ha.readyState).toBe(1);
+    ha.close();
+    expect(o.opened[0]!.readyState).toBe(2);
+  });
 });
