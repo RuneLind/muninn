@@ -68,6 +68,8 @@ const done = events.find((e) => e.event === "done");
 const end = done?.ms ?? events.at(-1)?.ms ?? 0;
 const answer = String(done?.data.answer ?? deltas.map((d) => String(d.data.text ?? "")).join(""));
 const named = (values.expect as string[]).filter((p) => answer.includes(p));
+/** A file named by its basename counts too: an answer may list a folder's files under the folder (27.11: `Q-3.csv` under `plans/melosys-8351-sql-resultat/`). */
+const namedByFile = (values.expect as string[]).filter((p) => answer.includes(p.split("/").pop()!));
 const first = deltas[0]?.ms ?? null;
 const last = deltas.at(-1)?.ms ?? null;
 const inLastSecond = deltas.filter((d) => d.ms >= end - 1000).length;
@@ -81,7 +83,7 @@ const summary = {
   modelPhaseMs: events.find((e) => e.event === "status" && e.data.phase === "model")?.ms ?? null,
   tools: tools.map((t) => ({ ms: t.ms, name: String(t.data.name), input: String(t.data.input ?? "") })),
   deltas: { count: deltas.length, chars, firstMs: first, lastMs: last, spreadMs: first !== null && last !== null ? last - first : null, inLastSecond },
-  named: { count: named.length, of: (values.expect as string[]).length, missing: (values.expect as string[]).filter((p) => !named.includes(p)) },
+  named: { count: named.length, byFile: namedByFile.length, of: (values.expect as string[]).length, missing: (values.expect as string[]).filter((p) => !namedByFile.includes(p)) },
   deltaTimes: deltas.map((d) => [d.ms, String(d.data.text ?? "").length]),
 };
 console.log(JSON.stringify({ ...summary, deltaTimes: undefined }, null, 2));
