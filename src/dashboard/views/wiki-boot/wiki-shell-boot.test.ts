@@ -390,8 +390,9 @@ describe("wiki-browser.ts — listener order", () => {
       // tab's own click, the mode toggle, Start over, an earlier thread's Delete and the user pick); a press
       // held in the tab (no follow-scroll meanwhile), ended by a pointerup or by what can take its place (a
       // context menu, the window's blur); Enter in its box. (PR 5 fix round 1 batch 2: the edit card's
-      // Apply, «Change the wording» and «Check again» tell an inline card from the tab's own.)
-      "document click 5c5lv", "document pointerdown capture 30n4x", "document pointerup capture 2yyyj",
+      // Apply, «Change the wording» and «Check again» tell an inline card from the tab's own.
+      // 2026-11-27: «as <name> ▾» and a turn's tool group header; a tab show follows a picked user.)
+      "document click kndq4", "document pointerdown capture 30n4x", "document pointerup capture 2yyyj",
       "document pointercancel capture 2yyyj", "document contextmenu capture 2yyyj", "window blur 2yyyj", "document keydown 11sdy",
       // Issue #623: the rail panel closes on Back/Forward and on leaving the narrow width.
       "window popstate 3fyct", "[object eventtarget] change 1g0ma", "document click 1wxv0",
@@ -408,7 +409,7 @@ describe("wiki-browser.ts — listener order", () => {
       "document focusin 3l9rj", "document keydown capture 1c2w7", "#wikiActiveOptions click 19s7n",
       "#wikiSelect change 3le4p", "window hashchange kobbe", "window popstate 24ens", "#wikiAskBtn click 7m320",
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
-      "document click 13kk2", "document change 1typa", "document input smycp", "document keydown 2bnv5",
+      "document click 7flzm", "document change 1typa", "document input smycp", "document keydown 2bnv5",
       "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s",
       // The key peek and the Trace card (`initKeyTrace`, Discuss v2 PR 6), before the selection menu's: the
       // peek shown on a key's hover; a press (its «Trace»/«Go to ↓» run with their default prevented, a press

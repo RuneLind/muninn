@@ -495,9 +495,26 @@ describe("a turn", () => {
     expect(prompt.trimEnd().endsWith("Which stop does the summer route add?")).toBe(true);
     const row = store.rows[0]!;
     expect(row.endState).toBe("done");
-    expect(row.toolCalls).toEqual([{ name: "Read", input: '{"file_path":"x"}' }]);
+    expect(row.toolCalls).toEqual([{ name: "Read", input: '{"file_path":"x"}', label: "Reading", detail: "x" }]);
     expect(row.location).toMatchObject({ found: "exact", fromLine: 15, toLine: 15 });
     expect(evs.find((e) => e.event === "done")!.data.turnId).toBe(row.id);
+  });
+  test("the turn event names the planned model and the connector; done the model the connector reported", async () => {
+    const reported = setup({
+      oneShot: (async () => ({ result: "Done.", model: "invented-model-20261101", toolCalls: [] })) as never,
+    });
+    const evs = await frames(await post(reported.app, PASSAGE));
+    expect(evs.find((e) => e.event === "turn")!.data).toMatchObject({ model: "invented-model", connector: "claude-sdk" });
+    expect(evs.find((e) => e.event === "done")!.data.model).toBe("invented-model-20261101");
+    // No reported model: done repeats the planned one; a bot with no model plans the instance's.
+    const planned = setup({
+      oneShot: (async () => ({ result: "Done.", toolCalls: [] })) as never,
+      deps: { bots: () => [{ ...bot("copilot-sdk"), model: undefined }] },
+    });
+    const evs2 = await frames(await post(planned.app, PASSAGE));
+    expect(evs2.find((e) => e.event === "turn")!.data).toMatchObject({ model: "fallback-model", connector: "copilot-sdk" });
+    expect(evs2.find((e) => e.event === "done")!.data.model).toBe("fallback-model");
+    expect(planned.store.rows[0]!.model).toBe("fallback-model");
   });
   test("a page whose repos: names a repo outside discuss.repos gets no snapshot of it, and the pack says so", async () => {
     const { app, calls } = setup();
@@ -777,6 +794,22 @@ describe("a turn", () => {
     expect(evs.find((e) => e.event === "app_error")!.data.endState).toBe("timeout");
     expect(evs.filter((e) => e.event === "delta").map((e) => e.data.text)).toEqual(["Half an ", "answer"]);
     expect(store.rows[0]).toMatchObject({ endState: "timeout", answer: "Half an answer", toolCalls: [{ name: "Grep", input: '{"pattern":"ferry"}' }] });
+  });
+  test("PR 913 R2: a tool's line is made from its full input, before the 200- and 300-char cuts", async () => {
+    const deep = "/Users/x/.muninn/agent-cwd/.snapshots/w-" + "a".repeat(40) + "/" + "d/".repeat(90) + "the-file.mdx";
+    const input = JSON.stringify({ file_path: deep, offset: 1234, limit: 80 });
+    const { app, store } = setup({
+      oneShot: async (_p, _c, _b, o) => {
+        o.onProgress?.({ type: "tool_start", id: "t1", name: "Read", displayName: "Read", input });
+        o.onProgress?.({ type: "tool_end", id: "t1", name: "Read", displayName: "Read" });
+        return { result: "ok", toolCalls: [{ name: "Read", input }] } as never;
+      },
+    });
+    const evs = await frames(await post(app, PASSAGE));
+    const want = { label: "Reading", detail: "…/d/d/the-file.mdx, lines 1234–1313" };
+    expect(evs.find((e) => e.event === "tool")!.data).toMatchObject(want);
+    expect((evs.find((e) => e.event === "done")!.data.toolCalls as unknown[])[0]).toMatchObject(want);
+    expect(store.rows[0]!.toolCalls[0]).toMatchObject(want);
   });
   test("events after the deadline reach neither the stream nor the row, however long the row's finish takes", async () => {
     const store = new MemStore();

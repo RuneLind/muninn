@@ -24,6 +24,7 @@ export function discussTabBodyHtml(): string {
     `<button type="button" data-discuss-mode="explore" aria-pressed="true" title="Ask and read: the agent explains, it proposes no edit">Explore</button>` +
     `<button type="button" data-discuss-mode="edit" aria-pressed="false" title="The agent may propose one edit to this page">Edit</button>` +
     `</div>` +
+    `<span class="wiki-discuss-as-slot"></span>` +
     `<span class="wiki-discuss-bar-gap"></span>` +
     `<a class="wiki-discuss-popout" id="${DISCUSS_POPOUT_ID}" target="_blank" rel="noopener" hidden title="This discussion as a thread in /chat">Pop out ↗</a>` +
     `<button type="button" class="wiki-discuss-startover" id="${DISCUSS_START_OVER_ID}" hidden title="Close this discussion; it stays under Earlier discussions">Start over</button>` +
@@ -75,8 +76,21 @@ export function discussTabStyles(): string {
     .wiki-discuss-q { font-size: 13px; font-weight: 600; color: var(--text-primary); white-space: pre-wrap; }
     .wiki-discuss-status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
     .wiki-discuss-status .spinner { width: 12px; height: 12px; border: 2px solid var(--border-secondary); border-top-color: var(--accent); border-radius: 50%; animation: wikiAskSpin 0.7s linear infinite; }
-    .wiki-discuss-tools { display: flex; flex-wrap: wrap; gap: 4px; }
-    .wiki-discuss-tool { font-size: 10.5px; font-family: var(--font-mono, monospace); color: var(--text-dim); background: var(--bg-inset); border-radius: 4px; padding: 1px 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* «as <name> ▾»: dim and small, out of the way in the bar. */
+    .wiki-discuss-as { font: inherit; font-size: 11.5px; color: var(--text-dim); background: none; border: none; padding: 2px 4px; border-radius: 6px; }
+    button.wiki-discuss-as { cursor: pointer; }
+    button.wiki-discuss-as:hover, button.wiki-discuss-as[aria-expanded="true"] { color: var(--text-secondary); background: var(--bg-inset); }
+    /* The tool group: /chat's .tool-activity look (italic dim label, accent detail). */
+    .wiki-discuss-tools { display: flex; flex-direction: column; gap: 2px; }
+    .wiki-discuss-tools-head { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 12px; color: var(--text-muted, var(--text-dim)); background: none; border: none; padding: 2px 0; cursor: pointer; }
+    .wiki-discuss-tools-head:hover { color: var(--text-secondary); }
+    .wiki-discuss-tools-label { opacity: 0.8; }
+    .wiki-discuss-tools-toggle { font-size: 9px; transition: transform 0.15s ease; }
+    .wiki-discuss-tools.collapsed .wiki-discuss-tools-toggle { transform: rotate(-90deg); }
+    .wiki-discuss-tools-body { display: flex; flex-direction: column; gap: 1px; padding-left: 4px; }
+    .wiki-discuss-tool, .wiki-discuss-tools-more { font-size: 12px; font-style: italic; color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
+    .wiki-discuss-tool-detail { color: var(--accent-light); font-style: normal; }
+    .wiki-discuss-model { font-size: 11px; color: var(--text-dim); }
     /* Not .wiki-article: the reader's selection, find and reveal code reads that
        class as the page. The chat's pre-wrap, since the formatter writes no <p>. */
     .wiki-discuss-answer { font-size: 13px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -13,6 +13,7 @@ import {
   historyHtml,
   inlineCardAnchor,
   inlineCardHtml,
+  inlineTurnSub,
   keyKindsFrom,
   selBarHtml,
   selMenuHtml,
@@ -292,5 +293,13 @@ describe("the mentions cards", () => {
     expect(html).toContain('data-sel-card-pane="t3"');
     expect(inlineCardHtml("where", "MEL-1", "", null)).not.toContain("data-sel-card-pane");
     expect(inlineCardHtml("where", "MEL-1", "", null)).toContain("data-sel-card-close");
+  });
+});
+
+describe("a thread turn card's sub line", () => {
+  test("names the thread's user once known, else the plain wording", () => {
+    expect(inlineTurnSub("Popp")).toBe("a turn in Popp's discussion of this page");
+    expect(inlineTurnSub(null)).toBe("a turn in this page's discussion");
+    expect(inlineCardHtml("explain", inlineTurnSub("Popp"), "", "t1")).toContain("· a turn in Popp&#39;s discussion of this page");
   });
 });

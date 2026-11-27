@@ -57,7 +57,7 @@ import { enhanceConfidenceHtml, renderStreamingBody } from "./wiki-ask-render.ts
 import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
-import { discussAgentOn, discussSendBlocked, discussTurnForCard, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
+import { discussAgentOn, discussSendBlocked, discussTurnForCard, discussUserNameHere, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
 import { discussTurnBodyParts, findSamePassage, holdPassage, type HeldPassage } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
@@ -71,6 +71,7 @@ import {
   historyHtml,
   inlineCardAnchor,
   inlineCardHtml,
+  inlineTurnSub,
   keyKindsFrom,
   selBarHtml,
   selMenuOffers,
@@ -656,7 +657,7 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
-  const card = placeCard(s, inlineCardHtml(kind, "a turn in this page's discussion", "", r.key));
+  const card = placeCard(s, inlineCardHtml(kind, inlineTurnSub(discussUserNameHere()), "", r.key));
   if (!card) return;
   holdCard(card, s);
   paintTurnCard(card);
@@ -732,6 +733,9 @@ function paintTurnCard(card: Element): void {
   const body = card.querySelector(".wiki-sel-card-body");
   if (!key || !body) return;
   const found = discussTurnForCard(key);
+  // The sub line is set once, when `threadCard` places the card: a repaint
+  // after a thread read named the user moved the text below under the
+  // reader's drag (#913 CI).
   const html = found
     ? discussTurnBodyParts(found.turn, found.current).join("") || ""
     : `<div class="wiki-discuss-hint">This turn is no longer in the page's discussion.</div>`;

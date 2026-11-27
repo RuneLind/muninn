@@ -266,6 +266,12 @@ const CARD_TITLES: Record<CardKind, string> = {
   trace: "🧭 Trace",
 };
 
+/** A thread turn card's sub line: whose discussion the turn is in, once the
+ *  thread read named the user. */
+export function inlineTurnSub(userName: string | null | undefined): string {
+  return userName ? `a turn in ${userName}'s discussion of this page` : "a turn in this page's discussion";
+}
+
 /** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
  *  `data-reader-only` keeps it out of every read of the page's own text (a
  *  later selection's context, Explain, fact check). */

@@ -281,6 +281,8 @@ test("the pane's SSE order, with the status line after the last tool event, and 
   const threadId = evs[0]!.data.threadId as string;
   const types = events.filter((e) => "conversationId" in e).map((e) => `${e.type}:${e.type === "message" ? e.message.threadId : (e as { threadId?: string | null }).threadId}`);
   expect(types).toEqual([`message:${threadId}`, `tool_status:${threadId}`, `stream_clear:${threadId}`, `message:${threadId}`]);
+  // The tool line in the pane's words (`label: detail`), never the raw JSON.
+  expect(events.find((e) => e.type === "tool_status")).toMatchObject({ text: "Reading: notes/harbour.md", name: "Read" });
 });
 
 test("processMessage throws on a wiki thread, before it saves or calls anything", async () => {
@@ -1015,4 +1017,28 @@ test("a page turn naming a key gets its mentions in the prompt, from the real me
     await rm(path.join(wiki, ".wiki-reader.json"), { force: true });
     __resetWikiCacheForTest();
   }
+});
+
+test("the thread read names the user, lists the bot's /chat users to switch to, and carries each answer's stored model", async () => {
+  const app = apps([{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }]);
+  await frames(await pane(app, { question: "When does it open?" }));
+  const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as {
+    userId: string;
+    userName: string | null;
+    userChoosable: boolean;
+    users: { id: string; name: string }[];
+    messages: { role: string; model: string | null; turn: { model: string | null; connector: string } | null }[];
+  };
+  expect(read).toMatchObject({ userId: "kari", userName: "Kari", userChoosable: true, users: [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }] });
+  expect(read.messages.find((m) => m.role === "assistant")!.model).toBe("invented-model");
+  expect(read.messages.find((m) => m.turn)!.turn).toMatchObject({ model: "invented-model", connector: "claude-sdk" });
+  // Another user's read is that user's own (empty) thread, named by them.
+  const ola = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md&userId=ola")).json()) as { userName: string; thread: unknown };
+  expect(ola).toMatchObject({ userName: "Ola", thread: null });
+});
+
+test("on an instance that authenticates, the thread read names the user but offers no one to switch to", async () => {
+  const app = apps([{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }], { authMode: () => "entra" });
+  const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as { userName: string; userChoosable: boolean; users: unknown[] };
+  expect(read).toMatchObject({ userName: "Kari", userChoosable: false, users: [] });
 });

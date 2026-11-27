@@ -11,7 +11,9 @@
  * (both turns there, the «Wiki» group, no connector selector), a turn sent
  * from /chat appearing in the pane after a reload, a refused /chat send
  * keeping its text and showing the refusal; «Start over» moving the thread
- * under «Earlier discussions» beside an old one-shot turn, and Delete.
+ * under «Earlier discussions» beside an old one-shot turn, and Delete; the
+ * «as <name> ▾» picker switching the pane to a second /chat user's own thread,
+ * and the turn's tool calls as a /chat-style tool group with its model line.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`), a throwaway `claude-sdk` bot under `MUNINN_BOTS_DIR`, a
@@ -41,6 +43,8 @@ const WIKI = "e2e-discuss-thread";
 const REL = "plans/ferry.mdx";
 const BOT = "threadbot";
 const USER = "e2e-thread-user";
+/** A second /chat user of the bot: «as <name> ▾» switches the page's discussion to theirs. */
+const USER2 = "e2e-thread-user-2";
 const OLD_LINE = "The night route is unchanged.";
 const NEW_LINE = "The night route is unchanged since May.";
 const PAGE = ["---", "title: Ferry plan", "---", "", "# Ferry plan", "", "## Brief", "", `- ${OLD_LINE}`, "- The morning route adds a stop.", ""].join("\n");
@@ -152,9 +156,11 @@ test.beforeAll(async () => {
 
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
   // A clean slate for this wiki and user (a rerun on the same database).
-  await sql`DELETE FROM threads WHERE user_id = ${USER}`;
+  await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2})`;
   await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`;
   await sql`INSERT INTO users (id, username, platform) VALUES (${USER}, 'E2E Thread', 'web') ON CONFLICT (id) DO NOTHING`;
+  await sql`INSERT INTO users (id, username, platform) VALUES (${USER2}, 'E2E Other', 'web') ON CONFLICT (id) DO NOTHING`;
+  await sql`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER2}, ${BOT}, 'main', true)`;
   await sql`INSERT INTO bot_default_user (bot_name, user_id) VALUES (${BOT}, ${USER}) ON CONFLICT (bot_name) DO UPDATE SET user_id = EXCLUDED.user_id`;
   await sql`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'main', true)`;
   // A connector, so /chat shows its selector on a chat thread: its absence on the wiki thread is then the kind's doing.
@@ -216,7 +222,7 @@ test.afterAll(async () => {
     }
   }
   if (sql) {
-    await sql`DELETE FROM threads WHERE user_id = ${USER}`.catch(() => {});
+    await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2})`.catch(() => {});
     await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`.catch(() => {});
     await sql`DELETE FROM connectors WHERE name = 'e2e-thread-conn'`.catch(() => {});
     await sql.end({ timeout: 2 });
@@ -255,9 +261,9 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
 
   // 1. Ask, then follow up: both on one thread; turn 2's request carries turn 1.
   await ask(page, Q1, 1);
-  await expect(turn(page, 1).locator(".wiki-discuss-tool").first()).toContainText("Grep");
+  await expect(turn(page, 1).locator(".wiki-discuss-tools-head")).toHaveText(/Used 1 tool/);
   await ask(page, Q2, 2);
-  await expect(turn(page, 2).locator(".wiki-discuss-tool").first()).toContainText("Grep");
+  await expect(turn(page, 2).locator(".wiki-discuss-tools-head")).toHaveText(/Used 1 tool/);
   const req1 = await requestAsking(Q1);
   const req2 = await requestAsking(Q2);
   expect(req1).not.toContain("The discussion so far");
@@ -403,6 +409,57 @@ test("the pane on the page's thread: follow-up with history, Edit → Apply, Con
   // A new ask starts a new thread.
   await page.locator('[data-discuss-mode="explore"]').click();
   await ask(page, "A fresh start?", 1);
-  const [fresh] = await sql!`SELECT id FROM threads WHERE kind = 'wiki' AND wiki = ${WIKI} AND closed_at IS NULL`;
+  const [fresh] = await sql!`SELECT id FROM threads WHERE kind = 'wiki' AND wiki = ${WIKI} AND user_id = ${USER} AND closed_at IS NULL`;
   expect(fresh!.id).not.toBe(thread!.id);
+});
+
+test("«as <name> ▾» switches the pane to another /chat user's own thread of the page; tool calls read as a /chat tool group with the model line", async ({ page }) => {
+  test.setTimeout(180_000);
+  // Runs after the first test, on the fresh thread it ends with.
+  await openPane(page);
+  // The thread read names the user the route resolved (the bot's default here).
+  const as = page.locator("#discussBody [data-discuss-as]");
+  await expect(as).toHaveText("as E2E Thread ▾");
+  await expect(turn(page, 1).locator(".wiki-discuss-q")).toHaveText("A fresh start?");
+
+  // The tool group: «Used 1 tool», closed once the turn ended; opened, a human line, no JSON.
+  const tools = turn(page, 1).locator(".wiki-discuss-tools");
+  await expect(tools.locator(".wiki-discuss-tools-head")).toHaveText(/^Used 1 tool/);
+  await expect(tools.locator(".wiki-discuss-tool")).toHaveCount(0);
+  await tools.locator(".wiki-discuss-tools-head").click();
+  await expect(tools.locator(".wiki-discuss-tool")).toHaveText('Searching files: "night route"');
+  await expect(tools.locator(".wiki-discuss-tool-detail")).toHaveText('"night route"');
+  // The model line: the model the API reported (the fake answers as `claude-fake`,
+  // not the bot's configured claude-sonnet-4-5) · connector · duration.
+  await expect(turn(page, 1).locator(".wiki-discuss-model")).toHaveText(/^claude-fake · claude-sdk · \d+\.\d s$/);
+  await shot(page, "7-tool-group-and-model-line");
+
+  // Switch to the other user: their thread (none yet), kept for the bot, the read carrying their id.
+  await as.click();
+  const select = page.locator("#discussBody .wiki-discuss-user-select");
+  await expect(select).toHaveValue(USER);
+  const reread = page.waitForRequest((r) => r.url().includes("/api/wiki/discuss/thread?") && new URL(r.url()).searchParams.get("userId") === USER2);
+  await select.selectOption(USER2);
+  await page.locator("#discussBody [data-discuss-pick-user]").click();
+  await reread;
+  await expect(as).toHaveText("as E2E Other ▾");
+  await expect(page.locator("#discussBody .wiki-discuss-turn")).toHaveCount(0);
+  await expect(select).toHaveCount(0);
+  await shot(page, "8-switched-user");
+
+  // A turn now lands on the other user's own thread; the first user's thread is untouched.
+  await page.locator('[data-discuss-mode="explore"]').click();
+  await ask(page, "Asked as the other user?", 1);
+  const live = await sql!`SELECT user_id FROM threads WHERE kind = 'wiki' AND wiki = ${WIKI} AND closed_at IS NULL ORDER BY user_id`;
+  expect(live.map((r) => r.user_id)).toEqual([USER, USER2]);
+
+  // A reload keeps the choice; switching back shows the first user's turn again.
+  await openPane(page);
+  await expect(as).toHaveText("as E2E Other ▾");
+  await expect(turn(page, 1).locator(".wiki-discuss-q")).toHaveText("Asked as the other user?");
+  await as.click();
+  await select.selectOption(USER);
+  await page.locator("#discussBody [data-discuss-pick-user]").click();
+  await expect(as).toHaveText("as E2E Thread ▾");
+  await expect(turn(page, 1).locator(".wiki-discuss-q")).toHaveText("A fresh start?");
 });

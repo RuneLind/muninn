@@ -74,6 +74,9 @@ const realFetch = globalThis.fetch;
 const REL = "plans/ferry.mdx";
 /** The page the menu's shell says is open (another one is a navigation). */
 let menuRel = REL;
+/** The wiki the Discuss tab is on (a test may move to a fresh one), and a thread read it answers. */
+let discussWiki = "w";
+let threadRead: ((url: string) => Response) | null = null;
 const posts: Record<string, unknown>[] = [];
 /** The stream a POST answers with: its frames are pushed by the test. */
 let push: ((event: string, data: unknown) => void) | null = null;
@@ -169,6 +172,7 @@ beforeAll(() => {
       traceReadSignal = init?.signal ?? null;
       await traceReadGate;
     }
+    if (url.startsWith("/api/wiki/discuss/thread?") && threadRead) return threadRead(url);
     if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -186,7 +190,7 @@ beforeAll(() => {
   }) as typeof fetch;
   document.body.innerHTML = `<div id="articleWrap"></div><button data-conntab="${DISCUSS_TAB}" hidden>Discuss</button>${discussTabBodyHtml()}`;
   initDiscussTab({
-    wiki: () => "w",
+    wiki: () => discussWiki,
     relPath: () => REL,
     switchTab: showTab,
     // The shell's render: the agent off, the article again (the card gone), the agent on.
@@ -1838,5 +1842,48 @@ test("12c: a new inline card while the Trace card is out for a render: the held 
     await closeStream();
     renderPage();
     await settle();
+  }
+});
+
+test("PR 913 F4 + CI: a turn card's sub line is set once, when the card is placed: a later thread read or a switch never repaints it (no layout shift)", async () => {
+  discussWiki = "w-owner";
+  const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
+  threadRead = (url) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
+    return json({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-owner", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  };
+  try {
+    renderPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    push!("turn", { turnId: "owner-1", seq: 1, discussionId: "thread-popp", userId: "u1" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    // Placed before the thread read named the user: it keeps the plain sub line.
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
+    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
+    // Placed after it: named.
+    await selectText("Check the berth list.");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const named = Array.from(document.querySelectorAll('#articleWrap .wiki-sel-card[data-sel-card="explain"]')).find((c) => c !== card)!;
+    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+    push!("turn", { turnId: "owner-2", seq: 2, discussionId: "thread-popp", userId: "u1" });
+    push!("done", { answer: "ok too", proposedEdit: null });
+    close!();
+    await settle();
+    // «as Popp ▾» → Rune: the page's discussion is Rune's now, the card's turn is still Popp's.
+    (document.querySelector("#discussBody [data-discuss-as]") as HTMLButtonElement).click();
+    document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "u2";
+    (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
+    await settle();
+    expect(document.querySelector("#discussBody [data-discuss-as]")!.textContent).toBe("as Rune ▾");
+    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
+    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
   }
 });

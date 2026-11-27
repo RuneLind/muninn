@@ -282,7 +282,16 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // so the pin moves to 991,800.
 // 2026-11-27, the mentions phase's words, shared with the Trace card (`discussPhaseWords`): 991,866
 // (336,328 gzipped), so the pin moves to 991,900.
-const WIKI_CLIENT_MAX_BYTES = 991_900;
+// 2026-11-27, the Discuss tool group, model line and «as <name> ▾» (`src/wiki/discuss-tool-line.ts`
+// joins the bundle): 998,618 (338,579 gzipped), so the pin moves to 998,700. Its fix round 1 batch 1
+// (a page re-read for a user picked elsewhere, the card's owner kept, the two pickers apart): 998,873
+// (338,667 gzipped), so the pin moves to 999,000. Batch 2 (a cut path keeps its head, top-level keys
+// only): 999,171 as the test measures it, so the pin moves to 999,300.
+// Fix round 2 batch 1 (a send names the user of its thread's read, only a pick keeps a user, a page
+// follows a pick when shown): 999,339 as the test measures it, so the pin moves to 999,400.
+// Round 2's state-table rebuild (R1–R6 in wiki-discuss-tab.ts) and the server-made tool lines:
+// 1,000,407 as the test measures it, so the pin moves to 1,000,500.
+const WIKI_CLIENT_MAX_BYTES = 1_000_500;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

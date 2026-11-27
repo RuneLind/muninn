@@ -16,12 +16,31 @@ import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../.
 import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
 import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
+import { discussToolLine } from "../../../wiki/discuss-tool-line.ts";
 
 /** How a turn stands in the tab. `sending` until the route's `turn` event;
  *  `refused` when the route answered a JSON refusal (no row was stored);
  *  `dropped` when the stream closed before the turn ended (the server still
  *  runs it to its end and stores it). */
 export type DiscussTurnState = "sending" | "running" | "done" | "error" | "timeout" | "abandoned" | "refused" | "dropped";
+
+export interface DiscussToolCallView {
+  name: string;
+  input: string;
+  /** The server's line from the full input; absent on a call stored before it shipped one. */
+  label?: string;
+  detail?: string;
+}
+
+/** A tool call from a frame or a stored row: the server's line kept when it has one. */
+function toolCallView(c: { name?: unknown; input?: unknown; label?: unknown; detail?: unknown } | null | undefined): DiscussToolCallView {
+  const v: DiscussToolCallView = { name: String(c?.name ?? ""), input: typeof c?.input === "string" ? c.input : "" };
+  if (typeof c?.label === "string") {
+    v.label = c.label;
+    v.detail = typeof c.detail === "string" ? c.detail : "";
+  }
+  return v;
+}
 
 /** The passage a turn asks about, as P1's panel read it. */
 export interface DiscussPassage {
@@ -46,7 +65,16 @@ export interface DiscussTurnView {
   state: DiscussTurnState;
   /** The route's phase (`snapshots`, `mentions`, `card`, `model`, `writing`) while it runs. */
   phase: string | null;
-  tools: string[];
+  /** The tool calls so far, as the route sends them (`input` cut at 200 chars). */
+  tools: DiscussToolCallView[];
+  /** The tool group's open state as the reader set it; null follows the turn
+   *  (open while the turn runs with no answer text yet, closed after). */
+  toolsOpen: boolean | null;
+  /** The model the turn ran on (planned on `turn`, the reported one on `done`),
+   *  its connector and its duration; null when not known. */
+  model: string | null;
+  connector: string | null;
+  durationMs: number | null;
   /** A refusal's or failure's words. */
   message: string | null;
   /** The answer carries a proposed edit (P4 previews and applies it). */
@@ -198,6 +226,15 @@ export interface DiscussionView {
    *  «Pop out ↗» opens /chat with. */
   bot?: string | null;
   userId?: string | null;
+  /** The thread's user by /chat name, the users the reader may switch to, and
+   *  whether switching is offered (never on an authenticating instance). */
+  userName?: string | null;
+  users?: { id: string; name: string }[];
+  userChoosable?: boolean;
+  /** The route can take `userId` as a posted id: it holds a thread, or the read listed it. */
+  userListed?: boolean;
+  /** The «as <name> ▾» picker is open. */
+  userMenu?: boolean;
   /** The mode the next turn is sent in (the Explore/Edit toggle). */
   mode?: "explore" | "edit";
   /** Where the thread read stands for this page. */
@@ -225,10 +262,15 @@ export interface StoredDiscussTurn {
   answer: string;
   endState: string;
   error: string | null;
-  toolCalls: { name: string; input: string }[];
+  toolCalls: { name: string; input: string; label?: string; detail?: string }[];
   proposedEdit: unknown;
   editAppliedAt: number | null;
   createdAt: number;
+  /** The planned model, the connector and the duration on the ledger row. */
+  model?: string | null;
+  connector?: string | null;
+  durationMs?: number | null;
+  assistantMessageId?: string | null;
 }
 
 /** A thread message joined to its ledger row. */
@@ -237,6 +279,8 @@ export interface StoredThreadMessage {
   role: string;
   content: string;
   createdAt: number;
+  /** The stored message's model (an answer's: the one the connector reported). */
+  model?: string | null;
   turn: StoredDiscussTurn | null;
 }
 
@@ -271,13 +315,16 @@ const STORED_END_WORDS: Record<string, string> = {
  *  tab streamed and the same turn read back are one turn. A turn still running
  *  reads as `dropped` (this tab has no stream for it, and sending is left to
  *  the route, which answers busy). */
-export function turnFromStored(t: StoredDiscussTurn): DiscussTurnView {
+export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null): DiscussTurnView {
   const passage: DiscussPassage | null = t.selection ? { selection: t.selection, before: "", after: "", atStart: false, atEnd: false, heading: "" } : null;
   const view = newTurn(`s:${t.id}`, t.question, passage);
   view.turnId = t.id;
   view.seq = t.seq;
   view.text = t.answer ?? "";
-  view.tools = (t.toolCalls ?? []).map((c) => (c.input ? `${c.name} ${c.input}` : c.name));
+  view.tools = (t.toolCalls ?? []).map(toolCallView);
+  view.model = answerModel || t.model || null;
+  view.connector = t.connector || null;
+  view.durationMs = typeof t.durationMs === "number" ? t.durationMs : null;
   if (t.endState === "done") {
     view.state = "done";
     view.proposedEdit = t.proposedEdit !== null && t.proposedEdit !== undefined;
@@ -295,10 +342,12 @@ export function turnFromStored(t: StoredDiscussTurn): DiscussTurnView {
 export function turnsFromThread(messages: StoredThreadMessage[]): DiscussTurnView[] {
   const seen = new Set<string>();
   const out: DiscussTurnView[] = [];
+  // The answer's own model (the one the connector reported), by message id.
+  const modelOf = new Map(messages.filter((m) => m.role === "assistant" && m.model).map((m) => [m.id, m.model!]));
   for (const m of messages) {
     if (!m.turn || seen.has(m.turn.id)) continue;
     seen.add(m.turn.id);
-    out.push(turnFromStored(m.turn));
+    out.push(turnFromStored(m.turn, m.turn.assistantMessageId ? modelOf.get(m.turn.assistantMessageId) : null));
   }
   return out.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }
@@ -421,11 +470,11 @@ export function discussEarlierHtml(e: EarlierDiscussions | null | undefined): st
 }
 
 /** The user picker the tab shows when the route needs the thread's user. */
-export function discussUserPickHtml(p: { users: { id: string; name: string }[]; message: string } | null | undefined): string {
+export function discussUserPickHtml(p: { users: { id: string; name: string }[]; message: string; current?: string | null; plain?: boolean } | null | undefined): string {
   if (!p) return "";
-  const opts = p.users.map((u) => `<option value="${esc(u.id)}">${esc(u.name)} (${esc(u.id)})</option>`).join("");
+  const opts = p.users.map((u) => `<option value="${esc(u.id)}"${u.id === p.current ? " selected" : ""}>${esc(u.name)} (${esc(u.id)})${u.id === p.current ? " · current" : ""}</option>`).join("");
   return (
-    `<div class="wiki-discuss-error" role="alert">${esc(p.message)}</div>` +
+    (p.plain ? `<div class="wiki-discuss-hint">${esc(p.message)}</div>` : `<div class="wiki-discuss-error" role="alert">${esc(p.message)}</div>`) +
     (p.users.length
       ? `<div class="wiki-discuss-actions"><select class="wiki-discuss-user-select" aria-label="The user this discussion belongs to">${opts}</select>` +
         `<button type="button" class="wiki-discuss-continue" data-discuss-pick-user>Use this user</button></div>`
@@ -433,8 +482,54 @@ export function discussUserPickHtml(p: { users: { id: string; name: string }[]; 
   );
 }
 
+/** The thread read's user fields onto the discussion: `userName`, and the
+ *  users to switch to only when the route says the user is choosable. */
+export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): void {
+  d.userName = typeof b.userName === "string" && b.userName ? b.userName : null;
+  d.userChoosable = b.userChoosable === true;
+  d.users = d.userChoosable && Array.isArray(b.users)
+    ? (b.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" && u.name ? u.name : (u.id as string) }))
+    : [];
+  if (!d.userChoosable) d.userMenu = false;
+}
+
+/** The «as <name> ▾» button in the tab's bar: the thread's user by name, a
+ *  button only when the reader may switch; empty while no name is known. */
+export function discussUserButtonHtml(d: DiscussionView | null, blockedWhy: string | null = null): string {
+  const name = d?.userName;
+  if (!d || !name) return "";
+  if (!d.userChoosable || !(d.users ?? []).length) return `<span class="wiki-discuss-as" title="Whose discussion this is">as ${esc(name)}</span>`;
+  const title = blockedWhy ?? "Whose discussion this is: choose another /chat user";
+  return `<button type="button" class="wiki-discuss-as" data-discuss-as aria-expanded="${!!d.userMenu}"${blockedWhy ? " disabled" : ""} title="${esc(title)}">as ${esc(name)} ▾</button>`;
+}
+
+/** The picker «as <name> ▾» opens: the bot's /chat users, the current one marked. */
+export function discussUserMenuPick(d: DiscussionView | null): { users: { id: string; name: string }[]; message: string; current: string | null; plain: true } | null {
+  if (!d?.userMenu || !d.userChoosable || !(d.users ?? []).length) return null;
+  return { users: d.users!, message: "Each user has their own discussion of this page. Pick whose to show (kept in this browser).", current: d.userId ?? null, plain: true };
+}
+
 export function newTurn(key: string, question: string, passage: DiscussPassage | null): DiscussTurnView {
-  return { key, turnId: null, seq: null, passage, question, text: "", state: "sending", phase: null, tools: [], message: null, proposedEdit: false, edit: null, handover: null, passageGone: false };
+  return {
+    key,
+    turnId: null,
+    seq: null,
+    passage,
+    question,
+    text: "",
+    state: "sending",
+    phase: null,
+    tools: [],
+    toolsOpen: null,
+    model: null,
+    connector: null,
+    durationMs: null,
+    message: null,
+    proposedEdit: false,
+    edit: null,
+    handover: null,
+    passageGone: false,
+  };
 }
 
 /** A turn that may still change: the tab sends no second turn meanwhile. */
@@ -482,6 +577,8 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
     case "turn":
       if (typeof data.turnId === "string") t.turnId = data.turnId;
       if (typeof data.seq === "number") t.seq = data.seq;
+      if (typeof data.model === "string" && data.model) t.model = data.model;
+      if (typeof data.connector === "string" && data.connector) t.connector = data.connector;
       t.state = "running";
       return typeof data.discussionId === "string" ? { discussionId: data.discussionId } : {};
     case "status":
@@ -491,12 +588,14 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
       if (typeof data.text === "string" && t.state === "running") t.text += data.text;
       return {};
     case "tool":
-      if (typeof data.name === "string") t.tools.push(typeof data.input === "string" && data.input ? `${data.name} ${data.input}` : data.name);
+      if (typeof data.name === "string") t.tools.push(toolCallView(data));
       return {};
     case "done":
       t.state = "done";
       t.phase = null;
       if (typeof data.answer === "string") t.text = data.answer;
+      if (typeof data.model === "string" && data.model) t.model = data.model;
+      if (typeof data.durationMs === "number") t.durationMs = data.durationMs;
       t.proposedEdit = data.proposedEdit !== null && data.proposedEdit !== undefined;
       return {};
     case "app_error":
@@ -635,6 +734,47 @@ export function discussEditHtml(t: DiscussTurnView, current: boolean): string {
   return parts.join("");
 }
 
+/** How many tool lines a turn shows: the newest, with «and K more» for the rest. */
+export const DISCUSS_TOOLS_SHOWN = 6;
+
+/** Whether a turn's tool group is open: the reader's choice, else open while
+ *  the turn runs and no answer text has arrived, closed from then on. */
+export function discussToolsOpen(t: DiscussTurnView): boolean {
+  return t.toolsOpen ?? (turnLive(t) && !t.text);
+}
+
+/** The tool group, /chat's look: «Using N tools…» while the turn runs, «Used N
+ *  tools» after, each line `label: detail` (`discussToolLine`). */
+export function discussToolsHtml(t: DiscussTurnView): string {
+  const n = t.tools.length;
+  const open = discussToolsOpen(t);
+  const head = `${turnLive(t) ? "Using" : "Used"} ${n} tool${n === 1 ? "" : "s"}${turnLive(t) ? "…" : ""}`;
+  const shown = t.tools.slice(-DISCUSS_TOOLS_SHOWN);
+  const more = n - shown.length;
+  const lines = shown
+    .map((c) => {
+      const l = c.label !== undefined ? { label: c.label, detail: c.detail ?? "" } : discussToolLine(c.name, c.input);
+      return `<div class="wiki-discuss-tool"><span class="wiki-discuss-tool-label">${esc(l.label)}${l.detail ? ": " : ""}</span>${l.detail ? `<span class="wiki-discuss-tool-detail">${esc(l.detail)}</span>` : ""}</div>`;
+    })
+    .join("");
+  return (
+    `<div class="wiki-discuss-tools${open ? "" : " collapsed"}">` +
+    `<button type="button" class="wiki-discuss-tools-head" data-discuss-tools="${esc(t.key)}" aria-expanded="${open}">` +
+    `<span class="wiki-discuss-tools-label">${head}</span><span class="wiki-discuss-tools-toggle" aria-hidden="true">▼</span></button>` +
+    (open ? `<div class="wiki-discuss-tools-body">${more > 0 ? `<div class="wiki-discuss-tools-more">and ${more} more</div>` : ""}${lines}</div>` : "") +
+    `</div>`
+  );
+}
+
+/** The turn's dim model line, `model · connector · 12.3 s`; empty without a model. */
+export function discussTurnMetaText(t: Pick<DiscussTurnView, "model" | "connector" | "durationMs">): string {
+  if (!t.model) return "";
+  const parts = [t.model];
+  if (t.connector) parts.push(t.connector);
+  if (t.durationMs !== null) parts.push(`${(t.durationMs / 1000).toFixed(1)} s`);
+  return parts.join(" · ");
+}
+
 /**
  * A turn's body: the status line while it runs, its tool lines, the answer,
  * the error and the proposed edit's card. The pane's turn and the selection
@@ -646,10 +786,10 @@ export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): stri
     const phase = t.state === "sending" ? "Starting the turn…" : discussPhaseWords(t.phase);
     parts.push(`<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(phase)}</span></div>`);
   }
-  if (t.tools.length) {
-    parts.push(`<div class="wiki-discuss-tools">${t.tools.slice(-6).map((x) => `<span class="wiki-discuss-tool">${esc(x)}</span>`).join("")}</div>`);
-  }
+  if (t.tools.length) parts.push(discussToolsHtml(t));
   if (t.text) parts.push(`<div class="wiki-discuss-answer">${breakablePaths(renderStreamingBody(t.text))}</div>`);
+  const meta = discussTurnMetaText(t);
+  if (meta) parts.push(`<div class="wiki-discuss-model">${esc(meta)}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
   if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
   return parts;

@@ -1257,7 +1257,7 @@ function wireChatOptions(): void {
     else if (t.closest("#wikiNewChatBtn")) openChatOptions("direct");
     // On a wiki with a wiki agent (Discuss P3) the button opens the Discuss tab.
     else if (t.closest("#" + DISCUSS_ARTICLE_BTN_ID)) {
-      if (discussAgentOn()) openDiscussTab(true);
+      if (discussAgentOn()) openDiscussTab(true, true); // the reader's own show: follows the kept user (R4)
       else openArticleChat();
     }
     else if (t.closest("[" + DRAFT_PLAN_ATTR + "]")) {
