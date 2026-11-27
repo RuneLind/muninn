@@ -20,6 +20,9 @@ describe("discussTurnKey", () => {
 
   test("a tracker key's place is where it stands whole, not inside a longer token (fix round 1, finding 4)", () => {
     expect(discussTurnKey({ question: "see XMELOSYS-8351, then MEL-5, then MELOSYS-8351" }, cfg)).toBe("MEL-5");
+    // The right edge too: a word character, or `-` and a digit, after it is no whole key (fix round 2).
+    expect(discussTurnKey({ question: "MELOSYS-8351-1 then MEL-5 then MELOSYS-8351" }, cfg)).toBe("MEL-5");
+    expect(discussTurnKey({ question: "MELOSYS-8351x then MEL-5 then MELOSYS-8351" }, cfg)).toBe("MEL-5");
   });
 
   test("a whole key only, and a wiki with no key patterns gets none", () => {

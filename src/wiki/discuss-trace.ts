@@ -133,10 +133,12 @@ export function renderTraceTurnPrompt(opts: { wiki: string; mentions: MentionsBo
 /**
  * A page turn's key block bounds each section on its own, so a busy key keeps
  * its commits, log lines and PR states: one outer cap equal to the where
- * section's own bound cut MELOSYS-8351 (96 lines) inside «Where it is
- * mentioned» and dropped the rest. Measured 27.11 on melosys-kode-wiki (where /
- * commits / log / PRs, chars): MEL-1029036 5,656 / 2,517 / 1,242 / 226, kept
- * whole; MELOSYS-8351 11,963 / 6,831 / 2,620 / 125.
+ * section's own bound cut MELOSYS-8351 inside «Where it is mentioned» and
+ * dropped the rest. Measured 27.11 on melosys-kode-wiki at 7789c38, uncut, in
+ * characters with headings left out (where / commits / log / PRs; PR states
+ * read with no gh, so that figure moves with the caches): MEL-1029036 5,631 /
+ * 2,458 / 1,222 / 202, a 10,011-character block, whole; MELOSYS-8351 19,353 /
+ * 6,772 / 2,600 / 101, a 13,554-character block with its where and commits cut.
  */
 export const KEY_PACK_BUDGET: TracePackBudget = { where: 8_000, commits: 3_000, log: 2_000, prs: 1_500 };
 

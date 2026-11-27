@@ -940,7 +940,6 @@ test("the trace pre-flight reads the wiki's git state afresh: a first commit mad
 test("a page turn naming a key gets its mentions in the prompt, from the real mentions builder; a keyless one reads no mentions", async () => {
   await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
   await Bun.write(path.join(wiki, "notes", "berth.md"), "# Berth note\n\nThe berth case MEL-95 waits on the crane.\n");
-  await Bun.write(path.join(wiki, "notes", "harbour.md"), NOTE + "\nThe crane for MEL-95 is late.\n");
   gitc("add", ".");
   gitc("commit", "-qm", "Berth note names MEL-95");
   __resetWikiCacheForTest();
