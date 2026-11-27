@@ -7,7 +7,8 @@
  *     reload brings it back**: the width is read off the pane's own box, never
  *     the variable. Double-click resets it, the arrow keys step it, a stored
  *     width too wide for the window is bounded, and the collapsed strip has no
- *     handle. `wiki-pane-width.test.ts` holds the rules, not the DOM chain.
+ *     handle. A drag that loses its capture ends (the rail's trap), and a rail
+ *     drag re-bounds the pane. `wiki-pane-width.test.ts` holds the rules, not the DOM chain.
  *  2. **A Discuss answer's list markers stay inside the pane**: each item's
  *     text starts at least 1.2em inside the pane (an outside marker hangs about
  *     that far left of it), a nested item another 1em in; and a long path in
@@ -31,7 +32,8 @@ import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
-import { PANE_WIDTH_DEFAULT, PANE_WIDTH_KEY, PANE_WIDTH_KEY_STEP } from "../src/dashboard/views/components/wiki-pane-width.ts";
+import { PANE_ARTICLE_RESERVE, PANE_WIDTH_DEFAULT, PANE_WIDTH_KEY, PANE_WIDTH_KEY_STEP } from "../src/dashboard/views/components/wiki-pane-width.ts";
+import { RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
 import { stubBootLine } from "./wiki-work-card-fixture.ts";
 
 const PORT = e2ePort("wiki-pane-room");
@@ -209,6 +211,60 @@ test("a drag on the pane's left edge widens it, a reload keeps it, double-click 
   expect(await paneWidth(page)).toBeLessThan(60);
   await page.locator('.wiki-conn-strip [data-pane-toggle="right"]').click();
   await page.evaluate((k) => localStorage.removeItem(k), PANE_WIDTH_KEY);
+});
+
+test("a drag that loses its pointer capture ends: the width it reached is stored and later moves resize nothing", async ({ page }) => {
+  await openPage(page);
+  await page.evaluate((k) => localStorage.removeItem(k), PANE_WIDTH_KEY);
+  await page.reload();
+  await expect(article(page)).toContainText("The harbour opens at six.");
+  const h = (await handle(page).boundingBox())!;
+  const x0 = h.x + h.width / 2;
+  const y0 = h.y + 200;
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(x0 - 80, y0, { steps: 4 });
+  await expect(page.locator("body")).toHaveClass(/wiki-rail-dragging/);
+  // The rail spec's gesture: a context menu drops the capture with no pointerup,
+  // which Playwright's mouse cannot make, so the browser's event is dispatched.
+  await handle(page).evaluate((el) => el.dispatchEvent(new PointerEvent("lostpointercapture", { pointerId: 1, bubbles: true })));
+  await expect(page.locator("body")).not.toHaveClass(/wiki-rail-dragging/);
+  const settled = await paneWidth(page);
+  expect(settled).toBeGreaterThan(PANE_WIDTH_DEFAULT);
+  await page.mouse.move(x0 - 160, y0, { steps: 3 });
+  expect(await paneWidth(page)).toBe(settled);
+  await page.mouse.up();
+  expect(Math.abs(Number(await page.evaluate((k) => localStorage.getItem(k), PANE_WIDTH_KEY)) - settled)).toBeLessThanOrEqual(1);
+  await page.evaluate((k) => localStorage.removeItem(k), PANE_WIDTH_KEY);
+});
+
+test("a wider rail narrows the pane to what it leaves the article, and a narrower one gives the stored width back", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 1000 });
+  await openPage(page);
+  await page.evaluate(([p, r]) => {
+    localStorage.setItem(p, "720");
+    localStorage.removeItem(r);
+  }, [PANE_WIDTH_KEY, RAIL_WIDTH_KEY]);
+  await page.reload();
+  await expect(article(page)).toContainText("The harbour opens at six.");
+  // 40% of 1400 is 560; the 300px rail leaves 1400 − 300 − 500 = 600.
+  expect(await paneWidth(page)).toBe(560);
+  // Drag the rail to 560: the pane may take 1400 − 560 − 500 = 340.
+  const rh = (await page.locator("#wikiRailResizer").boundingBox())!;
+  await page.mouse.move(rh.x + rh.width / 2, rh.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(rh.x + rh.width / 2 + 300, rh.y + 200, { steps: 8 });
+  await page.mouse.up();
+  const rail = async () => Math.round((await page.locator(".wiki-layout > .wiki-pane:first-child").boundingBox())!.width);
+  expect(await rail()).toBe(560);
+  await expect.poll(() => paneWidth(page)).toBe(1400 - 560 - PANE_ARTICLE_RESERVE);
+  // The rail reset: the stored 720 is bounded by the window again.
+  await page.locator("#wikiRailResizer").dblclick();
+  await expect.poll(() => paneWidth(page)).toBe(560);
+  await page.evaluate(([p, r]) => {
+    localStorage.removeItem(p);
+    localStorage.removeItem(r);
+  }, [PANE_WIDTH_KEY, RAIL_WIDTH_KEY]);
 });
 
 for (const theme of ["light", "dark"] as const) {

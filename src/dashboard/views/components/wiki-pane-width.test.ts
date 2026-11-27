@@ -37,8 +37,8 @@ describe("wiki pane width", () => {
     expect(effectivePaneWidth(720, 1400, 560)).toBe(1400 - 560 - PANE_ARTICLE_RESERVE);
     // Never under the minimum, however little is left.
     expect(effectivePaneWidth(720, 1150, 560)).toBe(PANE_WIDTH_MIN);
-    // A chosen width under the minimum is the reader's (a narrower pane).
-    expect(effectivePaneWidth(260, 1150, 560)).toBe(260);
+    // A chosen width under the bound is applied as chosen.
+    expect(effectivePaneWidth(300, 1600, 300)).toBe(300);
     // No usable viewport: the chosen width as is.
     expect(effectivePaneWidth(500, 0, 300)).toBe(500);
   });
