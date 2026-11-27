@@ -237,7 +237,7 @@ describe("sharedSseClient", () => {
     expect(hb.readyState).toBe(2);
   });
 
-  test("an error carries the leader's readyState to the follower's handle, read inside onerror", async () => {
+  test("a relayed transient error reads 0 on the follower's handle inside onerror, then 1 on reopen", async () => {
     const o = origin();
     const a = recorder([]);
     a.h.handle = sharedSseClient(URL, a.handlers, { ...OPTS, deps: o.deps });

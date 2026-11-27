@@ -806,8 +806,9 @@ export async function renderAgentsPage(): Promise<string> {
     // non-200 (readyState 2, no retry) — which is exactly what an expired
     // session or a role-denied /api/events answers — and calling that
     // "reconnecting…" promises a recovery that will never come. The stream is
-    // shared with the other home and /agents tabs (shared-sse.ts); the handle's
-    // readyState is the leading tab's, as of the error.
+    // shared with the other home and /agents tabs (shared-sse.ts): on a leading
+    // tab readyState is its own stream's; a follower reads 0 on a relayed error
+    // (a leader never relays 2), so only a tab's own refused stream reads 2.
     var sse = sharedSseClient('/api/events', {
       onopen: function () {
         // Fires on the first connect AND on every native reconnect after a drop
