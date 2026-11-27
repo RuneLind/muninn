@@ -265,6 +265,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // one-shot turns (`thread_id IS NULL`, read-only). Calls no model, so no egress
   // prologue. Refusals: 403 role · 400 query · 404 unknown wiki or page · 503
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
+  // Beside `userId`: `userName` (its /chat name), `userChoosable` and `users`
+  // (the bot's /chat users, empty unless choosable), for the tab's «as <name> ▾».
   //
   // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
   // the Trace view): the thread and its messages; a trace has no closed list
@@ -303,6 +305,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const live = turnOnFirstMessage(messages);
       return c.json({
         userId: who.userId,
+        ...whoFields(who),
         bot: bot.name,
         thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null,
         messages: live,
@@ -318,6 +321,14 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       return c.json({ error: "could not read the thread" }, 500);
     }
   });
+
+  /** The thread's user by name, and whether the reader may choose another:
+   *  only with `MUNINN_AUTH=off`, where the pane's `userId` picks the thread.
+   *  On an authenticating instance no user list is sent and no picker shows. */
+  function whoFields(who: { username: string | null; users: { id: string; name: string }[] }): { userName: string | null; userChoosable: boolean; users: { id: string; name: string }[] } {
+    const choosable = (deps.authMode ?? authMode)() === "off";
+    return { userName: who.username, userChoosable: choosable, users: choosable ? who.users : [] };
+  }
 
   async function traceThreadRead(c: Context, raw: string): Promise<Response> {
     // Absent where a trace turn is refused: an instance that authenticates.
@@ -335,7 +346,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const thread = await getLiveWikiTraceThread(who.userId, bot.name, entry?.name ?? "", key.key);
       const messages = thread ? await listThreadMessagesWithTurns(thread.id) : [];
       const live = turnOnFirstMessage(messages);
-      return c.json({ userId: who.userId, bot: bot.name, traceKey: key.key, thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null, messages: live, closed: [], closedTotal: 0, oneShot: [] });
+      return c.json({ userId: who.userId, ...whoFields(who), bot: bot.name, traceKey: key.key, thread: thread ? { id: thread.id, name: thread.name, createdAt: thread.createdAt } : null, messages: live, closed: [], closedTotal: 0, oneShot: [] });
     } catch (err) {
       log.error("discuss trace thread read failed: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "could not read the thread" }, 500);

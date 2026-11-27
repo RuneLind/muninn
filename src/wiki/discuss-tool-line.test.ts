@@ -1,0 +1,73 @@
+/** `discussToolLine`: a Discuss tool call in a reader's words, for every tool
+ *  the surfaces produce, a cut input and garbage. */
+import { describe, expect, test } from "bun:test";
+import { discussToolLine, discussToolText } from "./discuss-tool-line.ts";
+
+const j = (o: unknown) => JSON.stringify(o);
+
+describe("discussToolLine", () => {
+  test("research wiki tools (copilot-sdk names)", () => {
+    expect(discussToolLine("research-wiki_grep", j({ pattern: "2032", wiki: "melosys-kode-wiki", glob: "plans/2026-11-27-fnr-maskering-i-claude-code-og-opencode.mdx", maxResults: 10 }))).toEqual({
+      label: "Searching the wiki",
+      detail: '"2032" in plans/2026-11-27-fnr-maskering-i-claude-code-og-opencode.mdx',
+    });
+    expect(discussToolLine("research-wiki_grep", j({ pattern: "T-nummer", wiki: "w" }))).toEqual({ label: "Searching the wiki", detail: '"T-nummer"' });
+    expect(discussToolLine("research-wiki_read", j({ wiki: "w", path: "plans/2026-11-19-syntetisk-fnr-kosovo-testperson.mdx", offset: 28, limit: 40 }))).toEqual({
+      label: "Reading",
+      detail: "plans/2026-11-19-syntetisk-fnr-kosovo-testperson.mdx, lines 28–67",
+    });
+    expect(discussToolLine("research-wiki_read", j({ wiki: "w", path: "a.md", offset: 5 })).detail).toBe("a.md, from line 5");
+    expect(discussToolLine("research-wiki_read", j({ wiki: "w", path: "a.md", limit: 20 })).detail).toBe("a.md, lines 1–20");
+    expect(discussToolLine("research-wiki_history", j({ wiki: "w", term: "MEL-1", path: "plans" }))).toEqual({ label: "Reading the wiki's history", detail: '"MEL-1" in plans' });
+  });
+  test("claude-cli MCP spelling reads the same", () => {
+    expect(discussToolLine("mcp__research__wiki_grep", j({ pattern: "x" }))).toEqual({ label: "Searching the wiki", detail: '"x"' });
+  });
+  test("yggdrasil and knowledge tools", () => {
+    expect(discussToolLine("yggdrasil-search", j({ query: "fnr-guard idnr D-nummer" }))).toEqual({ label: "Searching code", detail: "fnr-guard idnr D-nummer" });
+    expect(discussToolLine("yggdrasil-search", j({ query: "q", repo: "melosys-api" })).detail).toBe("q in melosys-api");
+    expect(discussToolLine("yggdrasil-file_outline", j({ repo: "muninn", path: "src/wiki/x.ts" }))).toEqual({ label: "Outlining", detail: "muninn: src/wiki/x.ts" });
+    expect(discussToolLine("yggdrasil-symbol_context", j({ symbol: "startTurn" }))).toEqual({ label: "Looking up a symbol", detail: "startTurn" });
+    expect(discussToolLine("yggdrasil-impact", j({ symbol: "startTurn" }))).toEqual({ label: "Checking impact", detail: "startTurn" });
+    expect(discussToolLine("yggdrasil-list_repos", "{}")).toEqual({ label: "Listing repos", detail: "" });
+    expect(discussToolLine("yggdrasil-list_files", j({ repo: "muninn", path: "src" }))).toEqual({ label: "Listing files", detail: "muninn: src" });
+    expect(discussToolLine("knowledge-search_knowledge", j({ query: "trygdeavtale" }))).toEqual({ label: "Searching knowledge", detail: "trygdeavtale" });
+  });
+  test("claude-cli built-ins; an absolute snapshot path shows its tail", () => {
+    expect(discussToolLine("Read", j({ file_path: "/var/folders/x/T/muninn-snap-abc/wiki/plans/p.mdx", offset: 10, limit: 5 }))).toEqual({ label: "Reading", detail: "…/wiki/plans/p.mdx, lines 10–14" });
+    expect(discussToolLine("Read", j({ file_path: "/a/b.md" })).detail).toBe("/a/b.md");
+    expect(discussToolLine("Grep", j({ pattern: "fnr", path: "/tmp/snap/repo/src/guard", glob: "*.ts" }))).toEqual({ label: "Searching files", detail: '"fnr" in *.ts' });
+    expect(discussToolLine("Grep", j({ pattern: "fnr", path: "/tmp/snap/repo/src/guard" })).detail).toBe('"fnr" in …/repo/src/guard');
+    expect(discussToolLine("Glob", j({ pattern: "**/*.mdx", path: "/tmp/s/wiki" }))).toEqual({ label: "Listing files", detail: "**/*.mdx in /tmp/s/wiki" });
+  });
+  test("an input cut at 200 chars still gives its fields", () => {
+    const full = j({ pattern: "T-nummer", wiki: "melosys-kode-wiki", glob: `plans/${"x".repeat(300)}.mdx` });
+    const cutInput = `${full.slice(0, 199)}…`;
+    expect(() => JSON.parse(cutInput)).toThrow();
+    const l = discussToolLine("research-wiki_grep", cutInput);
+    expect(l.label).toBe("Searching the wiki");
+    expect(l.detail.startsWith('"T-nummer" in plans/xxx')).toBe(true);
+    expect(l.detail.length).toBeLessThanOrEqual(160);
+    expect(discussToolLine("research-wiki_read", '{"wiki":"w","path":"plans/a.mdx","offset":3,"lim').detail).toBe("plans/a.mdx, from line 3");
+    // An escape in a cut input is read as JSON would.
+    expect(discussToolLine("research-wiki_grep", '{"pattern":"say \\"hi\\"","glob":"pla').detail).toBe('"say "hi"" in pla');
+    // A long detail is cut to 160 characters.
+    const long = discussToolLine("yggdrasil-search", j({ query: "q".repeat(400) })).detail;
+    expect(long.length).toBe(160);
+    expect(long.endsWith("…")).toBe(true);
+  });
+  test("an unknown tool: its name with spaces and a short key: value detail", () => {
+    expect(discussToolLine("other-do_thing", j({ alpha: "one", beta: 2, gamma: "three", delta: "four" }))).toEqual({ label: "other-do thing", detail: "alpha: one, beta: 2, gamma: three" });
+  });
+  test("garbage never throws", () => {
+    expect(discussToolLine("Read", "not json at all")).toEqual({ label: "Reading", detail: "" });
+    expect(discussToolLine("", "")).toEqual({ label: "tool", detail: "" });
+    expect(discussToolLine("research-wiki_grep", "[1,2,3]")).toEqual({ label: "Searching the wiki", detail: "" });
+    expect(discussToolLine(undefined as unknown as string, null as unknown as string)).toEqual({ label: "tool", detail: "" });
+    expect(discussToolLine("x", '{"a":"\\u12')).toEqual({ label: "x", detail: "a: \\u12" });
+  });
+  test("discussToolText joins label and detail the way /chat's tool line splits it", () => {
+    expect(discussToolText("yggdrasil-search", j({ query: "q" }))).toBe("Searching code: q");
+    expect(discussToolText("yggdrasil-list_repos", "")).toBe("Listing repos");
+  });
+});

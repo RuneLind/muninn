@@ -499,6 +499,23 @@ describe("a turn", () => {
     expect(row.location).toMatchObject({ found: "exact", fromLine: 15, toLine: 15 });
     expect(evs.find((e) => e.event === "done")!.data.turnId).toBe(row.id);
   });
+  test("the turn event names the planned model and the connector; done the model the connector reported", async () => {
+    const reported = setup({
+      oneShot: (async () => ({ result: "Done.", model: "invented-model-20261101", toolCalls: [] })) as never,
+    });
+    const evs = await frames(await post(reported.app, PASSAGE));
+    expect(evs.find((e) => e.event === "turn")!.data).toMatchObject({ model: "invented-model", connector: "claude-sdk" });
+    expect(evs.find((e) => e.event === "done")!.data.model).toBe("invented-model-20261101");
+    // No reported model: done repeats the planned one; a bot with no model plans the instance's.
+    const planned = setup({
+      oneShot: (async () => ({ result: "Done.", toolCalls: [] })) as never,
+      deps: { bots: () => [{ ...bot("copilot-sdk"), model: undefined }] },
+    });
+    const evs2 = await frames(await post(planned.app, PASSAGE));
+    expect(evs2.find((e) => e.event === "turn")!.data).toMatchObject({ model: "fallback-model", connector: "copilot-sdk" });
+    expect(evs2.find((e) => e.event === "done")!.data.model).toBe("fallback-model");
+    expect(planned.store.rows[0]!.model).toBe("fallback-model");
+  });
   test("a page whose repos: names a repo outside discuss.repos gets no snapshot of it, and the pack says so", async () => {
     const { app, calls } = setup();
     await (await post(app, PASSAGE)).text();

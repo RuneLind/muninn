@@ -418,6 +418,10 @@ export interface ThreadMessageWithTurn {
   role: "user" | "assistant" | "peer";
   content: string;
   createdAt: number;
+  /** The stored message's model (an answer's: the one the connector reported); null for none. */
+  model: string | null;
+  /** The stored message's duration in ms; null for none. */
+  durationMs: number | null;
   /** The ledger row this message mirrors (its edit card keys on `turn.id`); null for none. */
   turn: DiscussTurn | null;
 }
@@ -462,7 +466,7 @@ export async function listClosedThreadMessages(threadIds: string[], perThread: n
  *  the next question can share a time); a message with no turn last. */
 export async function listThreadMessagesWithTurns(threadId: string): Promise<ThreadMessageWithTurn[]> {
   const rows = await getDb()`
-    SELECT m.id AS m_id, m.role AS m_role, m.content AS m_content, m.created_at AS m_created_at, w.*
+    SELECT m.id AS m_id, m.role AS m_role, m.content AS m_content, m.created_at AS m_created_at, m.model AS m_model, m.duration_ms AS m_duration_ms, w.*
     FROM messages m
     LEFT JOIN wiki_discuss_turns w ON w.thread_id = m.thread_id AND (w.user_message_id = m.id OR w.assistant_message_id = m.id)
     WHERE m.thread_id = ${threadId}
@@ -472,6 +476,8 @@ export async function listThreadMessagesWithTurns(threadId: string): Promise<Thr
     role: r.m_role as ThreadMessageWithTurn["role"],
     content: r.m_content as string,
     createdAt: new Date(r.m_created_at as string).getTime(),
+    model: (r.m_model as string | null) ?? null,
+    durationMs: r.m_duration_ms === null || r.m_duration_ms === undefined ? null : Number(r.m_duration_ms),
     turn: r.id ? mapRow(r) : null,
   }));
 }

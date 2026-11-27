@@ -409,7 +409,7 @@ export interface DiscussEngine {
   start(req: DiscussRequest): Promise<DiscussRefusal | StartedDiscussTurn>;
   /** The thread's user for a page read (`GET /api/wiki/discuss/thread`): the
    *  posted id (refused unless /chat lists it), else the bot's default user. */
-  resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null } | DiscussRefusal>;
+  resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null; users: { id: string; name: string }[] } | DiscussRefusal>;
 }
 
 function abbreviate(s: string | undefined, max = 300): string {
@@ -469,17 +469,19 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
   // Read-only roots never get here (the egress prologue refuses them), so a miss may start the refresh.
   const defaultMentions = (input: MentionsInput) => buildMentions(input, { git, gh: (gh ??= realGhCheckDeps()), now: Date.now });
   let inflight = 0;
+  /** The model a turn is asked to run on: the bot's, else the instance's. */
+  const plannedModel = (p: Prepared): string | null => p.bot.model ?? config.claudeModel ?? null;
 
-  async function resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null } | DiscussRefusal> {
+  async function resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null; users: { id: string; name: string }[] } | DiscussRefusal> {
     const users = deps.chatUsers ? await deps.chatUsers(botName) : [];
     if (posted !== undefined) {
       const hit = users.find((u) => u.id === posted);
       if (!hit) return refuse(422, { error: `the user "${posted}" is not one of ${botName}'s chat users`, reason: "unknown-user", users: users.map((u) => ({ id: u.id, name: u.name })) });
-      return { userId: hit.id, username: hit.name };
+      return { userId: hit.id, username: hit.name, users: users.map((u) => ({ id: u.id, name: u.name })) };
     }
     const def = await defaultUser(botName);
     if (!def) return refuse(422, { error: `pick the user this discussion belongs to: ${botName} has no default chat user`, reason: "no-user", bot: botName, users: users.map((u) => ({ id: u.id, name: u.name })) });
-    return { userId: def, username: users.find((u) => u.id === def)?.name ?? null };
+    return { userId: def, username: users.find((u) => u.id === def)?.name ?? null, users: users.map((u) => ({ id: u.id, name: u.name })) };
   }
 
   async function prepare(req: DiscussRequest): Promise<Prepared | DiscussRefusal> {
@@ -718,7 +720,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
           location: p.location,
           botName: p.bot.name,
           connector: p.connector,
-          model: p.bot.model ?? config.claudeModel ?? null,
+          model: plannedModel(p),
           surface: { kind: p.kind, mode: p.mode },
           userMessage: { userId: p.userId, botName: p.bot.name, username: p.username, content: userText },
         },
@@ -778,7 +780,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         }, heartbeatMs);
         beat.unref?.();
         try {
-          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, seq: turn.seq, location: p.location, mode: p.mode });
+          // The planned model rides the `turn` event: the first frame, before
+          // the snapshot and card phases, so the reader sees it from the start.
+          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, seq: turn.seq, location: p.location, mode: p.mode, model: plannedModel(p), connector: p.connector });
           await runTurn(p, threadId, turn, emit, mirrored);
         } finally {
           clearInterval(beat);
@@ -966,9 +970,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       const proposedEdit = p.traceKey !== null ? null : extractProposedEdit(answer);
       const durationMs = Math.round(performance.now() - t0);
       await store.finish(turn.id, { endState: "done", answer, card, toolCalls, proposedEdit, costUsd: res.costUsd ?? null, durationMs });
-      const assistantMessageId = await storeAnswer(p.traceKey !== null ? answer : stripProposedEdit(answer), "done", { model: res.model ?? p.bot.model ?? null, costUsd: res.costUsd ?? null, durationMs });
+      const assistantMessageId = await storeAnswer(p.traceKey !== null ? answer : stripProposedEdit(answer), "done", { model: res.model ?? plannedModel(p), costUsd: res.costUsd ?? null, durationMs });
       log.info("discuss turn on {wiki} {relPath}: done", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, seq: turn.seq, threadId, mode: p.mode, bot: p.bot.name, connector: p.connector, tools: toolCalls.length, edit: proposedEdit !== null, ms: durationMs });
-      emit("done", { turnId: turn.id, discussionId: threadId, threadId, assistantMessageId, endState: "done", answer, proposedEdit, toolCalls, costUsd: res.costUsd ?? null, durationMs });
+      emit("done", { turnId: turn.id, discussionId: threadId, threadId, assistantMessageId, endState: "done", answer, proposedEdit, toolCalls, costUsd: res.costUsd ?? null, durationMs, model: res.model ?? plannedModel(p) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const endState = err instanceof DiscussTurnTimeout ? "timeout" : "error";
@@ -976,7 +980,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       await store
         .finish(turn.id, { endState, answer: streamed, error: message, card, toolCalls: streamedTools.slice(), durationMs })
         .catch((e) => log.error("discuss turn finish failed: {error}", { error: String(e) }));
-      await storeAnswer(unfinishedMessage(p.traceKey !== null ? streamed : stripProposedEdit(streamed)), endState, { model: p.bot.model ?? null, durationMs });
+      await storeAnswer(unfinishedMessage(p.traceKey !== null ? streamed : stripProposedEdit(streamed)), endState, { model: plannedModel(p), durationMs });
       log.warn("discuss turn on {wiki} {relPath}: {endState}", { wiki: p.wiki, relPath: p.traceKey ?? p.relPath, traceKey: p.traceKey, turnId: turn.id, threadId, endState, error: message, ms: durationMs });
       emit("app_error", { type: "error", turnId: turn.id, endState, message: endState === "timeout" ? `The turn ran past ${Math.round(timeoutMs / 60000)} minutes and was stopped.` : `The turn failed: ${message}` });
     } finally {
