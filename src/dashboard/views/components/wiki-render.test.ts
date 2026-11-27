@@ -280,7 +280,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // 2026-11-27, Discuss pane room PR 1 (the right pane's drag handle `wiki-pane-resize.ts` and its width
 // rules, the Trace box's «Send» sync, the pane answer's breakable paths): 991,743 (336,305 gzipped),
 // so the pin moves to 991,800.
-const WIKI_CLIENT_MAX_BYTES = 991_800;
+// 2026-11-27, the mentions phase's words, shared with the Trace card (`discussPhaseWords`): 991,866
+// (336,328 gzipped), so the pin moves to 991,900.
+const WIKI_CLIENT_MAX_BYTES = 991_900;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

@@ -11,6 +11,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { prsHtml, whereElseHtml } from "./wiki-selection-menu-model.ts";
+import { discussPhaseWords } from "./wiki-discuss-state.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
 import { KEY_MARK_CHIPPED_CLASS } from "../../../wiki/core/live-facts-chip.ts";
 
@@ -88,6 +89,12 @@ export function traceBodyHtml(b: MentionsBody, opts: { currentRelPath: string | 
         `<button type="button" class="wiki-sel-card-btn" data-trace-continue title="A prompt that takes this discussion on to Claude Code (no page path)">Continue in Claude Code</button></form></section>`
       : "")
   );
+}
+
+/** A Trace turn's status line after an engine `status` frame: the pane's words
+ *  for its phase, else the frame's own text, else the line it had. */
+export function traceStatusFrom(m: Record<string, unknown>, prev: string | undefined): string | undefined {
+  return typeof m.phase === "string" ? discussPhaseWords(m.phase) : typeof m.text === "string" ? m.text : prev;
 }
 
 /** One turn of the trace thread: the question, then the answer as markdown HTML. */
