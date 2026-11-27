@@ -11,7 +11,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
-import { renderStreamingBody } from "./wiki-ask-render.ts";
+import { breakablePaths, renderStreamingBody } from "./wiki-ask-render.ts";
 import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
 import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussReading } from "./wiki-discuss-text.ts";
@@ -358,7 +358,7 @@ function earlierExchange(q: string, a: string, stored: "message" | "ledger"): st
   return (
     `<div class="wiki-discuss-earlier-turn">` +
     `<div class="wiki-discuss-q">${esc(q)}</div>` +
-    (answer ? `<div class="wiki-discuss-answer">${renderStreamingBody(answer)}</div>` : "") +
+    (answer ? `<div class="wiki-discuss-answer">${breakablePaths(renderStreamingBody(answer))}</div>` : "") +
     `</div>`
   );
 }
@@ -642,7 +642,7 @@ export function discussTurnBodyParts(t: DiscussTurnView, current: boolean): stri
   if (t.tools.length) {
     parts.push(`<div class="wiki-discuss-tools">${t.tools.slice(-6).map((x) => `<span class="wiki-discuss-tool">${esc(x)}</span>`).join("")}</div>`);
   }
-  if (t.text) parts.push(`<div class="wiki-discuss-answer">${renderStreamingBody(t.text)}</div>`);
+  if (t.text) parts.push(`<div class="wiki-discuss-answer">${breakablePaths(renderStreamingBody(t.text))}</div>`);
   if (t.message) parts.push(`<div class="wiki-discuss-error" role="alert">${esc(t.message)}</div>`);
   if (t.proposedEdit && t.state === "done") parts.push(discussEditHtml(t, current));
   return parts;

@@ -80,6 +80,13 @@ export function discussTabStyles(): string {
     /* Not .wiki-article: the reader's selection, find and reveal code reads that
        class as the page. The chat's pre-wrap, since the formatter writes no <p>. */
     .wiki-discuss-answer { font-size: 13px; line-height: 1.55; color: var(--text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
+    /* The global reset zeroes list padding, so a marker hung outside the box:
+       a top-level bullet drew over the pane's left border (27.11). Inline code
+       breaks at the <wbr>s breakablePaths puts after / and -; anywhere only
+       when one segment alone is wider than the column. */
+    .wiki-discuss-answer ul, .wiki-discuss-answer ol { padding-left: 1.4em; margin: 4px 0; }
+    .wiki-discuss-answer li { margin: 2px 0; }
+    .wiki-discuss-answer li > ul, .wiki-discuss-answer li > ol { margin: 2px 0; padding-left: 1.2em; }
     .wiki-discuss-answer code { font-family: var(--font-mono, monospace); font-size: 0.92em; background: var(--bg-inset); padding: 1px 4px; border-radius: 4px; }
     .wiki-discuss-answer pre { white-space: pre; overflow-x: auto; background: var(--bg-inset); padding: 8px; border-radius: 6px; }
     .wiki-discuss-answer pre code { background: none; padding: 0; }

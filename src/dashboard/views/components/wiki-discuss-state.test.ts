@@ -24,7 +24,7 @@ import {
   type DiscussionView,
 } from "./wiki-discuss-state.ts";
 import * as discussState from "./wiki-discuss-state.ts";
-import { renderStreamingBody } from "./wiki-ask-render.ts";
+import { breakablePaths, renderStreamingBody } from "./wiki-ask-render.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { plainSnippet } from "../../../wiki/find-everywhere.ts";
 import { DISCUSS_TEXT_SKIP, discussContext } from "./wiki-discuss-text.ts";
@@ -175,12 +175,13 @@ describe("refusal words", () => {
 });
 
 describe("the tab's markup", () => {
-  test("a streamed answer goes through the Ask tab's markdown function; user text is escaped", () => {
+  test("a streamed answer goes through the Ask tab's markdown function, its paths breakable; user text is escaped", () => {
     const t = newTurn("t1", "Is <b>this</b> right?", { ...passage, selection: "a <script> passage" });
     applyDiscussFrame(t, "turn", { turnId: "id", seq: 1 });
     applyDiscussFrame(t, "delta", { text: "**Yes**, see `src/route.ts`." });
     const html = discussTurnHtml(t);
-    expect(html).toContain(renderStreamingBody("**Yes**, see `src/route.ts`."));
+    expect(html).toContain(breakablePaths(renderStreamingBody("**Yes**, see `src/route.ts`.")));
+    expect(html).toContain("<code>src/<wbr>route.ts</code>");
     expect(html).toContain("Is &lt;b&gt;this&lt;/b&gt; right?");
     expect(html).toContain("a &lt;script&gt; passage");
     expect(html).toContain('data-discuss-chip="t1"');

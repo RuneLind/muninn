@@ -97,6 +97,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
+import { initPaneResize } from "./wiki-pane-resize.ts";
 import { closeRailPanel, initPaneToggles, revealRightPane } from "./wiki-pane-toggle.ts";
 import {
   parseRelatedOrder,
@@ -2702,6 +2703,7 @@ export function boot(): { dispose(): void } {
   });
   initWikiVisuals();
   initRailResize();
+  initPaneResize();
   initDiscussHandoff({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath });
   initDiscussTab({ wiki: () => FIND_SELF_WIKI || WIKI, relPath: () => currentRelPath, switchTab: (tab) => switchConnTab(tab), reload: () => reloadPageInPlace(currentRelPath ?? undefined) });
   initPaneToggles();

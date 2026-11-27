@@ -84,7 +84,7 @@ export function traceBodyHtml(b: MentionsBody, opts: { currentRelPath: string | 
     (opts.agent
       ? `<section class="wiki-trace-sec" data-trace-sec="thread"><div class="wiki-trace-h">Discussion</div><div class="wiki-trace-turns"></div>` +
         `<div class="wiki-trace-actions"><button type="button" class="wiki-sel-card-btn" data-trace-summarize>✨ Summarize</button></div>` +
-        `<form class="wiki-trace-follow" hidden><input type="text" class="wiki-trace-input" placeholder="Ask a follow-up about ${esc(b.key)}" aria-label="Follow-up question"><button type="submit" class="wiki-sel-card-btn">Send</button>` +
+        `<form class="wiki-trace-follow" hidden><input type="text" class="wiki-trace-input" placeholder="Ask a follow-up about ${esc(b.key)}" aria-label="Follow-up question"><button type="submit" class="wiki-sel-card-btn" disabled>Send</button>` +
         `<button type="button" class="wiki-sel-card-btn" data-trace-continue title="A prompt that takes this discussion on to Claude Code (no page path)">Continue in Claude Code</button></form></section>`
       : "")
   );
@@ -252,6 +252,11 @@ export function keyTraceStyles(): string {
     .wiki-trace-q { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
     .wiki-trace-actions, .wiki-trace-follow { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
     .wiki-trace-follow[hidden] { display: none; }
-    .wiki-trace-input { flex: 1 1 220px; min-width: 0; font: inherit; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border-primary); background: var(--bg-primary); color: var(--text-primary); }
+    /* The Discuss input's field look: --border-primary on --bg-primary barely
+       showed on the card in dark mode, and the box read as plain text. */
+    .wiki-trace-input { flex: 1 1 220px; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary); }
+    .wiki-trace-input:focus { outline: none; border-color: var(--accent); }
+    .wiki-trace-input::placeholder { color: var(--text-dim); }
+    .wiki-trace-follow .wiki-sel-card-btn:disabled { opacity: 0.5; cursor: default; }
   `;
 }

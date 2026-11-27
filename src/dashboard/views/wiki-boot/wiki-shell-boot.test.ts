@@ -380,6 +380,10 @@ describe("wiki-browser.ts — listener order", () => {
       "#wikiRailResizer pointerdown s1ktq", "#wikiRailResizer pointermove 2zrwk", "#wikiRailResizer pointerup 2ipmi",
       "#wikiRailResizer pointercancel 2ipmi", "#wikiRailResizer lostpointercapture 2ipmi",
       "#wikiRailResizer dblclick 2ix69", "#wikiRailResizer keydown 1hhyy",
+      // The right pane's handle (`initPaneResize`), right after the rail's and in the same shape.
+      "window resize 2dqks", "#wikiPaneResizer pointerdown 3d9ri", "#wikiPaneResizer pointermove 3r8l6",
+      "#wikiPaneResizer pointerup 2ipmi", "#wikiPaneResizer pointercancel 2ipmi",
+      "#wikiPaneResizer lostpointercapture 2ipmi", "#wikiPaneResizer dblclick 2ix69", "#wikiPaneResizer keydown 2jzz2",
       // Discuss P1 (`initDiscussHandoff`): show or hide the control on a settled selectionchange (the selection is read on click), keep the selection on a press, act on click, Escape.
       "document selectionchange 3v0f0", "document mousedown 124c0", "document click 3pvli", "document keydown 27uoi",
       // Discuss P3 (`initDiscussTab`): the tab's Ask, chips and Continue on click (Discuss v2 PR 4 adds the
@@ -409,10 +413,12 @@ describe("wiki-browser.ts — listener order", () => {
       // The key peek and the Trace card (`initKeyTrace`, Discuss v2 PR 6), before the selection menu's: the
       // peek shown on a key's hover; a press (its «Trace»/«Go to ↓» run with their default prevented, a press
       // elsewhere hides it); the button let go; Escape and a scroll hide it; the Trace card's Summarize and
-      // Continue, and its follow-up form. No listener of the menu's reads what these do (their selectors
+      // Continue, and its follow-up form and box. No listener of the menu's reads what these do (their selectors
       // are disjoint and its mousedown reads no `defaultPrevented`).
       "document mouseover sv93w", "document mousedown tkbem", "document mouseup 2attz", "document keydown 1zyn7",
-      "document scroll capture 3ut2f", "document click 2pyi4", "document submit 34esa",
+      "document scroll capture 3ut2f", "document click 2pyi4", "document submit 2ojtl",
+      // The follow-up box's «Send», off while the box is empty.
+      "document input 2cep6",
       // The selection menu (`initSelectionMenu`, Discuss v2 PR 5), where the Explain pill's listeners were:
       // the bar on a mouseup, the right-click menu, close on a collapsed selection, Escape and Enter, an
       // action's press, a keyboard click and the cards' buttons, the bar following a scroll or a resize;

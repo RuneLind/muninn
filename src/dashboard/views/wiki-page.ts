@@ -38,6 +38,7 @@ import {
   RAIL_WIDTH_DEFAULT_NARROW,
   RAIL_DRAWER_MAX,
 } from "./components/wiki-rail-width.ts";
+import { PANE_WIDTH_DEFAULT } from "./components/wiki-pane-width.ts";
 import { STRIP_WIDTH } from "./components/wiki-panes.ts";
 import {
   CODE_REF_CLASS,
@@ -328,6 +329,7 @@ export async function renderWikiPage(opts?: {
     </div>
 
     <div class="wiki-pane wiki-conn-pane">
+      <div class="wiki-pane-resizer" id="wikiPaneResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the side pane" title="Drag or use ← → to resize · double-click or Home to reset"></div>
       <!-- Collapsed form: shown only under .right-collapsed (wiki-pane-toggle.ts). -->
       <div class="wiki-conn-strip" id="wikiConnStrip">
         <button class="wiki-pane-btn" type="button" data-pane-toggle="right" title="Show connections (])">${SVG_EXPAND}</button>
@@ -419,10 +421,11 @@ function buildWikiPageCss(): string {
 
     /* The rail column reads --wiki-rail-w, which the drag handle sets inline
        (wiki-rail-resize.ts) from a stored width, viewport-bounded; absent, the
-       fallback is RAIL_WIDTH_DEFAULT, interpolated so there is one copy of it. */
+       fallback is RAIL_WIDTH_DEFAULT, interpolated so there is one copy of it.
+       The right pane's column reads --wiki-pane-w the same way (wiki-pane-resize.ts). */
     .wiki-layout {
       display: grid;
-      grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) 300px;
+      grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) var(--wiki-pane-w, ${PANE_WIDTH_DEFAULT}px);
       gap: 16px;
       padding: 16px 24px;
       height: calc(100vh - var(--header-h, 63px));
@@ -1613,6 +1616,21 @@ function buildWikiPageCss(): string {
     .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after,
     .wiki-rail-resizer:focus-visible::after { opacity: .8; }
     body.wiki-rail-dragging { cursor: col-resize; user-select: none; }
+    /* The right pane's handle, the rail's mirror: 14px from the pane's border
+       pixel into the 16px gap, so it never reaches the article's scrollbar; the
+       accent line sits on the pane's border and takes no pointer. Hidden while
+       the pane is the collapsed strip. */
+    .wiki-layout > .wiki-conn-pane { position: relative; }
+    .wiki-pane-resizer {
+      position: absolute; top: 0; bottom: 0; left: -14px; width: 14px;
+      cursor: col-resize; z-index: 2; touch-action: none; outline: none;
+    }
+    .wiki-pane-resizer::after {
+      content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px;
+      pointer-events: none; background: var(--accent); opacity: 0; transition: opacity .12s;
+    }
+    .wiki-pane-resizer:hover::after, .wiki-pane-resizer.dragging::after,
+    .wiki-pane-resizer:focus-visible::after { opacity: .8; }
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
     /* Where a worked-on date came from. Cyan + weight = a session wrote the page;
