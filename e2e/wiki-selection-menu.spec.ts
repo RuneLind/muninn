@@ -452,6 +452,21 @@ test("«Explain with context» answers in an inline card under the paragraph: a 
   await expect(page.locator("#discussBody .wiki-discuss-turn")).toHaveCount(1);
 });
 
+test("PR 913 CI: an inline card's head stays one line when its sub line names a long user, so the text below never moves under a drag", async ({ page }) => {
+  await page.route("**/api/wiki/discuss", () => {}); // the turn stays live; only the card matters
+  await openPage(page);
+  await dragSelect(page, NIGHT);
+  await bar(page).locator("#wikiExplainBtn").click();
+  const head = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"] .wiki-sel-card-head');
+  await expect(head).toBeVisible();
+  const before = await head.evaluate((el) => el.getBoundingClientRect().height);
+  // What the thread read paints once it names the user (`inlineTurnSub`), with a long name.
+  await head.locator(".wiki-sel-card-sub").evaluate((el) => {
+    el.textContent = "· a turn in " + "Someone-With-A-Very-Long-Display-Name ".repeat(4) + "'s discussion of this page";
+  });
+  expect(await head.evaluate((el) => el.getBoundingClientRect().height)).toBe(before);
+});
+
 test("«Where else» lists the fixture's files and «History» its commits, with no model; a key chip opens its Trace", async ({ page }) => {
   await openPage(page);
   const before = (await recorded()).length;
