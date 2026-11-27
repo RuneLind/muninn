@@ -993,6 +993,19 @@ test("a page turn naming a key gets its mentions in the prompt, from the real me
     expect(authedMentions).toBe(0);
     expect(calls[0]!.prompt).not.toContain("## The key this question names");
 
+    // A cut block reaches the prompt as cut: the engine passes `complete` on (fix round 2, finding 3).
+    calls = [];
+    const cutApp = apps(undefined, {
+      mentions: async () => ({
+        ok: true,
+        body: { key: "MEL-95", kind: "case", files: [{ relPath: "notes/berth.md", title: "Berth note", lines: [{ n: 3, text: "The berth case MEL-95 waits on the crane." }] }], commits: [], log: [], prs: [], totalLines: 1, totalFiles: 1, logTotalLines: 0, totalsAtLeast: false, truncated: true },
+      }),
+    });
+    const cut = await frames(await pane(cutApp, { question: "Where else is MEL-95?" }));
+    expect(cut.map((f) => f.event)).toContain("done");
+    expect(calls[0]!.prompt).toContain("cut where it says so");
+    expect(calls[0]!.prompt).not.toContain("do not search the wiki for MEL-95 again");
+
     // A key no tracked file names gets no block: nothing to answer from, and the tools stay the way.
     calls = [];
     const none = await frames(await pane(real, { question: "Where else is MEL-96?" }));

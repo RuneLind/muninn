@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PACK_SECTION_MAX } from "./discuss-pack.ts";
-import { keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { KEY_PACK_BUDGET, keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
 import { renderAgentTurnPrompt } from "./discuss-agent.ts";
 import type { MentionsBody } from "./mentions.ts";
 
@@ -216,6 +216,46 @@ describe("keyMentionsSection (pane room PR 2)", () => {
     const whole = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
     const p2 = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...whole } });
     expect(p2).toContain("MEL-77's mentions are in the context pack below, so do not grep for it.");
+  });
+});
+
+describe("keyMentionsSection bounds (pane room PR 2, fix round 2)", () => {
+  /** A key whose every section is far past its budget: long where lines, 50 long commits, 400 long log lines, 300 PRs. */
+  const huge = () =>
+    body({
+      ...busy(),
+      commits: Array.from({ length: 50 }, (_, i) => ({ sha: `${i}`.padStart(16, "a"), date: "2026-11-20T10:00:00+01:00", subject: `Commit ${i} names MEL-77 ${"y".repeat(150)}`, files: ["plans/ferry.mdx"] })),
+      log: Array.from({ length: 400 }, (_, i) => ({ date: "2026-11-20", kind: "plan", line: `- MEL-77 entry ${i} ${"z".repeat(150)}`, n: 40 + i })),
+      logTotalLines: 400,
+      prs: Array.from({ length: 300 }, (_, i) => ({ repo: "acme/acme-api", number: 1000 + i, state: "open" as const, mergedAt: null, url: `https://github.com/acme/acme-api/pull/${1000 + i}`, stale: false })),
+    });
+  const sections = (lines: string[]): Record<string, number> => {
+    const out: Record<string, number> = {};
+    let cur = "";
+    for (const l of lines) {
+      if (l.startsWith("### ")) cur = l;
+      else if (cur && !/^- … /.test(l) && l !== "") out[cur] = (out[cur] ?? 0) + l.length + 1;
+    }
+    return out;
+  };
+
+  test("each section keeps to its own budget, so the block stays bounded whatever the key (finding 1)", () => {
+    const b = blockOf(keyMentionsSection("kode", huge()));
+    const s = sections(b.lines);
+    expect(s["### Where it is mentioned"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.where);
+    expect(s["### Commits that changed how often it occurs (newest first)"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.commits);
+    expect(s["### Its log.md lines"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.log);
+    expect(s["### PRs those lines name"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.prs);
+    const sum = KEY_PACK_BUDGET.where + KEY_PACK_BUDGET.commits + KEY_PACK_BUDGET.log + KEY_PACK_BUDGET.prs;
+    expect(b.lines.join("\n").length).toBeLessThan(sum + 1_500);
+    expect(b.complete).toBe(false);
+  });
+
+  test("a block with nothing cut is still not whole when the route's own search was cut (finding 2)", () => {
+    const small = { truncated: false, totalLines: 2, totalsAtLeast: false };
+    expect(blockOf(keyMentionsSection("kode", body(small))).complete).toBe(true);
+    expect(blockOf(keyMentionsSection("kode", body({ ...small, truncated: true }))).complete).toBe(false);
+    expect(blockOf(keyMentionsSection("kode", body({ ...small, totalsAtLeast: true }))).complete).toBe(false);
   });
 });
 
