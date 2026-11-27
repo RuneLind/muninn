@@ -400,7 +400,7 @@ export function selectionMenuStyles(): string {
       line-height: 1.5; color: var(--text-primary); white-space: normal; list-style: none;
     }
     .wiki-sel-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-    .wiki-sel-card-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* one line: a sub line repainted with a user's name must not move the text below */
+    .wiki-sel-card-title { font-weight: 600; }
     .wiki-sel-card-moved { margin: 0 0 6px; }
     .wiki-sel-card-sub { font-weight: 400; color: var(--text-dim); }
     .wiki-sel-card-tools { display: flex; gap: 6px; flex-shrink: 0; }

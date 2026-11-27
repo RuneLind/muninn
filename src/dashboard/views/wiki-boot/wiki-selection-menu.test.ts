@@ -1845,7 +1845,7 @@ test("12c: a new inline card while the Trace card is out for a render: the held 
   }
 });
 
-test("PR 913 F4: a turn card's sub line names the user its turn ran as; a switch to another user leaves it", async () => {
+test("PR 913 F4 + CI: a turn card's sub line is set once, when the card is placed: a later thread read or a switch never repaints it (no layout shift)", async () => {
   discussWiki = "w-owner";
   const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
   threadRead = (url) => {
@@ -1861,15 +1861,27 @@ test("PR 913 F4: a turn card's sub line names the user its turn ran as; a switch
     push!("done", { answer: "ok", proposedEdit: null });
     close!();
     await settle();
+    // Placed before the thread read named the user: it keeps the plain sub line.
     const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
-    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
+    // Placed after it: named.
+    await selectText("Check the berth list.");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const named = Array.from(document.querySelectorAll('#articleWrap .wiki-sel-card[data-sel-card="explain"]')).find((c) => c !== card)!;
+    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+    push!("turn", { turnId: "owner-2", seq: 2, discussionId: "thread-popp", userId: "u1" });
+    push!("done", { answer: "ok too", proposedEdit: null });
+    close!();
+    await settle();
     // «as Popp ▾» → Rune: the page's discussion is Rune's now, the card's turn is still Popp's.
     (document.querySelector("#discussBody [data-discuss-as]") as HTMLButtonElement).click();
     document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "u2";
     (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
     await settle();
     expect(document.querySelector("#discussBody [data-discuss-as]")!.textContent).toBe("as Rune ▾");
-    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
+    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
   } finally {
     discussWiki = "w";
     threadRead = null;
