@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PACK_SECTION_MAX } from "./discuss-pack.ts";
-import { renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { KEY_MENTIONS_MAX, keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
 import type { MentionsBody } from "./mentions.ts";
 
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
@@ -163,4 +163,43 @@ test("renderTraceTurnPrompt with MCP tools: the reach section places the pack ab
   expect(prompt.indexOf("## The key")).toBeLessThan(prompt.indexOf("## What you can read"));
   expect(reach).toContain("The context pack above, and these tools only: knowledge-search_knowledge.");
   expect(reach).not.toContain("below");
+});
+
+describe("keyMentionsSection (pane room PR 2)", () => {
+  test("a page turn's key block: says it is already read, and its pack's headings sit one level down", () => {
+    const out = keyMentionsSection("kode", body());
+    expect(out[0]).toBe("## The key this question names: MEL-77");
+    expect(out[1]).toContain("do not search the wiki for MEL-77 again");
+    expect(out[1]).not.toContain("it was cut");
+    expect(out).toContain("### Where it is mentioned");
+    expect(out.filter((l) => l.startsWith("## "))).toHaveLength(1);
+    expect(out.join("\n")).toContain("12: The ferry case MEL-77 is open.");
+  });
+
+  test("a key on many long lines is cut at KEY_MENTIONS_MAX on a line boundary, and says so", () => {
+    const files = Array.from({ length: 30 }, (_, f) => ({
+      relPath: `plans/p${f}.mdx`,
+      title: `Plan ${f}`,
+      lines: Array.from({ length: 20 }, (_, n) => ({ n: n + 1, text: `MEL-77 ${"x".repeat(280)} ${f}-${n}` })),
+    }));
+    const out = keyMentionsSection("kode", body({ files, totalLines: 600, totalFiles: 30 }));
+    const packed = out.slice(3, out.at(-1) === "- … the rest of the key's mentions cut" ? -1 : undefined);
+    expect(out.at(-1)).toBe("- … the rest of the key's mentions cut");
+    expect(out[1]).toContain("it was cut");
+    expect(packed.join("\n").length).toBeLessThanOrEqual(KEY_MENTIONS_MAX);
+    expect(packed.join("\n").length).toBeGreaterThan(KEY_MENTIONS_MAX - 400);
+  });
+});
+
+describe("readSection with a key in the pack (pane room PR 2)", () => {
+  test("the Copilot wiki tools line says the key's mentions are in the pack, and points the grep at other keys", async () => {
+    const { readSection } = await import("./discuss-agent.ts");
+    const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
+    const packed = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }, "page", "MEL-77").join("\n");
+    expect(packed).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
+    expect(packed).not.toContain('"where else" question');
+    const plain = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }).join("\n");
+    expect(plain).toContain('research-wiki_grep for an exact key, id or a "where else" question');
+    expect(plain).not.toContain("already in the context pack");
+  });
 });

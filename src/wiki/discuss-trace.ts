@@ -120,3 +120,36 @@ export function renderTraceTurnPrompt(opts: { wiki: string; mentions: MentionsBo
     opts.question.trim(),
   ].join("\n");
 }
+
+/** The most a page turn's key block may take: about one page section, so a
+ *  key named on hundreds of lines cannot crowd the page out of the prompt. */
+export const KEY_MENTIONS_MAX = 12_000;
+
+/**
+ * A page turn's key block (pane room PR 2): the trace pack of the key the
+ * question names, cut at {@link KEY_MENTIONS_MAX} on a line boundary, under a
+ * heading that says it is already read. Without that sentence the agent greps
+ * again to be safe, and a tool call is what makes Sonnet 5.5 hold its text.
+ */
+export function keyMentionsSection(wiki: string, b: MentionsBody): string[] {
+  const body = traceContextPack(wiki, b).map((l) => (l.startsWith("## ") ? `#${l}` : l));
+  const out: string[] = [];
+  let size = 0;
+  let cut = false;
+  for (const l of body) {
+    if (size + l.length + 1 > KEY_MENTIONS_MAX) {
+      cut = true;
+      break;
+    }
+    out.push(l);
+    size += l.length + 1;
+  }
+  return [
+    `## The key this question names: ${b.key}`,
+    `Already gathered for you from this wiki's tracked files: every file and line that names ${b.key}, the commits that changed it, its log.md lines and the PRs those lines name. Answer from it; do not search the wiki for ${b.key} again. Use a tool only for what it does not hold${cut ? " (it was cut: past the cut, a search is fine)" : ""}.`,
+    "",
+    ...out,
+    ...(cut ? ["- … the rest of the key's mentions cut"] : []),
+  ];
+}
+
