@@ -168,6 +168,15 @@ function paintTurns(st: TraceState): void {
   const follow = st.card.querySelector<HTMLFormElement>(".wiki-trace-follow");
   if (follow) follow.hidden = !started || running;
   for (const b of Array.from(st.card.querySelectorAll<HTMLButtonElement>("[data-trace-summarize], .wiki-trace-follow button"))) b.disabled = st.busy;
+  syncTraceSend(st.card, st.busy);
+}
+
+/** «Send» is off while the follow-up box is empty (or a turn runs): on 27.11 an
+ *  empty box read as plain text and a Send on it did nothing visible. */
+function syncTraceSend(card: HTMLElement, busy: boolean): void {
+  const input = card.querySelector<HTMLInputElement>(".wiki-trace-input");
+  const btn = card.querySelector<HTMLButtonElement>(".wiki-trace-follow button[type=submit]");
+  if (input && btn) btn.disabled = busy || !input.value.trim();
 }
 
 /** The key's live trace thread, read back into the card from its ledger
@@ -232,8 +241,11 @@ async function loadThread(st: TraceState): Promise<void> {
   }
 }
 
-async function send(st: TraceState, question: string): Promise<void> {
+/** `onStart` runs once the send passes its checks, before anything else: the
+ *  follow-up box clears there, so a refused send keeps the question. */
+async function send(st: TraceState, question: string, onStart?: () => void): Promise<void> {
   if (st.busy || !question.trim() || discussSendBlocked()) return;
+  onStart?.();
   // A user action: the reads before it are superseded, and the bound counts afresh.
   stopReads(st);
   st.pollFailures = 0;
@@ -499,8 +511,13 @@ export function initKeyTrace(d: KeyTraceDeps): void {
     if (!form || !st) return;
     e.preventDefault();
     const input = form.querySelector<HTMLInputElement>(".wiki-trace-input");
-    const q = input?.value ?? "";
-    if (input) input.value = "";
-    void send(st, q);
+    void send(st, input?.value ?? "", () => {
+      if (input) input.value = "";
+    });
+  });
+  document.addEventListener("input", (e) => {
+    const card = (e.target as HTMLElement).closest?.<HTMLElement>(".wiki-sel-card[data-trace-key]");
+    const st = card ? traces.get(card) : undefined;
+    if (st && (e.target as HTMLElement).matches(".wiki-trace-input")) syncTraceSend(st.card, st.busy);
   });
 }

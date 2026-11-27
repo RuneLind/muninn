@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { renderStreamingBody, askAnswerBodyHtml, enhanceConfidenceHtml } from "./wiki-ask-render.ts";
+import { renderStreamingBody, askAnswerBodyHtml, enhanceConfidenceHtml, breakablePaths } from "./wiki-ask-render.ts";
 
 test("renderStreamingBody formats a partial markdown buffer into HTML", () => {
   const html = renderStreamingBody("## Heading\n\n- one\n- two\n\n`code`");
@@ -141,4 +141,15 @@ test("F29: the streaming buffer and a stored plain answer drop NUL and U+0001 be
   for (const html of [renderStreamingBody(forged), askAnswerBodyHtml(null, forged, "")]) {
     expect(html).toBe("INLINE0 and <code>c</code>");
   }
+});
+
+test("breakablePaths puts a <wbr> after / and - in inline code only", () => {
+  const html = renderStreamingBody("See `plans/2026-10-28-x.mdx` and\n\n```\na/b-c\n```");
+  const out = breakablePaths(html);
+  expect(out).toContain("<code>plans/<wbr>2026-<wbr>10-<wbr>28-<wbr>x.mdx</code>");
+  // The fence is left as written.
+  expect(out).toContain("a/b-c");
+  expect(out.replace(/<wbr>/g, "")).toBe(html);
+  // A trailing separator gets none (nothing to break before).
+  expect(breakablePaths("<code>a/</code>")).toBe("<code>a/</code>");
 });

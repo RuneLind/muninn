@@ -65,6 +65,20 @@ export function renderStreamingBody(text: string): string {
   return enhanceConfidenceHtml(formatWebHtml(withoutSentinelDelimiters(text)));
 }
 
+/** A `<wbr>` after each `/` and `-` inside INLINE code (a fenced block's
+ *  `<pre><code>` is left as written), so a narrow column breaks a repo path at
+ *  its separators. Chromium never breaks after `/` (measured: under
+ *  `overflow-wrap: anywhere` it split `compone|nts` and `wik|i` in a 200–250px
+ *  column); it does break after `-`, which is marked too for engines that do
+ *  not before a digit. `<wbr>` adds no text, so a copy or a `textContent` read
+ *  is unchanged. Inline code's body is escaped text with no tags, and no
+ *  entity holds `/` or `-`. */
+export function breakablePaths(html: string): string {
+  return html.replace(/<pre\b[\s\S]*?<\/pre>|<code>([^<]*)<\/code>/g, (m, body: string | undefined) =>
+    body === undefined ? m : `<code>${body.replace(/([/-])(?=.)/g, "$1<wbr>")}</code>`,
+  );
+}
+
 /** Body HTML for one Ask turn: the server-rendered final article once it has
  *  arrived (`html`, confidence-enhanced but otherwise unchanged — it also resolves
  *  citations), else the progressively-formatted streaming buffer (or the stored

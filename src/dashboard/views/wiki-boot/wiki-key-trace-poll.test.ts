@@ -248,7 +248,8 @@ const follow = (card: Element) => card.querySelector<HTMLFormElement>(".wiki-tra
 /** What the reader can do now: «Summarize», the follow-up box, or wait on a running turn still being read. */
 function actionable(card: Element): "summarize" | "follow" | "polling" | "stuck" {
   if (!summarize(card).hidden && !summarize(card).disabled) return "summarize";
-  if (!follow(card).hidden && !follow(card).querySelector<HTMLButtonElement>("button[type=submit]")!.disabled) return "follow";
+  // «Send» is off while the box is empty (pane room PR 1); «Continue in Claude Code» is off only while busy.
+  if (!follow(card).hidden && !follow(card).querySelector<HTMLButtonElement>("[data-trace-continue]")!.disabled) return "follow";
   if (states(card).includes("running") && (timers.size === 1 || reads.some((r) => !r.done && !r.signal?.aborted))) return "polling";
   return "stuck";
 }

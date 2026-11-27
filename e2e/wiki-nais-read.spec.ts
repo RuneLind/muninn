@@ -355,6 +355,8 @@ const READER_CONTROLS = [
   ".wiki-group-fold",
   ".wiki-fold-chip",
   "#wikiRailResizer",
+  // The right pane's drag handle (localStorage only).
+  "#wikiPaneResizer",
   // The breadcrumb: overview link, ⧉ Copy path, ⌖ Show in list, graph mode.
   "a.wiki-bc-wiki",
   "#wikiCopyPathBtn",

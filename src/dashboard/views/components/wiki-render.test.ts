@@ -277,7 +277,10 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // a render): 988,870 (335,629 gzipped), so the pin moves to 988,900.
 // Its class-check sweep B (the before → after rule reads a chip's sentinel as nothing): 988,985
 // (335,694 gzipped), so the pin moves to 989,000.
-const WIKI_CLIENT_MAX_BYTES = 989_000;
+// 2026-11-27, Discuss pane room PR 1 (the right pane's drag handle `wiki-pane-resize.ts` and its width
+// rules, the Trace box's «Send» sync, the pane answer's breakable paths): 991,743 (336,305 gzipped),
+// so the pin moves to 991,800.
+const WIKI_CLIENT_MAX_BYTES = 991_800;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();
