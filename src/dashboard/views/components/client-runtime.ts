@@ -32,9 +32,10 @@ export interface SseHandle {
   close: () => void;
 }
 
-/** Open an EventSource and wire named-event + onopen/onerror handlers. */
-export function sseClient(url: string, handlers: SseHandlers = {}): SseHandle {
-  const es = new EventSource(url);
+/** Open an EventSource and wire named-event + onopen/onerror handlers.
+ *  `make` opens the stream (a test passes a fake). */
+export function sseClient(url: string, handlers: SseHandlers = {}, make: (url: string) => EventSource = (u) => new EventSource(u)): SseHandle {
+  const es = make(url);
   for (const name of Object.keys(handlers)) {
     const fn = handlers[name];
     if (typeof fn !== "function") continue;

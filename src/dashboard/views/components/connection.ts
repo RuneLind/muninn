@@ -54,58 +54,60 @@ export function connectionScript(): string {
 
     // --- SSE Connection ---
     function connect() {
-      const es = new EventSource('/api/events');
+      // Shared across this origin's tabs (shared-sse.ts): one /api/events
+      // connection for every home and /agents tab.
       const statusDot = document.getElementById('statusDot');
       const statusText = document.getElementById('statusText');
+      const es = sharedSseClient('/api/events', {
+        onopen: () => {
+          statusDot.className = 'status-dot connected';
+          statusText.textContent = 'Connected';
+        },
 
-      es.onopen = () => {
-        statusDot.className = 'status-dot connected';
-        statusText.textContent = 'Connected';
-      };
+        activity: (e) => {
+          const ev = JSON.parse(e.data);
+          // Client-side bot filter for SSE events
+          if (selectedBot && ev.botName && ev.botName !== selectedBot) return;
+          addEvent(ev);
+        },
 
-      es.addEventListener('activity', (e) => {
-        const ev = JSON.parse(e.data);
-        // Client-side bot filter for SSE events
-        if (selectedBot && ev.botName && ev.botName !== selectedBot) return;
-        addEvent(ev);
-      });
+        stats: (e) => {
+          const data = JSON.parse(e.data);
+          // Live "messages today" — patch it onto the cached stats + re-tile.
+          if (lastStats && data && data.messagesToday != null) {
+            lastStats.messagesToday = data.messagesToday;
+            renderOverviewTiles();
+          }
+        },
 
-      es.addEventListener('stats', (e) => {
-        const data = JSON.parse(e.data);
-        // Live "messages today" — patch it onto the cached stats + re-tile.
-        if (lastStats && data && data.messagesToday != null) {
-          lastStats.messagesToday = data.messagesToday;
-          renderOverviewTiles();
-        }
-      });
+        // Live agent runs (running zone) for the home Now card. Refetch the overview
+        // only when the RUNNING set changes (a start/finish can shift up-next), not
+        // on every ~1/s progress snapshot.
+        agent_runs: (e) => {
+          try {
+            nowRuns = JSON.parse(e.data) || [];
+            renderNow();
+            const key = runningKey(nowRuns);
+            if (key !== lastRunningKey) { lastRunningKey = key; loadNowOverview(); }
+          } catch (err) {}
+        },
 
-      // Live agent runs (running zone) for the home Now card. Refetch the overview
-      // only when the RUNNING set changes (a start/finish can shift up-next), not
-      // on every ~1/s progress snapshot.
-      es.addEventListener('agent_runs', (e) => {
-        try {
-          nowRuns = JSON.parse(e.data) || [];
-          renderNow();
-          const key = runningKey(nowRuns);
-          if (key !== lastRunningKey) { lastRunningKey = key; loadNowOverview(); }
-        } catch (err) {}
-      });
+        agent_status: (e) => {
+          updateAgentStatus(JSON.parse(e.data));
+        },
 
-      es.addEventListener('agent_status', (e) => {
-        updateAgentStatus(JSON.parse(e.data));
-      });
+        request_progress: (e) => {
+          const progress = JSON.parse(e.data);
+          updateRequestProgress(progress);
+        },
 
-      es.addEventListener('request_progress', (e) => {
-        const progress = JSON.parse(e.data);
-        updateRequestProgress(progress);
-      });
-
-      es.onerror = () => {
-        statusDot.className = 'status-dot';
-        statusText.textContent = 'Reconnecting...';
-        es.close();
-        setTimeout(connect, 3000);
-      };
+        onerror: () => {
+          statusDot.className = 'status-dot';
+          statusText.textContent = 'Reconnecting...';
+          es.close();
+          setTimeout(connect, 3000);
+        },
+      }, API_EVENTS_SHARED);
     }
 
     // --- Data Loading ---
