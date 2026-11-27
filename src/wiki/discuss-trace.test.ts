@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PACK_SECTION_MAX } from "./discuss-pack.ts";
-import { renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { KEY_PACK_BUDGET, keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { renderAgentTurnPrompt } from "./discuss-agent.ts";
 import type { MentionsBody } from "./mentions.ts";
 
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
@@ -163,4 +164,111 @@ test("renderTraceTurnPrompt with MCP tools: the reach section places the pack ab
   expect(prompt.indexOf("## The key")).toBeLessThan(prompt.indexOf("## What you can read"));
   expect(reach).toContain("The context pack above, and these tools only: knowledge-search_knowledge.");
   expect(reach).not.toContain("below");
+});
+
+/** The block's lines, whichever shape `keyMentionsSection` returns (an array before fix round 1, `{ lines, complete }` after), so these tests run red against the unfixed code for their own reason. */
+const blockOf = (r: unknown): { lines: string[]; complete: boolean } => (Array.isArray(r) ? { lines: r as string[], complete: !(r as string[]).some((l) => l.includes("it was cut")) } : (r as { lines: string[]; complete: boolean }));
+/** A key named on 30 files × 20 long lines: its where section is far past any budget. */
+const busy = () =>
+  body({
+    files: Array.from({ length: 30 }, (_, f) => ({
+      relPath: `plans/p${f}.mdx`,
+      title: `Plan ${f}`,
+      lines: Array.from({ length: 20 }, (_, n) => ({ n: n + 1, text: `MEL-77 ${"x".repeat(280)} ${f}-${n}` })),
+    })),
+    totalLines: 600,
+    totalFiles: 30,
+    truncated: false,
+  });
+
+describe("keyMentionsSection (pane room PR 2)", () => {
+  test("a whole key's block: says it is already read, and its pack's headings sit one level down", () => {
+    const b = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
+    expect(b.complete).toBe(true);
+    expect(b.lines[0]).toBe("## The key this question names: MEL-77");
+    expect(b.lines[1]).toContain("do not search the wiki for MEL-77 again. Use a tool only for what it does not hold.");
+    expect(b.lines[1]).toContain("(a long line shortened with …)");
+    expect(b.lines).toContain("### Where it is mentioned");
+    expect(b.lines.filter((l) => l.startsWith("## "))).toHaveLength(1);
+    expect(b.lines.join("\n")).toContain("12: The ferry case MEL-77 is open.");
+  });
+
+  test("a busy key keeps every section: its where lines are cut, its commits, log lines and PR states are not (fix round 1, finding 3)", () => {
+    const b = blockOf(keyMentionsSection("kode", busy()));
+    const text = b.lines.join("\n");
+    expect(text).toContain("### PRs those lines name");
+    expect(text).toContain("- acme/acme-api#3: merged 2026-11-21");
+    expect(text).toContain("- log.md:40 [2026-11-20 plan] - MEL-77 was filed.");
+    expect(text).toContain("- 2026-11-20 abcdef0123 Ferry plan names MEL-77");
+    expect(text).toMatch(/- … \d+ more mention lines not listed in this pack/);
+    expect(text.length).toBeLessThan(16_000);
+  });
+
+  test("a cut block never tells the agent both to answer without searching and that a search is fine (fix round 1, finding 2)", () => {
+    const b = blockOf(keyMentionsSection("kode", busy()));
+    expect(b.complete).toBe(false);
+    expect(b.lines[1]).not.toContain("do not search the wiki for MEL-77 again");
+    const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
+    const pack = { wiki: "kode", relPath: "plans/ferry.mdx", title: "Ferry", path: "plans/ferry.mdx", passage: null, section: null, headings: [] } as never;
+    const prompt = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...b } });
+    expect(prompt).not.toContain("do not grep for it");
+    expect(prompt).toContain("grep for it only for what the pack leaves out");
+    // A whole block keeps the plain «do not grep» on the same reach (finding 6: the prompt passes the key on to readSection).
+    const whole = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
+    const p2 = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...whole } });
+    expect(p2).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
+  });
+});
+
+describe("keyMentionsSection bounds (pane room PR 2, fix round 2)", () => {
+  /** A key whose every section is far past its budget: long where lines, 50 long commits, 400 long log lines, 300 PRs. */
+  const huge = () =>
+    body({
+      ...busy(),
+      commits: Array.from({ length: 50 }, (_, i) => ({ sha: `${i}`.padStart(16, "a"), date: "2026-11-20T10:00:00+01:00", subject: `Commit ${i} names MEL-77 ${"y".repeat(150)}`, files: ["plans/ferry.mdx"] })),
+      log: Array.from({ length: 400 }, (_, i) => ({ date: "2026-11-20", kind: "plan", line: `- MEL-77 entry ${i} ${"z".repeat(150)}`, n: 40 + i })),
+      logTotalLines: 400,
+      prs: Array.from({ length: 300 }, (_, i) => ({ repo: "acme/acme-api", number: 1000 + i, state: "open" as const, mergedAt: null, url: `https://github.com/acme/acme-api/pull/${1000 + i}`, stale: false })),
+    });
+  const sections = (lines: string[]): Record<string, number> => {
+    const out: Record<string, number> = {};
+    let cur = "";
+    for (const l of lines) {
+      if (l.startsWith("### ")) cur = l;
+      else if (cur && !/^- … /.test(l) && l !== "") out[cur] = (out[cur] ?? 0) + l.length + 1;
+    }
+    return out;
+  };
+
+  test("each section keeps to its own budget, so the block stays bounded whatever the key (finding 1)", () => {
+    const b = blockOf(keyMentionsSection("kode", huge()));
+    const s = sections(b.lines);
+    expect(s["### Where it is mentioned"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.where);
+    expect(s["### Commits that changed how often it occurs (newest first)"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.commits);
+    expect(s["### Its log.md lines"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.log);
+    expect(s["### PRs those lines name"]!).toBeLessThanOrEqual(KEY_PACK_BUDGET.prs);
+    const sum = KEY_PACK_BUDGET.where + KEY_PACK_BUDGET.commits + KEY_PACK_BUDGET.log + KEY_PACK_BUDGET.prs;
+    expect(b.lines.join("\n").length).toBeLessThan(sum + 1_500);
+    expect(b.complete).toBe(false);
+  });
+
+  test("a block with nothing cut is still not whole when the route's own search was cut (finding 2)", () => {
+    const small = { truncated: false, totalLines: 2, totalsAtLeast: false };
+    expect(blockOf(keyMentionsSection("kode", body(small))).complete).toBe(true);
+    expect(blockOf(keyMentionsSection("kode", body({ ...small, truncated: true }))).complete).toBe(false);
+    expect(blockOf(keyMentionsSection("kode", body({ ...small, totalsAtLeast: true }))).complete).toBe(false);
+  });
+});
+
+describe("readSection with a key in the pack (pane room PR 2)", () => {
+  test("the Copilot wiki tools line says the key's mentions are in the pack, and points the grep at other keys", async () => {
+    const { readSection } = await import("./discuss-agent.ts");
+    const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
+    const packed = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }, "page", { key: "MEL-77", complete: true }).join("\n");
+    expect(packed).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
+    expect(packed).not.toContain('"where else" question');
+    const plain = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }).join("\n");
+    expect(plain).toContain('research-wiki_grep for an exact key, id or a "where else" question');
+    expect(plain).not.toContain("already in the context pack");
+  });
 });

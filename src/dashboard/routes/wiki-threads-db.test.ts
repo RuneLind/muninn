@@ -934,3 +934,85 @@ test("the trace pre-flight reads the wiki's git state afresh: a first commit mad
     __resetWikiCacheForTest();
   }
 });
+
+// Pane room PR 2: a page turn whose question (or selection) names a key gets
+// that key's mentions in its prompt, so a «where else» needs no grep.
+test("a page turn naming a key gets its mentions in the prompt, from the real mentions builder; a keyless one reads no mentions", async () => {
+  await Bun.write(path.join(wiki, ".wiki-reader.json"), JSON.stringify({ keys: [{ name: "case", pattern: "MEL-\\d+" }] }));
+  await Bun.write(path.join(wiki, "notes", "berth.md"), "# Berth note\n\nThe berth case MEL-95 waits on the crane.\n");
+  gitc("add", ".");
+  gitc("commit", "-qm", "Berth note names MEL-95");
+  __resetWikiCacheForTest();
+  try {
+    let mentionsCalls = 0;
+    const spied = apps(undefined, {
+      mentions: async () => {
+        mentionsCalls++;
+        return { ok: false, error: "a keyless question reads no mentions" };
+      },
+    });
+    const plain = await frames(await pane(spied, { question: "When does the harbour open?" }));
+    expect(plain.map((f) => f.event)).toContain("done");
+    expect(mentionsCalls).toBe(0);
+    expect(calls[0]!.prompt).not.toContain("## The key this question names");
+
+    calls = [];
+    const real = apps();
+    const keyed = await frames(await pane(real, { question: "Where else is MEL-95?" }));
+    expect(keyed.map((f) => f.event)).toContain("done");
+    expect(keyed.some((f) => f.event === "status" && f.data.phase === "mentions")).toBe(true);
+    const p = calls[0]!.prompt;
+    expect(p).toContain("## The key this question names: MEL-95");
+    expect(p).toContain("do not search the wiki for MEL-95 again");
+    expect(p).toContain("- notes/berth.md");
+    expect(p).toContain("The berth case MEL-95 waits on the crane.");
+    expect(p).toContain("Berth note names MEL-95");
+    // The block sits before the question, which stays last.
+    expect(p.indexOf("## The key this question names")).toBeLessThan(p.indexOf("## Question"));
+    expect(p.trimEnd().endsWith("Where else is MEL-95?")).toBe(true);
+
+    // A key named only in the selection counts too (fix round 1, finding 7).
+    calls = [];
+    const sel = await frames(await pane(real, { question: "Where else?", selection: "The crane for MEL-95 is late." }));
+    expect(sel.map((f) => f.event)).toContain("done");
+    expect(calls[0]!.prompt).toContain("## The key this question names: MEL-95");
+
+    // On an instance that authenticates, no mentions are read for a page turn either (fix round 1, finding 1).
+    calls = [];
+    let authedMentions = 0;
+    const authed = apps(undefined, {
+      authMode: () => "entra",
+      mentions: async () => {
+        authedMentions++;
+        return { ok: false, error: "an authenticating instance reads no mentions" };
+      },
+    });
+    const gated = await frames(await pane(authed, { question: "Where else is MEL-95?" }));
+    expect(gated.map((f) => f.event)).toContain("done");
+    expect(authedMentions).toBe(0);
+    expect(calls[0]!.prompt).not.toContain("## The key this question names");
+
+    // A cut block reaches the prompt as cut: the engine passes `complete` on (fix round 2, finding 3).
+    calls = [];
+    const cutApp = apps(undefined, {
+      mentions: async () => ({
+        ok: true,
+        body: { key: "MEL-95", kind: "case", files: [{ relPath: "notes/berth.md", title: "Berth note", lines: [{ n: 3, text: "The berth case MEL-95 waits on the crane." }] }], commits: [], log: [], prs: [], totalLines: 1, totalFiles: 1, logTotalLines: 0, totalsAtLeast: false, truncated: true },
+      }),
+    });
+    const cut = await frames(await pane(cutApp, { question: "Where else is MEL-95?" }));
+    expect(cut.map((f) => f.event)).toContain("done");
+    expect(calls[0]!.prompt).toContain("cut where it says so");
+    expect(calls[0]!.prompt).not.toContain("do not search the wiki for MEL-95 again");
+
+    // A key no tracked file names gets no block: nothing to answer from, and the tools stay the way.
+    calls = [];
+    const none = await frames(await pane(real, { question: "Where else is MEL-96?" }));
+    expect(none.map((f) => f.event)).toContain("done");
+    expect(calls[0]!.prompt).not.toContain("## The key this question names");
+  } finally {
+    git("reset", "-q", "--hard", "HEAD~1");
+    await rm(path.join(wiki, ".wiki-reader.json"), { force: true });
+    __resetWikiCacheForTest();
+  }
+});

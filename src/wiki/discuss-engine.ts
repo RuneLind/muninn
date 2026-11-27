@@ -98,7 +98,8 @@ import {
   type PackRepo,
 } from "./discuss-agent.ts";
 import { parseRepoRoots, realGit, type GitRun } from "./decision-triage/git.ts";
-import { renderTraceTurnPrompt } from "./discuss-trace.ts";
+import { keyMentionsSection, renderTraceTurnPrompt } from "./discuss-trace.ts";
+import { discussTurnKey } from "./discuss-key.ts";
 import { buildMentions, mentionsGitState, parseMentionKey, type MentionsBody, type MentionsInput } from "./mentions.ts";
 import { realGhCheckDeps, type GhCheckDeps } from "./work-map/gh-check.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "./plan-card.ts";
@@ -901,7 +902,20 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         card = c.card;
         const cardText = card && reach.kind === "readSearch" ? cardForSnapshot(card, p.wikiRoot, reach.wikiSnapshot) : card;
         const pack = buildContextPack({ wiki: p.wiki, relPath: p.relPath, title: p.title, absPath: pagePath, raw: p.raw, ...packSelection(p.body) });
-        prompt = renderAgentTurnPrompt({ pack, reach, card: cardText, cardNote: c.note, earlier: history, question: p.body.question });
+        // A question (or its selection) that names a key gets that key's
+        // mentions up front, as a trace turn does: no grep, so the answer can stream.
+        // Not on an instance that authenticates: there the mentions route 404s,
+        // a trace is refused (`TRACE_AUTH_REFUSAL`) and the Copilot wiki tools are
+        // left out (`authOff`), since mentions spawn git and a background gh refresh.
+        let keyMentions: { key: string; lines: string[]; complete: boolean } | null = null;
+        const key = (deps.authMode ?? authMode)() === "off" ? discussTurnKey({ question: p.body.question, selection: p.body.selection }, p.index.readerConfig) : null;
+        if (key) {
+          emit("status", { phase: "mentions" });
+          const m = await (deps.mentions ?? defaultMentions)({ wiki: p.wiki, root: p.wikiRoot, key, index: p.index });
+          if (m.ok && m.body.totalLines > 0) keyMentions = { key, ...keyMentionsSection(p.wiki, m.body) };
+          else if (!m.ok) log.warn("discuss turn on {wiki}: the mentions of {key} could not be read ({error}); the turn runs without them", { wiki: p.wiki, key, error: m.error });
+        }
+        prompt = renderAgentTurnPrompt({ pack, reach, card: cardText, cardNote: c.note, earlier: history, question: p.body.question, keyMentions });
       }
       const surface: ToolSurface = reach.kind === "readSearch" ? { readSearch: [reach.wikiSnapshot, ...reach.repos.map((r) => r.dir)] } : { mcpTools: reach.tools };
       emit("status", { phase: "model", read: reach.kind === "readSearch" ? { wiki: true, repos: reach.repos.map((r) => r.name), missed: reach.missed.map((m) => m.name) } : { tools: reach.tools } });

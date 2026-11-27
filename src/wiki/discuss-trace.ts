@@ -16,18 +16,18 @@ import { MENTIONS_MAX_COMMITS, type MentionsBody } from "./mentions.ts";
 export const TRACE_LINE_MAX = 300;
 
 /** The leading lines that fit a section: until the next would pass the bound. */
-function fitting(lines: string[]): string[] {
+function fitting(lines: string[], max = PACK_SECTION_MAX): string[] {
   let size = 0;
   for (let i = 0; i < lines.length; i++) {
     size += lines[i]!.length + 1;
-    if (size > PACK_SECTION_MAX) return lines.slice(0, i);
+    if (size > max) return lines.slice(0, i);
   }
   return lines;
 }
 
 /** Lines into a section until the next would pass the bound, then a note of how many `noun` were left out. */
-function bounded(lines: string[], noun: string, atLeast = false): string[] {
-  const out = fitting(lines);
+function bounded(lines: string[], noun: string, atLeast = false, max = PACK_SECTION_MAX): string[] {
+  const out = fitting(lines, max);
   return out.length < lines.length ? [...out, `- … ${atLeast ? "at least " : ""}${lines.length - out.length} more ${noun} cut`] : out;
 }
 
@@ -39,7 +39,7 @@ const ROOT_LOG = "log.md";
  * lines, until the next line would pass the bound. A header goes in only with
  * at least one of its lines. Returns the lines and how many mention lines they show.
  */
-function mentionLines(files: MentionsBody["files"]): { lines: string[]; shown: number } {
+function mentionLines(files: MentionsBody["files"], max = PACK_SECTION_MAX): { lines: string[]; shown: number } {
   const lines: string[] = [];
   let size = 0;
   let shown = 0;
@@ -49,7 +49,7 @@ function mentionLines(files: MentionsBody["files"]): { lines: string[]; shown: n
     for (const l of f.lines) {
       const line = `  ${l.n}: ${clampLine(l.text, TRACE_LINE_MAX)}`;
       const add = (header !== null ? header.length + 1 : 0) + line.length + 1;
-      if (size + add > PACK_SECTION_MAX) return { lines, shown };
+      if (size + add > max) return { lines, shown };
       if (header !== null) lines.push(header);
       header = null;
       lines.push(line);
@@ -67,6 +67,15 @@ const prState = (p: MentionsBody["prs"][number]): string => {
   return p.state;
 };
 
+/** Each section's character bound; a trace turn gives every section {@link PACK_SECTION_MAX}. */
+export interface TracePackBudget {
+  where: number;
+  commits: number;
+  log: number;
+  prs: number;
+}
+const TRACE_BUDGET: TracePackBudget = { where: PACK_SECTION_MAX, commits: PACK_SECTION_MAX, log: PACK_SECTION_MAX, prs: PACK_SECTION_MAX };
+
 /**
  * The context pack of a trace turn, from the mentions payload. Each mention
  * line is reported once: listed under «Where it is mentioned» or «Its log.md
@@ -76,7 +85,7 @@ const prState = (p: MentionsBody["prs"][number]): string => {
  * and the lines it lists. «At least» when the totals are lower bounds. Fix
  * round 2 batch 3: the where note counted the log section's cut lines again.
  */
-export function traceContextPack(wiki: string, b: MentionsBody): string[] {
+export function traceContextPack(wiki: string, b: MentionsBody, budget: TracePackBudget = TRACE_BUDGET): string[] {
   const at = b.totalsAtLeast ? "at least " : "";
   const out = [
     "## The key",
@@ -86,8 +95,8 @@ export function traceContextPack(wiki: string, b: MentionsBody): string[] {
     "",
     "## Where it is mentioned",
   ];
-  const where = mentionLines(b.files);
-  const logLines = fitting(b.log.map((l) => `- log.md:${l.n} [${l.date ?? "no date"}${l.kind ? ` ${l.kind}` : ""}] ${clampLine(l.line, TRACE_LINE_MAX)}`));
+  const where = mentionLines(b.files, budget.where);
+  const logLines = fitting(b.log.map((l) => `- log.md:${l.n} [${l.date ?? "no date"}${l.kind ? ` ${l.kind}` : ""}] ${clampLine(l.line, TRACE_LINE_MAX)}`), budget.log);
   const logTotal = Math.max(b.logTotalLines, b.log.length);
   const logCut = logTotal - logLines.length;
   const omitted = Math.max(0, b.totalLines - logTotal - where.shown);
@@ -96,14 +105,14 @@ export function traceContextPack(wiki: string, b: MentionsBody): string[] {
   if (omitted > 0) out.push(`- … ${at}${omitted} more mention line${omitted === 1 ? "" : "s"} not listed in this pack`);
   out.push("", "## Commits that changed how often it occurs (newest first)");
   if (b.commits.length === 0) out.push("(none)");
-  else out.push(...bounded(b.commits.map((c) => `- ${c.date.slice(0, 10)} ${c.sha.slice(0, 10)} ${clampLine(c.subject, 200)}${c.files.length ? ` (${c.files.slice(0, 6).join(", ")}${c.files.length > 6 ? ", …" : ""})` : ""}`), "commits", b.commits.length >= MENTIONS_MAX_COMMITS));
+  else out.push(...bounded(b.commits.map((c) => `- ${c.date.slice(0, 10)} ${c.sha.slice(0, 10)} ${clampLine(c.subject, 200)}${c.files.length ? ` (${c.files.slice(0, 6).join(", ")}${c.files.length > 6 ? ", …" : ""})` : ""}`), "commits", b.commits.length >= MENTIONS_MAX_COMMITS, budget.commits));
   out.push("", "## Its log.md lines");
   if (logTotal === 0) out.push("(none)");
   else out.push(...logLines);
   if (logCut > 0) out.push(`- … ${at}${logCut} more log.md line${logCut === 1 ? "" : "s"} cut`);
   out.push("", "## PRs those lines name");
   if (b.prs.length === 0) out.push("(none)");
-  else out.push(...bounded(b.prs.map((p) => `- ${p.repo}#${p.number}: ${prState(p)} (${p.url})`), "PRs"));
+  else out.push(...bounded(b.prs.map((p) => `- ${p.repo}#${p.number}: ${prState(p)} (${p.url})`), "PRs", false, budget.prs));
   return out;
 }
 
@@ -119,4 +128,37 @@ export function renderTraceTurnPrompt(opts: { wiki: string; mentions: MentionsBo
     "## Question",
     opts.question.trim(),
   ].join("\n");
+}
+
+/**
+ * A page turn's key block bounds each section on its own, so a busy key keeps
+ * its commits, log lines and PR states: one outer cap equal to the where
+ * section's own bound cut MELOSYS-8351 inside «Where it is mentioned» and
+ * dropped the rest. Measured 27.11 on melosys-kode-wiki at 7789c38, uncut, in
+ * characters with headings left out (where / commits / log / PRs; PR states
+ * read with no gh, so that figure moves with the caches): MEL-1029036 5,631 /
+ * 2,458 / 1,222 / 202, a 10,011-character block, whole; MELOSYS-8351 19,353 /
+ * 6,772 / 2,600 / 101, a 13,554-character block with its where and commits cut.
+ */
+export const KEY_PACK_BUDGET: TracePackBudget = { where: 8_000, commits: 3_000, log: 2_000, prs: 1_500 };
+
+/** A trace pack's cut notes, which `traceContextPack` writes as `- … ` lines. */
+const CUT_NOTE = /^- … /;
+
+/**
+ * A page turn's key block (pane room PR 2): the trace pack of the key the
+ * question names, each section within {@link KEY_PACK_BUDGET}, under a heading
+ * that says it is already read. `complete` is false when any section was cut
+ * or the route's own search was (`truncated`, `totalsAtLeast`): the block then
+ * says to search only for what it leaves out, and so does `readSection`.
+ * Without «already read» the agent greps again to be safe, and a tool call is
+ * what makes Sonnet 5.5 hold its text.
+ */
+export function keyMentionsSection(wiki: string, b: MentionsBody): { lines: string[]; complete: boolean } {
+  const body = traceContextPack(wiki, b, KEY_PACK_BUDGET).map((l) => (l.startsWith("## ") ? `#${l}` : l));
+  const complete = !b.truncated && !b.totalsAtLeast && !body.some((l) => CUT_NOTE.test(l));
+  const lead = complete
+    ? `Already gathered for you from this wiki's tracked files: every file and line that names ${b.key} (a long line shortened with …), the commits that changed it, its log.md lines and the PRs those lines name. Answer from it; do not search the wiki for ${b.key} again. Use a tool only for what it does not hold.`
+    : `Gathered for you from this wiki's tracked files, but cut where it says so: the files and lines that name ${b.key} (a long line shortened with …), the commits that changed it, its log.md lines and the PRs those lines name. Answer from it, and search the wiki for ${b.key} only for what it leaves out.`;
+  return { lines: [`## The key this question names: ${b.key}`, lead, "", ...body], complete };
 }
