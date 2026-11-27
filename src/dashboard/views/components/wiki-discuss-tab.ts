@@ -780,7 +780,8 @@ function endPress(): void {
  *     send during such a read can pair T with another user, and R3/R4 drop a
  *     turn whose Apply is running or was lost.
  *  R5 An unknown-user refusal for X clears K only when K is X; its picker is R3.
- *  R6 An inline turn card names the user its turn ran as.
+ *  R6 An inline turn card names the user known when it was placed, never
+ *     repainted (none for a card placed before the page's first read).
  */
 
 const botOf = (d: DiscussionView): string | null => d.bot ?? lsGet(botKey(d.wiki));
