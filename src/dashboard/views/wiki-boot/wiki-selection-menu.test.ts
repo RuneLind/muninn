@@ -61,7 +61,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
-import { LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
+import { DISCUSS_WAITING_MS, DISCUSS_WAITING_TEXT, LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
 import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
 import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
 import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
@@ -86,6 +86,8 @@ let postSignal: AbortSignal | null = null;
 let traceReadGate: Promise<void> | null = null;
 let traceReadSignal: AbortSignal | null = null;
 let close: (() => void) | null = null;
+/** While set, a Discuss POST has no response (no headers) until it settles. */
+let postGate: Promise<void> | null = null;
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
 /** The pages rendered again after an Apply. */
@@ -177,6 +179,7 @@ beforeAll(() => {
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       postSignal = init.signal ?? null;
+      if (postGate) await postGate;
       const enc = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
@@ -1885,5 +1888,63 @@ test("PR 913 F4 + CI: a turn card's sub line is set once, when the card is place
   } finally {
     discussWiki = "w";
     threadRead = null;
+  }
+});
+
+test("a send held back past 5 s: the inline card and the pane both say it is still waiting, and the response headers clear it", async () => {
+  discussWiki = "w-wait";
+  // Only the 5 s «still waiting» timer is held; every other timer runs.
+  const held = new Map<object, () => void>();
+  const st = Object.getOwnPropertyDescriptor(globalThis, "setTimeout")!;
+  const ct = Object.getOwnPropertyDescriptor(globalThis, "clearTimeout")!;
+  const realST = globalThis.setTimeout;
+  const realCT = globalThis.clearTimeout;
+  Object.defineProperty(globalThis, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((cb: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms !== DISCUSS_WAITING_MS) return realST(cb, ms, ...rest);
+      const id = {};
+      held.set(id, cb);
+      return id;
+    }) as unknown as typeof setTimeout,
+  });
+  Object.defineProperty(globalThis, "clearTimeout", {
+    configurable: true,
+    writable: true,
+    value: ((id: unknown) => (id && typeof id === "object" && held.has(id) ? void held.delete(id) : realCT(id as Parameters<typeof clearTimeout>[0]))) as typeof clearTimeout,
+  });
+  let answer!: () => void;
+  postGate = new Promise((r) => (answer = r));
+  const waiting = (root: Element | null) => root?.querySelector("[data-discuss-waiting]")?.textContent ?? null;
+  try {
+    renderPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
+    const pane = () => document.querySelector("#discussBody .wiki-discuss-turn");
+    expect(card.querySelector(".wiki-discuss-status")?.textContent).toBe("Starting the turn…");
+    expect(waiting(card)).toBeNull();
+    expect(held.size).toBe(1);
+    for (const cb of held.values()) cb();
+    await settle();
+    expect(waiting(card)).toBe(DISCUSS_WAITING_TEXT);
+    expect(waiting(pane())).toBe(DISCUSS_WAITING_TEXT);
+    answer();
+    await settle();
+    expect(held.size).toBe(0);
+    expect(waiting(card)).toBeNull();
+    expect(waiting(pane())).toBeNull();
+    push!("turn", { turnId: "wait-1", seq: 1, discussionId: "thread-wait" });
+    push!("done", { answer: "taken", proposedEdit: null });
+    close!();
+    await settle();
+    expect(card.querySelector(".wiki-discuss-answer")?.textContent).toContain("taken");
+  } finally {
+    Object.defineProperty(globalThis, "setTimeout", st);
+    Object.defineProperty(globalThis, "clearTimeout", ct);
+    postGate = null;
+    discussWiki = "w";
   }
 });

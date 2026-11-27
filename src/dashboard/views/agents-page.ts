@@ -805,8 +805,11 @@ export async function renderAgentsPage(): Promise<string> {
     // retrying stream from a dead one: EventSource fails PERMANENTLY on any
     // non-200 (readyState 2, no retry) — which is exactly what an expired
     // session or a role-denied /api/events answers — and calling that
-    // "reconnecting…" promises a recovery that will never come.
-    var sse = sseClient('/api/events', {
+    // "reconnecting…" promises a recovery that will never come. The stream is
+    // shared with the other home and /agents tabs (shared-sse.ts): on a leading
+    // tab readyState is its own stream's; a follower reads 0 on a relayed error
+    // (a leader never relays 2), so only a tab's own refused stream reads 2.
+    var sse = sharedSseClient('/api/events', {
       onopen: function () {
         // Fires on the first connect AND on every native reconnect after a drop
         // (a server restart). The snapshot that follows re-renders the live
@@ -822,7 +825,7 @@ export async function renderAgentsPage(): Promise<string> {
         if (!wasConnecting) loadOverview();
       },
       onerror: function () {
-        if (sse && sse.source && sse.source.readyState === 2) {
+        if (sse && sse.readyState === 2) {
           // Dead for good — EventSource never retries a non-200. The LIVE zone is
           // over until a reload; up-next and recent are not, so the poll keeps
           // running. Generalising "role-denied /api/events" into "the overview is
@@ -850,7 +853,7 @@ export async function renderAgentsPage(): Promise<string> {
           }
         } catch (e) {}
       }
-    });
+    }, API_EVENTS_SHARED);
 
     updateMeta();
     loadOverview();

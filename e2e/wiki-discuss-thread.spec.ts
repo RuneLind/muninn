@@ -463,3 +463,29 @@ test("«as <name> ▾» switches the pane to another /chat user's own thread of 
   await expect(as).toHaveText("as E2E Thread ▾");
   await expect(turn(page, 1).locator(".wiki-discuss-q")).toHaveText("A fresh start?");
 });
+
+test("a send the browser holds back past 5 s says it is still waiting on the turn, and the line clears when the response arrives", async ({ page }) => {
+  test.setTimeout(120_000);
+  // Runs after the tests above, on the first user's thread they leave.
+  await openPane(page);
+  // Hold the POST as a browser does when every connection to the host is taken.
+  await page.route("**/api/wiki/discuss", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    await new Promise((r) => setTimeout(r, 7_000));
+    await route.continue();
+  });
+  const q = "Held back by the browser?";
+  await page.locator("#wikiDiscussInput").fill(q);
+  await page.locator("#wikiDiscussAskBtn").click();
+  const sending = page.locator('#discussBody .wiki-discuss-turn[data-turn-state="sending"]');
+  await expect(sending.locator(".wiki-discuss-status")).toHaveText("Starting the turn…");
+  await expect(sending.locator("[data-discuss-waiting]")).toHaveCount(0);
+  await expect(sending.locator("[data-discuss-waiting]")).toHaveText(
+    "Still waiting for the server to take this turn. If several muninn tabs are open, the browser may be holding it back: closing one sends it.",
+    { timeout: 6_500 },
+  );
+  await shot(page, "9-waiting-line");
+  await expect(page.locator("#discussBody [data-discuss-waiting]")).toHaveCount(0, { timeout: 15_000 });
+  const asked = page.locator("#discussBody .wiki-discuss-turn").filter({ has: page.locator(".wiki-discuss-q", { hasText: q }) });
+  await expect(asked).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+});

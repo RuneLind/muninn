@@ -101,6 +101,7 @@ import {
   newTurn,
   patchDiscussTurns,
   streamClosed,
+  whenSlow,
   type DiscussAnchor,
   type DiscussEditPreview,
   type DiscussPassage,
@@ -449,9 +450,22 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
   const user = sendUserOf(d); // R2
   if (user) body.userId = user;
   let res: Response;
+  const stopWait = whenSlow(() => {
+    if (turn.state !== "sending") return;
+    turn.waiting = true;
+    schedulePaint();
+  });
+  const answered = () => {
+    stopWait();
+    if (!turn.waiting) return;
+    turn.waiting = false;
+    schedulePaint();
+  };
   try {
     res = await fetch(DISCUSS_PATH, { method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(body) });
+    answered();
   } catch {
+    answered();
     turn.state = "refused";
     turn.message = "The turn could not start: the server did not answer.";
     schedulePaint();

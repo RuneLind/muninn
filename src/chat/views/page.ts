@@ -206,7 +206,9 @@ const CHAT_SSE_SCRIPT = `
     // "mine" is per-connection on purpose: "conn" is shared so reconnectChatSse
     // can close the live one, and a STALE stream's onerror must not close (or
     // resurrect itself over) the stream that replaced it.
-    var mine = sseClient(url, {
+    // Shared across this origin's tabs (shared-sse.ts); the full URL is the
+    // key, so two viewers never share a stream.
+    var mine = sharedSseClient(url, {
       onopen: function() {
         // The stream is OPEN, which is the only evidence that a previous
         // refusal is over. Without this the latch below was released by
@@ -260,7 +262,7 @@ const CHAT_SSE_SCRIPT = `
         //      superseded by a viewer switch must not spend the page's one
         //      reload, and must not resurrect itself over its replacement.
         //   4. Only then, the refusal decision.
-        var permanent = !!(mine.source && mine.source.readyState === 2);
+        var permanent = mine.readyState === 2;
         mine.close();
         if (conn !== mine) return;   // superseded by a viewer switch — stay dead
 

@@ -11,7 +11,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { prsHtml, whereElseHtml } from "./wiki-selection-menu-model.ts";
-import { discussPhaseWords } from "./wiki-discuss-state.ts";
+import { DISCUSS_WAITING_HTML, discussPhaseWords } from "./wiki-discuss-state.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
 import { KEY_MARK_CHIPPED_CLASS } from "../../../wiki/core/live-facts-chip.ts";
 
@@ -98,11 +98,13 @@ export function traceStatusFrom(m: Record<string, unknown>, prev: string | undef
 }
 
 /** One turn of the trace thread: the question, then the answer as markdown HTML. */
-export function traceTurnHtml(t: { question: string; answerHtml: string; state: "running" | "done" | "error"; status?: string; turnId?: string | null }): string {
+export function traceTurnHtml(t: { question: string; answerHtml: string; state: "running" | "done" | "error"; status?: string; turnId?: string | null; waiting?: boolean }): string {
+  // Before its first status frame a turn is starting, as the pane says: the
+  // request may not even have reached the server yet.
   const body =
     t.state === "error"
       ? `<div class="wiki-discuss-error" role="alert">${t.answerHtml}</div>`
-      : t.answerHtml || `<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(t.status ?? "Reading the mentions…")}</span></div>`;
+      : t.answerHtml || `<div class="wiki-discuss-status"><span class="spinner"></span><span>${esc(t.status ?? "Starting the turn…")}</span></div>${t.waiting ? DISCUSS_WAITING_HTML : ""}`;
   return `<div class="wiki-trace-turn" data-trace-turn="${esc(t.turnId ?? "")}" data-trace-state="${t.state}"><div class="wiki-trace-q">${esc(t.question)}</div><div class="wiki-trace-a">${body}</div></div>`;
 }
 

@@ -291,7 +291,9 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // follows a pick when shown): 999,339 as the test measures it, so the pin moves to 999,400.
 // Round 2's state-table rebuild (R1–R6 in wiki-discuss-tab.ts) and the server-made tool lines:
 // 1,000,407 as the test measures it, so the pin moves to 1,000,500.
-const WIKI_CLIENT_MAX_BYTES = 1_000_500;
+// 2026-11-27, a Discuss send's «still waiting» line (`whenSlow`, `DISCUSS_WAITING_*`): +633 bytes
+// measured from a script (1,000,301 → 1,000,934), so the pin moves by that, to 1,001,133.
+const WIKI_CLIENT_MAX_BYTES = 1_001_133;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

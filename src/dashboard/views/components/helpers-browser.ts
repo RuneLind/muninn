@@ -7,6 +7,7 @@ import { extractToolInputLabel } from "./tool-helpers.ts";
 import { deriveSpanLabelHtml } from "./span-label.ts";
 import { summarizeSearchTrace } from "./search-helpers.ts";
 import { sseClient, getJson, HttpError } from "./client-runtime.ts";
+import { sharedSseClient, API_EVENTS_SHARED } from "./shared-sse.ts";
 import {
   formatTime,
   timeAgo,
@@ -34,6 +35,8 @@ Object.assign(globalThis, {
   fmtCost,
   formatSchedule,
   sseClient,
+  sharedSseClient,
+  API_EVENTS_SHARED,
   getJson,
   HttpError,
 });

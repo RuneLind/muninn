@@ -28,6 +28,7 @@ import { initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPag
 import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
 import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
 import { TRACE_POLL_MAX_FAILURES, TRACE_THREAD_GONE } from "../components/wiki-key-trace-model.ts";
+import { DISCUSS_WAITING_MS, DISCUSS_WAITING_TEXT } from "../components/wiki-discuss-state.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
 const IGNORE = new Set(["constructor", "undefined", "NaN", "global", "globalThis", "console"]);
@@ -44,8 +45,10 @@ let menuRel = REL;
 
 // ── Fake poll timers ────────────────────────────────────────────────────────
 
-/** Timers of 1 s or more (the poll's; nothing else on this page sets one): held until `fire`. */
+/** Timers of 1 s or more (the poll's): held until `fire`. */
 const timers = new Map<object, { cb: () => void; delay: number }>();
+/** A send's «still waiting» timer ({@link DISCUSS_WAITING_MS}), held apart so the poll's invariants count poll timers only. */
+const waits = new Map<object, () => void>();
 /** Every delay a held timer was set with, in order. */
 const delays: number[] = [];
 let realSetTimeout: typeof setTimeout;
@@ -109,6 +112,10 @@ beforeAll(() => {
     value: ((cb: () => void, ms?: number, ...rest: unknown[]) => {
       if ((ms ?? 0) < 1000) return realSetTimeout(cb, ms, ...rest);
       const id = {};
+      if (ms === DISCUSS_WAITING_MS) {
+        waits.set(id, cb);
+        return id;
+      }
       timers.set(id, { cb, delay: ms! });
       delays.push(ms!);
       return id;
@@ -118,7 +125,8 @@ beforeAll(() => {
     configurable: true,
     writable: true,
     value: ((id: unknown) => {
-      if (id && typeof id === "object" && timers.has(id)) timers.delete(id);
+      if (id && typeof id === "object" && waits.has(id)) waits.delete(id);
+      else if (id && typeof id === "object" && timers.has(id)) timers.delete(id);
       else realClearTimeout(id as Parameters<typeof clearTimeout>[0]);
     }) as typeof clearTimeout,
   });
@@ -208,6 +216,7 @@ beforeEach(async () => {
   renderPage();
   await settle(true);
   timers.clear();
+  waits.clear();
   delays.length = 0;
   reads.length = 0;
   posts.length = 0;
@@ -846,4 +855,57 @@ test("R1/R2 a Trace card keeps the user its read or turn returned when none is k
   } finally {
     localStorage.clear();
   }
+});
+
+// ── Part of the shared-stream PR: a send the browser holds back ─────────────
+
+const waitingLine = (card: Element) => card.querySelector("[data-discuss-waiting]")?.textContent ?? null;
+const statusLine = (card: Element) => card.querySelector(".wiki-trace-turn .wiki-discuss-status")?.textContent?.trim() ?? null;
+
+test("W1 a send with no response headers after 5 s says it is still waiting; the headers clear it", async () => {
+  const card = await openCard();
+  await reads[0]!.answer(gone());
+  summarize(card).click();
+  await settle();
+  expect(posts.length).toBe(1);
+  // Before any frame the turn is starting, not reading mentions.
+  expect(statusLine(card)).toBe("Starting the turn…");
+  expect(waitingLine(card)).toBeNull();
+  expect(waits.size).toBe(1);
+  for (const cb of waits.values()) cb();
+  await settle();
+  expect(waitingLine(card)).toBe(DISCUSS_WAITING_TEXT);
+  const s = await posts[0]!.stream();
+  expect(waitingLine(card)).toBeNull();
+  expect(waits.size).toBe(0);
+  await s.push("status", { phase: "mentions" });
+  expect(statusLine(card)).toBe("Reading the key's mentions…");
+  await s.push("done", { answer: "A." });
+  await s.end();
+  expect(states(card)).toEqual(["done"]);
+});
+
+test("W2 a send that fails clears the waiting line", async () => {
+  const card = await openCard();
+  await reads[0]!.answer(gone());
+  summarize(card).click();
+  await settle();
+  for (const cb of waits.values()) cb();
+  await settle();
+  expect(waitingLine(card)).toBe(DISCUSS_WAITING_TEXT);
+  await posts[0]!.refuse(500, { error: "boom" });
+  expect(waitingLine(card)).toBeNull();
+  expect(states(card)).toEqual(["error"]);
+});
+
+test("W3 a send answered inside 5 s never shows the waiting line", async () => {
+  const card2 = await openCard();
+  await reads[0]!.answer(gone());
+  summarize(card2).click();
+  await settle();
+  expect(waits.size).toBe(1);
+  await posts[0]!.refuse(500, { error: "boom" });
+  // The timer was cleared before it fired.
+  expect(waits.size).toBe(0);
+  expect(waitingLine(card2)).toBeNull();
 });
