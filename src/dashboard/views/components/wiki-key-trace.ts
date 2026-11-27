@@ -48,7 +48,7 @@
 import { copyText } from "./copy-path.ts";
 import { makeSseFrameParser } from "./client-runtime.ts";
 import { renderStreamingBody } from "./wiki-ask-render.ts";
-import { discussAgentOn, discussSendBlocked, discussUserFor } from "./wiki-discuss-tab.ts";
+import { adoptDiscussUser, discussAgentOn, discussBotFor, discussSendBlocked, discussUserFor, registerDiscussUserViews } from "./wiki-discuss-tab.ts";
 import { fetchMentions } from "./wiki-mentions-fetch.ts";
 import { inlineCardHtml } from "./wiki-selection-menu-model.ts";
 import {
@@ -107,6 +107,8 @@ interface TraceState {
   discussionId: string | null;
   /** The user of the read or turn that gave `discussionId`: a send naming the thread names this user. */
   userId: string | null;
+  /** The route can take `userId` as a posted id (R2: it holds a thread, or the read listed it). */
+  userListed: boolean;
   busy: boolean;
   /** The running send's stream, aborted when the card leaves for good. */
   ctl: AbortController | null;
@@ -119,6 +121,8 @@ interface TraceState {
 }
 
 const traces = new WeakMap<HTMLElement, TraceState>();
+/** Every card not dropped: the Discuss tab's user rules (R3) reach them. */
+const openTraces = new Set<TraceState>();
 
 function turnsEl(st: TraceState): HTMLElement | null {
   return st.card.querySelector<HTMLElement>(".wiki-trace-turns");
@@ -139,6 +143,7 @@ function stopReads(st: TraceState): void {
 
 function dropTrace(st: TraceState): void {
   st.dropped = true;
+  openTraces.delete(st);
   st.ctl?.abort();
   stopReads(st);
 }
@@ -191,18 +196,22 @@ async function loadThread(st: TraceState): Promise<void> {
   const ctl = new AbortController();
   st.pollCtl = ctl;
   const q = new URLSearchParams({ wiki: st.wiki, traceKey: st.key });
-  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki);
+  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki); // R1
   if (user) q.set("userId", user);
   let read: TraceThreadRead;
   let thread: { id: string; messages: TraceThreadMessage[] } | null = null;
   let readUser: string | null = null;
+  let readBot: string | null = null;
+  let readListed = false;
   try {
     const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" }, signal: ctl.signal });
     if (res.ok) {
       // Not JSON, or JSON that is no thread: `malformed`, read again under the bound.
-      const b = (await res.json().catch(() => undefined)) as { userId?: unknown } | undefined;
+      const b = (await res.json().catch(() => undefined)) as { userId?: unknown; bot?: unknown; users?: unknown } | undefined;
       ({ read, thread } = traceReadOf(b));
       readUser = typeof b?.userId === "string" ? b.userId : null;
+      if (readUser) readBot = typeof b?.bot === "string" ? b.bot : null;
+      readListed = Array.isArray(b?.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === readUser);
     } else {
       const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
       read = {
@@ -218,9 +227,13 @@ async function loadThread(st: TraceState): Promise<void> {
   if (st.pollCtl === ctl) st.pollCtl = null;
   // Superseded (a send, a newer read) or dropped: the answer is older than the card's state.
   if (ctl.signal.aborted || !live(st)) return;
+  if (readUser) {
+    st.userId = readUser; // R1
+    st.userListed = !!thread || readListed;
+    if (st.userListed) adoptDiscussUser(st.wiki, readBot, readUser);
+  }
   if (thread) {
     st.discussionId = thread.id;
-    st.userId = readUser;
     st.turns = traceTurnsFromThread(thread.messages);
     paintTurns(st);
     read = { kind: "thread", running: st.turns.some((t) => t.state === "running") };
@@ -263,9 +276,7 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
   paintTurns(st);
   const body: Record<string, unknown> = { wiki: st.wiki, traceKey: st.key, question: turn.question, mode: "explore" };
   if (st.discussionId) body.discussionId = st.discussionId;
-  // A send naming a thread names the user of the read or turn that gave it;
-  // the user kept for the bot goes only with no thread (409 `other-user` otherwise).
-  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki);
+  const user = st.discussionId && st.userId ? st.userId : ((st.userListed ? st.userId : null) ?? discussUserFor(st.wiki)); // R2
   if (user) body.userId = user;
   const fail = (msg: string) => {
     turn.state = "error";
@@ -292,7 +303,11 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
         }
         if (f.event === "turn") {
           if (typeof m.discussionId === "string") st.discussionId = m.discussionId;
-          if (typeof m.userId === "string") st.userId = m.userId;
+          if (typeof m.userId === "string") {
+            st.userId = m.userId; // R2
+            st.userListed = true;
+            adoptDiscussUser(st.wiki, null, m.userId);
+          }
           if (typeof m.turnId === "string") turn.turnId = m.turnId;
         } else if (f.event === "status") turn.status = traceStatusFrom(m, turn.status);
         else if (f.event === "delta" && typeof m.text === "string") turn.text += m.text;
@@ -348,7 +363,8 @@ export function openTrace(key: string, range: Range | null): HTMLElement | null 
   });
   if (!card) return null;
   card.setAttribute("data-trace-key", key);
-  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, userId: null, busy: false, ctl: null, poll: null, pollCtl: null, pollFailures: 0, dropped: false });
+  const state: TraceState = (st = { key, wiki: d.wiki(), card, turns: [], discussionId: null, userId: null, userListed: false, busy: false, ctl: null, poll: null, pollCtl: null, pollFailures: 0, dropped: false });
+  openTraces.add(state);
   traces.set(card, state);
   void (async () => {
     const r = await fetchMentions(state.wiki, key);
@@ -457,6 +473,18 @@ function rangeAround(el: Element): Range {
 /** Wire the peek once, at boot; `openTrace` needs it too. */
 export function initKeyTrace(d: KeyTraceDeps): void {
   deps = d;
+  // R3: a pick waits for the bot's running Trace turns, and drops each card's thread.
+  const ofBot = (bot: string) => [...openTraces].filter((st) => live(st) && discussBotFor(st.wiki) === bot);
+  registerDiscussUserViews({
+    live: (bot) => ofBot(bot).some((st) => st.busy || st.turns.some((t) => t.state === "running")),
+    reset: (bot) => {
+      for (const st of ofBot(bot)) {
+        Object.assign(st, { discussionId: null, userId: null, userListed: false, turns: [] });
+        paintTurns(st);
+        void loadThread(st);
+      }
+    },
+  });
   document.addEventListener("mouseover", (e) => {
     const t = e.target as Element | null;
     if (t?.closest?.(`#${KEY_PEEK_ID}`)) {

@@ -218,6 +218,8 @@ export interface DiscussionView {
   userName?: string | null;
   users?: { id: string; name: string }[];
   userChoosable?: boolean;
+  /** The route can take `userId` as a posted id: it holds a thread, or the read listed it. */
+  userListed?: boolean;
   /** The «as <name> ▾» picker is open. */
   userMenu?: boolean;
   /** The mode the next turn is sent in (the Explore/Edit toggle). */
@@ -478,30 +480,14 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
   if (!d.userChoosable) d.userMenu = false;
 }
 
-/** Switch the discussion to another user's thread: its turns, thread id and
- *  «Earlier discussions» are that user's, read again by the caller. Refused
- *  (false) while a turn runs or for a user the read did not list. */
-export function switchDiscussUser(d: DiscussionView, userId: string): boolean {
-  if (discussionLive(d)) return false;
-  const u = (d.users ?? []).find((x) => x.id === userId);
-  if (!u) return false;
-  d.userMenu = false;
-  if (u.id === d.userId) return true;
-  d.userId = u.id;
-  d.userName = u.name;
-  d.turns = [];
-  d.discussionId = null;
-  d.earlier = null;
-  return true;
-}
-
 /** The «as <name> ▾» button in the tab's bar: the thread's user by name, a
  *  button only when the reader may switch; empty while no name is known. */
-export function discussUserButtonHtml(d: DiscussionView | null): string {
+export function discussUserButtonHtml(d: DiscussionView | null, blockedWhy: string | null = null): string {
   const name = d?.userName;
   if (!d || !name) return "";
   if (!d.userChoosable || !(d.users ?? []).length) return `<span class="wiki-discuss-as" title="Whose discussion this is">as ${esc(name)}</span>`;
-  return `<button type="button" class="wiki-discuss-as" data-discuss-as aria-expanded="${!!d.userMenu}" title="Whose discussion this is: choose another /chat user">as ${esc(name)} ▾</button>`;
+  const title = blockedWhy ?? "Whose discussion this is: choose another /chat user";
+  return `<button type="button" class="wiki-discuss-as" data-discuss-as aria-expanded="${!!d.userMenu}"${blockedWhy ? " disabled" : ""} title="${esc(title)}">as ${esc(name)} ▾</button>`;
 }
 
 /** The picker «as <name> ▾» opens: the bot's /chat users, the current one marked. */

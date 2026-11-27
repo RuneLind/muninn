@@ -52,15 +52,10 @@
  * `GET /api/wiki/discuss/thread` once per page per session: the live thread's
  * turns join the ones streamed here (by turn id), the bot and user give
  * «Pop out ↗» (`/chat?…&src=wiki`), and the closed threads and old one-shot
- * turns fill «Earlier discussions». The user is the one the read resolved
- * (`d.userId`): a turn on the page's thread sends it, so a thread is never
- * sent with another user's id. Only an explicit pick (the «as <name> ▾» menu,
- * or the picker after a `no-user`/`unknown-user` refusal) keeps a user per bot
- * in localStorage (`muninn-discuss-user-<bot>`); a read or turn with no thread
- * yet sends that, and a page shown again with no turn running follows it. The
- * bar names the user; with `MUNINN_AUTH=off` the route lists the bot's /chat
- * users and the button opens the picker (each user has their own thread);
- * elsewhere the name shows with no picker. The Explore/Edit toggle sets the next turn's
+ * turns fill «Earlier discussions». Whose thread a view holds follows the
+ * user rules (R1–R6) at the top of the thread section below. The bar names
+ * the user; with `MUNINN_AUTH=off` the route lists the bot's /chat users and
+ * the button opens the picker; elsewhere the name shows with no picker. The Explore/Edit toggle sets the next turn's
  * `mode`; «Start over» closes the live thread (it moves under «Earlier
  * discussions»), and an earlier thread's Delete is /chat's thread delete.
  */
@@ -89,7 +84,6 @@ import {
   discussUserMenuPick,
   discussToolsOpen,
   applyThreadWho,
-  switchDiscussUser,
   dropStoredCopy,
   mergeThreadTurns,
   turnsFromThread,
@@ -258,7 +252,7 @@ export function setDiscussAgentEnabled(on: boolean): void {
     const input = body?.querySelector<HTMLTextAreaElement>(`#${DISCUSS_INPUT_ID}`);
     if (input) input.value = "";
   }
-  if (enabled && tab?.classList.contains("active")) maybeLoad(true);
+  if (enabled && tab?.classList.contains("active")) maybeLoad(!afterApply);
   paint();
   // The render's later enhancements (the ref links) replace text nodes the
   // mark's range may sit in: the mark is checked again once they have run.
@@ -296,8 +290,10 @@ export function discussSendBlocked(): boolean {
   return wikiReadonlyWikiFlag() || !!document.body?.classList.contains("wiki-readonly-wiki");
 }
 
-/** Show the tab (the breadcrumb's 💬 Discuss, «Ask here»), the pane first. */
-export function openDiscussTab(focus = false, follow = true): void {
+/** Show the tab, the pane first. `follow` (R4) only for a show the reader asked
+ *  for (the breadcrumb's 💬 Discuss); a show on the way to a turn being acted
+ *  on (Open in Discuss, an inline Apply or reword, a send) never follows. */
+export function openDiscussTab(focus = false, follow = false): void {
   if (!enabled || !deps) return;
   revealRightPane();
   deps.switchTab(DISCUSS_TAB);
@@ -377,8 +373,7 @@ function startTurn(question: string, passage: DiscussPassage | null, selected: R
   if (!enabled || discussSendBlocked()) return null;
   const d = ensureHere();
   if (!d || !question.trim() || discussionLive(d)) return null;
-  // A send never changes the page's user (`maybeLoad`'s follow is for a show only).
-  if (opts.openPane !== false) openDiscussTab(false, false);
+  if (opts.openPane !== false) openDiscussTab();
   maybeLoad(false);
   const key = `t${++turnSeq}`;
   void runTurn(d, key, question.trim(), passage, passage ? selected : null, box, opts.mode);
@@ -451,10 +446,7 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
   }
   if (d.discussionId) body.discussionId = d.discussionId;
   body.mode = mode ?? d.mode ?? "explore";
-  // A send that names a thread names the user of the read or turn that gave
-  // it (`d.userId`); the user kept for the bot only goes with no thread yet.
-  // The engine refuses a thread with another user's id (409 `other-user`).
-  const user = d.discussionId && d.userId ? d.userId : sendUser(d);
+  const user = sendUserOf(d); // R2
   if (user) body.userId = user;
   let res: Response;
   try {
@@ -474,7 +466,7 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
     }
     turn.state = "refused";
     turn.message = discussRefusalMessage(res.status, data);
-    noteUserRefusal(d, data);
+    noteUserRefusal(d, data, user);
     schedulePaint();
     return;
   }
@@ -491,7 +483,11 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
     if (out.discussionId && !d.discussionId) d.discussionId = out.discussionId;
     if (frame.event === "turn") {
       dropStoredCopy(d, turn);
-      if (typeof data.userId === "string") d.userId = data.userId;
+      if (typeof data.userId === "string") {
+        d.userId = data.userId;
+        d.userListed = true; // it holds this thread now
+        adoptUser(botOf(d), data.userId); // R2
+      }
     }
     if (frame.event === "turn" && box) {
       clearSentBox(box);
@@ -760,19 +756,73 @@ function endPress(): void {
 
 // ── The page's thread (Discuss v2, PR 4) ─────────────────────────────────
 
-/** The user kept for the wiki's bot, for another reader on that wiki with no
- *  thread yet (the Trace view's, PR 6): the same rule as {@link sendUser}. */
-export function discussUserFor(wiki: string): string | null {
-  const bot = lsGet(botKey(wiki));
-  return bot ? lsGet(userKey(bot)) : null;
-}
+/*
+ * Whose thread (PR #913 class check). Per bot, K is the kept user
+ * (`muninn-discuss-user-<bot>`; another window may change it). Per view (a
+ * page here, or a Trace card), U is the user its last read or turn returned,
+ * T its thread (owned by U), live a turn of it running.
+ *  R1 A read: with T, as U; without, as K (none when K is null). Then
+ *     U := read's user, and K := U when K is null (adopted once, so a thread
+ *     stays with its user when /chat's default user changes).
+ *  R2 A send: with T, as U; without, U, else K, else none. The `turn` event
+ *     sets U and T, and K when null. (The engine refuses T with another user.)
+ *     A U the route would refuse as a posted id (a default user who holds no
+ *     thread and is not listed) is neither adopted nor sent: none is sent.
+ *  R3 A pick (the «as» menu or a refusal's picker, one path) is refused while
+ *     any view of the bot is live; else K := the pick and every view of the
+ *     bot here (pages and Trace cards) drops U, T, its turns and «Earlier»;
+ *     the current view reads again at once, the others when shown.
+ *  R4 A show the reader asked for (the tab's click, the breadcrumb, a page
+ *     render with the tab shown) resets a view with U ≠ K that is not live.
+ *     Nothing else follows K.
+ *  R5 An unknown-user refusal for X clears K only when K is X; its picker is R3.
+ *  R6 An inline turn card names the user its turn ran as.
+ */
 
-/** The user a read, or a turn with no thread yet, sends: the one the reader
- *  picked for the wiki's bot. Otherwise none, and the route uses the bot's
- *  default user. */
-function sendUser(d: DiscussionView): string | null {
-  const bot = d.bot ?? lsGet(botKey(d.wiki));
-  return bot ? lsGet(userKey(bot)) : null;
+const botOf = (d: DiscussionView): string | null => d.bot ?? lsGet(botKey(d.wiki));
+const keptFor = (bot: string | null): string | null => (bot ? lsGet(userKey(bot)) : null);
+/** R1/R2: K := userId, only while K is null. */
+function adoptUser(bot: string | null, userId: string): void {
+  if (bot && !lsGet(userKey(bot))) lsSet(userKey(bot), userId);
+}
+/** R1: the user a read sends. */
+const readUserOf = (d: DiscussionView): string | null => (d.discussionId && d.userId ? d.userId : keptFor(botOf(d)));
+/** R2: the user a send sends. */
+const sendUserOf = (d: DiscussionView): string | null => (d.discussionId && d.userId ? d.userId : ((d.userListed ? d.userId : null) ?? keptFor(botOf(d))));
+
+/** The bot a wiki's discussions are on, as a read last named it. */
+export function discussBotFor(wiki: string): string | null {
+  return lsGet(botKey(wiki));
+}
+/** K for a wiki's bot: a Trace card's read or send with no thread (R1, R2). */
+export function discussUserFor(wiki: string): string | null {
+  return keptFor(lsGet(botKey(wiki)));
+}
+/** A Trace card's read or turn returned `userId` (R1, R2); `bot` as the read named it. */
+export function adoptDiscussUser(wiki: string, bot: string | null, userId: string): void {
+  if (bot) lsSet(botKey(wiki), bot);
+  adoptUser(bot ?? lsGet(botKey(wiki)), userId);
+}
+/** The Trace cards, for R3: whether one of the bot's is live, and their reset. */
+export interface DiscussUserViews {
+  live(bot: string): boolean;
+  reset(bot: string): void;
+}
+const otherViews: DiscussUserViews[] = [];
+export function registerDiscussUserViews(v: DiscussUserViews): void {
+  otherViews.push(v);
+}
+/** Any view of `bot` in this tab with a turn running (R3). */
+function botLive(bot: string | null): boolean {
+  if (!bot) return false;
+  for (const d of discussions.values()) if (botOf(d) === bot && discussionLive(d)) return true;
+  return otherViews.some((v) => v.live(bot));
+}
+/** Drop a view's user, thread and turns (R3, R4); its next read is as K. */
+function resetView(d: DiscussionView): void {
+  for (const t of d.turns) anchors.delete(t.key);
+  readGen.set(d, (readGen.get(d) ?? 0) + 1);
+  Object.assign(d, { turns: [], discussionId: null, earlier: null, userId: null, userListed: false, userName: null, userMenu: false, userPick: null, load: undefined });
 }
 
 /** The route named the wiki's bot (a thread read or a refusal): kept for the
@@ -782,16 +832,15 @@ function learnBot(d: DiscussionView, bot: string): void {
   lsSet(botKey(d.wiki), bot);
 }
 
-/** A `no-user`/`unknown-user` refusal: drop a kept user the route no longer
- *  lists, and offer the users it named. */
-function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null): void {
+/** A `no-user`/`unknown-user` refusal for `refused` (the id sent, if any):
+ *  R5, then the picker with the users the route named. */
+function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null, refused: string | null): void {
   const reason = data?.reason;
   if (reason !== "no-user" && reason !== "unknown-user") return;
   if (typeof data?.bot === "string") learnBot(d, data.bot);
-  if (reason === "unknown-user") {
-    const bot = d.bot ?? lsGet(botKey(d.wiki));
-    if (bot) lsSet(userKey(bot), null);
-  }
+  // R5: K is cleared only when it is the user refused.
+  const bot = botOf(d);
+  if (reason === "unknown-user" && refused && keptFor(bot) === refused) lsSet(userKey(bot!), null);
   const users = Array.isArray(data?.users)
     ? (data.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" ? u.name : (u.id as string) }))
     : [];
@@ -806,18 +855,12 @@ function noteUserRefusal(d: DiscussionView, data: Record<string, unknown> | null
 }
 
 /** Read the thread once per page per session, when the tab is shown or a turn
- *  starts. Only an explicit pick writes the user kept for the bot (every page
- *  of the wiki shares it); a page read for another user follows it when shown
- *  (`follow`) with no turn of it running, its old thread dropped first, and
- *  never on a send. */
+ *  starts; `follow` is R4. */
 function maybeLoad(follow: boolean): void {
   const d = ensureHere();
   if (!d) return;
-  const kept = follow && d.userId && !discussionLive(d) ? sendUser(d) : null;
-  if (kept && kept !== d.userId) {
-    for (const t of d.turns) anchors.delete(t.key);
-    Object.assign(d, { turns: [], discussionId: null, earlier: null, userId: kept, userName: null, userMenu: false, load: undefined });
-  }
+  const kept = follow && d.userId && !discussionLive(d) ? keptFor(botOf(d)) : null;
+  if (kept && kept !== d.userId) resetView(d);
   if (!d.load) void loadThread(d);
 }
 
@@ -845,19 +888,22 @@ async function loadThread(d: DiscussionView): Promise<void> {
   const gen = (readGen.get(d) ?? 0) + 1;
   readGen.set(d, gen);
   const stale = () => readGen.get(d) !== gen;
-  const cachedBot = d.bot ?? lsGet(botKey(d.wiki));
-  const kept = sendUser(d);
-  let r = await getThread(d, kept);
+  const cachedBot = botOf(d);
+  const holds = !!(d.discussionId && d.userId);
+  let asUser = readUserOf(d); // R1
+  let r = await getThread(d, asUser);
   if (stale()) return;
-  if (kept && r.status === 422 && r.body?.reason === "unknown-user") {
-    if (cachedBot) lsSet(userKey(cachedBot), null);
+  if (asUser && !holds && r.status === 422 && r.body?.reason === "unknown-user") {
+    // K is no longer listed (R5: it is the user refused): read as the default.
+    if (keptFor(cachedBot) === asUser) lsSet(userKey(cachedBot!), null);
+    asUser = null;
     r = await getThread(d, null);
     if (stale()) return;
   }
   // The wiki answers on another bot than last time: that bot's kept user, if any.
   const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
   if (bot) learnBot(d, bot);
-  if (bot && bot !== cachedBot) {
+  if (bot && bot !== cachedBot && !holds) {
     const forBot = lsGet(userKey(bot));
     if (forBot && forBot !== r.body?.userId) {
       const again = await getThread(d, forBot);
@@ -874,7 +920,11 @@ async function loadThread(d: DiscussionView): Promise<void> {
     d.loadError = null;
     const thread = b.thread as { id?: unknown } | null;
     const threadId = thread && typeof thread.id === "string" ? thread.id : null;
-    if (typeof b.userId === "string") d.userId = threadId ? b.userId : (d.userId ?? b.userId);
+    if (typeof b.userId === "string") {
+      d.userId = b.userId; // R1
+      d.userListed = !!threadId || (Array.isArray(b.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === b.userId));
+      if (d.userListed) adoptUser(botOf(d), b.userId);
+    }
     mergeThreadTurns(d, threadId, turnsFromThread(Array.isArray(b.messages) ? (b.messages as StoredThreadMessage[]) : []));
     d.earlier = {
       closed: Array.isArray(b.closed) ? (b.closed as EarlierDiscussions["closed"]) : [],
@@ -887,7 +937,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     if (cur && cur.state === "done" && cur.proposedEdit && !cur.edit && cur.turnId) void previewEdit(cur);
   } else {
     d.load = "failed";
-    noteUserRefusal(d, r.body);
+    noteUserRefusal(d, r.body, asUser);
     if (!d.userPick) {
       d.loadError =
         r.status === 0
@@ -929,7 +979,7 @@ function paintBar(body: HTMLElement, d: DiscussionView | null, live: boolean): v
   }
   const asEl = body.querySelector<HTMLElement>(".wiki-discuss-as-slot");
   if (asEl) {
-    const html = discussUserButtonHtml(d);
+    const html = discussUserButtonHtml(d, botLive(d ? botOf(d) : null) ? PICK_LIVE : null);
     if (asEl.dataset.drawn !== html) {
       asEl.innerHTML = html;
       asEl.dataset.drawn = html;
@@ -1012,6 +1062,9 @@ async function deleteEarlier(threadId: string): Promise<void> {
   reloadThread(d);
 }
 
+/** Why a pick is refused now (R3). */
+const PICK_LIVE = "A turn is still running: pick the user when it has ended.";
+
 /** «as <name> ▾»: open or close the user picker. Opening it takes the place
  *  of a refusal's picker, as a refusal's picker closes it. */
 function toggleUserMenu(): void {
@@ -1036,28 +1089,25 @@ export function discussUserNameHere(): string | null {
   return here()?.userName ?? null;
 }
 
-/** The picker's choice: kept for the bot, then the thread is read for that user. */
+/** A pick, from the «as» menu or a refusal's picker (R3). */
 function pickUser(): void {
   const d = here();
   const sel = document.querySelector<HTMLSelectElement>(`#${DISCUSS_BODY_ID} .wiki-discuss-user-select`);
   if (!d || !sel?.value) return;
-  // «as <name> ▾»: another user's own thread of this page (never moves a thread).
-  // Never open beside a refusal's picker (`userPick`): each closes the other.
-  if (d.userMenu) {
-    if (discussionLive(d)) {
-      noteActionError(d, "A turn is still running: switch the user when it has ended.");
-      paint();
-      return;
-    }
-    if (!switchDiscussUser(d, sel.value)) return;
-    for (const t of Array.from(anchors.keys())) if (!d.turns.some((x) => x.key === t)) anchors.delete(t);
+  const bot = botOf(d);
+  if (botLive(bot)) {
+    noteActionError(d, PICK_LIVE);
+    paint();
+    return;
   }
-  const bot = d.bot ?? lsGet(botKey(d.wiki));
-  if (bot) lsSet(userKey(bot), sel.value);
-  d.userId = sel.value;
-  d.userPick = null;
+  if (bot) {
+    lsSet(userKey(bot), sel.value);
+    for (const v of discussions.values()) if (v !== d && botOf(v) === bot) resetView(v);
+    for (const v of otherViews) v.reset(bot);
+  }
+  resetView(d);
   noteActionError(d, null);
-  reloadThread(d);
+  void loadThread(d);
   paint();
 }
 

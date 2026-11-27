@@ -22,7 +22,8 @@
  */
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage } from "../components/wiki-selection-menu.ts";
 import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
 import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
@@ -63,6 +64,8 @@ interface HeldRead {
 const reads: HeldRead[] = [];
 /** Each thread read's URL, in order (PR 913 D3c reads its userId). */
 const readUrls: URL[] = [];
+/** The page's own thread read (the Discuss tab's), when a test answers it. */
+let pageRead: ((url: URL) => Response) | null = null;
 interface HeldPost {
   body: Record<string, unknown>;
   signal: AbortSignal | null;
@@ -122,6 +125,7 @@ beforeAll(() => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.startsWith("/api/wiki/mentions?")) return json(MENTIONS);
+    if (url.startsWith("/api/wiki/discuss/thread?") && !url.includes("traceKey=") && pageRead) return pageRead(new URL(url, "http://x"));
     if (url.startsWith("/api/wiki/discuss/thread?") && url.includes("traceKey=")) {
       readUrls.push(new URL(url, "http://x"));
       return new Promise<Response>((resolve, reject) => {
@@ -175,7 +179,8 @@ beforeAll(() => {
     }
     return json({}, 404);
   }) as typeof fetch;
-  document.body.innerHTML = `<div id="articleWrap"></div>`;
+  document.body.innerHTML = `<div id="articleWrap"></div><button data-conntab="${DISCUSS_TAB}" hidden>Discuss</button>${discussTabBodyHtml()}`;
+  initDiscussTab({ wiki: () => "w", relPath: () => menuRel, switchTab: () => {} });
   initSelectionMenu({
     wiki: () => "w",
     relPath: () => menuRel,
@@ -756,6 +761,88 @@ test("D3c a running turn's poll reads the thread for the user it was read for, t
     await fire();
     expect(reads.length).toBe(2);
     expect(readUrls.at(-1)!.searchParams.get("userId")).toBe("popp");
+  } finally {
+    localStorage.clear();
+  }
+});
+
+test("R3 a pick in the Discuss tab resets a Trace card of the same bot: its old thread dropped, read again for the picked user", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  localStorage.setItem("muninn-discuss-user-b", "popp");
+  const users = [{ id: "popp", name: "Popp" }, { id: "rune", name: "Rune" }];
+  pageRead = (u) => {
+    const userId = u.searchParams.get("userId") ?? "popp";
+    return json({ userId, userName: users.find((x) => x.id === userId)!.name, userChoosable: true, users, bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  };
+  try {
+    const card = await openCard();
+    await reads[0]!.answer(json({ userId: "popp", bot: "b", thread: { id: "th-popp" }, messages: [{ id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "A1", endState: "done", error: null, assistantMessageId: null } }, { id: "m2", role: "assistant", content: "A1.", turn: null }] }));
+    expect(states(card)).toEqual(["done"]);
+    (document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`) as HTMLButtonElement).click();
+    await settle(true);
+    (document.querySelector("#discussBody [data-discuss-as]") as HTMLButtonElement).click();
+    document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "rune";
+    (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
+    await settle(true);
+    expect(states(card)).toEqual([]);
+    expect(reads.length).toBe(2);
+    expect(readUrls.at(-1)!.searchParams.get("userId")).toBe("rune");
+  } finally {
+    pageRead = null;
+    localStorage.clear();
+  }
+});
+
+test("R3 a Trace turn of the bot still running holds off a pick: the «as» button is off", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  const users = [{ id: "popp", name: "Popp" }, { id: "rune", name: "Rune" }];
+  pageRead = () => json({ userId: "popp", userName: "Popp", userChoosable: true, users, bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await openCard();
+    await reads[0]!.answer(gone());
+    summarize(card).click();
+    await settle();
+    const s = await posts[0]!.stream(); // the Trace turn runs
+    (document.querySelector(`[data-conntab="${DISCUSS_TAB}"]`) as HTMLButtonElement).click();
+    await settle(true);
+    expect(document.querySelector<HTMLButtonElement>("#discussBody [data-discuss-as]")!.disabled).toBe(true);
+    await s.push("done", { answer: "ok" });
+    await s.end();
+  } finally {
+    pageRead = null;
+    localStorage.clear();
+  }
+});
+
+test("R1/R2 a Trace card keeps the user its read or turn returned when none is kept, and sends that user with no thread", async () => {
+  localStorage.setItem("muninn-discuss-bot-w", "b");
+  try {
+    // A read of a listed user with no thread: kept (R1).
+    let card = await openCard();
+    await reads[0]!.answer(json({ userId: "popp", bot: "b", users: [{ id: "popp", name: "Popp" }], thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] }));
+    expect(localStorage.getItem("muninn-discuss-user-b")).toBe("popp");
+    // Another window keeps Rune; «Summarize» (no thread yet) is still as Popp, the card's user (R2).
+    localStorage.setItem("muninn-discuss-user-b", "rune");
+    summarize(card).click();
+    await settle();
+    expect(posts[0]!.body.userId).toBe("popp");
+    await posts[0]!.refuse(500, { error: "x" });
+
+    // Nothing kept, a read of an unlisted user: not kept; the turn event's user is (R2).
+    localStorage.removeItem("muninn-discuss-user-b");
+    reads.length = 0;
+    posts.length = 0;
+    renderPage();
+    card = await openCard();
+    await reads[0]!.answer(gone());
+    expect(localStorage.getItem("muninn-discuss-user-b")).toBe(null);
+    summarize(card).click();
+    await settle();
+    const s = await posts[0]!.stream();
+    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp" });
+    expect(localStorage.getItem("muninn-discuss-user-b")).toBe("popp");
+    await s.push("done", { answer: "ok" });
+    await s.end();
   } finally {
     localStorage.clear();
   }

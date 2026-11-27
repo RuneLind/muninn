@@ -409,7 +409,7 @@ describe("wiki-browser.ts — listener order", () => {
       "document focusin 3l9rj", "document keydown capture 1c2w7", "#wikiActiveOptions click 19s7n",
       "#wikiSelect change 3le4p", "window hashchange kobbe", "window popstate 24ens", "#wikiAskBtn click 7m320",
       "#wikiAskInput keydown 36h0q", "#wikiAskHistory click 13b99", "document click 1vfg7", "document keydown 2zmrp",
-      "document click 13kk2", "document change 1typa", "document input smycp", "document keydown 2bnv5",
+      "document click 7flzm", "document change 1typa", "document input smycp", "document keydown 2bnv5",
       "document change kqu5p", "document toggle capture 2ac08", "document keydown 35n5s",
       // The key peek and the Trace card (`initKeyTrace`, Discuss v2 PR 6), before the selection menu's: the
       // peek shown on a key's hover; a press (its «Trace»/«Go to ↓» run with their default prevented, a press

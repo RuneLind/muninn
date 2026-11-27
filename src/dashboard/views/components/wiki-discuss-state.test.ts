@@ -1618,13 +1618,4 @@ describe("the thread's user («as <name> ▾»)", () => {
     discussState.applyThreadWho(d, { userChoosable: true, users: [] });
     expect(discussState.discussUserButtonHtml(d)).toBe("");
   });
-  test("switching drops the other user's turns and thread, never while a turn runs, never to an unlisted id", () => {
-    const t = newTurn("t1", "q", null);
-    const d = view({ userId: "u1", userName: "Popp", userChoosable: true, users: [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }], turns: [t], userMenu: true });
-    expect(discussState.switchDiscussUser(d, "u2")).toBe(false); // t is still sending
-    t.state = "done";
-    expect(discussState.switchDiscussUser(d, "nobody")).toBe(false);
-    expect(discussState.switchDiscussUser(d, "u2")).toBe(true);
-    expect(d).toMatchObject({ userId: "u2", userName: "Rune", turns: [], discussionId: null, earlier: null, userMenu: false });
-  });
 });
