@@ -971,6 +971,21 @@ test("a page turn naming a key gets its mentions in the prompt, from the real me
     expect(p.indexOf("## The key this question names")).toBeLessThan(p.indexOf("## Question"));
     expect(p.trimEnd().endsWith("Where else is MEL-95?")).toBe(true);
 
+    // On an instance that authenticates, no mentions are read for a page turn either (fix round 1, finding 1).
+    calls = [];
+    let authedMentions = 0;
+    const authed = apps(undefined, {
+      authMode: () => "entra",
+      mentions: async () => {
+        authedMentions++;
+        return { ok: false, error: "an authenticating instance reads no mentions" };
+      },
+    });
+    const gated = await frames(await pane(authed, { question: "Where else is MEL-95?" }));
+    expect(gated.map((f) => f.event)).toContain("done");
+    expect(authedMentions).toBe(0);
+    expect(calls[0]!.prompt).not.toContain("## The key this question names");
+
     // A key no tracked file names gets no block: nothing to answer from, and the tools stay the way.
     calls = [];
     const none = await frames(await pane(real, { question: "Where else is MEL-96?" }));

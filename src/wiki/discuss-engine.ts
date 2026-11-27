@@ -904,12 +904,15 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         const pack = buildContextPack({ wiki: p.wiki, relPath: p.relPath, title: p.title, absPath: pagePath, raw: p.raw, ...packSelection(p.body) });
         // A question (or its selection) that names a key gets that key's
         // mentions up front, as a trace turn does: no grep, so the answer can stream.
-        let keyMentions: { key: string; lines: string[] } | null = null;
-        const key = discussTurnKey({ question: p.body.question, selection: p.body.selection }, p.index.readerConfig);
+        // Not on an instance that authenticates: there the mentions route, a trace
+        // and the Copilot wiki tools are all off (`TRACE_AUTH_REFUSAL`), since
+        // mentions spawn git and a background gh refresh.
+        let keyMentions: { key: string; lines: string[]; complete: boolean } | null = null;
+        const key = (deps.authMode ?? authMode)() === "off" ? discussTurnKey({ question: p.body.question, selection: p.body.selection }, p.index.readerConfig) : null;
         if (key) {
           emit("status", { phase: "mentions" });
           const m = await (deps.mentions ?? defaultMentions)({ wiki: p.wiki, root: p.wikiRoot, key, index: p.index });
-          if (m.ok && m.body.totalLines > 0) keyMentions = { key, lines: keyMentionsSection(p.wiki, m.body) };
+          if (m.ok && m.body.totalLines > 0) keyMentions = { key, ...keyMentionsSection(p.wiki, m.body) };
           else if (!m.ok) log.warn("discuss turn on {wiki}: the mentions of {key} could not be read ({error}); the turn runs without them", { wiki: p.wiki, key, error: m.error });
         }
         prompt = renderAgentTurnPrompt({ pack, reach, card: cardText, cardNote: c.note, earlier: history, question: p.body.question, keyMentions });

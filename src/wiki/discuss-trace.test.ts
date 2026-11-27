@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PACK_SECTION_MAX } from "./discuss-pack.ts";
-import { KEY_MENTIONS_MAX, keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { keyMentionsSection, renderTraceTurnPrompt, traceContextPack } from "./discuss-trace.ts";
+import { renderAgentTurnPrompt } from "./discuss-agent.ts";
 import type { MentionsBody } from "./mentions.ts";
 
 const body = (over: Partial<MentionsBody> = {}): MentionsBody => ({
@@ -165,29 +166,56 @@ test("renderTraceTurnPrompt with MCP tools: the reach section places the pack ab
   expect(reach).not.toContain("below");
 });
 
-describe("keyMentionsSection (pane room PR 2)", () => {
-  test("a page turn's key block: says it is already read, and its pack's headings sit one level down", () => {
-    const out = keyMentionsSection("kode", body());
-    expect(out[0]).toBe("## The key this question names: MEL-77");
-    expect(out[1]).toContain("do not search the wiki for MEL-77 again");
-    expect(out[1]).not.toContain("it was cut");
-    expect(out).toContain("### Where it is mentioned");
-    expect(out.filter((l) => l.startsWith("## "))).toHaveLength(1);
-    expect(out.join("\n")).toContain("12: The ferry case MEL-77 is open.");
-  });
-
-  test("a key on many long lines is cut at KEY_MENTIONS_MAX on a line boundary, and says so", () => {
-    const files = Array.from({ length: 30 }, (_, f) => ({
+/** The block's lines, whichever shape `keyMentionsSection` returns (an array before fix round 1, `{ lines, complete }` after), so these tests run red against the unfixed code for their own reason. */
+const blockOf = (r: unknown): { lines: string[]; complete: boolean } => (Array.isArray(r) ? { lines: r as string[], complete: !(r as string[]).some((l) => l.includes("it was cut")) } : (r as { lines: string[]; complete: boolean }));
+/** A key named on 30 files × 20 long lines: its where section is far past any budget. */
+const busy = () =>
+  body({
+    files: Array.from({ length: 30 }, (_, f) => ({
       relPath: `plans/p${f}.mdx`,
       title: `Plan ${f}`,
       lines: Array.from({ length: 20 }, (_, n) => ({ n: n + 1, text: `MEL-77 ${"x".repeat(280)} ${f}-${n}` })),
-    }));
-    const out = keyMentionsSection("kode", body({ files, totalLines: 600, totalFiles: 30 }));
-    const packed = out.slice(3, out.at(-1) === "- … the rest of the key's mentions cut" ? -1 : undefined);
-    expect(out.at(-1)).toBe("- … the rest of the key's mentions cut");
-    expect(out[1]).toContain("it was cut");
-    expect(packed.join("\n").length).toBeLessThanOrEqual(KEY_MENTIONS_MAX);
-    expect(packed.join("\n").length).toBeGreaterThan(KEY_MENTIONS_MAX - 400);
+    })),
+    totalLines: 600,
+    totalFiles: 30,
+    truncated: false,
+  });
+
+describe("keyMentionsSection (pane room PR 2)", () => {
+  test("a whole key's block: says it is already read, and its pack's headings sit one level down", () => {
+    const b = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
+    expect(b.complete).toBe(true);
+    expect(b.lines[0]).toBe("## The key this question names: MEL-77");
+    expect(b.lines[1]).toContain("do not search the wiki for MEL-77 again");
+    expect(b.lines).toContain("### Where it is mentioned");
+    expect(b.lines.filter((l) => l.startsWith("## "))).toHaveLength(1);
+    expect(b.lines.join("\n")).toContain("12: The ferry case MEL-77 is open.");
+  });
+
+  test("a busy key keeps every section: its where lines are cut, its commits, log lines and PR states are not (fix round 1, finding 3)", () => {
+    const b = blockOf(keyMentionsSection("kode", busy()));
+    const text = b.lines.join("\n");
+    expect(text).toContain("### PRs those lines name");
+    expect(text).toContain("- acme/acme-api#3: merged 2026-11-21");
+    expect(text).toContain("- log.md:40 [2026-11-20 plan] - MEL-77 was filed.");
+    expect(text).toContain("- 2026-11-20 abcdef0123 Ferry plan names MEL-77");
+    expect(text).toMatch(/- … \d+ more mention lines not listed in this pack/);
+    expect(text.length).toBeLessThan(16_000);
+  });
+
+  test("a cut block never tells the agent both to answer without searching and that a search is fine (fix round 1, finding 2)", () => {
+    const b = blockOf(keyMentionsSection("kode", busy()));
+    expect(b.complete).toBe(false);
+    expect(b.lines[1]).not.toContain("do not search the wiki for MEL-77 again");
+    const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
+    const pack = { wiki: "kode", relPath: "plans/ferry.mdx", title: "Ferry", path: "plans/ferry.mdx", passage: null, section: null, headings: [] } as never;
+    const prompt = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...b } });
+    expect(prompt).not.toContain("do not grep for it");
+    expect(prompt).toContain("grep for it only for what the pack leaves out");
+    // A whole block keeps the plain «do not grep» on the same reach (finding 6: the prompt passes the key on to readSection).
+    const whole = blockOf(keyMentionsSection("kode", body({ truncated: false, totalLines: 2 })));
+    const p2 = renderAgentTurnPrompt({ pack, reach, card: null, earlier: [], question: "Is MEL-77 done?", keyMentions: { key: "MEL-77", ...whole } });
+    expect(p2).toContain("MEL-77's mentions are in the context pack below, so do not grep for it.");
   });
 });
 
@@ -195,8 +223,8 @@ describe("readSection with a key in the pack (pane room PR 2)", () => {
   test("the Copilot wiki tools line says the key's mentions are in the pack, and points the grep at other keys", async () => {
     const { readSection } = await import("./discuss-agent.ts");
     const reach = { kind: "mcpTools" as const, tools: { research: ["wiki_grep", "wiki_read", "wiki_history"] }, wikiToolsWiki: "kode" };
-    const packed = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }, "page", "MEL-77").join("\n");
-    expect(packed).toContain("MEL-77's mentions are already in the context pack below, so do not grep for it.");
+    const packed = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }, "page", { key: "MEL-77", complete: true }).join("\n");
+    expect(packed).toContain("MEL-77's mentions are in the context pack below, so do not grep for it.");
     expect(packed).not.toContain('"where else" question');
     const plain = readSection(reach, { wiki: "kode", relPath: "plans/ferry.mdx" }).join("\n");
     expect(plain).toContain('research-wiki_grep for an exact key, id or a "where else" question');

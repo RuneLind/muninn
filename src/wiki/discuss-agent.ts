@@ -281,7 +281,7 @@ function numbered(text: string, fromLine: number): string {
 /** «What you can read»: the reach, with citations shown on `pack.relPath`
  *  (a page turn's page, a trace turn's first file). A trace turn's subject is
  *  its key, so its wording names no page. */
-export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">, subject: "page" | "trace" = "page", packedKey: string | null = null): string[] {
+export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | "relPath">, subject: "page" | "trace" = "page", packedKey: { key: string; complete: boolean } | null = null): string[] {
   if (reach.kind === "mcpTools") {
     const tools = Object.entries(reach.tools).flatMap(([server, ts]) => ts.map((t) => `${server}-${t}`));
     return [
@@ -294,7 +294,7 @@ export function readSection(reach: AgentReach, pack: Pick<ContextPack, "wiki" | 
       ...(reach.wikiToolsWiki && reach.tools.research?.includes("wiki_grep")
         ? [
             packedKey
-              ? `This wiki's own files: ${packedKey}'s mentions are already in the context pack below, so do not grep for it. For another exact key or id use research-wiki_grep (it finds every tracked file that holds it), research-wiki_read to read a file, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`
+              ? `This wiki's own files: ${packedKey.key}'s mentions are in the context pack below${packedKey.complete ? ", so do not grep for it" : ", cut where it says so: grep for it only for what the pack leaves out"}. For another exact key or id use research-wiki_grep (it finds every tracked file that holds it), research-wiki_read to read a file, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`
               : `This wiki's own files: use research-wiki_grep for an exact key, id or a "where else" question (it finds every tracked file that holds it), research-wiki_read to read a file it returned, and research-wiki_history for the commits that added or removed a term. Pass wiki: ${JSON.stringify(reach.wikiToolsWiki)} to each.`,
           ]
         : []),
@@ -330,8 +330,8 @@ export function renderAgentTurnPrompt(opts: {
   cardNote?: string | null;
   earlier: readonly EarlierTurn[];
   question: string;
-  /** The key block (`keyMentionsSection`) when the question names a key, and that key. */
-  keyMentions?: { key: string; lines: string[] } | null;
+  /** The key block (`keyMentionsSection`) when the question names a key: that key, its lines, whether it is whole. */
+  keyMentions?: { key: string; lines: string[]; complete: boolean } | null;
 }): string {
   const { pack, reach } = opts;
   const out: string[] = [];
@@ -341,7 +341,7 @@ export function renderAgentTurnPrompt(opts: {
   out.push(`Page: ${pack.relPath}`);
   if (reach.kind === "readSearch") out.push(`Page file: ${pack.path} (inside the wiki snapshot ${reach.wikiSnapshot})`);
   out.push("");
-  out.push(...readSection(reach, pack, "page", opts.keyMentions?.key ?? null));
+  out.push(...readSection(reach, pack, "page", opts.keyMentions ? { key: opts.keyMentions.key, complete: opts.keyMentions.complete } : null));
   out.push("");
   if (pack.passage !== null) {
     out.push(`## The marked passage (${passageWhere(pack)})`);
