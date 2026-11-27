@@ -1,7 +1,7 @@
 /** `discussToolLine`: a Discuss tool call in a reader's words, for every tool
  *  the surfaces produce, a cut input and garbage. */
 import { describe, expect, test } from "bun:test";
-import { discussToolLine, discussToolText } from "./discuss-tool-line.ts";
+import { discussToolLine, discussToolText, toolLineText } from "./discuss-tool-line.ts";
 
 const j = (o: unknown) => JSON.stringify(o);
 
@@ -69,13 +69,27 @@ describe("discussToolLine", () => {
   // The engine cuts a tool input at 200 chars (`abbreviate`): a path cut there
   // has no file name left, so its tail would be middle directories.
   const cutAt = (s: string, max = 200) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
-  test("PR 913 R1: a path cut by the 200-char limit keeps its head, never a tail of middle directories", () => {
-    const deep = "/Users/rune/source/private/snapshot/" + "d/".repeat(80) + "file.ts";
-    const line = discussToolLine("Read", cutAt(j({ file_path: deep })));
-    expect(line.detail.startsWith("/Users/rune/source/private/snapshot/")).toBe(true);
+  test("PR 913 R2: a path cut inside its file name shows the tail it has left, with the file name's start", () => {
+    const p = "/Users/rune/.muninn/agent-cwd/.snapshots/mimir-" + "3f9c".repeat(10) + "/projects/muninn/discuss/2026-11-27-wiki-discuss-model-user-tools-follow-up-plan-and-fix-rounds.mdx";
+    const line = discussToolLine("Read", cutAt(j({ file_path: p, offset: 40, limit: 80 })));
+    expect(line.detail).toContain("2026-11-27-wiki-discuss-model-user-tools");
+    expect(line.detail).not.toContain(".snapshots");
     expect(line.detail.endsWith("…")).toBe(true);
     // An uncut absolute path still shows its tail.
     expect(discussToolLine("Read", j({ file_path: "/a/b/c/d/e.ts" })).detail).toBe("…/c/d/e.ts");
+  });
+
+  test("PR 913 R2: a number the cut reached is not read as a smaller number", () => {
+    for (const n of [158, 159, 160]) {
+      const input = cutAt(j({ pad: "y".repeat(n), file_path: "a.md", offset: 1234, limit: 80 }));
+      expect(input).toMatch(/"offset":\d{1,3}…$/);
+      expect(discussToolLine("Read", input).detail).toBe("a.md");
+    }
+  });
+
+  test("PR 913 R2: a key with an escaped quote in its name never passes for a top-level field", () => {
+    const input = cutAt(j({ 'x"pattern': "evil", pattern: "real", path: "p/" + "x".repeat(300) }));
+    expect(discussToolLine("Grep", input).detail.startsWith('"real"')).toBe(true);
   });
 
   test("PR 913 R1: on a cut input a nested key never shadows the top-level one", () => {
@@ -90,5 +104,8 @@ describe("discussToolLine", () => {
   test("discussToolText joins label and detail the way /chat's tool line splits it", () => {
     expect(discussToolText("yggdrasil-search", j({ query: "q" }))).toBe("Searching code: q");
     expect(discussToolText("yggdrasil-list_repos", "")).toBe("Listing repos");
+    // /chat's mirror sends the engine's line through toolLineText.
+    expect(toolLineText({ label: "Reading", detail: "…/d/the-file.mdx" })).toBe("Reading: …/d/the-file.mdx");
+    expect(toolLineText({ label: "Listing repos", detail: "" })).toBe("Listing repos");
   });
 });

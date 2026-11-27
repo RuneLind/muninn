@@ -12,9 +12,9 @@
  * `processChatMessage`.
  */
 import { getLog } from "../logging.ts";
+import { toolLineText } from "../wiki/discuss-tool-line.ts";
 import { getThreadById, type Thread } from "../db/threads.ts";
 import { parseDiscussBody, type DiscussEngine, type DiscussMirrorFactory, type DiscussRefusal } from "../wiki/discuss-engine.ts";
-import { discussToolText } from "../wiki/discuss-tool-line.ts";
 import { chatState } from "./state.ts";
 import { loadChatConfig } from "./chat-config.ts";
 
@@ -33,7 +33,7 @@ export function chatWikiMirror(): DiscussMirrorFactory {
       userMessage: (m) => chatState.addMessage(conv.id, { id: m.id, timestamp: m.createdAt, sender: "user", text: m.text, threadId }),
       delta: (text) => chatState.publishTextDelta(conv.id, text, threadId),
       // The pane's words for the call (`label: detail`), which /chat's tool line splits.
-      tool: (t) => chatState.publishToolStatus(conv.id, discussToolText(t.name, t.input), threadId, t.name, t.displayName),
+      tool: (t) => chatState.publishToolStatus(conv.id, toolLineText(t), threadId, t.name, t.displayName),
       answer: (m) => {
         chatState.publishStreamClear(conv.id, threadId);
         chatState.addMessage(conv.id, { id: m.id ?? crypto.randomUUID(), timestamp: Date.now(), sender: "bot", text: m.text, threadId, model: m.model });

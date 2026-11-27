@@ -4,8 +4,10 @@
  * mirror of a wiki thread all draw it, so it is pure and dependency-free (the
  * /wiki client bundle imports it).
  *
- * The input may arrive cut at 200 chars by the engine's `abbreviate`, so a
- * field is read by JSON.parse first and by a per-field regex when that fails.
+ * The engine runs it on the full input and ships `label`/`detail` with each
+ * call; the client runs it only on a call stored before that, whose input was
+ * cut at 300 chars, so a field is read by JSON.parse first and by a per-field
+ * regex when that fails.
  * Never throws: an unreadable input gives the tool's name and no detail.
  */
 
@@ -22,22 +24,21 @@ function cut(s: string, n = DETAIL_MAX): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-/** Brace depth at each index of `s`, braces inside strings not counted. */
-function depths(s: string): number[] {
-  const out: number[] = new Array(s.length);
+/** The indexes where a string opens at brace depth 1: where a top-level key can start. */
+function topLevelStringStarts(s: string): Set<number> {
+  const out = new Set<number>();
   let depth = 0;
   let inStr = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (inStr) {
-      if (c === "\\") {
-        out[i] = depth;
-        i++;
-      } else if (c === '"') inStr = false;
-    } else if (c === '"') inStr = true;
-    else if (c === "{" || c === "[") depth++;
+      if (c === "\\") i++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') {
+      inStr = true;
+      if (depth === 1) out.add(i);
+    } else if (c === "{" || c === "[") depth++;
     else if (c === "}" || c === "]") depth--;
-    out[i] = depth;
   }
   return out;
 }
@@ -56,12 +57,13 @@ function readFields(input: string): Fields {
   } catch {
     /* cut or not JSON: the regex below */
   }
-  // Only keys at depth 1 count: a nested object's key must not shadow a top-level one.
-  const depth = depths(input);
+  // Only a key that opens a string at depth 1 counts: neither a nested key nor
+  // a quote escaped inside another string passes for a top-level field.
+  const starts = topLevelStringStarts(input);
   const re = /"([A-Za-z_][\w]*)"\s*:\s*(?:"((?:[^"\\]|\\.)*)"?|(-?\d+(?:\.\d+)?|true|false))/g;
   for (const m of input.matchAll(re)) {
     const key = m[1]!;
-    if (depth[m.index] !== 1 || Object.hasOwn(out, key)) continue;
+    if (!starts.has(m.index) || Object.hasOwn(out, key)) continue;
     if (m[2] !== undefined) {
       let s = m[2];
       try {
@@ -70,16 +72,16 @@ function readFields(input: string): Fields {
         /* a cut escape: keep the raw text */
       }
       out[key] = s;
-    } else if (m[3] !== undefined) out[key] = m[3];
+    } else if (m[3] !== undefined && !input.startsWith("…", m.index + m[0].length)) {
+      // A number the cut reached (`"offset":12…`) would read as a smaller one.
+      out[key] = m[3];
+    }
   }
   return out;
 }
 
-/** An absolute path (a snapshot's, a repo's) shows only its last three
- *  segments. One the engine's 200-char cut reached ends in its «…» and keeps
- *  its head: the file name is gone, so a tail would be middle directories. */
+/** An absolute path (a snapshot's, a repo's) shows only its last three segments. */
 function tail(p: string): string {
-  if (p.endsWith("…")) return p;
   if (!p.startsWith("/") && !p.startsWith("~") && !/^[A-Za-z]:[\\/]/.test(p)) return p;
   const segs = p.split(/[\\/]+/).filter(Boolean);
   return segs.length <= 3 ? p : `…/${segs.slice(-3).join("/")}`;
@@ -149,8 +151,11 @@ export function discussToolLine(name: string, input: string): DiscussToolLine {
   }
 }
 
-/** One line of text: `label: detail`, or the label alone. */
-export function discussToolText(name: string, input: string): string {
-  const l = discussToolLine(name, input);
+/** One line of text: `label: detail`, or the label alone (/chat's tool line splits it back). */
+export function toolLineText(l: DiscussToolLine): string {
   return l.detail ? `${l.label}: ${l.detail}` : l.label;
+}
+
+export function discussToolText(name: string, input: string): string {
+  return toolLineText(discussToolLine(name, input));
 }

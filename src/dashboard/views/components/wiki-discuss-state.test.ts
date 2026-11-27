@@ -1583,6 +1583,15 @@ describe("the tool group", () => {
     t.toolsOpen = true;
     expect(discussState.discussToolsHtml(t)).toContain("wiki-discuss-tools-body");
   });
+  test("PR 913 R2: a call that carries the server's label and detail renders those, from the stream and from a read", () => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-1", seq: 1 });
+    applyDiscussFrame(t, "tool", { name: "Read", input: '{"file_path":"/cut/d/d/d…', label: "Reading", detail: "…/d/d/the-file.mdx" });
+    expect(discussState.discussToolsHtml(t)).toContain('<span class="wiki-discuss-tool-detail">…/d/d/the-file.mdx</span>');
+    const read = discussState.turnFromStored(stored({ id: "r9", seq: 9, toolCalls: [{ name: "Read", input: '{"file_path":"/cut/d/d/d…', label: "Reading", detail: "…/x/the-read.mdx" }] as never }));
+    read.toolsOpen = true;
+    expect(discussState.discussToolsHtml(read)).toContain("…/x/the-read.mdx");
+  });
   test("past the cap: the newest lines and «and K more», nothing dropped silently", () => {
     const t = withTools(discussState.DISCUSS_TOOLS_SHOWN + 3);
     const html = discussState.discussToolsHtml(t);

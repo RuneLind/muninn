@@ -108,6 +108,7 @@ import { getWikiRegistry } from "./registry-memo.ts";
 import { botWikis, resolveWikiRequest } from "./registry.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "./readonly.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot, type WikiIndex } from "./store.ts";
+import { discussToolLine } from "./discuss-tool-line.ts";
 
 /** The Copilot surface (D2): the knowledge server's search for other pages,
  *  and yggdrasil's listing and graph tools. Never `read_source`,
@@ -369,7 +370,7 @@ const refuse = (status: DiscussRefusal["status"], body: DiscussRefusal["body"], 
 export interface DiscussMirror {
   userMessage(m: { id: string; text: string; createdAt: number }): void;
   delta(text: string): void;
-  tool(m: { name: string; displayName: string; input: string }): void;
+  tool(m: { name: string; displayName: string; input: string; label: string; detail: string }): void;
   /** The stored answer (the edit block replaced, «(unfinished)» when it did not end done). */
   answer(m: { id: string | null; text: string; model: string | null; endState: string }): void;
 }
@@ -415,6 +416,12 @@ export interface DiscussEngine {
 function abbreviate(s: string | undefined, max = 300): string {
   const t = (s ?? "").replace(/\s+/g, " ").trim();
   return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+}
+
+/** A tool call as stored and streamed: its input cut to `max`, its reader's
+ *  line made from the whole input first. */
+function toolCall(name: string, input: string | undefined, max = 300): Required<DiscussToolCall> {
+  return { name, input: abbreviate(input, max), ...discussToolLine(name, input ?? "") };
 }
 
 /** A thread's user message: the bare question, plus one quoted line for the selection. */
@@ -948,9 +955,10 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
             mirrored((m) => m.delta(ev.text));
           } else if (ev.type === "tool_start") {
             textSinceTool = false;
-            streamedTools.push({ name: ev.name, input: abbreviate(ev.input) });
-            emit("tool", { name: ev.name, input: abbreviate(ev.input, 200) });
-            mirrored((m) => m.tool({ name: ev.name, displayName: ev.displayName, input: abbreviate(ev.input, 200) }));
+            streamedTools.push(toolCall(ev.name, ev.input));
+            const live = toolCall(ev.name, ev.input, 200);
+            emit("tool", live);
+            mirrored((m) => m.tool({ ...live, displayName: ev.displayName }));
           } else if (ev.type === "tool_end") {
             if (!textSinceTool) emit("status", { phase: "writing", text: DISCUSS_WRITING_STATUS });
           }
@@ -964,7 +972,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         clearTimeout(deadlineTimer);
       }
       const answer = res.result ?? "";
-      const toolCalls: DiscussToolCall[] = (res.toolCalls ?? []).map((tc) => ({ name: tc.name, input: abbreviate(tc.input) }));
+      const toolCalls: DiscussToolCall[] = (res.toolCalls ?? []).map((tc) => toolCall(tc.name, tc.input));
       // A trace has no page to edit and Apply refuses its turns: an edit block
       // there is left in the answer as the model wrote it, and is no proposed edit.
       const proposedEdit = p.traceKey !== null ? null : extractProposedEdit(answer);

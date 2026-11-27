@@ -27,6 +27,19 @@ export type DiscussTurnState = "sending" | "running" | "done" | "error" | "timeo
 export interface DiscussToolCallView {
   name: string;
   input: string;
+  /** The server's line from the full input; absent on a call stored before it shipped one. */
+  label?: string;
+  detail?: string;
+}
+
+/** A tool call from a frame or a stored row: the server's line kept when it has one. */
+function toolCallView(c: { name?: unknown; input?: unknown; label?: unknown; detail?: unknown } | null | undefined): DiscussToolCallView {
+  const v: DiscussToolCallView = { name: String(c?.name ?? ""), input: typeof c?.input === "string" ? c.input : "" };
+  if (typeof c?.label === "string") {
+    v.label = c.label;
+    v.detail = typeof c.detail === "string" ? c.detail : "";
+  }
+  return v;
 }
 
 /** The passage a turn asks about, as P1's panel read it. */
@@ -249,7 +262,7 @@ export interface StoredDiscussTurn {
   answer: string;
   endState: string;
   error: string | null;
-  toolCalls: { name: string; input: string }[];
+  toolCalls: { name: string; input: string; label?: string; detail?: string }[];
   proposedEdit: unknown;
   editAppliedAt: number | null;
   createdAt: number;
@@ -308,7 +321,7 @@ export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null
   view.turnId = t.id;
   view.seq = t.seq;
   view.text = t.answer ?? "";
-  view.tools = (t.toolCalls ?? []).map((c) => ({ name: String(c?.name ?? ""), input: typeof c?.input === "string" ? c.input : "" }));
+  view.tools = (t.toolCalls ?? []).map(toolCallView);
   view.model = answerModel || t.model || null;
   view.connector = t.connector || null;
   view.durationMs = typeof t.durationMs === "number" ? t.durationMs : null;
@@ -575,7 +588,7 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
       if (typeof data.text === "string" && t.state === "running") t.text += data.text;
       return {};
     case "tool":
-      if (typeof data.name === "string") t.tools.push({ name: data.name, input: typeof data.input === "string" ? data.input : "" });
+      if (typeof data.name === "string") t.tools.push(toolCallView(data));
       return {};
     case "done":
       t.state = "done";
@@ -740,7 +753,7 @@ export function discussToolsHtml(t: DiscussTurnView): string {
   const more = n - shown.length;
   const lines = shown
     .map((c) => {
-      const l = discussToolLine(c.name, c.input);
+      const l = c.label !== undefined ? { label: c.label, detail: c.detail ?? "" } : discussToolLine(c.name, c.input);
       return `<div class="wiki-discuss-tool"><span class="wiki-discuss-tool-label">${esc(l.label)}${l.detail ? ": " : ""}</span>${l.detail ? `<span class="wiki-discuss-tool-detail">${esc(l.detail)}</span>` : ""}</div>`;
     })
     .join("");

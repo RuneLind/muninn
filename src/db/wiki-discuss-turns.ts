@@ -25,6 +25,9 @@ export interface DiscussToolCall {
   name: string;
   /** The tool input, abbreviated. */
   input: string;
+  /** The reader's line, made from the full input (`discussToolLine`); absent on older rows. */
+  label?: string;
+  detail?: string;
 }
 
 export interface DiscussTurnStart {
