@@ -126,3 +126,39 @@ test("a takeover does not add the activity feed's rows again on the remaining ho
   await home.waitForTimeout(300);
   expect(await rows(home)).toBe(before);
 });
+
+test("a dropped stream reconnects without adding the activity feed's rows again", async ({ context, request }) => {
+  // The first /api/events answers the server's own activity rows (the replay a
+  // real connection opens with) and then ENDS, as a server restart ends it: a
+  // transient error (readyState 0). The reconnect is held until the test lets
+  // it through to the real server, whose replay carries the same rows.
+  const { events } = (await (await request.get("/api/activity")).json()) as { events: unknown[] };
+  expect(events.length).toBeGreaterThan(0);
+  const replay = "retry: 500\n\n" + events.map((ev) => `event: activity\ndata: ${JSON.stringify(ev)}\n\n`).join("");
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let n = 0;
+  await context.route("**/api/events", async (route) => {
+    n += 1;
+    if (n === 1) return route.fulfill({ status: 200, headers: { "Content-Type": "text/event-stream" }, body: replay });
+    await gate;
+    return route.fallback();
+  });
+  const rows = (p: Page) => p.locator("#feed [data-feed-event]").count();
+  const home = await context.newPage();
+  await recordHandlers(home);
+  await home.goto("/");
+  await expect.poll(async () => count(await seen(home), "activity")).toBe(events.length);
+  await expect(home.locator("#statusText")).toHaveText("Reconnecting...");
+  await expect.poll(() => n).toBe(2);
+  await home.waitForTimeout(300);
+  const before = await rows(home);
+  expect(before).toBeGreaterThan(0);
+
+  release();
+  // The real connection's burst (activity replay first, agent_runs last) has arrived.
+  await expect(home.locator("#statusText")).toHaveText("Connected");
+  await expect.poll(async () => count(await seen(home), "agent_runs")).toBeGreaterThan(0);
+  await home.waitForTimeout(300);
+  expect(await rows(home)).toBe(before);
+});

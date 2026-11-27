@@ -104,7 +104,7 @@ function origin(opts: { locks?: boolean; channel?: boolean } = {}) {
     },
     id: () => `tab${++n}`,
   };
-  return { deps, opened, reported };
+  return { deps, opened, reported, bus };
 }
 
 /** A tab's handlers that log what they see; `readyStateOnError` reads the handle inside onerror. */
@@ -421,5 +421,50 @@ describe("sharedSseClient", () => {
     expect(ha.readyState).toBe(1);
     ha.close();
     expect(o.opened[0]!.readyState).toBe(2);
+  });
+
+  // ── Fix round 2 ──────────────────────────────────────────────────────
+
+  test("a snapshot channel (no history) is delivered every time, even with the same data", async () => {
+    const o = origin();
+    const a = recorder(["stats", "agent_runs"]);
+    sharedSseClient(URL, a.handlers, { ...OPTS, events: [...OPTS.events, "agent_runs"], deps: o.deps });
+    await flush();
+    const es = o.opened[0]!;
+    es.open();
+    es.emit("stats", "same");
+    es.emit("agent_runs", "[]");
+    es.emit("stats", "same");
+    es.emit("agent_runs", "[]");
+    expect(a.log).toEqual(["open", "stats:same", "agent_runs:[]", "stats:same", "agent_runs:[]"]);
+  });
+
+  test("the delivered-rows memory holds only the cap: a row that fell out of it is delivered again", async () => {
+    const o = origin();
+    const a = recorder(["activity"]);
+    sharedSseClient(URL, a.handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    const es = o.opened[0]!;
+    es.open();
+    for (const d of ["1", "2", "3", "1"]) es.emit("activity", d);
+    // cap 2: after 1, 2, 3 the memory is [2, 3], so 1 is new again.
+    expect(a.log).toEqual(["open", "activity:1", "activity:2", "activity:3", "activity:1"]);
+  });
+
+  test("a solo tab (its lock refused) exposes its own stream as source", async () => {
+    const o = origin();
+    o.deps.locks = { request: () => Promise.reject(new Error("SecurityError")) };
+    const ha = sharedSseClient(URL, recorder([]).handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    expect(ha.role).toBe("solo");
+    expect(ha.source).toBe(o.opened[0] as unknown as EventSource);
+  });
+
+  test("a solo tab closes its channel: it is off the bus and answers no hellos", async () => {
+    const o = origin();
+    o.deps.locks = { request: () => Promise.reject(new Error("SecurityError")) };
+    sharedSseClient(URL, recorder([]).handlers, { ...OPTS, deps: o.deps });
+    await flush();
+    expect(o.bus.chans.get("muninn-sse:" + URL)?.size ?? 0).toBe(0);
   });
 });

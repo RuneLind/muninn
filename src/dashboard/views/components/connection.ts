@@ -104,6 +104,11 @@ export function connectionScript(): string {
         onerror: () => {
           statusDot.className = 'status-dot';
           statusText.textContent = 'Reconnecting...';
+          // A transient drop keeps this handle: the stream's own retry (or the
+          // next tab's takeover) reconnects, and the handle's memory of the
+          // activity rows it delivered keeps the replay from adding them again.
+          // Only a dead stream (2, a non-200 never retries) is redone by hand.
+          if (es.readyState !== 2) return;
           es.close();
           setTimeout(connect, 3000);
         },
