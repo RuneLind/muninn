@@ -66,8 +66,8 @@ describe("discussToolLine", () => {
     expect(discussToolLine(undefined as unknown as string, null as unknown as string)).toEqual({ label: "tool", detail: "" });
     expect(discussToolLine("x", '{"a":"\\u12')).toEqual({ label: "x", detail: "a: \\u12" });
   });
-  // The engine cuts a tool input at 200 chars (`abbreviate`): a path cut there
-  // has no file name left, so its tail would be middle directories.
+  // A row stored before #913 carries only the input, cut (300 chars stored,
+  // 200 live); the server now ships each call's line made from the full input.
   const cutAt = (s: string, max = 200) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
   test("PR 913 R2: a path cut inside its file name shows the tail it has left, with the file name's start", () => {
     const p = "/Users/rune/.muninn/agent-cwd/.snapshots/mimir-" + "3f9c".repeat(10) + "/projects/muninn/discuss/2026-11-27-wiki-discuss-model-user-tools-follow-up-plan-and-fix-rounds.mdx";

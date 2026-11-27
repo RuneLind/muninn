@@ -771,10 +771,14 @@ function endPress(): void {
  *  R3 A pick (the «as» menu or a refusal's picker, one path) is refused while
  *     any view of the bot is live; else K := the pick and every view of the
  *     bot here (pages and Trace cards) drops U, T, its turns and «Earlier»;
- *     the current view reads again at once, the others when shown.
+ *     the current page and every open Trace card read again at once, other
+ *     pages when shown.
  *  R4 A show the reader asked for (the tab's click, the breadcrumb, a page
  *     render with the tab shown) resets a view with U ≠ K that is not live.
- *     Nothing else follows K.
+ *     A read without T (Start over, a Delete with no live thread, a Trace
+ *     read or poll) also goes as K under R1. Known gaps (#913 follow-up): a
+ *     send during such a read can pair T with another user, and R3/R4 drop a
+ *     turn whose Apply is running or was lost.
  *  R5 An unknown-user refusal for X clears K only when K is X; its picker is R3.
  *  R6 An inline turn card names the user its turn ran as.
  */
