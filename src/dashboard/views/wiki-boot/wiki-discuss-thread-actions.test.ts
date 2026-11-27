@@ -396,3 +396,48 @@ test("a thread read naming the wiki's bot keeps it for the wiki", async () => {
   expect(localStorage.getItem("muninn-discuss-bot-lb")).toBe("lb-bot");
   document.body.innerHTML = "";
 });
+
+test("«as <name> ▾» switches the page's discussion to another user's own thread: kept for the bot, read again, the other user's turns gone", async () => {
+  wiki = "harbour";
+  relPath = "plans/s.mdx";
+  reads.length = 0;
+  localStorage.clear();
+  const users = [{ id: "popp", name: "Popp" }, { id: "rune", name: "Rune" }];
+  const turnRow = (id: string, q: string) => ({ id, discussionId: `th-${id}`, seq: 1, selection: null, question: q, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 });
+  route = (url) => {
+    if (!url.startsWith("/api/wiki/discuss/thread?")) return json({}, 404);
+    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "popp";
+    const name = users.find((u) => u.id === userId)!.name;
+    const row = turnRow(userId, `${name}'s question`);
+    return json({ userId, userName: name, userChoosable: true, users, bot: "harbour-bot", thread: { id: `th-${userId}`, name: "t", createdAt: 1 }, messages: [{ id: `m-${userId}`, role: "user", content: row.question, createdAt: 1, turn: row }], closed: [], closedTotal: 0, oneShot: [] });
+  };
+  await openTab();
+  const as = document.querySelector<HTMLButtonElement>("[data-discuss-as]");
+  expect(as?.textContent).toBe("as Popp ▾");
+  expect(document.querySelector(".wiki-discuss-turns")!.textContent).toContain("Popp's question");
+  as!.click();
+  const sel = document.querySelector<HTMLSelectElement>(".wiki-discuss-user-select")!;
+  expect(sel.value).toBe("popp");
+  sel.value = "rune";
+  (document.querySelector("[data-discuss-pick-user]") as HTMLButtonElement).click();
+  await settle();
+  expect(new URL(reads.at(-1)!, "http://x").searchParams.get("userId")).toBe("rune");
+  expect(localStorage.getItem("muninn-discuss-user-harbour-bot")).toBe("rune");
+  expect(document.querySelector("[data-discuss-as]")!.textContent).toBe("as Rune ▾");
+  const turns = document.querySelector(".wiki-discuss-turns")!.textContent!;
+  expect(turns).toContain("Rune's question");
+  expect(turns).not.toContain("Popp's question");
+  expect(document.querySelector(".wiki-discuss-user-select")).toBe(null);
+  document.body.innerHTML = "";
+});
+
+test("not choosable (an authenticating instance): the name shows with no picker button", async () => {
+  wiki = "harbour2";
+  relPath = "plans/n.mdx";
+  localStorage.clear();
+  route = (url) => (url.startsWith("/api/wiki/discuss/thread?") ? json({ ...emptyThread("popp", "harbour-bot"), userName: "Popp", userChoosable: false, users: [] }) : json({}, 404));
+  await openTab();
+  expect(document.querySelector(".wiki-discuss-as")?.textContent).toBe("as Popp");
+  expect(document.querySelector("[data-discuss-as]")).toBe(null);
+  document.body.innerHTML = "";
+});

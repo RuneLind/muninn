@@ -390,8 +390,9 @@ describe("wiki-browser.ts — listener order", () => {
       // tab's own click, the mode toggle, Start over, an earlier thread's Delete and the user pick); a press
       // held in the tab (no follow-scroll meanwhile), ended by a pointerup or by what can take its place (a
       // context menu, the window's blur); Enter in its box. (PR 5 fix round 1 batch 2: the edit card's
-      // Apply, «Change the wording» and «Check again» tell an inline card from the tab's own.)
-      "document click 5c5lv", "document pointerdown capture 30n4x", "document pointerup capture 2yyyj",
+      // Apply, «Change the wording» and «Check again» tell an inline card from the tab's own.
+      // 2026-11-27: «as <name> ▾» and a turn's tool group header.)
+      "document click 39cwn", "document pointerdown capture 30n4x", "document pointerup capture 2yyyj",
       "document pointercancel capture 2yyyj", "document contextmenu capture 2yyyj", "window blur 2yyyj", "document keydown 11sdy",
       // Issue #623: the rail panel closes on Back/Forward and on leaving the narrow width.
       "window popstate 3fyct", "[object eventtarget] change 1g0ma", "document click 1wxv0",

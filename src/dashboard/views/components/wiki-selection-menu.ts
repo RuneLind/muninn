@@ -57,7 +57,7 @@ import { enhanceConfidenceHtml, renderStreamingBody } from "./wiki-ask-render.ts
 import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
 import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
-import { discussAgentOn, discussSendBlocked, discussTurnForCard, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
+import { discussAgentOn, discussSendBlocked, discussTurnForCard, discussUserNameHere, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
 import { discussTurnBodyParts, findSamePassage, holdPassage, type HeldPassage } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
@@ -71,6 +71,7 @@ import {
   historyHtml,
   inlineCardAnchor,
   inlineCardHtml,
+  inlineTurnSub,
   keyKindsFrom,
   selBarHtml,
   selMenuOffers,
@@ -656,7 +657,7 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
-  const card = placeCard(s, inlineCardHtml(kind, "a turn in this page's discussion", "", r.key));
+  const card = placeCard(s, inlineCardHtml(kind, inlineTurnSub(discussUserNameHere()), "", r.key));
   if (!card) return;
   holdCard(card, s);
   paintTurnCard(card);
@@ -731,6 +732,10 @@ function paintTurnCard(card: Element): void {
   const key = card.getAttribute("data-sel-turn");
   const body = card.querySelector(".wiki-sel-card-body");
   if (!key || !body) return;
+  // The thread read may name the user after the card was placed.
+  const sub = card.querySelector(".wiki-sel-card-sub");
+  const subText = `· ${inlineTurnSub(discussUserNameHere())}`;
+  if (sub && sub.textContent !== subText) sub.textContent = subText;
   const found = discussTurnForCard(key);
   const html = found
     ? discussTurnBodyParts(found.turn, found.current).join("") || ""

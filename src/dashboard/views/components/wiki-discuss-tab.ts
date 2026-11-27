@@ -56,7 +56,10 @@
  * it is kept per bot in localStorage (`muninn-discuss-user-<bot>`) once a
  * thread holds it (or the reader picked it after a `no-user` refusal) and sent
  * with every turn and read afterwards, so /chat's default-user dropdown never
- * moves the page's thread. The Explore/Edit toggle sets the next turn's
+ * moves the page's thread. The bar names that user («as <name> ▾»); with
+ * `MUNINN_AUTH=off` the route lists the bot's /chat users and the button opens
+ * the picker, which keeps the choice for the bot and reads that user's thread
+ * (each user has their own); elsewhere the name shows with no picker. The Explore/Edit toggle sets the next turn's
  * `mode`; «Start over» closes the live thread (it moves under «Earlier
  * discussions»), and an earlier thread's Delete is /chat's thread delete.
  */
@@ -81,6 +84,11 @@ import {
   discussEarlierHtml,
   discussPopOutHref,
   discussUserPickHtml,
+  discussUserButtonHtml,
+  discussUserMenuPick,
+  discussToolsOpen,
+  applyThreadWho,
+  switchDiscussUser,
   dropStoredCopy,
   mergeThreadTurns,
   turnsFromThread,
@@ -853,6 +861,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     const b = r.body;
     d.bot = typeof b.bot === "string" ? b.bot : (d.bot ?? null);
     d.userPick = null;
+    applyThreadWho(d, b);
     d.loadError = null;
     const thread = b.thread as { id?: unknown } | null;
     const threadId = thread && typeof thread.id === "string" ? thread.id : null;
@@ -912,11 +921,20 @@ function paintBar(body: HTMLElement, d: DiscussionView | null, live: boolean): v
     over.hidden = !d?.discussionId;
     over.disabled = live;
   }
+  const asEl = body.querySelector<HTMLElement>(".wiki-discuss-as-slot");
+  if (asEl) {
+    const html = discussUserButtonHtml(d);
+    if (asEl.dataset.drawn !== html) {
+      asEl.innerHTML = html;
+      asEl.dataset.drawn = html;
+    }
+  }
   const userEl = body.querySelector<HTMLElement>(".wiki-discuss-user");
   if (userEl) {
+    const menu = discussUserMenuPick(d);
     const html =
       (d?.actionError ? `<div class="wiki-discuss-hint">${escHtml(d.actionError)}</div>` : "") +
-      (d?.userPick ? discussUserPickHtml(d.userPick) : d?.loadError ? `<div class="wiki-discuss-hint">${escHtml(d.loadError)}</div>` : "");
+      (d?.userPick ? discussUserPickHtml(d.userPick) : menu ? discussUserPickHtml(menu) : d?.loadError ? `<div class="wiki-discuss-hint">${escHtml(d.loadError)}</div>` : "");
     if (userEl.dataset.drawn !== html) {
       userEl.innerHTML = html;
       userEl.dataset.drawn = html;
@@ -988,11 +1006,43 @@ async function deleteEarlier(threadId: string): Promise<void> {
   reloadThread(d);
 }
 
+/** «as <name> ▾»: open or close the user picker. */
+function toggleUserMenu(): void {
+  const d = here();
+  if (!d?.userChoosable) return;
+  d.userMenu = !d.userMenu;
+  paint();
+}
+
+/** A turn's tool group header: open or close it (the reader's choice sticks). */
+function toggleTools(key: string): void {
+  const t = turnByKey(key);
+  if (!t) return;
+  t.toolsOpen = !discussToolsOpen(t);
+  paint();
+}
+
+/** The thread's user by /chat name for the open page, once the read named it
+ *  (the inline card's sub line). */
+export function discussUserNameHere(): string | null {
+  return here()?.userName ?? null;
+}
+
 /** The picker's choice: kept for the bot, then the thread is read for that user. */
 function pickUser(): void {
   const d = here();
   const sel = document.querySelector<HTMLSelectElement>(`#${DISCUSS_BODY_ID} .wiki-discuss-user-select`);
   if (!d || !sel?.value) return;
+  // «as <name> ▾»: another user's own thread of this page (never moves a thread).
+  if (d.userMenu) {
+    if (discussionLive(d)) {
+      noteActionError(d, "A turn is still running: switch the user when it has ended.");
+      paint();
+      return;
+    }
+    if (!switchDiscussUser(d, sel.value)) return;
+    for (const t of Array.from(anchors.keys())) if (!d.turns.some((x) => x.key === t)) anchors.delete(t);
+  }
   const bot = d.bot ?? lsGet(botKey(d.wiki));
   if (bot) lsSet(userKey(bot), sel.value);
   d.userId = sel.value;
@@ -1037,6 +1087,15 @@ export function initDiscussTab(d: DiscussTabDeps): void {
     }
     if (t.closest("[data-discuss-pick-user]")) {
       pickUser();
+      return;
+    }
+    if (t.closest("[data-discuss-as]")) {
+      toggleUserMenu();
+      return;
+    }
+    const toolsHead = t.closest<HTMLElement>("[data-discuss-tools]");
+    if (toolsHead) {
+      toggleTools(toolsHead.dataset.discussTools ?? "");
       return;
     }
     const chip = t.closest<HTMLElement>("[data-discuss-chip]");

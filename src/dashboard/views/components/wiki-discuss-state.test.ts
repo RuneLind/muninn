@@ -59,7 +59,7 @@ describe("a turn moved by the stream", () => {
     applyDiscussFrame(t, "delta", { text: "route" });
     expect(t.text).toBe("The summer route");
     applyDiscussFrame(t, "tool", { name: "Read", input: '{"file_path":"src/route.ts"}' });
-    expect(t.tools).toEqual(['Read {"file_path":"src/route.ts"}']);
+    expect(t.tools).toEqual([{ name: "Read", input: '{"file_path":"src/route.ts"}' }]);
     applyDiscussFrame(t, "done", { answer: "It stops at Example Island.", proposedEdit: null });
     expect(t).toMatchObject({ state: "done", text: "It stops at Example Island.", phase: null, proposedEdit: false });
     // A late delta after the end changes nothing.
@@ -1380,7 +1380,7 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
       ["s:r2", "r2", 2, "done"],
     ]);
     expect(turns[1]!.passage?.selection).toBe("The pier.");
-    expect(turns[1]!.tools).toEqual(["Read notes/a.md"]);
+    expect(turns[1]!.tools).toEqual([{ name: "Read", input: "notes/a.md" }]);
     expect(turns[1]!.proposedEdit).toBe(true);
     expect(turns[0]!.proposedEdit).toBe(false);
   });
@@ -1519,5 +1519,112 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
   test("a closed, another user's or another bot's thread, and a missing user, each name what to do", () => {
     for (const reason of ["closed", "other-user", "other-bot"]) expect(discussRefusalMessage(409, { error: "that discussion was closed", reason })).toContain("reload the page");
     expect(discussRefusalMessage(422, { error: "x", reason: "no-user" })).toContain("pick one");
+  });
+});
+
+describe("the model a turn ran on", () => {
+  test("the turn event's planned model and connector, then done's reported model and duration", () => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-1", discussionId: "d-1", seq: 1, model: "claude-sonnet-5-5", connector: "copilot-sdk" });
+    expect(t).toMatchObject({ model: "claude-sonnet-5-5", connector: "copilot-sdk", durationMs: null });
+    // While it runs: model and connector, no duration.
+    expect(discussTurnBodyParts(t, true).join("")).toContain('<div class="wiki-discuss-model">claude-sonnet-5-5 · copilot-sdk</div>');
+    applyDiscussFrame(t, "done", { answer: "A.", proposedEdit: null, model: "claude-sonnet-5-5-20261101", durationMs: 12_345 });
+    expect(t.model).toBe("claude-sonnet-5-5-20261101");
+    expect(discussTurnBodyParts(t, true).join("")).toContain("claude-sonnet-5-5-20261101 · copilot-sdk · 12.3 s");
+  });
+  test("no model: no line at all, never an «unknown» value", () => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-1", seq: 1, connector: "claude-cli" });
+    applyDiscussFrame(t, "done", { answer: "A.", proposedEdit: null, durationMs: 10 });
+    expect(discussState.discussTurnMetaText(t)).toBe("");
+    expect(discussTurnBodyParts(t, true).join("")).not.toContain("wiki-discuss-model");
+  });
+  test("a turn read back carries the answer message's model over the ledger's planned one", () => {
+    const row = { id: "r1", discussionId: "d", seq: 1, selection: null, question: "q", answer: "a", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1, model: "sonnet", connector: "claude-sdk", durationMs: 4_000, assistantMessageId: "a-r1" };
+    const [t] = discussState.turnsFromThread([
+      { id: "u-r1", role: "user", content: "q", createdAt: 1, model: null, turn: row },
+      { id: "a-r1", role: "assistant", content: "a", createdAt: 2, model: "claude-sonnet-5-5", turn: null },
+    ]);
+    expect(t!.model).toBe("claude-sonnet-5-5");
+    expect(discussState.discussTurnMetaText(t!)).toBe("claude-sonnet-5-5 · claude-sdk · 4.0 s");
+    // Without the answer's model, the ledger's planned one.
+    const [p] = discussState.turnsFromThread([{ id: "u-r1", role: "user", content: "q", createdAt: 1, turn: { ...row, assistantMessageId: null } }]);
+    expect(p!.model).toBe("sonnet");
+  });
+});
+
+describe("the tool group", () => {
+  const withTools = (n: number) => {
+    const t = newTurn("t1", "q", null);
+    applyDiscussFrame(t, "turn", { turnId: "id-1", seq: 1 });
+    for (let i = 0; i < n; i++) applyDiscussFrame(t, "tool", { name: "research-wiki_read", input: JSON.stringify({ wiki: "w", path: `plans/p${i}.mdx`, offset: 1, limit: 10 }) });
+    return t;
+  };
+  test("«Using N tools…» while running, open, with human lines, not JSON", () => {
+    const t = withTools(2);
+    const html = discussState.discussToolsHtml(t);
+    expect(html).toContain("Using 2 tools…");
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('<span class="wiki-discuss-tool-label">Reading: </span><span class="wiki-discuss-tool-detail">plans/p1.mdx, lines 1–10</span>');
+    expect(html).not.toContain("{&quot;");
+  });
+  test("closed once the answer text starts, and «Used N tools» once done", () => {
+    const t = withTools(1);
+    applyDiscussFrame(t, "delta", { text: "So" });
+    expect(discussState.discussToolsOpen(t)).toBe(false);
+    expect(discussState.discussToolsHtml(t)).not.toContain("wiki-discuss-tools-body");
+    applyDiscussFrame(t, "done", { answer: "So.", proposedEdit: null });
+    expect(discussState.discussToolsHtml(t)).toContain("Used 1 tool<");
+  });
+  test("the reader's toggle sticks over the automatic rule", () => {
+    const t = withTools(1);
+    applyDiscussFrame(t, "done", { answer: "So.", proposedEdit: null });
+    t.toolsOpen = true;
+    expect(discussState.discussToolsHtml(t)).toContain("wiki-discuss-tools-body");
+  });
+  test("past the cap: the newest lines and «and K more», nothing dropped silently", () => {
+    const t = withTools(discussState.DISCUSS_TOOLS_SHOWN + 3);
+    const html = discussState.discussToolsHtml(t);
+    expect(html).toContain("and 3 more");
+    expect(html).not.toContain("plans/p2.mdx");
+    expect(html).toContain(`plans/p${discussState.DISCUSS_TOOLS_SHOWN + 2}.mdx`);
+    expect(html.match(/class="wiki-discuss-tool"/g)!.length).toBe(discussState.DISCUSS_TOOLS_SHOWN);
+  });
+});
+
+describe("the thread's user («as <name> ▾»)", () => {
+  const view = (o: Partial<DiscussionView> = {}): DiscussionView => ({ wiki: "w", relPath: "p.md", discussionId: "th-1", turns: [], ...o });
+  test("the read's name and users; a picker button only when choosable", () => {
+    const d = view({ userId: "u1" });
+    discussState.applyThreadWho(d, { userName: "Popp", userChoosable: true, users: [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }] });
+    expect(d.users).toEqual([{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }]);
+    expect(discussState.discussUserButtonHtml(d)).toContain("data-discuss-as");
+    expect(discussState.discussUserButtonHtml(d)).toContain("as Popp ▾");
+    d.userMenu = true;
+    const pick = discussState.discussUserMenuPick(d)!;
+    expect(discussState.discussUserPickHtml(pick)).toContain('<option value="u1" selected>Popp (u1) · current</option>');
+    expect(discussState.discussUserPickHtml(pick)).toContain('<option value="u2">Rune (u2)</option>');
+  });
+  test("not choosable (an authenticating instance): the name alone, no list kept, no picker", () => {
+    const d = view({ userId: "u1", userMenu: true });
+    discussState.applyThreadWho(d, { userName: "Popp", userChoosable: false, users: [{ id: "u2", name: "Rune" }] });
+    expect(d.users).toEqual([]);
+    expect(discussState.discussUserButtonHtml(d)).toBe('<span class="wiki-discuss-as" title="Whose discussion this is">as Popp</span>');
+    expect(discussState.discussUserMenuPick(d)).toBeNull();
+  });
+  test("no name known: nothing", () => {
+    const d = view();
+    discussState.applyThreadWho(d, { userChoosable: true, users: [] });
+    expect(discussState.discussUserButtonHtml(d)).toBe("");
+  });
+  test("switching drops the other user's turns and thread, never while a turn runs, never to an unlisted id", () => {
+    const t = newTurn("t1", "q", null);
+    const d = view({ userId: "u1", userName: "Popp", userChoosable: true, users: [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }], turns: [t], userMenu: true });
+    expect(discussState.switchDiscussUser(d, "u2")).toBe(false); // t is still sending
+    t.state = "done";
+    expect(discussState.switchDiscussUser(d, "nobody")).toBe(false);
+    expect(discussState.switchDiscussUser(d, "u2")).toBe(true);
+    expect(d).toMatchObject({ userId: "u2", userName: "Rune", turns: [], discussionId: null, earlier: null, userMenu: false });
   });
 });
