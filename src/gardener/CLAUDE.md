@@ -179,8 +179,8 @@ which on a stopped group said "3 pages" over a commit staging one.
 It **runs every row's pre-write checks before the first write**
 (`preflightGroupRows`, inside the same section). They are the SAME
 `checkBeforeWrite` the per-row `applyInner` runs — unindexed or explainer target,
-path confinement, the alias and containment passes, the base-hash CAS and the
-create-mode stem collision — so a member the apply would refuse stops the group
+path confinement (`isPathConfined` in `draft.ts`, also the persist gate's), the
+alias and containment passes, the base-hash CAS and the create-mode stem collision — so a member the apply would refuse stops the group
 with NO page written, and a member whose page already IS its (contained) draft
 passes as a no-op. Every row is judged against the wiki as it was before the
 group, which is enough because a group is lint update rows. A row that fails

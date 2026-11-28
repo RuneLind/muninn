@@ -498,6 +498,32 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     expect(active.id).toBe("articleWrap");
   });
 
+  // Fix round 2 batch 3: the case above scrolls, and a scrolling pane is
+  // focusable in Chromium without a tabindex. A pane with nothing to scroll is
+  // focusable only through the `tabindex="-1"` the close gives it.
+  test("fix round 2 batch 3: with no bar to return to and an article pane that does not scroll, closing the panel still focuses the pane", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 4000 });
+    await openPage(page, WIKI);
+    const wrap = page.locator("#articleWrap");
+    expect(await wrap.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+    expect(await wrap.getAttribute("tabindex")).toBeNull();
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) if (t.data.includes("The pier opens at six.")) return void t.remove();
+    });
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await page.waitForTimeout(100);
+    const active = await page.evaluate(() => ({ tag: document.activeElement?.tagName ?? null, id: document.activeElement?.id ?? null }));
+    expect(active.tag).not.toBe("BODY");
+    expect(active.id).toBe("articleWrap");
+  });
+
   test("Copy is disabled while its request runs, and a non-JSON answer shows its status", async ({ page }) => {
     await openPage(page, WIKI);
     let release: () => void = () => {};

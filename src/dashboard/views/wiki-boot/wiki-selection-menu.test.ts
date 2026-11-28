@@ -53,6 +53,10 @@
  *   replaces it, on the page or while out for a render, and its drop hook
  *   aborts its stream at once; while out for a render of its own page it is
  *   live (`inlineCardLive`), so a frame then neither aborts nor is lost.
+ * - Discuss v3 P1 fix round 2 batch 3 (mutants earlier rounds left alive): the
+ *   menu hides the who box, asks again for a light read that got no answer and
+ *   names the user once a read lands; a touch selection that settles under the
+ *   long-press's menu leaves the menu, and one that collapsed unseen is forgotten.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -62,7 +66,7 @@ import { GlobalWindow } from "happy-dom";
 import { DISCUSS_TAB, discussRunsAsHere, initDiscussTab, pickDiscussUser, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { DISCUSS_WAITING_MS, DISCUSS_WAITING_TEXT, LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, TOUCH_SETTLE_MS, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
 import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
 import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
 
@@ -2622,6 +2626,150 @@ test("fix round 1 batch 3 K1: the keyboard menu names who Explain runs as and of
     escape();
     expect(m.style.display).toBe("none");
   } finally {
+    resetWho();
+  }
+});
+
+// ── Fix round 2 batch 3: mutants that survived earlier rounds ───────────
+
+/** A right-click on the selection's laid-out line (`layOut` puts it at 40–240 × top–top+20),
+ *  after the window in which a `contextmenu` is taken as a keyboard gesture's
+ *  echo (`KEY_MENU_MS`, 500 ms after an earlier test's ⇧F10) has passed. */
+async function rightClick(wait = true): Promise<MouseEvent> {
+  if (wait) await keyWindowPassed();
+  const top = 100;
+  const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: top + 10 });
+  document.querySelector(".wiki-article")!.dispatchEvent(ev);
+  return ev;
+}
+/** A touch press: the input a selection that settles counts as a long-press's. */
+const keyWindowPassed = () => new Promise((r) => setTimeout(r, 520));
+const touchDown = () => document.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "touch", bubbles: true }));
+/** A mouse press: back to mouse input, so no later selection settles as touch. */
+const mouseDown = () => document.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "mouse", bubbles: true }));
+const settleTouch = () => new Promise((r) => setTimeout(r, TOUCH_SETTLE_MS + 80));
+const menuEl = () => document.getElementById("wikiSelMenu");
+const shownNow = (el: HTMLElement | null) => !!el && el.style.display !== "none";
+
+test("fix round 2 batch 3: the right-click menu hides the who box the bar's «Change…» opened", async () => {
+  discussWiki = "w-b3-who";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  const restore = layOut(() => 100);
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    const box = await openWho();
+    expect(box.style.display).toBe("block");
+    expect((await rightClick()).defaultPrevented).toBe(true);
+    expect(shownNow(menuEl())).toBe(true);
+    expect(box.style.display).toBe("none");
+  } finally {
+    restore();
+    escape();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: the menu opened while the light read is pending names the user once the read lands", async () => {
+  discussWiki = "w-b3-menuwho";
+  let releaseLight: () => void = () => {};
+  const lightHeld = new Promise<void>((r) => (releaseLight = r));
+  threadRead = ((url: string) => lightHeld.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }))) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    selectByKeys(NIGHT);
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    const line = () => menuEl()!.querySelector("#wikiSelMenuWho [data-seltip-who]")?.textContent ?? null;
+    expect(line()).toBe("Runs as … · claude-sonnet-5.5 · copilot-sdk");
+    releaseLight();
+    await settle();
+    expect(shownNow(menuEl())).toBe(true);
+    expect(line()).toBe("Runs as Kari · claude-sonnet-5.5 · copilot-sdk");
+  } finally {
+    releaseLight();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a light read that got no answer is read again when the menu opens (no hover), and the menu names the user", async () => {
+  discussWiki = "w-b3-retry";
+  let light = 0;
+  threadRead = ((url: string) => {
+    if (!url.includes("who=1")) return json({ error: "no full read here" }, 500);
+    light++;
+    return light === 1 ? unanswered() : json(whoBody("u2", { bot: "b-f" }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    expect(light).toBe(1);
+    selectByKeys(NIGHT);
+    // No bar and no tooltip: only the menu can ask again.
+    expect(document.getElementById("wikiSelBar")?.style.display ?? "none").toBe("none");
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    await settle();
+    expect(light).toBe(2);
+    expect(menuEl()!.querySelector("#wikiSelMenuWho [data-seltip-who]")?.textContent ?? null).toBe("Runs as Ola · claude-sonnet-5.5 · copilot-sdk");
+  } finally {
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a touch selection the long-press's menu opened for stays in the menu when it settles: no bar over it", async () => {
+  discussWiki = "w-b3-touchmenu";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  const restore = layOut(() => 100);
+  try {
+    renderWhoPage();
+    await settle();
+    await keyWindowPassed();
+    touchDown();
+    selectByKeys(NIGHT);
+    // The long-press's menu, before the selection settles.
+    expect((await rightClick(false)).defaultPrevented).toBe(true);
+    expect(shownNow(menuEl())).toBe(true);
+    await settleTouch();
+    expect(shownNow(menuEl())).toBe(true);
+    expect(shownNow(document.getElementById("wikiSelBar"))).toBe(false);
+  } finally {
+    mouseDown();
+    restore();
+    escape();
+    window.getSelection()!.removeAllRanges();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a touch selection that collapsed unseen before it settled is forgotten: the same selection made again shows the bar", async () => {
+  discussWiki = "w-b3-collapse";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  try {
+    renderWhoPage();
+    await settle();
+    touchDown();
+    selectByKeys(NIGHT);
+    await settleTouch();
+    expect(shownNow(barEl())).toBe(true);
+    escape();
+    expect(shownNow(barEl())).toBe(false);
+    // Escape's keydown made the input a key's: touch again. Another selection,
+    // then collapsed in place: no `selectionchange` reports the collapse, so
+    // only the settle that follows can forget the first one.
+    touchDown();
+    selectByKeys(EDIT_OLD);
+    window.getSelection()!.getRangeAt(0).collapse(true);
+    expect(window.getSelection()!.isCollapsed).toBe(true);
+    await settleTouch();
+    selectByKeys(NIGHT);
+    await settleTouch();
+    expect(shownNow(barEl())).toBe(true);
+  } finally {
+    mouseDown();
+    escape();
+    window.getSelection()!.removeAllRanges();
     resetWho();
   }
 });
