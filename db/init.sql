@@ -1081,13 +1081,23 @@ CREATE TABLE wiki_discuss_turns (
   user_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
   assistant_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
   trace_key      TEXT,
+  -- Discuss v3 P2 (migration 095): a reader card's follow-up names its card's
+  -- first turn (null on that turn); a turn with a selection and no origin (a
+  -- card's first turn, a tab «Ask here» turn) stores where its passage stands;
+  -- and where the reader typed the turn.
+  origin_turn_id UUID REFERENCES wiki_discuss_turns(id) ON DELETE SET NULL,
+  passage        JSONB,
+  sent_from      TEXT,
   UNIQUE (discussion_id, seq),
-  CONSTRAINT wiki_discuss_turns_key_check CHECK (rel_path IS NOT NULL OR trace_key IS NOT NULL)
+  CONSTRAINT wiki_discuss_turns_key_check CHECK (rel_path IS NOT NULL OR trace_key IS NOT NULL),
+  CONSTRAINT wiki_discuss_turns_sent_from_check CHECK (sent_from IS NULL OR sent_from IN ('card', 'chat', 'tab', 'trace'))
 );
 
 CREATE INDEX idx_wiki_discuss_turns_page ON wiki_discuss_turns (wiki, rel_path, created_at DESC);
 CREATE INDEX idx_wiki_discuss_turns_running ON wiki_discuss_turns (heartbeat_at) WHERE end_state = 'running';
 CREATE INDEX idx_wiki_discuss_turns_thread ON wiki_discuss_turns (thread_id) WHERE thread_id IS NOT NULL;
+-- Migration 095: the self-referencing FK's index (a deleted turn looks up the rows naming it).
+CREATE INDEX idx_wiki_discuss_turns_origin ON wiki_discuss_turns (origin_turn_id) WHERE origin_turn_id IS NOT NULL;
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

@@ -105,6 +105,9 @@ class MemStore implements DiscussStore {
       finishedAt: null,
       handedOverAt: null,
       editAppliedAt: null,
+      originTurnId: i.originTurnId ?? null,
+      passage: i.passage ?? null,
+      sentFrom: i.sentFrom ?? null,
     };
     this.rows.push(row);
     if (i.userMessage) this.messages.push({ id: row.userMessageId!, role: "user", content: i.userMessage.content, threadId: i.threadId! });
@@ -1280,5 +1283,182 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
         { name: "norules", root: norules, source: "extra" },
       ]);
     }
+  });
+});
+
+// Discuss v3 P2 (D9, D12): a card's follow-up names its card's first turn and
+// sends the card's stored passage again, so the server finds the same copy.
+describe("a card's follow-up: origin, stored passage, sent_from", () => {
+  const rel = "notes/twice.md";
+  // «TWFA» stands twice; the reader selected the second one.
+  const TWICE = ["---", "title: Twice note", "---", "", "# Twice note", "", "## First", "", "The TWFA gate waits for the ferry.", "", "## Second", "", "The TWFA gate opens at noon.", ""].join("\n");
+  const SECOND = {
+    wiki: "agent",
+    relPath: rel,
+    question: "Explain this passage with context.",
+    selection: "TWFA",
+    before: "The TWFA gate waits for the ferry.\nSecond\nThe ",
+    after: " gate opens at noon.",
+    heading: "Second",
+    sentFrom: "card",
+  };
+  const held = { before: "TwicenoteFirstTheTWFAgatewaitsfortheferry.SecondThe", after: "gateopensatnoon.", at: 40 };
+
+  async function withTwice(run: () => Promise<void>): Promise<void> {
+    await Bun.write(path.join(agent, rel), TWICE);
+    __resetWikiCacheForTest();
+    try {
+      await run();
+    } finally {
+      await rm(path.join(agent, rel), { force: true });
+      __resetWikiCacheForTest();
+    }
+  }
+
+  test("a POST that names an origin and the stored passage on a page whose words stand twice locates the second copy", async () => {
+    await withTwice(async () => {
+      const { app, store } = setup();
+      const first = await frames(await post(app, { ...SECOND, held }));
+      const turn = first.find((f) => f.event === "turn")!.data;
+      expect(turn).toMatchObject({ originTurnId: null, sentFrom: "card" });
+      const row1 = store.rows[0]!;
+      expect(row1.location).toMatchObject({ found: "exact", fromLine: 13, toLine: 13 });
+      // The held passage's text equals the selection with white space ignored: not stored.
+      expect(row1.passage).toEqual({ before: SECOND.before, after: SECOND.after, heading: "Second", atStart: false, atEnd: false, held });
+      expect(row1.originTurnId).toBeNull();
+      expect(row1.sentFrom).toBe("card");
+
+      // The follow-up: the card's stored passage as the body, its first turn as the origin.
+      const p = row1.passage!;
+      const follow = await frames(
+        await post(app, { wiki: "agent", relPath: rel, question: "And when does it close?", selection: row1.selection, before: p.before, after: p.after, heading: p.heading, discussionId: turn.discussionId, originTurnId: row1.id, sentFrom: "card" }),
+      );
+      expect(follow.find((f) => f.event === "turn")!.data).toMatchObject({ originTurnId: row1.id, sentFrom: "card", seq: 2 });
+      expect(follow.some((f) => f.event === "done")).toBe(true);
+      const row2 = store.rows[1]!;
+      expect(row2.location).toMatchObject({ found: "exact", fromLine: 13, toLine: 13 });
+      expect(row2.originTurnId).toBe(row1.id);
+      expect(row2.passage).toBeNull();
+      expect(row2.sentFrom).toBe("card");
+    });
+  });
+
+  test("a held passage whose text differs from the selection keeps that text", async () => {
+    await withTwice(async () => {
+      const { app, store } = setup();
+      await frames(await post(app, { ...SECOND, held: { ...held, passage: "TWFA gate" } }));
+      expect(store.rows[0]!.passage!.held).toEqual({ ...held, passage: "TWFA gate" });
+      await frames(await post(app, { ...SECOND, relPath: "notes/harbour.md", selection: "The harbour opens at six.", before: "", after: "", held: { ...held, passage: "The harbour\nopens at six." } }));
+      expect(store.rows[1]!.passage!.held).toEqual(held);
+    });
+  });
+
+  test("the body's checks: a non-uuid origin, a held passage on a follow-up or without a selection, a sentFrom the pane does not send", async () => {
+    const { app, store } = setup();
+    const bad: [Record<string, unknown>, string][] = [
+      [{ ...PASSAGE, originTurnId: "nope" }, "originTurnId must be a uuid"],
+      [{ ...PASSAGE, originTurnId: crypto.randomUUID(), held }, "a follow-up takes no held passage"],
+      [{ wiki: "agent", relPath: "plans/ferry.mdx", question: "q", held }, "held needs a selection"],
+      [{ ...PASSAGE, held: { ...held, at: "40" } }, "held.at must be a number"],
+      [{ ...PASSAGE, held: { ...held, before: "x".repeat(1001) } }, "at most 1000"],
+      [{ ...PASSAGE, sentFrom: "chat" }, 'sentFrom must be "card" or "tab"'],
+      [{ ...PASSAGE, sentFrom: "trace" }, 'sentFrom must be "card" or "tab"'],
+    ];
+    for (const [body, words] of bad) {
+      const res = await post(app, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(words);
+    }
+    expect(store.rows).toHaveLength(0);
+  });
+
+  test("an origin that is not a first turn of this thread is a 409 of its own, as JSON: another page's turn, a follow-up, no thread yet", async () => {
+    await withTwice(async () => {
+      const { app, store } = setup();
+      const other = await frames(await post(app, PASSAGE));
+      const otherTurn = store.rows[0]!.id;
+      expect(other.some((f) => f.event === "done")).toBe(true);
+      // No thread on this page yet: no turn of it can be the origin.
+      const none = await post(app, { ...SECOND, originTurnId: otherTurn });
+      expect(none.status).toBe(409);
+      expect(await none.json()).toMatchObject({ reason: "origin" });
+
+      const first = await frames(await post(app, SECOND));
+      const discussionId = first.find((f) => f.event === "turn")!.data.discussionId as string;
+      const firstId = store.rows[1]!.id;
+      const fromOther = await post(app, { ...SECOND, discussionId, originTurnId: otherTurn });
+      expect(fromOther.status).toBe(409);
+      expect(fromOther.headers.get("content-type")).toContain("application/json");
+      expect(await fromOther.json()).toMatchObject({ reason: "origin" });
+
+      await frames(await post(app, { ...SECOND, discussionId, originTurnId: firstId }));
+      const followId = store.rows[2]!.id;
+      expect(store.rows[2]!.originTurnId).toBe(firstId);
+      const fromFollow = await post(app, { ...SECOND, discussionId, originTurnId: followId });
+      expect(fromFollow.status).toBe(409);
+      expect(await fromFollow.json()).toMatchObject({ reason: "origin" });
+      expect(store.rows).toHaveLength(3);
+    });
+  });
+
+  // Fix round 1 (finding A): an origin is a card's first turn, the one turn
+  // that stores where its passage stands; a first turn of any other kind, and
+  // a follow-up whose selection is not its origin's, is refused.
+  async function cardThread() {
+    const { app, store } = setup();
+    const first = await frames(await post(app, { ...SECOND, held }));
+    const discussionId = first.find((f) => f.event === "turn")!.data.discussionId as string;
+    return { app, store, discussionId, card: store.rows[0]! };
+  }
+  async function refusedOrigin(res: Response) {
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ reason: "origin" });
+  }
+
+  test("a whole-page tab turn (no selection, no stored passage) named as origin is a 409 `origin`", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId } = await cardThread();
+      await frames(await post(app, { wiki: "agent", relPath: rel, question: "Whole page?", discussionId, sentFrom: "tab" }));
+      const tabTurn = store.rows[1]!;
+      expect([tabTurn.originTurnId, tabTurn.passage, tabTurn.sentFrom]).toEqual([null, null, "tab"]);
+      await refusedOrigin(await post(app, { ...SECOND, discussionId, originTurnId: tabTurn.id }));
+      expect(store.rows).toHaveLength(2);
+    });
+  });
+
+  test("a /chat turn named as origin is a 409 `origin`", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId, card } = await cardThread();
+      // As the chat entry stores it: no selection, so no passage; sent_from chat.
+      const chat = await store.start({ discussionId, threadId: discussionId, wiki: "agent", relPath: rel, pageHash: "h", selection: null, question: "From chat", location: null, botName: card.botName, connector: card.connector, model: null, surface: card.surface, sentFrom: "chat" } as never);
+      await store.finish(chat.id, { endState: "done", answer: "ok" });
+      await refusedOrigin(await post(app, { ...SECOND, discussionId, originTurnId: chat.id }));
+      expect(store.rows).toHaveLength(2);
+    });
+  });
+
+  test("a follow-up whose selection is not its origin's, or that has none, is a 409 `origin`; other white space is the same words", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId, card } = await cardThread();
+      await refusedOrigin(await post(app, { ...SECOND, selection: "TWFA gate", discussionId, originTurnId: card.id }));
+      await refusedOrigin(await post(app, { wiki: "agent", relPath: rel, question: "And then?", discussionId, originTurnId: card.id, sentFrom: "card" }));
+      expect(store.rows).toHaveLength(1);
+      const ok = await frames(await post(app, { ...SECOND, selection: "TW\nFA", discussionId, originTurnId: card.id }));
+      expect(ok.some((f) => f.event === "done")).toBe(true);
+      expect(store.rows[1]!.originTurnId).toBe(card.id);
+    });
+  });
+
+  test("a body that names no sentFrom stores null; a tab turn stores tab", async () => {
+    const { app, store } = setup();
+    const f = await frames(await post(app, PASSAGE));
+    expect(store.rows[0]!.sentFrom).toBeNull();
+    const discussionId = f.find((x) => x.event === "turn")!.data.discussionId as string;
+    await frames(await post(app, { ...PASSAGE, discussionId, sentFrom: "tab" }));
+    expect(store.rows[1]!.sentFrom).toBe("tab");
+    // A tab turn with a selection stores its passage too; one with no selection stores none.
+    expect(store.rows[1]!.passage).toMatchObject({ before: PASSAGE.before });
+    await frames(await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Whole page?", discussionId }));
+    expect(store.rows[2]!.passage).toBeNull();
   });
 });

@@ -49,6 +49,43 @@ const start = (discussionId: string, over: Partial<DiscussTurnStart> = {}): Disc
 });
 
 describe("wiki_discuss_turns", () => {
+  // Discuss v3 P2 (migration 095): origin, passage and sent_from round-trip;
+  // the origin's delete leaves the follow-up with none; sent_from is checked.
+  test("a card's first turn stores its passage and sent_from; its follow-up names it, and loses it when it is deleted", async () => {
+    const d = crypto.randomUUID();
+    const passage = { before: "The", after: "gate opens.", heading: "Second", atStart: false, atEnd: false, held: { before: "SecondThe", after: "gateopens.", at: 40 } };
+    const a = await startDiscussTurn(start(d, { passage, sentFrom: "card" }));
+    let first = await getDiscussTurn(a.id);
+    expect(first).toMatchObject({ originTurnId: null, passage, sentFrom: "card" });
+    await done(a.id);
+    const b = await startDiscussTurn(start(d, { originTurnId: a.id, sentFrom: "card" }));
+    expect(await getDiscussTurn(b.id)).toMatchObject({ originTurnId: a.id, passage: null, sentFrom: "card" });
+    // An older row (no field given) reads as null throughout.
+    await done(b.id);
+    const c = await startDiscussTurn(start(d));
+    expect(await getDiscussTurn(c.id)).toMatchObject({ originTurnId: null, passage: null, sentFrom: null });
+    await done(c.id);
+    expect((await listDiscussTurns(d)).map((t) => t.originTurnId)).toEqual([null, a.id, null]);
+    await getDb()`DELETE FROM wiki_discuss_turns WHERE id = ${a.id}`;
+    expect((await getDiscussTurn(b.id))?.originTurnId).toBeNull();
+    first = await getDiscussTurn(a.id);
+    expect(first).toBeNull();
+    // sent_from takes only the four places a reader types.
+    const refused = await getDb()`UPDATE wiki_discuss_turns SET sent_from = 'pane' WHERE id = ${b.id}`.then(
+      () => "",
+      (err: Error) => err.message,
+    );
+    expect(refused).toContain("sent_from_check");
+  });
+
+  // Fix round 1 (finding G): the self-referencing FK has an index, so a
+  // deleted turn (every turn of a deleted thread) does not scan the table.
+  test("origin_turn_id has an index", async () => {
+    const rows = await getDb()<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes WHERE tablename = 'wiki_discuss_turns' AND schemaname = current_schema()`;
+    expect(rows.some((r) => /\(origin_turn_id\)/.test(r.indexdef))).toBe(true);
+  });
+
   test("a turn starts running and is finished once, with how it ended", async () => {
     const d = crypto.randomUUID();
     const t = await startDiscussTurn(start(d));

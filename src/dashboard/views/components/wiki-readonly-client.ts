@@ -157,6 +157,9 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   "#wikiDiscussAskBtn",
   '[data-handoff="ask-here"]',
   "[data-discuss-continue]",
+  // Discuss v3 P2: an inline card's follow-up box (its input's Enter submits).
+  "[data-sel-followup-send]",
+  "[data-sel-followup-input]",
   // P4's «Change the wording»: it fills the box for a turn the route refuses here.
   "[data-discuss-reword]",
   // P4's «Preview again» / «Check again»: a preview request to the apply route.
@@ -270,9 +273,11 @@ export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInp
  * The controls reachable from the **keyboard with no pointer event at all**: the
  * two text inputs whose Enter key is itself an egress trigger. A button needs no
  * entry here — Enter/Space on a focused button dispatches a `click`, which the
- * click cancel already refuses.
+ * click cancel already refuses. Plus an inline card's follow-up input (Discuss
+ * v3 P2), whose Enter submits its form: it is drawn after the guard installs,
+ * so it is not in the disabled list.
  */
-export const WIKI_READONLY_KEYDOWN_SELECTOR = WIKI_READONLY_DISABLED_INPUTS.join(",");
+export const WIKI_READONLY_KEYDOWN_SELECTOR = [...WIKI_READONLY_DISABLED_INPUTS, "[data-sel-followup-input]"].join(",");
 
 /** The placeholder those inputs carry on a read-only wiki. */
 export const WIKI_READONLY_INPUT_PLACEHOLDER = "This wiki is read-only — no questions are sent";

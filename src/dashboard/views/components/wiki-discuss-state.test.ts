@@ -1386,6 +1386,60 @@ describe("the page's thread read back (Discuss v2 PR 4)", () => {
     expect(turns[0]!.proposedEdit).toBe(false);
   });
 
+  // Discuss v3 P2 (migration 095): a card's first turn reads back with its
+  // stored context and held passage; a follow-up with its origin; an older row with none.
+  test("a stored passage, origin and sent_from read back; a held passage without its own text is the selection's", () => {
+    const first = discussState.turnFromStored({
+      ...stored({ id: "f1", seq: 1, selection: "TWFA" }),
+      sentFrom: "card",
+      passage: { before: "The", after: "gate opens.", heading: "Second", atStart: false, atEnd: true, edge: "added", held: { before: "SecondThe", after: "gateopens.", at: 40 } },
+    });
+    expect(first.passage).toEqual({ selection: "TWFA", before: "The", after: "gate opens.", heading: "Second", atStart: false, atEnd: true, edge: "added" });
+    expect(first.held).toEqual({ passage: "TWFA", before: "SecondThe", after: "gateopens.", at: 40 });
+    expect([first.originTurnId, first.sentFrom]).toEqual([null, "card"]);
+    const own = discussState.turnFromStored({ ...stored({ id: "f2", seq: 1, selection: "B then A" }), passage: { before: "", after: "", held: { before: "x", after: "y", at: 3, passage: "A then B" } } });
+    expect(own.held?.passage).toBe("A then B");
+    const follow = discussState.turnFromStored({ ...stored({ id: "f3", seq: 2, selection: "TWFA" }), originTurnId: "f1", sentFrom: "card", passage: null });
+    expect(follow.originTurnId).toBe("f1");
+    expect(follow.held).toBeNull();
+    expect(follow.passage).toEqual({ selection: "TWFA", before: "", after: "", atStart: false, atEnd: false, heading: "" });
+    const old = discussState.turnFromStored(stored({ id: "f4", seq: 1, selection: "Old." }));
+    expect([old.originTurnId, old.held, old.sentFrom]).toEqual([null, null, null]);
+  });
+
+  // Fix round 1 (finding B): read back from the thread, a follow-up takes its
+  // origin's stored context, so its chip reaches the copy its card was asked
+  // on, not the page's first copy of the words.
+  test("a follow-up read back with its origin finds the origin's copy of a passage that stands five times", () => {
+    const copy = (i: number) => `<h2>Part ${i}</h2><p id="c${i}">The TWFA gate number ${i} opens.</p>`;
+    const a = article([1, 2, 3, 4, 5].map(copy).join(""));
+    const first = stored({ id: "o1", seq: 1, selection: "TWFA" });
+    first.passage = { before: "Part 3 The", after: "gate number 3 opens.", heading: "Part 3", atStart: false, atEnd: false };
+    const follow = stored({ id: "o2", seq: 2, selection: "TWFA" });
+    follow.originTurnId = "o1";
+    follow.passage = null;
+    const turns = discussState.turnsFromThread([...pair(follow), ...pair(first)]);
+    const at = (t: (typeof turns)[number]) => findPassage(a, t.passage!.selection, t.passage)?.block?.id;
+    expect(at(turns[0]!)).toBe("c3");
+    expect(at(turns[1]!)).toBe("c3");
+    expect(turns[1]!.passage).toMatchObject({ before: "Part 3 The", after: "gate number 3 opens.", heading: "Part 3" });
+    expect(turns[1]!.held).toBeNull();
+    // Its origin outside the read (deleted turns lose the link outright): no
+    // context, so the first copy, as an older row reads.
+    const alone = discussState.turnsFromThread(pair(follow));
+    expect(at(alone[0]!)).toBe("c1");
+    // A follow-up on other words than its origin's (a row stored before the
+    // route checked) does not borrow context written for other words.
+    const other = { ...follow, selection: "gate" };
+    expect(discussState.turnsFromThread([...pair(first), ...pair(other)])[1]!.passage).toMatchObject({ before: "", after: "" });
+  });
+
+  test("a held passage goes in the body without its text when that equals the selection with white space ignored", () => {
+    expect(discussState.heldForBody({ passage: "The  gate\nopens", before: "a", after: "b", at: 1 }, "The gate opens")).toEqual({ before: "a", after: "b", at: 1 });
+    expect(discussState.heldForBody({ passage: "B A", before: "a", after: "b", at: 1 }, "A B")).toEqual({ before: "a", after: "b", at: 1, passage: "B A" });
+    expect(discussState.heldForBody({ passage: "x".repeat(20_001), before: "a", after: "b", at: 1 }, "y")).toBeNull();
+  });
+
   test("an applied edit reads as applied; a running turn is not live here; a failed one says so", () => {
     const applied = discussState.turnFromStored(stored({ id: "r1", seq: 1, proposedEdit: { edits: [] }, editAppliedAt: 5 }));
     expect(applied.edit?.state).toBe("applied");

@@ -16,6 +16,7 @@ import { escHtml as esc } from "./escape.ts";
 import { classifyKey, parseKeyKinds, type KeyKind } from "../../../wiki/key-kinds.ts";
 import { parseMentionKey } from "../../../wiki/mention-key.ts";
 import type { MentionsBody } from "../../../wiki/mentions.ts";
+import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
 
 export const SEL_BAR_ID = "wikiSelBar";
 export const SEL_MENU_ID = "wikiSelMenu";
@@ -397,19 +398,63 @@ export function inlineTurnSub(userName: string | null | undefined): string {
 }
 
 
-/** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
+/** The card's follow-up box placeholder (Discuss v3 P2). */
+export const CARD_FOLLOW_PLACEHOLDER = "Ask a follow-up about this passage";
+
+/** A card's frame: its title and ✕; a thread turn's card (Discuss v3 P2)
+ *  also «Open in chat ↗» (its href set when the thread is known), Collapse,
+ *  and a foot under the turns: «⌘ Continue in Claude Code» (painted once the
+ *  card has a follow-up, D4) and the follow-up box. `data-sel-turn` is the
+ *  card's first turn's key, `data-sel-turns` every turn's in order. The foot is
+ *  outside the body the turns repaint, so a typed follow-up survives a repaint.
  *  `data-reader-only` keeps it out of every read of the page's own text (a
  *  later selection's context, Explain, fact check). */
 export function inlineCardHtml(kind: CardKind, sub: string, body: string, turnKey: string | null): string {
+  const key = turnKey ? esc(turnKey) : "";
   return (
-    `<div class="${SEL_CARD_CLASS}" data-sel-card="${kind}" data-reader-only role="region" aria-label="${esc(CARD_TITLES[kind].replace(/^\S+\s/, ""))}"${turnKey ? ` data-sel-turn="${esc(turnKey)}"` : ""}>` +
+    `<div class="${SEL_CARD_CLASS}" data-sel-card="${kind}" data-reader-only role="region" aria-label="${esc(CARD_TITLES[kind].replace(/^\S+\s/, ""))}"${turnKey ? ` data-sel-turn="${key}" data-sel-turns="${key}"` : ""}>` +
     `<div class="wiki-sel-card-head"><span class="wiki-sel-card-title">${esc(CARD_TITLES[kind])}${sub ? ` <span class="wiki-sel-card-sub">· ${esc(sub)}</span>` : ""}</span>` +
     `<span class="wiki-sel-card-tools">` +
-    (turnKey ? `<button type="button" class="wiki-sel-card-btn" data-sel-card-pane="${esc(turnKey)}" title="This turn in the page's discussion">Open in Discuss →</button>` : "") +
+    (turnKey
+      ? `<a class="wiki-sel-card-btn" data-sel-card-chat target="_blank" rel="noopener" hidden title="This page's discussion in /chat">Open in chat ↗</a>` +
+        `<button type="button" class="wiki-sel-card-btn" data-sel-card-collapse aria-expanded="true" title="Collapse this card">▾</button>`
+      : "") +
     `<button type="button" class="wiki-sel-card-btn" data-sel-card-close aria-label="Close">✕</button></span></div>` +
-    `<div class="wiki-sel-card-body">${body}</div></div>`
+    `<div class="wiki-sel-card-body">${body}</div>` +
+    (turnKey
+      ? `<div class="wiki-sel-card-foot"><div class="wiki-sel-card-cont"></div>` +
+        `<form class="wiki-sel-follow" hidden><input type="text" class="wiki-sel-follow-input" data-sel-followup-input maxlength="${HANDOFF_QUESTION_MAX}" placeholder="${esc(CARD_FOLLOW_PLACEHOLDER)}" aria-label="Follow-up question">` +
+        `<button type="submit" class="wiki-sel-card-btn" data-sel-followup-send>Send</button></form>` +
+        `<div class="wiki-sel-follow-msg" role="status"></div></div>`
+      : "") +
+    `</div>`
   );
 }
+
+/** One turn of a thread card's body (Discuss v3 P2): a follow-up's question
+ *  above its answer, the answer's parts, and «⧉ Copy answer» once it has one. */
+export function cardTurnHtml(key: string, question: string | null, parts: string[], copyable: boolean): string {
+  return (
+    `<div class="wiki-sel-turn" data-sel-turn-key="${esc(key)}">` +
+    (question !== null ? `<div class="wiki-sel-turn-q">${esc(question)}</div>` : "") +
+    parts.join("") +
+    (copyable ? `<div class="wiki-sel-turn-tools"><button type="button" class="wiki-sel-card-btn" data-sel-copy-answer="${esc(key)}">⧉ Copy answer</button><span class="wiki-sel-copy-note" role="status"></span></div>` : "") +
+    `</div>`
+  );
+}
+
+/** «⌘ Continue in Claude Code» and its status, for the card's last turn
+ *  (`key`), as the tab's button does it (`data-discuss-continue`). */
+export function cardContinueHtml(key: string, h: { state: string; note: string; prompt?: string } | null): string {
+  return (
+    `<div class="wiki-sel-cont"><button type="button" class="wiki-sel-card-btn" data-discuss-continue="${esc(key)}"${h?.state === "busy" ? " disabled" : ""} title="A prompt that takes this discussion on to Claude Code">⌘ Continue in Claude Code</button>` +
+    `<span class="wiki-discuss-cont-status" role="status">${h ? esc(h.note) : ""}</span></div>` +
+    (h?.state === "failed" && h.prompt ? `<textarea class="wiki-discuss-cont-out" readonly aria-label="The prompt">${esc(h.prompt)}</textarea>` : "")
+  );
+}
+
+/** The note a card shows once its page's discussion was started over elsewhere. */
+export const CARD_CLOSED_ELSEWHERE = "This page's discussion was started over elsewhere, so this card is closed. Select the passage again to ask in the new discussion.";
 
 const LINE_MAX = 160;
 const cut = (s: string, n = LINE_MAX) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -567,6 +612,22 @@ export function selectionMenuStyles(): string {
       border-radius: 999px; padding: 2px 9px; font: inherit; font-size: 12px; cursor: pointer;
     }
     .wiki-sel-card-btn:hover { background: var(--tint-neutral); color: var(--text-primary); }
+    a.wiki-sel-card-btn { text-decoration: none; color: var(--text-secondary); }
+    a.wiki-sel-card-btn[hidden] { display: none; }
+    .wiki-sel-card-btn:disabled { opacity: 0.5; cursor: default; }
+    /* Collapse is the reader's own state: the head stays, the turns and the foot go. */
+    .${SEL_CARD_CLASS}[data-sel-collapsed] .wiki-sel-card-body, .${SEL_CARD_CLASS}[data-sel-collapsed] .wiki-sel-card-foot { display: none; }
+    .wiki-sel-turn + .wiki-sel-turn { border-top: 1px solid var(--border-secondary); margin-top: 8px; padding-top: 8px; }
+    .wiki-sel-turn-q { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
+    .wiki-sel-turn-tools, .wiki-sel-cont { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+    .wiki-sel-card-foot:empty { display: none; }
+    .wiki-sel-follow { display: flex; gap: 6px; margin-top: 8px; }
+    .wiki-sel-follow[hidden] { display: none; }
+    .wiki-sel-follow-input { flex: 1 1 220px; min-width: 0; font: inherit; font-size: 13px; padding: 6px 9px; border-radius: 8px; border: 1px solid var(--border-secondary); background: var(--bg-inset); color: var(--text-primary); }
+    .wiki-sel-follow-input:focus { outline: none; border-color: var(--accent); }
+    .wiki-sel-follow-input::placeholder { color: var(--text-dim); }
+    .wiki-sel-follow-msg:empty { display: none; }
+    .wiki-sel-follow-msg { margin-top: 4px; font-size: 12px; color: var(--danger, var(--text-secondary)); }
     .wiki-sel-meta, .wiki-sel-log, .wiki-sel-empty { font-size: 12.5px; color: var(--text-secondary); margin: 4px 0; }
     .wiki-sel-files { margin: 4px 0; padding-left: 18px; }
     .wiki-sel-file { margin: 3px 0; }

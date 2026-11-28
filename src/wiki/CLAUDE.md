@@ -138,6 +138,7 @@ Pages and routes:
 - Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
 - Discuss handoff (`discuss-locate.ts`) [trap]
 - Discuss who answers (`discuss-engine.ts`)
+- Discuss follow-up (`discuss-engine.ts`, migration 095)
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
 - Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
 - Owner-step checks (`src/wiki/step-checks/`, `GET /api/wiki/step-checks`, `MUNINN_MACHINE`) [trap]

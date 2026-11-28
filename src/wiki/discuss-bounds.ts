@@ -24,6 +24,15 @@ export const HANDOFF_HEADING_MAX = 200;
 /** The whole request body's bound, in bytes: the selection at four UTF-8
  *  bytes a character, with room for the rest. */
 export const HANDOFF_BODY_MAX = 128 * 1024;
+/** `POST /api/wiki/discuss`'s body bound (Discuss v3 P2): the handoff's
+ *  fields plus a card's held passage, whose own text can be a second copy of
+ *  the selection and whose two sides are each `HANDOFF_CONTEXT_MAX`. It
+ *  assumes text at no more than four UTF-8 bytes a character: two selections
+ *  are then 160,000 bytes, with the rest under the other 100 KB. JSON writes a
+ *  control character as `\uXXXX` (six bytes), so a selection made mostly of
+ *  control characters can pass `HANDOFF_SELECTION_MAX` and still be refused
+ *  here (413); real page text does not. */
+export const DISCUSS_BODY_MAX = 256 * 1024;
 
 /** The one line a thread's stored assistant message carries in place of the
  *  proposed edit's JSON block: the edit itself is the ledger row's. Here, not

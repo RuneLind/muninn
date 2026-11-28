@@ -451,8 +451,10 @@ test("«Explain with context» answers in an inline card under the paragraph: a 
   expect(row!.question).toContain("Explain this passage with context");
   expect(row!.selection).toBe(NIGHT);
 
-  // The card links to the pane: the same turn there, once.
-  await card.locator("[data-sel-card-pane]").click();
+  // The card links to the thread in /chat (Discuss v3 P2: «Open in chat ↗»
+  // replaced «Open in Discuss →»); the pane holds the same turn, once.
+  await expect(card.locator("[data-sel-card-chat]")).toHaveAttribute("href", new RegExp(`thread=${thread!.id}`));
+  await page.locator('[data-conntab="discuss"]').click();
   await expect(page.locator('[data-conntab="discuss"]')).toHaveClass(/active/);
   const turns = page.locator("#discussBody .wiki-discuss-turn");
   await expect(turns).toHaveCount(1);
