@@ -1585,3 +1585,42 @@ test("Apply on an inline card with the tab closed: the page renders again withou
   await shot(page, "10-applied-from-card");
   expect(await pageText()).toBe(PAGE.replace(FOLLOW_OLD, FOLLOW_NEW));
 });
+
+test.describe("touch selection in a DecisionLog", () => {
+  test.use({ hasTouch: true });
+
+  // Fix round 2 batch 2: reading a DecisionLog selection sets the selection to
+  // its authored text and restores it, which fires `selectionchange` again;
+  // each touch settle queued the next one, forever, whenever the bar was
+  // refused (a 2-character selection is too short for it).
+  test("fix round 2 batch 2: a tap, then a 2-character selection in a DecisionLog item: the selection is evaluated once, not again and again", async ({ page }) => {
+    await openPage(page, DECISIONS);
+    const at = await textBox(page, FLAT);
+    await page.touchscreen.tap((at.x0 + at.x1) / 2, at.y0);
+    // The tap's emulated mouse events let through first.
+    await page.waitForTimeout(700);
+    await page.evaluate(() => {
+      (window as unknown as { __selChanges: number }).__selChanges = 0;
+      document.addEventListener("selectionchange", () => (window as unknown as { __selChanges: number }).__selChanges++);
+    });
+    await page.evaluate((flat) => {
+      const item = Array.from(document.querySelectorAll("#articleWrap .wiki-article li.dl-item")).find((li) => li.textContent!.includes(flat))!;
+      const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf(flat);
+        if (i !== -1) return void getSelection()!.setBaseAndExtent(t, i, t, i + 2);
+      }
+      throw new Error("no DecisionLog text");
+    }, FLAT);
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe(FLAT.slice(0, 2));
+    // Settled (350 ms) and read once by now.
+    await page.waitForTimeout(1000);
+    const count = () => page.evaluate(() => (window as unknown as { __selChanges: number }).__selChanges);
+    const settled = await count();
+    expect(settled).toBeGreaterThan(0);
+    await page.waitForTimeout(2000);
+    expect(await count()).toBe(settled);
+    await expect(bar(page)).toBeHidden();
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe(FLAT.slice(0, 2));
+  });
+});

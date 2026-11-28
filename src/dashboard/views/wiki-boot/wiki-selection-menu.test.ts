@@ -88,6 +88,8 @@ let traceReadSignal: AbortSignal | null = null;
 let close: (() => void) | null = null;
 /** While set, a Discuss POST has no response (no headers) until it settles. */
 let postGate: Promise<void> | null = null;
+/** While set, a Discuss POST is answered with it instead of a stream (a refusal). */
+let postAnswer: (() => Response) | null = null;
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
 /** The pages rendered again after an Apply. */
@@ -180,6 +182,7 @@ beforeAll(() => {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       postSignal = init.signal ?? null;
       if (postGate) await postGate;
+      if (postAnswer) return postAnswer();
       const enc = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
@@ -2342,6 +2345,69 @@ test("fix round 1 batch 2 F1c: a card placed while the light read is pending, th
     expect(subEl.textContent).toBe("· a turn in Kari's discussion of this page");
   } finally {
     releaseLight();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 2 F1: a card whose POST was refused `no-user` says «not sent», and a pick in the Discuss tab afterwards never names the picked user in it", async () => {
+  discussWiki = "w-r2b2";
+  const noUser = () => json({ error: "pick the user this discussion belongs to: b-f has no default chat user", reason: "no-user", bot: "b-f", users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }] }, 422);
+  threadRead = (url: string) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    return userId ? json({ ...whoBody(userId, { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }) : noUser();
+  };
+  postAnswer = noUser;
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    await settle();
+    expect(posts.at(-1)!.userId).toBeUndefined();
+    // The POST was refused: the turn never ran as anyone.
+    expect(subEl.textContent).toBe("· not sent");
+    expect(card.hasAttribute("data-sel-who-pending")).toBe(false);
+    postAnswer = null;
+    // The refusal's picker in the Discuss tab (the path that leaves inline cards open).
+    document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "u2";
+    (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
+    await settle();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u2", name: "Ola" });
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("This turn is no longer in the page's discussion.");
+    expect(subEl.textContent).toBe("· not sent");
+  } finally {
+    postAnswer = null;
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 2 F1: a pending card whose turn ends before the route names its user keeps the nameless line; a read naming Kari afterwards never fills it", async () => {
+  discussWiki = "w-r2b2-end";
+  let releaseReads: () => void = () => {};
+  const held = new Promise<void>((r) => (releaseReads = r));
+  threadRead = ((url: string) => held.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }))) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await settle();
+    // The stream closes with no frame: the turn ended, its user never named.
+    close!();
+    await settle();
+    expect(subEl.textContent).toBe("· a turn in this page's discussion");
+    releaseReads();
+    await settle();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u1", name: "Kari" });
+    expect(subEl.textContent).toBe("· a turn in this page's discussion");
+  } finally {
+    releaseReads();
     await settle();
     resetWho();
   }

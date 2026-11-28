@@ -559,18 +559,23 @@ export function resolveWikiSynthesisBot(
 /**
  * A key that changes whenever {@link resolveWikiSynthesisBot} over
  * `discoverAllBots()` could answer differently for the same entry: the bots
- * root, each bot folder (its mtime moves when a CLAUDE.md or config.json is
- * added, removed or renamed in) and each `config.json`'s mtime and size, plus
- * the two role knobs the fallback reads (DB override, then env). Built from
- * `readdir` and `stat` only — no file is read or parsed, so nothing warns.
- * For a memo over that resolution (the reader's who line, read on every page
- * navigation); a caller that runs a turn still discovers afresh.
+ * root, each bot folder (a CLAUDE.md or config.json added, removed or renamed
+ * in) and each `config.json`, each stamped by ctime and size (ctime moves on
+ * every content write, chmod and utimes, so a permission-only change or a
+ * write with its old mtime restored is seen too), plus the two role knobs the
+ * fallback reads (DB override, then env). Built from `readdir` and `stat`
+ * only: no config.json is read or parsed, so no discovery warn fires; a bad
+ * `MUNINN_BOTS_DIR` is warned by `resolveBotsDir`/`readBotsDirEntries`, once
+ * per value. For a memo over that resolution (the reader's who line, read on
+ * every page navigation); a caller that runs a turn still discovers afresh.
  */
 export function wikiSynthesisInputsKey(): string {
   const stamp = (p: string): string => {
     try {
-      const s = statSync(p);
-      return `${s.mtimeMs}:${s.size}`;
+      // Nanoseconds: Bun's `ctimeMs` is a whole millisecond, and a write, a
+      // chmod and a utimes inside one millisecond would share it.
+      const s = statSync(p, { bigint: true });
+      return `${s.ctimeNs}:${s.size}`;
     } catch {
       return "-";
     }

@@ -432,7 +432,7 @@ describe("wiki-browser.ts — listener order", () => {
       // focus, after the bar's resize. Fix round 1 batch 3: which input made the selection, its press
       // or key, before the selectionchange that shows the bar for a settled touch selection.)
       "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document pointerdown capture 3hzi3", "document keydown capture 1p6id",
-      "document selectionchange 1904b", "document keydown 2h3k4",
+      "document selectionchange hwt4k", "document keydown 2h3k4",
       "document mousedown lvaou", "document click 3b9r9", "document scroll capture 32kwe", "window resize 2k8ec",
       "document mouseover 1xprt", "document mouseout 2a7ug", "document focusin 2jm8i",
       "document mousedown 2qltq", "window message 3ipik",

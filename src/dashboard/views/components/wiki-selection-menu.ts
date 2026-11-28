@@ -56,7 +56,8 @@
  *   ↗». A wiki pinned to a bot that is missing has no one to answer: the
  *   tooltip says so and Explain is the classic one. A turn card's head names
  *   the same user, set when it is placed; placed while no read has named
- *   the user (pending or refused), it is filled once when one does (R6). The
+ *   the user (pending or refused), it is filled once from its own turn, and
+ *   a refused one says «not sent» (R6, `fillPendingWho`). The
  *   who box follows the bar and hides with it; Escape closes it either way.
  *   The menu (right-click, ⇧F10) has the same «Runs as» line under Explain
  *   and «Change…» as a menu item the arrows reach; that who box opens beside
@@ -84,6 +85,7 @@ import {
   discussRunsAsHere,
   discussSendBlocked,
   discussTurnForCard,
+  discussUserNameHere,
   discussWhoUsersHere,
   retryDiscussWho,
   onDiscussChange,
@@ -111,6 +113,7 @@ import {
   inlineCardHtml,
   keyKindsFrom,
   runsAsSub,
+  inlineTurnSub,
   selRunsAsHtml,
   selTipHtml,
   selWhoFrom,
@@ -948,7 +951,8 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
   }
   // The head names the user the tooltip names (R6): set now, or, while no
   // read has named the user (pending, or a refusal such as an unanswered
-  // light read), «…» or the refusal, filled once when a read names the user.
+  // light read), «…» or the refusal, filled once from the card's own turn
+  // (`fillPendingWho`).
   const runsAs = discussRunsAsHere();
   const card = placeCard(s, inlineCardHtml(kind, runsAsSub(runsAs), "", r.key));
   if (!card) return;
@@ -1043,18 +1047,46 @@ function paintTurnCard(card: Element): void {
   drawnBody.set(body, html);
 }
 
-/** Fill a pending card's sub line once a read names the user (the head is
- *  one `nowrap` line, so nothing below it moves), never again after. A
- *  refusal meanwhile shows its text and keeps the card pending, so a later
- *  read that names the user still fills it. */
+/** Fill a pending card's sub line once, from its own turn (the head is one
+ *  `nowrap` line, so nothing below it moves), never again after: the user
+ *  the turn's `turn` frame says it ran as, once a read knows that user's
+ *  name; before that frame, while the turn is live, the «Runs as» user once
+ *  a read names one. Never a later turn's user: a pick after the turn (R3)
+ *  names another. A turn the route refused never ran: «not sent». A turn
+ *  that ended, or left the discussion (a pick, Start over), before its user
+ *  was named: the nameless line. While the turn is live with no user named,
+ *  a read's refusal shows its text and the card stays pending. */
 function fillPendingWho(card: Element): void {
   if (!card.hasAttribute(WHO_PENDING_ATTR)) return;
-  const runsAs = discussRunsAsHere();
-  if (runsAs.state === "pending") return;
-  if (runsAs.state === "user") card.removeAttribute(WHO_PENDING_ATTR);
-  const sub = card.querySelector(".wiki-sel-card-sub");
-  const text = `· ${runsAsSub(runsAs)}`;
-  if (sub && sub.textContent !== text) sub.textContent = text;
+  const key = card.getAttribute("data-sel-turn");
+  const turn = key ? (discussTurnForCard(key)?.turn ?? null) : null;
+  let text: string;
+  if (turn?.userId) {
+    const name = discussUserNameHere(turn.userId);
+    if (!name) return;
+    text = inlineTurnSub(name);
+  } else if (turn?.state === "refused") text = TURN_NOT_SENT;
+  else if (!turn || (turn.state !== "sending" && turn.state !== "running")) text = inlineTurnSub(null);
+  else {
+    // Still sending or running, its user not named by the route yet: no pick
+    // can land meanwhile (R3 refuses one while a turn of the bot is live), so
+    // «Runs as» is the user this turn runs as.
+    const runsAs = discussRunsAsHere();
+    if (runsAs.state === "refused") setCardSub(card, runsAs.text);
+    if (runsAs.state !== "user") return;
+    text = inlineTurnSub(runsAs.name);
+  }
+  card.removeAttribute(WHO_PENDING_ATTR);
+  setCardSub(card, text);
+}
+
+/** A refused turn card's sub line: the turn never ran as anyone. */
+const TURN_NOT_SENT = "not sent";
+
+function setCardSub(card: Element, sub: string): void {
+  const el = card.querySelector(".wiki-sel-card-sub");
+  const text = `· ${sub}`;
+  if (el && el.textContent !== text) el.textContent = text;
 }
 
 function paintTurnCards(): void {
@@ -1127,6 +1159,18 @@ let lastInput: "mouse" | "touch" | "key" | null = null;
  *  long-press, then its handles dragged). */
 export const TOUCH_SETTLE_MS = 350;
 let touchTimer: ReturnType<typeof setTimeout> | null = null;
+/** The touch selection the last settle evaluated, by its ends and text:
+ *  evaluated once until the selection itself changes. Reading a selection
+ *  can set it and restore it (a DecisionLog's authored text,
+ *  `authoredSelectionText`), which fires `selectionchange` again with the
+ *  same selection; without this each settle queued the next, forever, when
+ *  the bar was refused (2 characters). Cleared when the selection collapses. */
+let settledSel: { a: Node | null; ao: number; f: Node | null; fo: number; text: string } | null = null;
+
+function sameSettled(sel: Selection): boolean {
+  const s = settledSel;
+  return !!s && s.a === sel.anchorNode && s.ao === sel.anchorOffset && s.f === sel.focusNode && s.fo === sel.focusOffset && s.text === sel.toString();
+}
 
 function queueTouchSettle(): void {
   if (touchTimer) clearTimeout(touchTimer);
@@ -1134,7 +1178,11 @@ function queueTouchSettle(): void {
     touchTimer = null;
     if (lastInput !== "touch") return;
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      settledSel = null;
+      return;
+    }
+    if (sameSettled(sel)) return;
     // Already shown for this very selection (the bar, or the menu a long-press opened).
     const r = sel.getRangeAt(0);
     let same = false;
@@ -1143,6 +1191,7 @@ function queueTouchSettle(): void {
     } catch {
       /* the shown range's nodes left the document: not the same selection */
     }
+    settledSel = { a: sel.anchorNode, ao: sel.anchorOffset, f: sel.focusNode, fo: sel.focusOffset, text: sel.toString() };
     if (same && selectionMenuOpen()) return;
     maybeShowSelectionBar();
   }, TOUCH_SETTLE_MS);
@@ -1175,6 +1224,7 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   document.addEventListener("selectionchange", () => {
     const sel = window.getSelection();
     if ((!sel || sel.isCollapsed) && shown && !shown.explainer) hideSelectionMenu();
+    if (!sel || sel.isCollapsed) settledSel = null;
     if (lastInput === "touch") queueTouchSettle();
   });
   document.addEventListener("keydown", (e) => {

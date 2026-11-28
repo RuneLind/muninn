@@ -97,6 +97,7 @@ import {
   discussionLive,
   discussRefusalMessage,
   discussRunsAs,
+  discussUserName,
   threadReadListsUser,
   type DiscussRunsAs,
   findPassage,
@@ -826,8 +827,12 @@ function endPress(): void {
  *  R6 An inline turn card names the user known when it was placed (the
  *     «Runs as» user, `discussRunsAsHere`), never repainted; a card placed
  *     while no read has named the user (pending, or refused) reserves the
- *     line at its full height and gets the name once, when a read names the
- *     user (Discuss v3 P1).
+ *     line at its full height and gets a name once, from its own turn: the
+ *     user its `turn` frame names (`DiscussTurnView.userId`), or «Runs as»
+ *     while that turn is live (no pick lands then, R3). A turn the route
+ *     refused says «not sent»; one that ended or left the discussion before
+ *     naming its user, the nameless line. Never a later pick's user (Discuss
+ *     v3 P1, fix round 2 batch 2).
  */
 
 const botOf = (d: DiscussionView): string | null => d.bot ?? lsGet(botKey(d.wiki));
@@ -1104,6 +1109,12 @@ export function retryDiscussWho(): void {
 export function discussRunsAsHere(): DiscussRunsAs {
   const d = here();
   return discussRunsAs(d, d ? sendUserOf(d) : null);
+}
+
+/** A user's name on the open page as its reads know it ({@link discussUserName}):
+ *  an inline card naming the user its own turn ran as. */
+export function discussUserNameHere(id: string): string | null {
+  return discussUserName(here(), id);
 }
 
 /** The users the who box offers for the open page, and whether a pick is

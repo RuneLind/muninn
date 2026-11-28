@@ -87,6 +87,8 @@ export interface DiscussTurnView {
   passageGone: boolean;
   /** The send's request had no answer after {@link DISCUSS_WAITING_MS}. */
   waiting?: boolean;
+  /** The user the route ran the turn as (its `turn` frame): an inline card's head. */
+  userId?: string | null;
 }
 
 /** How long a Discuss send may wait for response headers before the turn says so. */
@@ -553,6 +555,14 @@ export function discussRunsAs(d: DiscussionView | null, sendUser: string | null)
   return { state: "user", userId: id, name };
 }
 
+/** A user's name as the view knows it, by the same rule as
+ *  {@link discussRunsAs}: the read's name for its user, else the users it
+ *  listed, else the id once a read named the user; null before (not known yet). */
+export function discussUserName(d: DiscussionView | null, id: string): string | null {
+  if (!d) return null;
+  return (id === d.userId ? d.userName : null) ?? d.users?.find((u) => u.id === id)?.name ?? (d.whoKnown ? id : null);
+}
+
 /** The «as <name> ▾» button in the tab's bar: the thread's user by name, a
  *  button only when the reader may switch; empty while no name is known. */
 export function discussUserButtonHtml(d: DiscussionView | null, blockedWhy: string | null = null): string {
@@ -639,6 +649,7 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
       if (typeof data.seq === "number") t.seq = data.seq;
       if (typeof data.model === "string" && data.model) t.model = data.model;
       if (typeof data.connector === "string" && data.connector) t.connector = data.connector;
+      if (typeof data.userId === "string" && data.userId) t.userId = data.userId;
       t.state = "running";
       return typeof data.discussionId === "string" ? { discussionId: data.discussionId } : {};
     case "status":
