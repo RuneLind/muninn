@@ -75,6 +75,9 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   // P4's Apply and «Change the wording»: `POST /api/wiki/discuss/apply` is in the same group.
   "[data-discuss-apply]",
   "[data-discuss-reword]",
+  // Discuss v3 P2: an inline card's «Open in chat ↗» (its follow-up box and
+  // «⌘ Continue in Claude Code» are in the egress list above).
+  "[data-sel-card-chat]",
   // Stamp on a provenance ghost row: `POST /api/wiki/provenance/stamp`.
   "[data-prov-stamp]",
   // The start view's Your work, What's new (digest) and Index (index-coverage, reindex)

@@ -36,7 +36,9 @@
  * on read-and-search 503 `no-snapshot` and 422 `page-not-in-snapshot` (a trace,
  * on any connector: 503 `no-snapshot` when the wiki is no git work tree or has no commit yet) · 422
  * `no-user` / `unknown-user` the thread's user · 404/409 the discussion (a
- * given id must be this page's live wiki thread) · 409 `busy` · 429 `busy` (the
+ * given id must be this page's live wiki thread) · 409 `origin` (Discuss v3
+ * P2: a follow-up's `originTurnId` must be a first turn of that thread) ·
+ * 409 `busy` · 429 `busy` (the
  * in-flight cap). Only then is the thread created (so a refused request leaves
  * no empty thread) and the turn row inserted with the user message in one
  * transaction (409 `busy` when the database holds another live turn).
@@ -70,6 +72,8 @@ import {
   touchDiscussTurn,
   unfinishedMessage,
   DiscussTurnConflict,
+  type DiscussSentFrom,
+  type DiscussStoredPassage,
   type DiscussToolCall,
   type DiscussTurn,
 } from "../db/wiki-discuss-turns.ts";
@@ -77,6 +81,7 @@ import { researchMcpServer } from "../research/mcp-server.ts";
 import { WIKI_TOOL_NAMES, type BotWiki } from "../research/wiki-tools.ts";
 import { sha256 } from "../utils/date-hash.ts";
 import { parseHandoffBody, type HandoffBody } from "./discuss-body.ts";
+import { HANDOFF_CONTEXT_MAX, HANDOFF_SELECTION_MAX } from "./discuss-bounds.ts";
 import { buildContextPack } from "./discuss-pack.ts";
 import { clampLine } from "./discuss-prompt.ts";
 import {
@@ -372,6 +377,15 @@ export interface DiscussBody extends HandoffBody {
   mode?: DiscussMode;
   /** The thread's user; else the bot's `bot_default_user`. */
   userId?: string;
+  /** Discuss v3 P2 (D9): a card's follow-up names its card's first turn,
+   *  which must be a first turn of the thread this turn runs on (409 `origin`). */
+  originTurnId?: string;
+  /** A card's first turn: the passage as the reader held it in DOM order
+   *  (`holdPassage`), for re-placing the card (D12). Its own text only when it
+   *  differs from `selection`. Never with `originTurnId`. */
+  held?: { before: string; after: string; at: number; passage?: string };
+  /** Where the reader typed the turn, as the pane's body names it. */
+  sentFrom?: "card" | "tab";
 }
 
 /** A trace on an authenticating instance: the mentions route's 404, as JSON. */
@@ -417,6 +431,56 @@ export function parseDiscussBody(raw: unknown): DiscussBody | string {
     if (typeof user !== "string" || !user.trim() || user.length > USER_ID_MAX) return `userId must be a non-empty string of at most ${USER_ID_MAX} characters`;
     out.userId = user;
   }
+  const origin = r.originTurnId;
+  if (origin !== undefined && origin !== null) {
+    if (typeof origin !== "string" || !UUID_RE.test(origin)) return "originTurnId must be a uuid";
+    out.originTurnId = origin.toLowerCase();
+  }
+  const sentFrom = r.sentFrom;
+  if (sentFrom !== undefined && sentFrom !== null) {
+    if (sentFrom !== "card" && sentFrom !== "tab") return 'sentFrom must be "card" or "tab"';
+    out.sentFrom = sentFrom;
+  }
+  const held = r.held;
+  if (held !== undefined && held !== null) {
+    if (out.traceKey !== undefined) return "a trace turn takes no held";
+    if (out.originTurnId) return "a follow-up takes no held passage: its card's first turn stores it";
+    if (out.selection === undefined) return "held needs a selection";
+    if (typeof held !== "object" || Array.isArray(held)) return "held must be an object";
+    const h = held as Record<string, unknown>;
+    if (typeof h.before !== "string" || typeof h.after !== "string") return "held.before and held.after must be strings";
+    if (h.before.length > HANDOFF_CONTEXT_MAX || h.after.length > HANDOFF_CONTEXT_MAX) return `held.before and held.after are at most ${HANDOFF_CONTEXT_MAX} characters`;
+    if (typeof h.at !== "number" || !Number.isFinite(h.at) || h.at < 0) return "held.at must be a number of at least 0";
+    if (h.passage !== undefined && h.passage !== null) {
+      if (typeof h.passage !== "string" || !h.passage.trim()) return "held.passage must be a non-empty string";
+      if (h.passage.length > HANDOFF_SELECTION_MAX) return `held.passage is at most ${HANDOFF_SELECTION_MAX} characters`;
+    }
+    out.held = { before: h.before, after: h.after, at: h.at, ...(typeof h.passage === "string" && h.passage.trim() ? { passage: h.passage } : {}) };
+  }
+  return out;
+}
+
+const compactText = (s: string) => s.replace(/\s+/g, "");
+
+/** A card's first turn's stored passage (D12): the context the reader sent in
+ *  authored order, and its held passage, whose text is kept only when it
+ *  differs from the selection with white space ignored (DOM and authored
+ *  order part on a selection across DecisionLog items shown newest first).
+ *  Null for a follow-up, a trace turn and a turn with no selection. */
+export function storedPassageFor(body: DiscussBody): DiscussStoredPassage | null {
+  if (body.originTurnId || body.traceKey !== undefined || !body.selection?.trim()) return null;
+  const out: DiscussStoredPassage = {
+    before: body.before ?? "",
+    after: body.after ?? "",
+    heading: body.heading ?? "",
+    atStart: body.atStart === true,
+    atEnd: body.atEnd === true,
+    ...(body.edge ? { edge: body.edge } : {}),
+  };
+  if (body.held) {
+    const { passage, ...sides } = body.held;
+    out.held = passage !== undefined && compactText(passage) !== compactText(body.selection) ? { ...sides, passage } : sides;
+  }
   return out;
 }
 
@@ -458,6 +522,10 @@ export interface DiscussRequest {
   threadUser?: string;
   /** Builds the /chat mirror once the thread's user and bot are known. */
   mirror?: DiscussMirrorFactory;
+  /** Where the reader typed the turn (`sent_from`, migration 095): set by
+   *  each entry point (/chat's `chat`, the pane's `trace` for a key, else the
+   *  pane body's `card`/`tab`); null when it names none. */
+  sentFrom?: DiscussSentFrom | null;
 }
 
 /** A turn that passed the preflight: its row is inserted and the user message
@@ -712,6 +780,13 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       thread = await (threads.liveTrace ?? getLiveWikiTraceThread)(userId, bot.name, wikiName, traceKey!);
     }
     const earlier = thread ? await store.list(thread.id) : [];
+    if (body.originTurnId) {
+      // D9: a card's first turn of this very thread (no thread yet: none is).
+      const origin = earlier.find((t) => t.id === body.originTurnId);
+      if (!origin || origin.originTurnId !== null) {
+        return refuse(409, { error: "that card's first turn is not a first turn of this page's discussion; select the passage again to ask", reason: "origin" });
+      }
+    }
     const last = earlier[earlier.length - 1];
     if (last && last.endState === "running" && Date.now() - last.heartbeatAt < staleRunningMs) {
       // `thread` is the requester's: checked above, or found by their user, bot and page.
@@ -820,6 +895,9 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
           connector: p.connector,
           model: plannedModel(p),
           surface: { kind: p.kind, mode: p.mode },
+          originTurnId: p.body.originTurnId ?? null,
+          passage: p.traceKey !== null ? null : storedPassageFor(p.body),
+          sentFrom: req.sentFrom ?? null,
           userMessage: { userId: p.userId, botName: p.bot.name, username: p.username, content: userText },
         },
         { staleRunningMs },
@@ -880,7 +958,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         try {
           // The planned model rides the `turn` event: the first frame, before
           // the snapshot and card phases, so the reader sees it from the start.
-          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, userName: p.username, userPostable: p.userPostable, seq: turn.seq, location: p.location, mode: p.mode, model: plannedModel(p), connector: p.connector });
+          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, userName: p.username, userPostable: p.userPostable, seq: turn.seq, location: p.location, mode: p.mode, model: plannedModel(p), connector: p.connector, originTurnId: p.body.originTurnId ?? null, sentFrom: req.sentFrom ?? null });
           await runTurn(p, threadId, turn, emit, mirrored);
         } finally {
           clearInterval(beat);

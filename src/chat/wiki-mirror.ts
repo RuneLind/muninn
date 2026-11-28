@@ -91,7 +91,8 @@ export async function runWikiThreadTurnFromChat(opts: {
   const target = thread.relPath ? { relPath: thread.relPath } : { traceKey: thread.traceKey };
   const body = parseDiscussBody({ wiki: thread.wiki || undefined, ...target, question: opts.text, discussionId: thread.id, mode: "explore" });
   if (typeof body === "string") return refused({ refused: true, status: 400, body: { error: body } });
-  const started = await opts.engine.start({ role: opts.role, threadUser: thread.userId, mirror: opts.mirror ?? chatWikiMirror(), body });
+  // `chat` on a trace thread too: `sent_from` counts where the reader typed.
+  const started = await opts.engine.start({ role: opts.role, threadUser: thread.userId, mirror: opts.mirror ?? chatWikiMirror(), body, sentFrom: "chat" });
   if (started.refused) return refused(started);
   started
     .run((event, data) => {

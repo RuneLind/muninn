@@ -12,7 +12,7 @@
 
 import { escHtml as esc } from "./escape.ts";
 import { breakablePaths, renderStreamingBody } from "./wiki-ask-render.ts";
-import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
+import { EARLIER_EDIT_NOTE, HANDOFF_CONTEXT_MAX, HANDOFF_SELECTION_MAX, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { replaceProposedEdit } from "../../../wiki/discuss-edit-block.ts";
 import { DISCUSS_TEXT_HIDDEN, DISCUSS_TEXT_SKIP, discussReading } from "./wiki-discuss-text.ts";
 import { PEEK_CLASS } from "./wiki-ref-dom.ts";
@@ -94,6 +94,17 @@ export interface DiscussTurnView {
    *  default user runs it), undefined for a turn read back from the thread:
    *  an inline card's head names it (R6). */
   sentUser?: string | null;
+  /** Discuss v3 P2: a card's follow-up names its card's first turn (D9);
+   *  null on a first turn, undefined before the turn says. */
+  originTurnId?: string | null;
+  /** A card's first turn: its passage as held in DOM order (D12), from the
+   *  send or the thread read; what re-places the card. */
+  held?: HeldPassage | null;
+  /** Where the reader typed it (`card`, `tab`, `chat`, `trace`), as sent or read back. */
+  sentFrom?: string | null;
+  /** A card's send was refused because the page's discussion was started over
+   *  elsewhere (409 `closed`): the card closes and says so. */
+  closedElsewhere?: boolean;
 }
 
 /** How long a Discuss send may wait for response headers before the turn says so. */
@@ -304,6 +315,18 @@ export interface StoredDiscussTurn {
   connector?: string | null;
   durationMs?: number | null;
   assistantMessageId?: string | null;
+  /** Discuss v3 P2 (migration 095); null or absent on older rows. */
+  originTurnId?: string | null;
+  passage?: {
+    before?: string;
+    after?: string;
+    heading?: string;
+    atStart?: boolean;
+    atEnd?: boolean;
+    edge?: "added" | "reordered";
+    held?: { before?: string; after?: string; at?: number; passage?: string };
+  } | null;
+  sentFrom?: string | null;
 }
 
 /** A thread message joined to its ledger row. */
@@ -349,8 +372,10 @@ const STORED_END_WORDS: Record<string, string> = {
  *  reads as `dropped` (this tab has no stream for it, and sending is left to
  *  the route, which answers busy). */
 export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null): DiscussTurnView {
-  const passage: DiscussPassage | null = t.selection ? { selection: t.selection, before: "", after: "", atStart: false, atEnd: false, heading: "" } : null;
-  const view = newTurn(`s:${t.id}`, t.question, passage);
+  const view = newTurn(`s:${t.id}`, t.question, storedPassageView(t));
+  view.originTurnId = t.originTurnId ?? null;
+  view.held = storedHeld(t);
+  view.sentFrom = t.sentFrom ?? null;
   view.turnId = t.id;
   view.seq = t.seq;
   view.text = t.answer ?? "";
@@ -368,6 +393,42 @@ export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null
     if (t.error && t.endState !== "running") view.message += ` ${t.error}`;
   }
   return view;
+}
+
+/** A stored turn's passage: its selection with the context its row stored
+ *  (a card's first turn, migration 095), else empty context (an older row, a
+ *  follow-up: its card's first turn holds the context). */
+function storedPassageView(t: StoredDiscussTurn): DiscussPassage | null {
+  if (!t.selection) return null;
+  const p = t.passage ?? null;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  return {
+    selection: t.selection,
+    before: str(p?.before),
+    after: str(p?.after),
+    atStart: p?.atStart === true,
+    atEnd: p?.atEnd === true,
+    heading: str(p?.heading),
+    ...(p?.edge === "added" || p?.edge === "reordered" ? { edge: p.edge } : {}),
+  };
+}
+
+/** A stored first turn's held passage (D12): its own text, else the
+ *  selection (stored only when the two differ with white space ignored). */
+function storedHeld(t: StoredDiscussTurn): HeldPassage | null {
+  const h = t.passage?.held;
+  if (!h || !t.selection || typeof h.before !== "string" || typeof h.after !== "string" || typeof h.at !== "number") return null;
+  return { passage: typeof h.passage === "string" && h.passage ? h.passage : t.selection, before: h.before, after: h.after, at: h.at };
+}
+
+/** The held passage as a card's first turn sends it (`held` in the body):
+ *  its text only when it differs from the selection with white space ignored;
+ *  none when that text is past the route's bound (the card is then re-placed
+ *  from memory only until P5). */
+export function heldForBody(held: HeldPassage, selection: string): { before: string; after: string; at: number; passage?: string } | null {
+  const body = { before: held.before, after: held.after, at: held.at };
+  if (compact(held.passage) === compact(selection)) return body;
+  return held.passage.length > HANDOFF_SELECTION_MAX ? null : { ...body, passage: held.passage };
 }
 
 /** The live thread's turns from its messages, in turn order (a message with

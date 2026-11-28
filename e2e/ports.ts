@@ -437,6 +437,8 @@ export const E2E_PORTS = {
   "wiki-trace": 3259,
   // Discuss pane room PR 1: the right pane's drag handle, answer lists in the pane, the Trace follow-up box.
   "wiki-pane-room": 3418,
+  // Discuss v3 P2: an inline card's follow-ups (origin, stored passage), against a claude-sdk bot on the fake Messages API.
+  "wiki-discuss-follow-up": 3419,
   // F26: a hostile <Question id> in the reader, with a glossary term after it.
   "wiki-reader-html-gate": 3255,
   // Architecture review B6: an Ask stream (a stubbed EventSource) while the reader opens a stored turn.

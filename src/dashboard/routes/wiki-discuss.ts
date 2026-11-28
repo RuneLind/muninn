@@ -3,8 +3,10 @@
  * (mimir plans muninn-wiki-discuss, muninn-wiki-discuss-v2). Body: the
  * handoff's (`{wiki, relPath, question, selection?, before?, after?, atStart?,
  * atEnd?, edge?, heading?}`) plus `discussionId?` (the page's live wiki
- * thread), `mode?` (`explore` | `edit`) and `userId?`, read by
- * `parseDiscussBody`. Answers an SSE stream: `turn`, `status`, `delta`,
+ * thread), `mode?` (`explore` | `edit`), `userId?`, and Discuss v3 P2's
+ * `originTurnId?` (a card's follow-up), `held?` (a card's first turn's
+ * DOM-order passage) and `sentFrom?` (`card` | `tab`), read by
+ * `parseDiscussBody`; the body bound is `DISCUSS_BODY_MAX`. Answers an SSE stream: `turn`, `status`, `delta`,
  * `tool`, then `done` or `app_error`, then `end` (heartbeats between).
  *
  * The preflight and the turn are the Discuss engine's
@@ -43,7 +45,7 @@ import { closeWikiThread, countClosedWikiThreads, getLiveWikiThread, getLiveWiki
 import { parseMentionKey } from "../../wiki/mention-key.ts";
 import { mentionsKind } from "../../wiki/mentions.ts";
 import { sha256 } from "../../utils/date-hash.ts";
-import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
+import { DISCUSS_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
 import {
   createDiscussEngine,
@@ -144,8 +146,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     await next();
   };
   const limit = bodyLimit({
-    maxSize: HANDOFF_BODY_MAX,
-    onError: (c) => c.json({ error: `request body is larger than ${HANDOFF_BODY_MAX} bytes`, code: "too_large" }, 413),
+    maxSize: DISCUSS_BODY_MAX,
+    onError: (c) => c.json({ error: `request body is larger than ${DISCUSS_BODY_MAX} bytes`, code: "too_large" }, 413),
   });
 
   app.post(WIKI_DISCUSS_PATH, gate, limit, async (c) => {
@@ -158,7 +160,11 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     const body = parseDiscussBody(raw);
     if (typeof body === "string") return c.json({ error: body }, 400);
 
-    const started = await engine.start({ role: c.get("role") ?? "admin", body, ...(mirror ? { mirror } : {}) });
+    // Where the reader typed it (migration 095): a key's turn is the Trace
+    // card's, whatever the body says; else the body's `card`/`tab`, null when
+    // it names none (a reader tab opened before the restart sends none).
+    const sentFrom = body.traceKey !== undefined ? "trace" : (body.sentFrom ?? null);
+    const started = await engine.start({ role: c.get("role") ?? "admin", body, sentFrom, ...(mirror ? { mirror } : {}) });
     if (started.refused) {
       // A popped-out /chat on this thread shows the refusal as /chat's own
       // entry does (a transient error event; nothing is stored). Only one the

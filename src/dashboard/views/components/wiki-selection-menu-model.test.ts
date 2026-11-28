@@ -308,13 +308,26 @@ describe("the mentions cards", () => {
     expect(el.textContent).toContain("First <mention>");
     expect(historyHtml(body({ commits: [], log: [] }))).toContain("No commit or log.md entry");
   });
-  test("a card is reader-only, links its turn to the pane, and always has ✕", () => {
-    const html = inlineCardHtml("explain", "", "", "t3");
+  test("a card is reader-only, and always has ✕; a thread card has «Open in chat ↗», Collapse and a follow-up box outside its body", () => {
+    const html = inlineCardHtml("explain", "", "<p>body</p>", "t3");
     expect(html).toContain("data-reader-only");
     expect(html).toContain('data-sel-turn="t3"');
-    expect(html).toContain('data-sel-card-pane="t3"');
-    expect(inlineCardHtml("where", "MEL-1", "", null)).not.toContain("data-sel-card-pane");
-    expect(inlineCardHtml("where", "MEL-1", "", null)).toContain("data-sel-card-close");
+    expect(html).toContain('data-sel-turns="t3"');
+    // Discuss v3 P2: «Open in chat ↗» replaces «Open in Discuss →».
+    expect(html).not.toContain("data-sel-card-pane");
+    expect(html).toContain("data-sel-card-chat");
+    expect(html).toContain("Open in chat ↗");
+    expect(html).toContain("data-sel-card-collapse");
+    const el = new Window().document.createElement("div");
+    el.innerHTML = html;
+    // The box sits in the foot, never in the body the turns repaint.
+    expect(el.querySelector(".wiki-sel-card-body [data-sel-followup-input]")).toBeNull();
+    expect(el.querySelector(".wiki-sel-card-foot form.wiki-sel-follow [data-sel-followup-input]")).not.toBeNull();
+    expect(el.querySelector("form.wiki-sel-follow")!.hasAttribute("hidden")).toBe(true);
+    const plain = inlineCardHtml("where", "MEL-1", "", null);
+    expect(plain).not.toContain("data-sel-card-chat");
+    expect(plain).not.toContain("data-sel-followup-input");
+    expect(plain).toContain("data-sel-card-close");
   });
 });
 

@@ -12,6 +12,11 @@
  * on the thread (`user_message_id`, `assistant_message_id`, `source 'wiki'`).
  * The ledger stays the history the prompt reads; the messages are /chat's
  * mirror of it. Deleting the thread deletes its turns (CASCADE).
+ *
+ * Discuss v3 P2 (migration 095): a reader card's follow-up stores its card's
+ * first turn (`origin_turn_id`), a card's first turn where its passage stands
+ * (`passage`, {@link DiscussStoredPassage}), and every turn from 095 on where
+ * the reader typed it (`sent_from`). Null on older rows.
  */
 import type postgres from "postgres";
 import { getDb } from "./client.ts";
@@ -28,6 +33,23 @@ export interface DiscussToolCall {
   /** The reader's line, made from the full input (`discussToolLine`); absent on older rows. */
   label?: string;
   detail?: string;
+}
+
+/** Where the reader typed a turn (migration 095's check). */
+export type DiscussSentFrom = "card" | "chat" | "tab" | "trace";
+
+/** A card's first turn's passage as stored (D12): the reader's context in
+ *  authored order (`findPassage`, and the body a follow-up sends again), and
+ *  the DOM-order held passage (`findSamePassage`) whose own text is stored
+ *  only when it differs from the turn's `selection` with white space ignored. */
+export interface DiscussStoredPassage {
+  before: string;
+  after: string;
+  heading: string;
+  atStart: boolean;
+  atEnd: boolean;
+  edge?: "added" | "reordered";
+  held?: { before: string; after: string; at: number; passage?: string };
 }
 
 export interface DiscussTurnStart {
@@ -50,6 +72,11 @@ export interface DiscussTurnStart {
   model: string | null;
   /** What the turn could read (snapshot keys, repos, tools). */
   surface: unknown;
+  /** The card's first turn, on a card's follow-up (migration 095). */
+  originTurnId?: string | null;
+  /** On a card's first turn: where its passage stands. */
+  passage?: DiscussStoredPassage | null;
+  sentFrom?: DiscussSentFrom | null;
 }
 
 export interface DiscussTurnFinish {
@@ -98,6 +125,11 @@ export interface DiscussTurn {
   handedOverAt: number | null;
   /** When the turn's proposed edit was applied to the page (P4: `proposed_edit.appliedAt`); null until then. */
   editAppliedAt: number | null;
+  /** Migration 095: the card's first turn on a follow-up, the passage on a
+   *  card's first turn, where the reader typed it. Null on older rows. */
+  originTurnId: string | null;
+  passage: DiscussStoredPassage | null;
+  sentFrom: DiscussSentFrom | null;
 }
 
 /** The discussion already has a live turn: a `running` row whose heartbeat
@@ -146,6 +178,9 @@ function mapRow(r: Record<string, unknown>): DiscussTurn {
     finishedAt: r.finished_at ? new Date(r.finished_at as string).getTime() : null,
     handedOverAt: r.handed_over_at ? new Date(r.handed_over_at as string).getTime() : null,
     editAppliedAt: appliedAtOf(r.proposed_edit),
+    originTurnId: (r.origin_turn_id as string | null) ?? null,
+    passage: (r.passage as DiscussStoredPassage | null) ?? null,
+    sentFrom: (r.sent_from as DiscussSentFrom | null) ?? null,
   };
 }
 
@@ -293,11 +328,13 @@ export async function startDiscussTurn(input: DiscussTurnStart, opts: { staleRun
       await closeAbandoned(tx, opts.staleRunningMs, input.discussionId);
       const [inserted] = await tx`
         INSERT INTO wiki_discuss_turns
-          (discussion_id, seq, wiki, rel_path, page_hash, trace_key, thread_id, selection, question, location, bot_name, connector, model, surface)
+          (discussion_id, seq, wiki, rel_path, page_hash, trace_key, thread_id, selection, question, location, bot_name, connector, model, surface,
+           origin_turn_id, passage, sent_from)
         SELECT ${input.discussionId}, COALESCE(MAX(seq), 0) + 1, ${input.wiki}, ${input.relPath}, ${input.pageHash},
                ${input.traceKey ?? null}, ${input.threadId ?? null},
                ${input.selection}, ${input.question}, ${input.location === null || input.location === undefined ? null : tx.json(input.location as never)},
-               ${input.botName}, ${input.connector}, ${input.model}, ${tx.json((input.surface ?? {}) as never)}
+               ${input.botName}, ${input.connector}, ${input.model}, ${tx.json((input.surface ?? {}) as never)},
+               ${input.originTurnId ?? null}, ${input.passage ? tx.json(input.passage as never) : null}, ${input.sentFrom ?? null}
         FROM wiki_discuss_turns WHERE discussion_id = ${input.discussionId}
         HAVING NOT (bool_or(end_state = 'running') IS TRUE)
         RETURNING id, seq`;

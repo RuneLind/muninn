@@ -110,6 +110,8 @@ import {
   type DiscussPassage,
   type DiscussTurnView,
   type DiscussionView,
+  type HeldPassage,
+  heldForBody,
 } from "./wiki-discuss-state.ts";
 import { HANDOFF_QUESTION_MAX } from "../../../wiki/discuss-bounds.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_BODY_ID, DISCUSS_INPUT_ID, DISCUSS_POPOUT_ID, DISCUSS_START_OVER_ID, DISCUSS_TAB } from "./wiki-discuss-tab-view.ts";
@@ -303,7 +305,7 @@ export function discussSendBlocked(): boolean {
 
 /** Show the tab, the pane first. `follow` (R4) only for a show the reader asked
  *  for (the breadcrumb's 💬 Discuss); a show on the way to a turn being acted
- *  on (Open in Discuss, an inline Apply or reword, a send) never follows. */
+ *  on (an inline Apply or reword, a send) never follows. */
 export function openDiscussTab(focus = false, follow = false): void {
   if (!enabled || !deps) return;
   revealRightPane();
@@ -317,7 +319,14 @@ export function openDiscussTab(focus = false, follow = false): void {
  *  when `passage` is null), in this page's discussion. False when nothing was
  *  sent (off, read-only, off a page, or a turn of the discussion still running). */
 export function askInDiscuss(question: string, passage: DiscussPassage | null, selected: Range | null = null): boolean {
-  return startTurn(question, passage, selected, null) !== null;
+  return startTurn(question, passage, selected, null, { sentFrom: "tab" }) !== null;
+}
+
+/** What a card's send adds (Discuss v3 P2): a follow-up's card's first turn
+ *  (D9), or a first turn's DOM-order held passage (D12), read before the POST. */
+export interface InlineTurnOpts {
+  originTurnId?: string;
+  held?: HeldPassage | null;
 }
 
 /**
@@ -334,7 +343,7 @@ export function askInDiscuss(question: string, passage: DiscussPassage | null, s
  * off a new inline turn: that turn would become the current one, and the
  * Apply's outcome (a refusal, «Check again») is offered on the current turn only.
  */
-export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit"): { key: string } | { refused: string; busy?: true; busyWhy?: string } {
+export function startInlineTurn(question: string, passage: DiscussPassage, selected: Range | null, mode: "explore" | "edit", card: InlineTurnOpts = {}): { key: string } | { refused: string; busy?: true; busyWhy?: string } {
   if (!enabled) return { refused: "This wiki has no wiki agent here." };
   if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
@@ -348,8 +357,14 @@ export function startInlineTurn(question: string, passage: DiscussPassage, selec
       busy: true,
       busyWhy: "an Apply in the page's discussion has no known outcome yet, so not in it",
     };
-  const key = startTurn(question, passage, selected, null, { mode, openPane: false });
+  const key = startTurn(question, passage, selected, null, { mode, openPane: false, sentFrom: "card", ...card });
   return key ? { key } : { refused: "The turn could not start here." };
+}
+
+/** «Open in chat ↗» on a card: the open page's thread in /chat
+ *  (`discussPopOutHref`), null until its thread, bot and user are known. */
+export function discussPopOutHrefHere(): string | null {
+  return discussPopOutHref(here());
 }
 
 /** The turn an inline card draws, by key, in the open page's discussion;
@@ -361,7 +376,7 @@ export function discussTurnForCard(key: string): { turn: DiscussTurnView; curren
   return d && t ? { turn: t, current: currentTurn(d) === t } : null;
 }
 
-/** «Open in Discuss →» on an inline card: the pane on this page's thread,
+/** The pane on this page's thread (an inline Apply whose card is gone),
  *  scrolled to the turn. */
 export function showTurnInDiscuss(key: string): void {
   openDiscussTab();
@@ -377,17 +392,24 @@ export function onDiscussChange(fn: () => void): () => void {
   return () => changeListeners.delete(fn);
 }
 
+interface TurnOpts extends InlineTurnOpts {
+  mode?: "explore" | "edit";
+  openPane?: boolean;
+  /** Where the reader typed it, sent as the body's `sentFrom`. */
+  sentFrom?: "card" | "tab";
+}
+
 /** Start a turn of this page's discussion: its key, or null when nothing was
  *  sent (off, read-only, off a page, or a turn still running). The pane opens
  *  unless `openPane` is false (the selection menu's inline card). */
-function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, opts: { mode?: "explore" | "edit"; openPane?: boolean } = {}): string | null {
+function startTurn(question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, opts: TurnOpts = {}): string | null {
   if (!enabled || discussSendBlocked()) return null;
   const d = ensureHere();
   if (!d || !question.trim() || discussionLive(d)) return null;
   if (opts.openPane !== false) openDiscussTab();
   maybeLoad(false);
   const key = `t${++turnSeq}`;
-  void runTurn(d, key, question.trim(), passage, passage ? selected : null, box, opts.mode);
+  void runTurn(d, key, question.trim(), passage, passage ? selected : null, box, opts);
   return key;
 }
 
@@ -443,8 +465,13 @@ function schedulePaint(): void {
   else setTimeout(run, 0);
 }
 
-async function runTurn(d: DiscussionView, key: string, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, mode?: "explore" | "edit"): Promise<void> {
+async function runTurn(d: DiscussionView, key: string, question: string, passage: DiscussPassage | null, selected: Range | null, box: BoxSend | null, opts: TurnOpts): Promise<void> {
+  const mode = opts.mode;
   const turn = newTurn(key, question, passage);
+  turn.sentFrom = opts.sentFrom ?? null;
+  turn.originTurnId = opts.originTurnId ?? null;
+  // Only a first turn holds its passage (a follow-up's card's first turn does).
+  if (!opts.originTurnId && passage && opts.held) turn.held = opts.held;
   noteActionError(d, null);
   if (selected) anchors.set(turn.key, keepAnchor(selected));
   d.turns.push(turn);
@@ -457,6 +484,12 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
   }
   if (d.discussionId) body.discussionId = d.discussionId;
   body.mode = mode ?? d.mode ?? "explore";
+  if (opts.sentFrom) body.sentFrom = opts.sentFrom;
+  if (opts.originTurnId) body.originTurnId = opts.originTurnId;
+  else if (passage && opts.held) {
+    const held = heldForBody(opts.held, passage.selection);
+    if (held) body.held = held;
+  }
   const user = sendUserOf(d); // R2
   if (user) body.userId = user;
   // The id this POST carries, or none (the engine's default user): the
@@ -494,6 +527,7 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
     turn.state = "refused";
     turn.message = discussRefusalMessage(res.status, data);
     noteUserRefusal(d, data, user);
+    if (res.status === 409 && data?.reason === "closed" && opts.sentFrom === "card") closedElsewhere(d, turn);
     schedulePaint();
     return;
   }
@@ -542,6 +576,19 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
   streamClosed(turn);
   schedulePaint();
   if (turn.state === "done" && turn.proposedEdit && turn.turnId && currentTurn(d) === turn) void previewEdit(turn);
+}
+
+/** A card's send found the page's discussion closed elsewhere (Start over in
+ *  another tab, /chat): its turns leave this view (they are under «Earlier
+ *  discussions» now), the thread is read again, and the card that sent it
+ *  closes and says so (`closedElsewhere`, which the card reads). */
+function closedElsewhere(d: DiscussionView, refused: DiscussTurnView): void {
+  refused.closedElsewhere = true;
+  const gone = d.turns.filter((t) => t !== refused && t.turnId);
+  for (const t of gone) anchors.delete(t.key);
+  d.turns = d.turns.filter((t) => t === refused || !t.turnId);
+  d.discussionId = null;
+  reloadThread(d);
 }
 
 /** Fetch the current turn's edit preview from its stored turn id: when the
@@ -773,7 +820,7 @@ function askFromBox(): void {
   const input = document.getElementById(DISCUSS_INPUT_ID) as HTMLTextAreaElement | null;
   const q = input?.value.trim() ?? "";
   if (!input || !q) return;
-  startTurn(q.slice(0, HANDOFF_QUESTION_MAX), null, null, { text: input.value, page: draftPage });
+  startTurn(q.slice(0, HANDOFF_QUESTION_MAX), null, null, { text: input.value, page: draftPage }, { sentFrom: "tab" });
 }
 
 /** The press is over: a press that began at the bottom, with the pane not

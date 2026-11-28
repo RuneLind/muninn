@@ -309,9 +309,50 @@ test("«Explain with context»: one turn through the pane's entry, drawn by the 
   const turns = document.querySelectorAll("#discussBody .wiki-discuss-turn");
   expect(turns.length).toBe(1);
   expect(turns[0]!.querySelector(".wiki-discuss-answer")?.textContent).toContain("CARD-ANSWER whole.");
-  // «Open in Discuss →» shows the pane on it.
-  (card.querySelector("[data-sel-card-pane]") as HTMLButtonElement).click();
-  expect(switched).toEqual([DISCUSS_TAB]);
+  // Discuss v3 P2: the first turn is the card's, and holds its passage.
+  expect(posts[0]).toMatchObject({ sentFrom: "card", held: { at: expect.any(Number) } });
+  expect(posts[0]!.originTurnId).toBeUndefined();
+  // «Open in chat ↗» (not «Open in Discuss →») opens the page's thread in /chat.
+  expect(card.querySelector("[data-sel-card-pane]")).toBeNull();
+  const chat = card.querySelector<HTMLAnchorElement>("[data-sel-card-chat]")!;
+  expect(chat.hidden).toBe(false);
+  expect(chat.getAttribute("href")).toContain("thread=thread-1");
+  // One turn: no «Continue in Claude Code» yet (D4); the follow-up box is offered.
+  expect(card.querySelector("[data-discuss-continue]")).toBeNull();
+  const form = card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!;
+  expect(form.hidden).toBe(false);
+  // A follow-up from the box, after the selection is gone: the stored passage,
+  // the card's first turn as its origin, Explore, no held passage.
+  window.getSelection()!.removeAllRanges();
+  const input = card.querySelector<HTMLInputElement>("[data-sel-followup-input]")!;
+  input.value = "And on Sundays?";
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await settle();
+  expect(posts.length).toBe(2);
+  expect(posts[1]).toMatchObject({ originTurnId: "turn-1", sentFrom: "card", mode: "explore", question: "And on Sundays?", selection: NIGHT, before: posts[0]!.before, after: posts[0]!.after, discussionId: "thread-1" });
+  expect(posts[1]!.held).toBeUndefined();
+  expect(input.value).toBe("");
+  // The box is disabled while the follow-up runs; the card holds both turns in order.
+  expect(input.disabled).toBe(true);
+  push!("turn", { turnId: "turn-1f", seq: 2, discussionId: "thread-1", originTurnId: "turn-1" });
+  push!("done", { answer: "FOLLOW-ANSWER.", proposedEdit: null });
+  close!();
+  await settle();
+  expect(card.getAttribute("data-sel-turns")?.split(" ").length).toBe(2);
+  const parts = Array.from(card.querySelectorAll(".wiki-sel-turn"));
+  expect(parts.map((p) => p.querySelector(".wiki-discuss-answer")?.textContent?.trim())).toEqual(["CARD-ANSWER whole.", "FOLLOW-ANSWER."]);
+  expect(parts[1]!.querySelector(".wiki-sel-turn-q")?.textContent).toBe("And on Sundays?");
+  expect(input.disabled).toBe(false);
+  // Two turns: «Continue in Claude Code» for the last one.
+  expect(card.querySelector("[data-discuss-continue]")?.getAttribute("data-discuss-continue")).toBe(parts[1]!.getAttribute("data-sel-turn-key"));
+  // Collapse is the card's own state.
+  const fold = card.querySelector<HTMLButtonElement>("[data-sel-card-collapse]")!;
+  fold.click();
+  expect(card.hasAttribute("data-sel-collapsed")).toBe(true);
+  expect(fold.getAttribute("aria-expanded")).toBe("false");
+  fold.click();
+  expect(card.hasAttribute("data-sel-collapsed")).toBe(false);
+  expect(switched).toEqual([]);
 });
 
 test("«Add to Oppfølging» is an Edit turn for itself only: the pane's toggle stays Explore", async () => {
@@ -320,12 +361,13 @@ test("«Add to Oppfølging» is an Edit turn for itself only: the pane's toggle 
   press(barEl().querySelector('[data-selact="follow"]')!);
   await settle();
   expect(posts.at(-1)).toMatchObject({ mode: "edit", selection: "The morning route adds a stop.", discussionId: "thread-1" });
-  push!("turn", { turnId: "turn-2", seq: 2, discussionId: "thread-1" });
+  push!("turn", { turnId: "turn-2", seq: 3, discussionId: "thread-1" });
   push!("done", { answer: "Proposed.", proposedEdit: null });
   close!();
   await settle();
   expect(document.querySelector('[data-discuss-mode="explore"]')!.getAttribute("aria-pressed")).toBe("true");
-  expect(document.querySelectorAll("#discussBody .wiki-discuss-turn").length).toBe(2);
+  // The Explain card's two turns (its follow-up included), then this one.
+  expect(document.querySelectorAll("#discussBody .wiki-discuss-turn").length).toBe(3);
   // The new card replaced the first.
   expect(document.querySelectorAll("#articleWrap .wiki-sel-card").length).toBe(1);
 });
@@ -2771,5 +2813,44 @@ test("fix round 2 batch 3: a touch selection that collapsed unseen before it set
     escape();
     window.getSelection()!.removeAllRanges();
     resetWho();
+  }
+});
+
+test("Discuss v3 P2: a follow-up the server refuses 409 closed (Start over elsewhere): the thread is read again and the card closes, saying so", async () => {
+  discussWiki = "w-closed";
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    return json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  };
+  try {
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector<HTMLElement>('#articleWrap .wiki-sel-card[data-sel-turn]')!;
+    push!("turn", { turnId: "cl-1", seq: 1, discussionId: "thread-cl" });
+    push!("done", { answer: "First.", proposedEdit: null });
+    close!();
+    await settle();
+    const readsBefore = reads.filter((u) => !u.includes("who=1")).length;
+    postAnswer = () => json({ error: "that discussion was closed (Start over); ask without it to start a new one", reason: "closed" }, 409);
+    const input = card.querySelector<HTMLInputElement>("[data-sel-followup-input]")!;
+    input.value = "Still there?";
+    card.querySelector("form.wiki-sel-follow")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(posts.at(-1)).toMatchObject({ originTurnId: "cl-1", discussionId: "thread-cl" });
+    expect(card.hasAttribute("data-sel-closed")).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("started over elsewhere");
+    expect(card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!.hidden).toBe(true);
+    expect(card.querySelector<HTMLAnchorElement>("[data-sel-card-chat]")!.hidden).toBe(true);
+    // The page's thread is read again.
+    expect(reads.filter((u) => !u.includes("who=1")).length).toBeGreaterThan(readsBefore);
+  } finally {
+    postAnswer = null;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
   }
 });

@@ -17,7 +17,7 @@
  *   thread, sent through the pane's own entry (`startInlineTurn`): the same
  *   turn record the pane draws, so it is never a second copy, and the pane
  *   need not be open. Its card repaints on `onDiscussChange` and links to the
- *   turn in the pane. Where the thread cannot take it (the selection is no
+ *   thread in /chat. Where the thread cannot take it (the selection is no
  *   passage, or a turn of the discussion is still running) the card streams
  *   the classic `/api/wiki/explain` answer instead. Without an agent (and on
  *   an explainer, whose card goes before its frame) the card streams that
@@ -62,6 +62,14 @@
  *   The menu (right-click, ⇧F10) has the same «Runs as» line under Explain
  *   and «Change…» as a menu item the arrows reach; that who box opens beside
  *   the menu, and closing it puts focus back on «Change…».
+ * - «Follow up» (Discuss v3 P2): a thread card holds the keys of its turns
+ *   (`data-sel-turns`) and paints each; its foot's box sends an Explore turn
+ *   naming the card's first turn as its origin, about the passage that turn
+ *   stored (`sendFollowUp`), so it works with the selection gone. The held
+ *   passage is read before the first POST and stored with it (D12).
+ *   «⌘ Continue in Claude Code» once the card has two turns (D4), «Open in
+ *   chat ↗» in place of «Open in Discuss →», Collapse and «⧉ Copy answer».
+ *   A send refused 409 `closed` closes the card and says so.
  * - «One button» (Discuss v3 P1): the handoff's passage control is a bar item
  *   («⌘ Ask Claude Code», or «💬 Ask about this» where the wiki has an agent
  *   and no handoff), offered up to the handoff's own bound: a selection past
@@ -88,14 +96,17 @@ import {
   discussUserNameHere,
   discussWhoUsersHere,
   retryDiscussWho,
+  discussPopOutHrefHere,
   onDiscussChange,
   pickDiscussUser,
-  showTurnInDiscuss,
   startInlineTurn,
 } from "./wiki-discuss-tab.ts";
-import { HANDOFF_SELECTION_MAX } from "../../../wiki/discuss-bounds.ts";
-import { discussTurnBodyParts, findSamePassage, holdPassage, type HeldPassage } from "./wiki-discuss-state.ts";
+import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX } from "../../../wiki/discuss-bounds.ts";
+import { discussTurnBodyParts, findSamePassage, holdPassage, turnLive, type DiscussTurnView, type HeldPassage } from "./wiki-discuss-state.ts";
 import {
+  CARD_CLOSED_ELSEWHERE,
+  cardContinueHtml,
+  cardTurnHtml,
   EXPLAIN_QUESTION,
   FOLLOW_QUESTION,
   SEL_BAR_ID,
@@ -923,11 +934,11 @@ function queueVisibility(): void {
  *  the walk the re-attach searches with (`holdPassage`), whatever the
  *  selection's shape (a triple-click's element boundary, DecisionLog items
  *  shown newest first, the article head). */
-function holdCard(card: HTMLElement, s: Shown): void {
+function holdCard(card: HTMLElement, s: Shown, passage?: HeldPassage | null): void {
   const rel = deps?.relPath();
   const wrap = document.getElementById("articleWrap");
   if (!deps || !rel || !s.range) return;
-  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: wrap ? holdPassage(wrap, s.range) : null };
+  held = { el: card, wiki: deps.wiki(), relPath: rel, passage: passage !== undefined ? passage : wrap ? holdPassage(wrap, s.range) : null };
 }
 
 /** «Explain with context» or «Add to Oppfølging»: a turn of the page's thread.
@@ -942,7 +953,11 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     return;
   }
   const p = { selection: passage.selection, before: passage.before, after: passage.after, atStart: passage.atStart, atEnd: passage.atEnd, heading: passage.heading, ...(passage.edge ? { edge: passage.edge } : {}) };
-  const r = startInlineTurn(question, p, passage.range, mode);
+  // Held before the POST (Discuss v3 P2, D12): the turn stores it, so the
+  // card's place outlives the selection, and the card holds the same one.
+  const wrap = document.getElementById("articleWrap");
+  const heldPassage = wrap && s.range ? holdPassage(wrap, s.range) : null;
+  const r = startInlineTurn(question, p, passage.range, mode, { held: heldPassage });
   if ("refused" in r && r.busy && fallback) return fallback(r.busyWhy ?? "the page's discussion is busy, so not in it");
   if ("refused" in r) {
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
@@ -959,7 +974,7 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
   const card = placeCard(s, inlineCardHtml(kind, name ? inlineTurnSub(name) : runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…"), "", r.key));
   if (!card) return;
   if (!name) card.setAttribute(WHO_PENDING_ATTR, "");
-  holdCard(card, s);
+  holdCard(card, s, heldPassage);
   paintTurnCard(card);
 }
 
@@ -1031,22 +1046,96 @@ function escText(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-/** Draw a turn card's body from the turn record, when its markup changed. */
+/** A thread card's turn keys, oldest first (Discuss v3 P2: its first turn
+ *  and each follow-up sent from it). */
+function cardKeys(card: Element): string[] {
+  return (card.getAttribute("data-sel-turns") ?? card.getAttribute("data-sel-turn") ?? "").split(" ").filter(Boolean);
+}
+
+/** Draw a turn card's body from its turn records, when its markup changed:
+ *  each turn from {@link discussTurnForCard}, a follow-up under its question.
+ *  One of them refused because the discussion was started over elsewhere
+ *  closes the card with a note. Then its foot ({@link paintCardFoot}). */
 function paintTurnCard(card: Element): void {
-  const key = card.getAttribute("data-sel-turn");
+  const keys = cardKeys(card);
   const body = card.querySelector(".wiki-sel-card-body");
-  if (!key || !body) return;
+  if (!keys.length || !body) return;
   fillPendingWho(card);
-  const found = discussTurnForCard(key);
+  const found = keys.map((key) => ({ key, hit: discussTurnForCard(key) }));
+  const closed = found.some((f) => f.hit?.turn.closedElsewhere);
   // The sub line is set once, when `threadCard` places the card (or filled
   // once by `fillPendingWho`): a repaint after a thread read named the user
   // moved the text below under the reader's drag (#913 CI).
-  const html = found
-    ? discussTurnBodyParts(found.turn, found.current).join("") || ""
-    : `<div class="wiki-discuss-hint">This turn is no longer in the page's discussion.</div>`;
-  if (drawnBody.get(body) === html) return;
-  body.innerHTML = html;
-  drawnBody.set(body, html);
+  const html = closed
+    ? `<div class="wiki-discuss-hint" role="status">${escText(CARD_CLOSED_ELSEWHERE)}</div>`
+    : !found[0]!.hit
+      ? `<div class="wiki-discuss-hint">This turn is no longer in the page's discussion.</div>`
+      : found
+          .map(({ key, hit }, i) => (hit ? cardTurnHtml(key, i === 0 ? null : hit.turn.question, discussTurnBodyParts(hit.turn, hit.current), hit.turn.state === "done" && !!hit.turn.text) : ""))
+          .join("");
+  if (drawnBody.get(body) !== html) {
+    body.innerHTML = html;
+    drawnBody.set(body, html);
+  }
+  paintCardFoot(card, found.map((f) => f.hit?.turn ?? null), closed);
+}
+
+/** A thread card's foot and head link: the follow-up box once its first turn
+ *  has an id (the origin a follow-up names, D9), disabled while a turn of it
+ *  runs; «⌘ Continue in Claude Code» for its last turn once it has a
+ *  follow-up (D4); «Open in chat ↗» once the thread is known. A closed card
+ *  keeps none of them. Each is set only when it changed (a typed follow-up
+ *  and focus survive the stream's repaints). */
+function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed: boolean): void {
+  if (closed !== card.hasAttribute("data-sel-closed")) card.toggleAttribute("data-sel-closed", closed);
+  const first = turns[0] ?? null;
+  const last = turns[turns.length - 1] ?? null;
+  const live = turns.some((t) => !!t && turnLive(t));
+  const form = card.querySelector<HTMLFormElement>("form.wiki-sel-follow");
+  if (form) {
+    const open = !closed && !!first?.turnId && !!first.passage && first.state !== "refused";
+    if (form.hidden === open) form.hidden = !open;
+    for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button"))) if (el.disabled !== live) el.disabled = live;
+  }
+  const cont = card.querySelector<HTMLElement>(".wiki-sel-card-cont");
+  if (cont) {
+    const key = cardKeys(card).at(-1) ?? "";
+    const show = !closed && turns.length >= 2 && !!last?.turnId && !turnLive(last) && last.state !== "refused";
+    const html = show ? cardContinueHtml(key, last!.handover) : "";
+    if (cont.dataset.drawn !== html) {
+      cont.innerHTML = html;
+      cont.dataset.drawn = html;
+    }
+  }
+  const chat = card.querySelector<HTMLAnchorElement>("[data-sel-card-chat]");
+  if (chat) {
+    const href = closed ? null : discussPopOutHrefHere();
+    if (chat.hidden !== !href) chat.hidden = !href;
+    if (href && chat.getAttribute("href") !== href) chat.setAttribute("href", href);
+  }
+}
+
+/** The follow-up box's send (Discuss v3 P2): an Explore turn of the page's
+ *  thread naming the card's first turn as its origin (D9), about the passage
+ *  that turn stored, so it works after the selection is gone. The posted user
+ *  follows R2 like every send; the card's head keeps the name it was filled
+ *  with (R6). A refusal before the request shows under the box. */
+function sendFollowUp(card: HTMLElement): void {
+  const input = card.querySelector<HTMLInputElement>("[data-sel-followup-input]");
+  const msg = card.querySelector<HTMLElement>(".wiki-sel-follow-msg");
+  const keys = cardKeys(card);
+  const first = keys[0] ? (discussTurnForCard(keys[0])?.turn ?? null) : null;
+  const q = input?.value.trim() ?? "";
+  if (!input || !q || !first?.turnId || !first.passage || discussSendBlocked()) return;
+  const r = startInlineTurn(q.slice(0, HANDOFF_QUESTION_MAX), first.passage, null, "explore", { originTurnId: first.turnId });
+  if ("refused" in r) {
+    if (msg) msg.textContent = r.refused;
+    return;
+  }
+  if (msg) msg.textContent = "";
+  input.value = "";
+  card.setAttribute("data-sel-turns", [...keys, r.key].join(" "));
+  paintTurnCard(card);
 }
 
 /** Fill a pending card's sub line once, from its own turn (the head is one
@@ -1310,8 +1399,30 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
       if (card) dropCard(card);
       return;
     }
-    const pane = t.closest?.<HTMLElement>(`.${SEL_CARD_CLASS} [data-sel-card-pane]`);
-    if (pane) showTurnInDiscuss(pane.dataset.selCardPane ?? "");
+    const collapse = t.closest?.<HTMLElement>(`.${SEL_CARD_CLASS} [data-sel-card-collapse]`);
+    if (collapse) {
+      const card = collapse.closest(`.${SEL_CARD_CLASS}`);
+      const fold = !card?.hasAttribute("data-sel-collapsed");
+      card?.toggleAttribute("data-sel-collapsed", fold);
+      collapse.setAttribute("aria-expanded", String(!fold));
+      collapse.textContent = fold ? "▸" : "▾";
+      collapse.title = fold ? "Expand this card" : "Collapse this card";
+      return;
+    }
+    const copy = t.closest?.<HTMLElement>(`.${SEL_CARD_CLASS} [data-sel-copy-answer]`);
+    if (copy) {
+      const turn = discussTurnForCard(copy.dataset.selCopyAnswer ?? "")?.turn;
+      const note = copy.parentElement?.querySelector(".wiki-sel-copy-note");
+      if (turn?.text) void copyText(turn.text).then((ok) => note && (note.textContent = ok ? "Copied." : "Copy failed."));
+    }
+  });
+  // A card's follow-up box: Enter or Send (Discuss v3 P2).
+  document.addEventListener("submit", (e) => {
+    const form = (e.target as HTMLElement | null)?.closest?.<HTMLFormElement>(`.${SEL_CARD_CLASS} form.wiki-sel-follow`);
+    if (!form) return;
+    e.preventDefault();
+    const card = form.closest<HTMLElement>(`.${SEL_CARD_CLASS}`);
+    if (card) sendFollowUp(card);
   });
   // The bar is placed in the viewport: it follows the selection when the page
   // scrolls or resizes. The menu closes on a scroll that moves the selection,

@@ -430,10 +430,11 @@ describe("wiki-browser.ts — listener order", () => {
       // hook, which lets a Trace card go. Discuss v3 P1: Escape closes the who box first; its press keeps
       // the selection; «Change…», the box's ✕ and its users on click; then Explain's tooltip on hover or
       // focus, after the bar's resize. Fix round 1 batch 3: which input made the selection, its press
-      // or key, before the selectionchange that shows the bar for a settled touch selection.)
+      // or key, before the selectionchange that shows the bar for a settled touch selection. Discuss v3 P2: the
+      // cards' click also takes Collapse and Copy answer; a card's follow-up box submits, right after it.)
       "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document pointerdown capture 3hzi3", "document keydown capture 1p6id",
       "document selectionchange hwt4k", "document keydown 2h3k4",
-      "document mousedown lvaou", "document click 3b9r9", "document scroll capture 32kwe", "window resize 2k8ec",
+      "document mousedown lvaou", "document click h0ajq", "document submit iepqg", "document scroll capture 32kwe", "window resize 2k8ec",
       "document mouseover 1xprt", "document mouseout 2a7ug", "document focusin 2jm8i",
       "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
