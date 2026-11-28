@@ -75,6 +75,7 @@ export const PINNED: readonly PinnedLink[] = [
   { args: ["src/dashboard/routes/wiki-discuss-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/dashboard/routes/wiki-discuss-apply-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/dashboard/routes/research-chat-wiki-thread-db.test.ts"], reason: DB_CHAIN },
+  { args: ["src/chat/wiki-thread-read-db.test.ts"], reason: DB_CHAIN },
   { args: ["src/bot/handler.test.ts"], reason: HANDLERS_CHAIN },
   { args: ["src/bot/middleware.test.ts"], reason: HANDLERS_CHAIN },
   {

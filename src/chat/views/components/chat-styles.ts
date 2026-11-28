@@ -751,6 +751,29 @@ ${paletteTokenStyles(CHAT_PALETTE_TOKENS)}
       text-transform: uppercase;
       color: var(--text-muted);
     }
+    /* A wiki thread's page bar, Explain chip and Continue (wiki-thread-bar.ts). */
+    .chat-wiki-bar { padding: 6px 16px; border-bottom: 1px solid var(--border-primary); background: var(--bg-panel); font-size: 12px; }
+    .chat-wiki-bar[hidden] { display: none; }
+    .chat-wiki-bar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+    .chat-wiki-page { font-weight: 600; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; }
+    .chat-wiki-name { color: var(--text-muted); }
+    .chat-wiki-back { color: var(--accent-light, var(--accent, #58a6ff)); text-decoration: none; }
+    .chat-wiki-back:hover { text-decoration: underline; }
+    .chat-wiki-btn { font-size: 11px; padding: 3px 8px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-surface); color: var(--text-secondary, var(--text-primary)); cursor: pointer; }
+    .chat-wiki-btn:hover:not([disabled]) { color: var(--text-primary); border-color: var(--accent, #58a6ff); }
+    .chat-wiki-btn[disabled] { opacity: 0.5; cursor: progress; }
+    .chat-wiki-earlier summary { cursor: pointer; color: var(--text-muted); }
+    .chat-wiki-earlier ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+    .chat-wiki-earlier-item { font-size: 11px; background: none; border: none; padding: 2px 0; color: var(--accent-light, var(--accent, #58a6ff)); cursor: pointer; text-align: left; }
+    .chat-wiki-earlier-item.current { color: var(--text-muted); cursor: default; }
+    .chat-wiki-earlier-more { font-size: 11px; color: var(--text-muted); }
+    .chat-wiki-closed { margin-top: 4px; color: var(--text-muted); }
+    .chat-wiki-error { margin-top: 4px; color: var(--status-error, #e5534b); }
+    .chat-wiki-error[hidden] { display: none; }
+    .chat-explain-chip { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border-primary); background: var(--bg-surface); color: var(--text-primary); text-decoration: none; vertical-align: bottom; }
+    .chat-explain-chip:hover { border-color: var(--accent, #58a6ff); }
+    .chat-wiki-continue { margin: 4px 16px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+    .chat-wiki-cont-out { width: 100%; min-height: 80px; font-family: var(--font-mono, monospace); font-size: 11px; }
     .chat-transient-error {
       margin: 8px 12px;
       padding: 8px 12px;

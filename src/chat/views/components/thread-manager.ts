@@ -13,7 +13,8 @@
 //            clearChat, scrollToBottom, setChatStatusText
 //
 // Defines for the other scripts (threadKindScript): findThread, isWikiThread,
-// isClosedWikiThread, wikiAnswerForThread.
+// isClosedWikiThread, wikiAnswerForThread. Uses wiki-thread-bar.ts's
+// renderWikiBar and WIKI_CLOSED_TEXT (a closed wiki thread's placeholder).
 
 import { EARLIER_EDIT_NOTE, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 
@@ -335,9 +336,9 @@ export function threadManagerScript(): string {
     // Enable input; a closed wiki thread is read-only (its page starts a new one)
     chatInput.disabled = closedWiki;
     chatSend.disabled = closedWiki;
-    chatInput.placeholder = closedWiki
-      ? "Closed with Start over: the page's Discuss tab starts a new discussion."
-      : 'Type a message...';
+    chatInput.placeholder = closedWiki ? WIKI_CLOSED_TEXT : 'Type a message...';
+    // A wiki thread's page bar (wiki-thread-bar.ts); the message read fills in its title.
+    renderWikiBar(threadId, null, false);
 
     // Load messages
     loadThreadMessages(threadId);

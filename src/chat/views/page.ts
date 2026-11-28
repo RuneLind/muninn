@@ -16,6 +16,7 @@ import { jiraCardClientScript } from "./components/jira-card-client.ts";
 import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
+import { wikiThreadBarScript } from "./components/wiki-thread-bar.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
 import type { AuthRole } from "../../auth/role.ts";
@@ -80,6 +81,7 @@ export async function renderChatPage(opts?: { role?: AuthRole | null; authProvid
         <button class="chat-header-pill auto-respond-pill" id="autoRespondPill" hidden></button>
         <span class="chat-status" id="chatStatus"></span>
       </div>
+      <div class="chat-wiki-bar" id="chatWikiBar" hidden></div>
       <div class="chat-body">
         ${requestProgressHtml()}
         <div class="chat-messages" id="chatMessages">
@@ -710,12 +712,16 @@ const CHAT_SCRIPT = `
   // ── Thread manager functions (from thread-manager.ts) ──
   ${threadManagerScript()}
 
+  // ── A wiki thread's page bar, chip and Continue (from wiki-thread-bar.ts) ──
+  ${wikiThreadBarScript()}
+
   function clearChat() {
     chatMessages.innerHTML = '<div class="empty-state">Select a thread from the sidebar</div>';
     chatInput.disabled = true;
     chatSend.disabled = true;
     chatHeader.querySelector('.chat-title').textContent = 'Select a thread';
     document.getElementById('chatDescription').textContent = '';
+    renderWikiBar(null, null, false);
     var arPill = document.getElementById('autoRespondPill');
     if (arPill) { arPill.hidden = true; arPill.classList.remove('paused'); }
     connectorDropdown.value = selectedConnectorId;
@@ -908,6 +914,8 @@ const CHAT_SCRIPT = `
               conv.status = '';
             }
             appendMessage(event.message, conv.type, true);
+            // A wiki answer: Continue's turn and any chip come from the read.
+            if (event.message.sender === 'bot' && isWikiThread(activeThreadId)) refreshWikiTurns(activeThreadId);
           }
           updateInspector();
         }
@@ -1260,9 +1268,12 @@ const CHAT_SCRIPT = `
         chatMessages.appendChild(banner);
       }
 
+      // A wiki thread's page bar, before the replay: a chip reads the page it names.
+      if (isWikiThread(threadId)) renderWikiBar(threadId, data.wikiPage || null, true);
       for (var i = 0; i < msgs.length; i++) {
         appendMessage(msgs[i], conv ? conv.type : 'web', false);
       }
+      if (isWikiThread(threadId)) applyWikiTurns(threadId, msgs);
       // Phase 5: after replaying history, render the research affordance off
       // dev_run state (not a positional reply counter). Per-message rendering is
       // skipped during replay (isLive=false) so this single fetch+render decides
@@ -1443,7 +1454,11 @@ const CHAT_SCRIPT = `
     } else {
       div.className = 'msg msg-user';
       body.className = 'msg-body';
-      body.textContent = msg.text;
+      // An Explain turn on a wiki thread reads as its chip (wiki-thread-bar.ts).
+      var explainChip = wikiTurnChip(msg);
+      if (explainChip) body.appendChild(explainChip);
+      else body.textContent = msg.text;
+      if (msg.id) div.dataset.userMessageId = msg.id;
       headName = selectedUsername || 'You';
       dotColor = avatarColor(selectedUsername || 'user');
     }

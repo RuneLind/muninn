@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import path from "node:path";
 import { connectorSelectorScript } from "./connector-selector.ts";
 import { threadKindScript, threadManagerScript } from "./thread-manager.ts";
+import { CHAT_WIKI_CLOSED_TEXT } from "./wiki-thread-bar.ts";
 
 /**
  * Regression harness for the connector STAMP — the chat page's habit of writing
@@ -336,6 +337,8 @@ async function pageHarness(opts: {
     "function escapeHtml(s){return s;} function escapeAttr(s){return s;} function timeAgo(){return '';}" +
     "function getBotInfo(){return null;} function getSkipExtractions(){return false;} function scrollToBottom(){}" +
     "async function selectBot(_b, t){ activeConvId = 'C1'; activeThreadId = null; await loadThreads(t); }" +
+    // wiki-thread-bar.ts's two names selectThread uses; the bar itself is wiki-thread-messages.test.ts's.
+    "function renderWikiBar(){} var WIKI_CLOSED_TEXT = " + JSON.stringify(CHAT_WIKI_CLOSED_TEXT) + ";" +
     threadManagerScript() +
     connectorSelectorScript() +
     (await deepLinkBlockSource()) +
@@ -388,7 +391,8 @@ describe("a wiki thread the thread list leaves out, reached by link (fix round 1
     expect(h.title()).toContain("(closed)");
     expect(h.input.disabled).toBe(true);
     expect(h.send.disabled).toBe(true);
-    expect(h.input.placeholder).toBe("Closed with Start over: the page's Discuss tab starts a new discussion.");
+    expect(h.input.placeholder).toBe(CHAT_WIKI_CLOSED_TEXT);
+    expect(CHAT_WIKI_CLOSED_TEXT).toBe("Closed with Start over: the page's next question starts a new discussion.");
     h.input.value = "typed anyway";
     await h.made.sendMessage();
     expect(h.sends).toEqual([]);

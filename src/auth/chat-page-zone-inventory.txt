@@ -63,6 +63,9 @@
 /api/jira/draft/ | user-zone | /api/jira/draft/abc
 /api/jira/draft/from-thread | user-zone |
 /api/users | admin-zone |    # named on the page, but PR C's client skips loadUsersForBot ENTIRELY under a session
+/api/wiki/discuss/continue | admin-zone |    # a wiki thread's Continue (Discuss v3 P4): the Discuss routes are admin-only; role user never holds a wiki thread
+/api/wiki/discuss/thread | admin-zone |    # «Earlier discussions», the list-only read (?closed=1)
+/api/wiki/discuss/thread/close | admin-zone |    # «Start over»
 
 ## the operator nav, rendered on every page
 

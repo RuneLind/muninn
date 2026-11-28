@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import { Window } from "happy-dom";
 import { threadKindScript } from "./thread-manager.ts";
+import { wikiThreadBarScript } from "./wiki-thread-bar.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
-import { STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
+import { EXPLAIN_QUESTION, STORED_EDIT_MARKER } from "../../../wiki/discuss-bounds.ts";
 import { EARLIER_EDIT_NOTE } from "../../../dashboard/views/components/wiki-discuss-state.ts";
 
 /**
@@ -32,6 +33,9 @@ async function harness(threads: Record<string, unknown>[], activeThreadId: strin
   const document = win.document;
   const chatMessages = document.createElement("div");
   document.body.appendChild(chatMessages);
+  const bar = document.createElement("div");
+  bar.id = "chatWikiBar";
+  document.body.appendChild(bar);
   const body =
     "var document = ctx.document; var chatMessages = ctx.chatMessages; var threads = ctx.threads;" +
     "var formatWebHtml = ctx.formatWebHtml; var activeThreadId = ctx.activeThreadId;" +
@@ -45,13 +49,22 @@ async function harness(threads: Record<string, unknown>[], activeThreadId: strin
     "function escapeHtml(s){ return String(s); } function escapeAttr(s){ return String(s); }" +
     "function scrollToBottom(){} function attachFeedbackControls(){} function loadToolCallsFromTrace(){}" +
     "function peerDisplayName(n){ return n; }" +
+    "var conversations = {}; var activeConvId = null; var navigator = {};" +
+    "function authedFetch(){ return Promise.resolve({ ok: false, json: function(){ return Promise.resolve(null); } }); }" +
+    "function lookUpLinkedThread(){ return Promise.resolve(); } function selectThread(){} function renderThreadList(){}" +
     threadKindScript() +
+    wikiThreadBarScript() +
     (await appendBlockSource()) +
-    "return { appendMessage: appendMessage };";
+    "return { appendMessage: appendMessage, renderWikiBar: renderWikiBar, applyWikiTurns: applyWikiTurns };";
   const made = new Function("ctx", body)({ document, chatMessages, threads, formatWebHtml, activeThreadId }) as {
     appendMessage: (msg: Record<string, unknown>, convType: string, isLive: boolean) => void;
+    renderWikiBar: (threadId: string | null, page: Record<string, unknown> | null, fromRead: boolean) => void;
+    applyWikiTurns: (threadId: string, msgs: Record<string, unknown>[]) => void;
   };
   return {
+    made,
+    chatMessages,
+    bar,
     /** A stored assistant row as `GET /chat/conversations/:id/messages` sends it to a web conversation. */
     showStored(threadId: string, content: string): string {
       chatMessages.innerHTML = "";
@@ -90,5 +103,74 @@ describe("/chat on a wiki thread whose turn proposed an edit", () => {
     const h = await harness([chat, closedWiki], chat.id);
     const text = h.showStored(chat.id, ANSWER);
     expect(text).toContain("(Proposed edit: preview and apply it in the page's Discuss tab.)");
+  });
+});
+
+const PAGE = { wiki: "harbour", relPath: "notes/harbour.md", traceKey: null, title: "Harbour note" };
+const PASSAGE = "The harbour opens at six.";
+const explainTurn = { id: "11111111-1111-4111-8111-111111111111", question: EXPLAIN_QUESTION, passage: PASSAGE };
+/** The stored text of an Explain turn's user message (threadUserMessage's shape). */
+const STORED_EXPLAIN = `> ${PASSAGE}\n\n${EXPLAIN_QUESTION}`;
+
+describe("/chat's page bar, Explain chip and Continue on a wiki thread (Discuss v3 P4)", () => {
+  test("an Explain turn's user message is the chip, linking to the page at its card", async () => {
+    const h = await harness([chat, openWiki], openWiki.id);
+    h.made.renderWikiBar(openWiki.id, PAGE, false);
+    h.made.appendMessage({ id: "u1", sender: "user", text: STORED_EXPLAIN, timestamp: 1, threadId: openWiki.id, turn: explainTurn }, "web", false);
+    const chip = h.chatMessages.querySelector(".msg-user .chat-explain-chip");
+    expect(chip?.textContent).toBe(`\u2728 Explain \u00b7 \u00ab${PASSAGE}\u00bb`);
+    expect(chip?.getAttribute("href")).toBe(`/wiki?wiki=harbour&relPath=notes%2Fharbour.md&turn=${explainTurn.id}`);
+    // The stored text is not shown beside it.
+    expect(h.chatMessages.querySelector(".msg-user .msg-body")?.textContent).not.toContain(EXPLAIN_QUESTION);
+  });
+
+  test("the chip comes from the turn's fields, never the stored text: no turn or another question stays plain", async () => {
+    const h = await harness([chat, openWiki], openWiki.id);
+    h.made.renderWikiBar(openWiki.id, PAGE, false);
+    h.made.appendMessage({ id: "u1", sender: "user", text: STORED_EXPLAIN, timestamp: 1, threadId: openWiki.id }, "web", false);
+    h.made.appendMessage({ id: "u2", sender: "user", text: "Who owns it?", timestamp: 2, threadId: openWiki.id, turn: { ...explainTurn, id: "t2", question: "Who owns it?" } }, "web", false);
+    expect(h.chatMessages.querySelectorAll(".chat-explain-chip").length).toBe(0);
+    expect(h.chatMessages.querySelectorAll(".msg-user .msg-body")[0]?.textContent).toBe(STORED_EXPLAIN);
+  });
+
+  test("the bar names the page, its wiki and the way back; Start over only on a live thread, the closed one says what starts the next", async () => {
+    const h = await harness([chat, openWiki, closedWiki], openWiki.id);
+    h.made.renderWikiBar(openWiki.id, PAGE, false);
+    expect(h.bar.hidden).toBe(false);
+    expect(h.bar.querySelector("[data-wiki-page-title]")?.textContent).toBe("Harbour note");
+    expect(h.bar.querySelector(".chat-wiki-name")?.textContent).toBe("harbour");
+    expect(h.bar.querySelector("[data-wiki-back]")?.getAttribute("href")).toBe("/wiki?wiki=harbour&relPath=notes%2Fharbour.md");
+    expect(h.bar.querySelector("[data-wiki-start-over]")).not.toBeNull();
+    expect(h.bar.querySelector("[data-wiki-closed]")).toBeNull();
+    h.made.renderWikiBar(closedWiki.id, PAGE, false);
+    expect(h.bar.querySelector("[data-wiki-start-over]")).toBeNull();
+    expect(h.bar.querySelector("[data-wiki-closed]")?.textContent).toBe("Closed with Start over: the page's next question starts a new discussion.");
+    expect(h.bar.querySelector("[data-wiki-back]")).not.toBeNull();
+    // A chat thread hides it.
+    h.made.renderWikiBar(chat.id, null, false);
+    expect(h.bar.hidden).toBe(true);
+  });
+
+  test("Continue sits under the last answer, naming the newest turn; a live user bubble the read knows becomes its chip", async () => {
+    const h = await harness([chat, openWiki], openWiki.id);
+    h.made.renderWikiBar(openWiki.id, PAGE, false);
+    h.made.appendMessage({ id: "u1", sender: "user", text: STORED_EXPLAIN, timestamp: 1, threadId: openWiki.id }, "web", true);
+    h.made.appendMessage({ id: "b1", sender: "bot", text: "<p>It opens at six.</p>", timestamp: 2, threadId: openWiki.id }, "web", true);
+    h.made.applyWikiTurns(openWiki.id, [{ id: "u1", sender: "user", turn: explainTurn, threadId: openWiki.id }, { id: "b1", sender: "bot" }]);
+    const cont = h.chatMessages.querySelector(".chat-wiki-continue");
+    expect(cont?.previousElementSibling?.classList.contains("msg-bot")).toBe(true);
+    expect(cont?.querySelector("[data-chat-continue]")?.textContent).toBe("\u2318 Continue in Claude Code");
+    expect(h.chatMessages.querySelector('.msg-user[data-user-message-id="u1"] .chat-explain-chip')).not.toBeNull();
+    // Applied again (a later answer): still one control.
+    h.made.applyWikiTurns(openWiki.id, [{ id: "u1", sender: "user", turn: explainTurn, threadId: openWiki.id }]);
+    expect(h.chatMessages.querySelectorAll(".chat-wiki-continue").length).toBe(1);
+  });
+
+  test("no turn in the read: no Continue", async () => {
+    const h = await harness([chat, openWiki], openWiki.id);
+    h.made.renderWikiBar(openWiki.id, PAGE, false);
+    h.made.appendMessage({ id: "b1", sender: "bot", text: "<p>x</p>", timestamp: 2, threadId: openWiki.id }, "web", false);
+    h.made.applyWikiTurns(openWiki.id, [{ id: "b1", sender: "bot" }]);
+    expect(h.chatMessages.querySelector(".chat-wiki-continue")).toBeNull();
   });
 });
