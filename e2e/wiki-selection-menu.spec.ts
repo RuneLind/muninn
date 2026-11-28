@@ -1296,6 +1296,79 @@ test("Discuss v3 P1 fix round 1 F1: rendering a page and reading Explain's toolt
   }
 });
 
+/** The page's light read (`?who=1`) fails once, as a request the server never answered. */
+async function dropLightReadOnce(page: Page): Promise<void> {
+  await page.route((u) => u.pathname === "/api/wiki/discuss/thread" && u.searchParams.get("who") === "1", (route) => route.abort(), { times: 1 });
+}
+
+test("Discuss v3 P1 fix round 1 batch 2 F1a: a light read the server never answered: hovering Explain reads the user again", async ({ page }) => {
+  test.setTimeout(180_000);
+  await sql!`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'e2e-p1-b2f1', false)`;
+  try {
+    // The tooltip: read again on hover, then names the user.
+    await dropLightReadOnce(page);
+    await openPage(page, OTHER);
+    await dragSelect(page, "The pier opens at six.");
+    await expect((await explainTip(page)).locator(".wiki-seltip-l2")).toHaveText(`Runs as E2E Selection · ${MODEL} · claude-sdk · Change…`);
+  } finally {
+    await sql!`DELETE FROM threads WHERE user_id = ${USER} AND name = 'e2e-p1-b2f1'`;
+  }
+});
+
+test("Discuss v3 P1 fix round 1 batch 2 F1b: a light read the server never answered: a card placed then ends naming the user its turn runs as", async ({ page }) => {
+  test.setTimeout(180_000);
+  await sql!`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'e2e-p1-b2f1', false)`;
+  try {
+    // Placed while «Runs as» may still be the refusal, filled with the user once a read names it.
+    await dropLightReadOnce(page);
+    await openPage(page, OTHER);
+    await dragSelect(page, "The pier opens at six.");
+    await bar(page).locator("#wikiExplainBtn").click();
+    const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+    await expect(card.locator(".wiki-sel-card-sub")).toHaveText("· a turn in E2E Selection's discussion of this page");
+    await expect(card.locator(".wiki-discuss-answer")).toContainText("EXPLAIN-ANSWER", { timeout: 90_000 });
+    await expect(card.locator(".wiki-discuss-status")).toHaveCount(0, { timeout: 60_000 });
+    await expect(card.locator(".wiki-sel-card-sub")).toHaveText("· a turn in E2E Selection's discussion of this page");
+  } finally {
+    await sql!`DELETE FROM threads WHERE user_id = ${USER} AND name = 'e2e-p1-b2f1'`;
+  }
+});
+
+test("Discuss v3 P1 fix round 1 batch 2 F3a: the who box follows the bar as the article scrolls and hides with it", async ({ page }) => {
+  await openPage(page, LONG);
+  await dragSelect(page, LONG_TARGET);
+  await (await explainTip(page)).locator("[data-selwho-open]").click();
+  const box = page.locator("#wikiSelWho");
+  await expect(box).toBeVisible();
+  const y = async (sel: string) => page.locator(sel).evaluate((el) => Math.round(el.getBoundingClientRect().top));
+  const bar0 = await y("#wikiSelBar");
+  const box0 = await y("#wikiSelWho");
+  expect(box0).toBeGreaterThan(bar0);
+  // A small scroll: the selection stays in the pane, the bar and the box move up with it.
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 40));
+  await expect.poll(() => y("#wikiSelBar")).toBe(bar0 - 40);
+  await expect.poll(() => y("#wikiSelWho")).toBe(box0 - 40);
+  // Scrolled out of the pane: both hidden.
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 1500));
+  await expect(bar(page)).toBeHidden();
+  await expect(box).toBeHidden();
+});
+
+test("Discuss v3 P1 fix round 1 batch 2 F3b: Escape closes the who box while the bar is hidden (its selection scrolled out of the pane)", async ({ page }) => {
+  await openPage(page, LONG);
+  await dragSelect(page, LONG_TARGET);
+  await (await explainTip(page)).locator("[data-selwho-open]").click();
+  const box = page.locator("#wikiSelWho");
+  await expect(box).toBeVisible();
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 1500));
+  await expect(bar(page)).toBeHidden();
+  await page.keyboard.press("Escape");
+  expect(await box.evaluate((el) => el.style.display)).toBe("none");
+  await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
+  await expect(bar(page)).toBeVisible();
+  await expect(box).toBeHidden();
+});
+
 test("Discuss v3 P1: /models?bot=x opens on bot x and leaves the stored selection alone", async ({ page }) => {
   // The selector lists bots with messages: the first bot has some; the second
   // gets its pill from the parameter (a discovered bot), then from a message.

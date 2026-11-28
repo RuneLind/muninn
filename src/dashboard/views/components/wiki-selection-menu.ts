@@ -53,8 +53,9 @@
  *   card), the bot and where it comes from, the model with «Change on /models
  *   ↗». A wiki pinned to a bot that is missing has no one to answer: the
  *   tooltip says so and Explain is the classic one. A turn card's head names
- *   the same user, set when it is placed; placed while the read is pending,
- *   it is filled once when the read lands (R6).
+ *   the same user, set when it is placed; placed while no read has named
+ *   the user (pending or refused), it is filled once when one does (R6). The
+ *   who box follows the bar and hides with it; Escape closes it either way.
  * - «One button» (Discuss v3 P1): the handoff's passage control is a bar item
  *   («⌘ Ask Claude Code», or «💬 Ask about this» where the wiki has an agent
  *   and no handoff), offered up to the handoff's own bound: a selection past
@@ -79,6 +80,7 @@ import {
   discussSendBlocked,
   discussTurnForCard,
   discussWhoUsersHere,
+  retryDiscussWho,
   onDiscussChange,
   pickDiscussUser,
   showTurnInDiscuss,
@@ -231,6 +233,7 @@ function showTip(): void {
   tipTimer = null;
   const tip = document.getElementById(SEL_TIP_ID);
   if (!tip) return;
+  if (tipWho()) retryDiscussWho();
   refreshTip();
   tip.style.display = "block";
 }
@@ -308,8 +311,19 @@ function openWhoBox(): void {
   const el = whoBox();
   whoMessage = null;
   el.style.display = "block";
+  el.style.visibility = "";
+  retryDiscussWho();
   paintWhoBox();
   hideTip(true);
+  placeWhoBox();
+  (el.querySelector<HTMLElement>('[data-selwho-user][aria-pressed="true"]') ?? el.querySelector<HTMLElement>("[data-selwho-user]") ?? el.querySelector<HTMLElement>("[data-selwho-close]"))?.focus({ preventScroll: true });
+}
+
+/** Put the open who box under the bar (above it when there is no room). The
+ *  bar's placing calls it too, so the box follows the selection. */
+function placeWhoBox(): void {
+  const el = document.getElementById(SEL_WHO_ID);
+  if (!el || el.style.display === "none") return;
   const b = document.getElementById(SEL_BAR_ID)?.getBoundingClientRect();
   const w = el.offsetWidth || 360;
   const h = el.offsetHeight || 220;
@@ -318,7 +332,6 @@ function openWhoBox(): void {
   const top = b ? (b.bottom + 6 + h > vh - 4 && b.top - h - 6 > 4 ? b.top - h - 6 : b.bottom + 6) : 8;
   el.style.left = `${clamp(b?.left ?? 8, 4, Math.max(4, vw - w - 4))}px`;
   el.style.top = `${clamp(top, 4, Math.max(4, vh - h - 4))}px`;
-  (el.querySelector<HTMLElement>('[data-selwho-user][aria-pressed="true"]') ?? el.querySelector<HTMLElement>("[data-selwho-user]") ?? el.querySelector<HTMLElement>("[data-selwho-close]"))?.focus({ preventScroll: true });
 }
 
 /** Close the who box; focus back on Explain when it was inside the box. */
@@ -580,6 +593,9 @@ function placeBar(): void {
   // No layout to tell by (an explainer's bar, a DOM without one): shown.
   const inView = !box || box.rects.some((r) => r.bottom > area.top && r.top < area.bottom);
   b.style.visibility = inView ? "" : "hidden";
+  // The who box hides with the bar (it stays open: Escape still closes it).
+  const who = document.getElementById(SEL_WHO_ID);
+  if (who) who.style.visibility = inView ? "" : "hidden";
   if (!inView) return;
   if (shown.range) {
     rect = box ?? shown.range.getBoundingClientRect();
@@ -597,6 +613,7 @@ function placeBar(): void {
   const top = below + h > vh - 4 && rect.top - h - 6 > 4 ? rect.top - h - 6 : below;
   b.style.left = `${clamp(rect.left, 4, Math.max(4, vw - w - 4))}px`;
   b.style.top = `${clamp(top, area.top + 4, Math.max(area.top + 4, vh - h - 4))}px`;
+  placeWhoBox();
 }
 
 function queueReposition(): void {
@@ -876,18 +893,19 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
-  // The head names the user the tooltip names (R6): set now, or, while the
-  // page's light read is pending, «…» filled once when it lands.
+  // The head names the user the tooltip names (R6): set now, or, while no
+  // read has named the user (pending, or a refusal such as an unanswered
+  // light read), «…» or the refusal, filled once when a read names the user.
   const runsAs = discussRunsAsHere();
   const card = placeCard(s, inlineCardHtml(kind, runsAsSub(runsAs), "", r.key));
   if (!card) return;
-  if (runsAs.state === "pending") card.setAttribute(WHO_PENDING_ATTR, "");
+  if (runsAs.state !== "user") card.setAttribute(WHO_PENDING_ATTR, "");
   holdCard(card, s);
   paintTurnCard(card);
 }
 
-/** A turn card placed while the page's light read was pending: its head's
- *  sub line is filled once, when a read answers. */
+/** A turn card placed while no read had named the user: its head's sub
+ *  line is filled once, when a read names the user. */
 const WHO_PENDING_ATTR = "data-sel-who-pending";
 
 /** Explain where no thread takes the turn (no wiki agent, an explainer) or
@@ -972,15 +990,18 @@ function paintTurnCard(card: Element): void {
   drawnBody.set(body, html);
 }
 
-/** Fill a pending card's sub line once a read has answered (the head is one
- *  line at a fixed height, so nothing below it moves). Never again after. */
+/** Fill a pending card's sub line once a read names the user (the head is
+ *  one `nowrap` line, so nothing below it moves), never again after. A
+ *  refusal meanwhile shows its text and keeps the card pending, so a later
+ *  read that names the user still fills it. */
 function fillPendingWho(card: Element): void {
   if (!card.hasAttribute(WHO_PENDING_ATTR)) return;
   const runsAs = discussRunsAsHere();
   if (runsAs.state === "pending") return;
-  card.removeAttribute(WHO_PENDING_ATTR);
+  if (runsAs.state === "user") card.removeAttribute(WHO_PENDING_ATTR);
   const sub = card.querySelector(".wiki-sel-card-sub");
-  if (sub) sub.textContent = `· ${runsAsSub(runsAs)}`;
+  const text = `· ${runsAsSub(runsAs)}`;
+  if (sub && sub.textContent !== text) sub.textContent = text;
 }
 
 function paintTurnCards(): void {
@@ -1078,8 +1099,10 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
       if (enterIsOurs(e.target) && openMenuFromKeyboard()) e.preventDefault();
       return;
     }
-    if (!selectionMenuOpen()) return;
+    // The who box first, open whether or not the bar shows (it hides with a
+    // bar whose selection is scrolled away).
     if (e.key === "Escape" && whoBoxOpen()) return closeWhoBox();
+    if (!selectionMenuOpen()) return;
     if (e.key === "Escape") return hideSelectionMenu();
     if (moveFocus(e)) return e.preventDefault();
     // Enter: the default action, unless focus is on something Enter already drives.

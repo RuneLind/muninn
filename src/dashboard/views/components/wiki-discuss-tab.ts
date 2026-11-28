@@ -807,8 +807,9 @@ function endPress(): void {
  *  R5 An unknown-user refusal for X clears K only when K is X; its picker is R3.
  *  R6 An inline turn card names the user known when it was placed (the
  *     «Runs as» user, `discussRunsAsHere`), never repainted; a card placed
- *     while the page's light read is pending reserves the line at its full
- *     height and gets the name once, when that read lands (Discuss v3 P1).
+ *     while no read has named the user (pending, or refused) reserves the
+ *     line at its full height and gets the name once, when a read names the
+ *     user (Discuss v3 P1).
  */
 
 const botOf = (d: DiscussionView): string | null => d.bot ?? lsGet(botKey(d.wiki));
@@ -1021,13 +1022,14 @@ function whoRefusalText(r: { status: number; body: Record<string, unknown> | nul
 async function loadWho(d: DiscussionView): Promise<void> {
   if (d.whoKnown || d.whoLoading || d.load === "loading" || d.load === "done") return;
   d.whoLoading = true;
+  whoRetry.delete(d);
   // Not incremented: any read that starts after this one (a full read, a pick's) makes it stale.
   const gen = readGen.get(d);
   const stale = () => readGen.get(d) !== gen;
   try {
     const read = await readThreadR1(d, true, stale);
     if (!read) return;
-    const { r } = read;
+    const { r, asUser } = read;
     if (r.ok && r.body && typeof r.body.userId === "string") {
       applyThreadWho(d, r.body);
       d.userId = r.body.userId; // R1, but K is never adopted here (a page render alone keeps no user)
@@ -1035,13 +1037,29 @@ async function loadWho(d: DiscussionView): Promise<void> {
       d.whoKnown = true;
       d.whoRefusal = null;
     } else {
-      if (r.body?.reason === "no-user" && typeof r.body.bot === "string") learnBot(d, r.body.bot);
       d.whoRefusal = whoRefusalText(r);
+      // The full read's refusal path: the bot learned, R5, and the users to
+      // pick from (the tab's picker and the who box).
+      noteUserRefusal(d, r.body, asUser);
+      // No answer, or the server failed: read again on the reader's next look.
+      if (r.status === 0 || (r.status >= 500 && r.body?.reason !== "no-bot")) whoRetry.add(d);
     }
   } finally {
     d.whoLoading = false;
   }
   schedulePaint();
+}
+
+/** Views whose light read got no answer or a server failure (status 0, a
+ *  5xx other than `no-bot`): read again when the reader next looks at who
+ *  answers (Explain's tooltip, the who box), not left wrong for the session. */
+const whoRetry = new WeakSet<DiscussionView>();
+
+/** The selection bar's look at who answers: a light read that failed for
+ *  want of an answer is read again (once per look; never while one runs). */
+export function retryDiscussWho(): void {
+  const d = here();
+  if (d && whoRetry.has(d)) void loadWho(d);
 }
 
 /** Who the next turn on the open page runs as (the «Runs as» line and an
@@ -1053,10 +1071,18 @@ export function discussRunsAsHere(): DiscussRunsAs {
   return discussRunsAs(d, d ? sendUserOf(d) : null);
 }
 
-/** The users the who box offers for the open page, and whether a pick is open now. */
-export function discussWhoUsersHere(): { users: { id: string; name: string }[]; choosable: boolean; blocked: string | null } {
+/** The users the who box offers for the open page, and whether a pick is
+ *  open now: a `no-user`/`unknown-user` refusal's users (the tab's picker,
+ *  `userPick`), else the read's when choosable. `choosable` is null while no
+ *  read has named the user: not known, so the box claims nothing. */
+export function discussWhoUsersHere(): { users: { id: string; name: string }[]; choosable: boolean | null; blocked: string | null } {
   const d = here();
-  return { users: d?.userChoosable ? (d.users ?? []) : [], choosable: !!d?.userChoosable, blocked: botLive(d ? botOf(d) : null) ? PICK_LIVE : null };
+  const picked = d?.userPick?.users.length ? d.userPick.users : null;
+  return {
+    users: picked ?? (d?.userChoosable ? (d.users ?? []) : []),
+    choosable: picked ? true : d?.whoKnown ? !!d.userChoosable : null,
+    blocked: botLive(d ? botOf(d) : null) ? PICK_LIVE : null,
+  };
 }
 
 /** Read the page's thread again (after Start over, a delete or a user pick). */

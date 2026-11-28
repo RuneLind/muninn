@@ -195,9 +195,10 @@ const ORIGIN_WORDS: Record<SelWho["origin"], string> = {
  * the user can be chosen), the bot and where it comes from, and the model
  * with «Change on /models ↗». Nothing here changes a connector; on a pinned
  * wiki the box says the connector is fixed there. `message` is a pick's
- * refusal (shown as an alert).
+ * refusal (shown as an alert). `choosable` null: no read has answered yet,
+ * so the box neither offers users nor says they are not choosable.
  */
-export function selWhoHtml(opts: { wiki: string; who: SelWho; runsAs: SelRunsAs; users: { id: string; name: string }[]; choosable: boolean; message: string | null }): string {
+export function selWhoHtml(opts: { wiki: string; who: SelWho; runsAs: SelRunsAs; users: { id: string; name: string }[]; choosable: boolean | null; message: string | null }): string {
   const { who, runsAs } = opts;
   const current = runsAs.state === "user" ? runsAs.userId : null;
   const userCell =
@@ -205,7 +206,7 @@ export function selWhoHtml(opts: { wiki: string; who: SelWho; runsAs: SelRunsAs;
       ? `<div class="wiki-selwho-users">${opts.users.map((u) => `<button type="button" class="wiki-selwho-user" data-selwho-user="${esc(u.id)}" aria-pressed="${u.id === current}">${esc(u.name)}</button>`).join("")}</div>` +
         `<div class="wiki-selwho-h">The ${esc(who.bot)} bot's /chat users. Each has their own discussion of a page. Kept in this browser.</div>`
       : `<div>${runsAs.state === "user" ? esc(runsAs.name) : runsAs.state === "refused" ? esc(runsAs.text) : "…"}</div>` +
-        (opts.choosable ? "" : `<div class="wiki-selwho-h">Not choosable on this instance.</div>`);
+        (opts.choosable === false ? `<div class="wiki-selwho-h">Not choosable on this instance.</div>` : "");
   const fixed = who.origin === "pinned" ? `The connector is fixed on this wiki: it is ${esc(who.bot)}'s.` : "Nothing here changes the connector.";
   return (
     `<div class="wiki-selwho-hd"><span>Who answers on ${esc(opts.wiki)}</span><button type="button" class="wiki-selwho-x" data-selwho-close aria-label="Close">✕</button></div>` +
