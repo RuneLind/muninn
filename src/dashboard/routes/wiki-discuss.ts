@@ -49,6 +49,7 @@ import {
   createDiscussEngine,
   parseDiscussBody,
   resolveDiscussBot,
+  resolveDiscussBotHere,
   sharedDiscussEngine,
   TRACE_AUTH_REFUSAL,
   type DiscussEngine,
@@ -286,7 +287,9 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const index = await getWikiIndex({ root: entry?.root });
       const meta = index?.resolveRelPath(relPathQ);
       if (!meta) return c.json({ error: `no wiki page for relPath "${relPathQ}"` }, 404);
-      const bot = resolveDiscussBot(entry, (deps.bots ?? discoverAllBots)())?.bot;
+      // Memoized when discovery is not injected: the light read runs on every
+      // page navigation (`resolveDiscussBotHere`).
+      const bot = (deps.bots ? resolveDiscussBot(entry, deps.bots()) : resolveDiscussBotHere(entry))?.bot;
       if (!bot) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
       const who = await engine.resolveUser(bot.name, postedUser || undefined);
       if ("refused" in who) return c.json(who.body, who.status);

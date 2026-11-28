@@ -49,7 +49,7 @@ import path from "node:path";
 import type { Config } from "../config.ts";
 import { resolveServingProfile } from "../config.ts";
 import { getLog } from "../logging.ts";
-import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig, type ConnectorType } from "../bots/config.ts";
+import { discoverAllBots, resolveWikiSynthesisBot, wikiSynthesisInputsKey, type BotConfig, type ConnectorType } from "../bots/config.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import { toolSurfaceBlocker, type ToolSurface } from "../ai/tool-surface.ts";
 import { snapshotRootDir } from "../ai/agent-cwd.ts";
@@ -233,9 +233,57 @@ export interface DiscussWho {
 }
 
 export function discussWhoFor(entry: WikiRegistryEntry | undefined, bots: BotConfig[], config: Pick<Config, "claudeModel">): DiscussWho | null {
-  const hit = resolveDiscussBot(entry, bots);
+  return whoOf(resolveDiscussBot(entry, bots), config);
+}
+
+function whoOf(hit: { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null, config: Pick<Config, "claudeModel">): DiscussWho | null {
   if (!hit) return null;
   return { bot: hit.bot.name, origin: hit.origin, connector: hit.bot.connector ?? "claude-cli", model: discussPlannedModel(hit.bot, config) };
+}
+
+/** The fields of a bot the reader's who line and the thread read use. */
+export type DiscussBotRef = Pick<BotConfig, "name" | "connector" | "model">;
+
+/** Per wiki entry, the last {@link resolveDiscussBot} answer over
+ *  `discoverAllBots()`, valid while `wikiSynthesisInputsKey()` is unchanged. */
+let botHereInputs: string | null = null;
+const botHere = new Map<string, { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null>();
+let botHereDiscoveries = 0;
+
+/**
+ * {@link resolveDiscussBot} over the discovered bots, memoized for the reads a
+ * page navigation makes (the page JSON's `discussWho`, the thread read). A
+ * navigation used to walk every bot folder, parse each config.json and, on a
+ * wiki pinned to a missing bot, log the resolver's warn — per page. The memo
+ * is dropped when `wikiSynthesisInputsKey()` changes (a bot folder or
+ * config.json added, removed or edited, `MUNINN_BOTS_DIR`, a RESEARCH_BOT /
+ * SUMMARIZER_BOT override or env), so a config edit shows on the next read;
+ * that check is a `readdir` and `stat`s, never a parse. A turn
+ * (`runDiscussTurn`) still discovers afresh.
+ */
+export function resolveDiscussBotHere(entry: WikiRegistryEntry | undefined): { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null {
+  const inputs = wikiSynthesisInputsKey();
+  if (inputs !== botHereInputs) {
+    botHere.clear();
+    botHereInputs = inputs;
+  }
+  const key = `${entry?.name ?? ""}\0${entry?.source ?? ""}\0${entry?.synthesisBot ?? ""}`;
+  if (botHere.has(key)) return botHere.get(key)!;
+  botHereDiscoveries++;
+  const hit = resolveDiscussBot(entry, discoverAllBots());
+  const ref = hit ? { bot: { name: hit.bot.name, connector: hit.bot.connector, model: hit.bot.model }, origin: hit.origin } : null;
+  botHere.set(key, ref);
+  return ref;
+}
+
+/** {@link discussWhoFor} through {@link resolveDiscussBotHere}. */
+export function discussWhoHere(entry: WikiRegistryEntry | undefined, config: Pick<Config, "claudeModel">): DiscussWho | null {
+  return whoOf(resolveDiscussBotHere(entry), config);
+}
+
+/** Test-only: how many times {@link resolveDiscussBotHere} discovered bots. */
+export function __discussBotHereDiscoveriesForTest(): number {
+  return botHereDiscoveries;
 }
 
 type SurfaceKind = "readSearch" | "mcpTools";

@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { executeOneShot, OneShotOptions } from "../../ai/one-shot.ts";
@@ -1203,6 +1204,45 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     const { app } = setup({ threads, deps: { authMode: () => "entra" } });
     expect(await (await read(app, {})).json()).toMatchObject({ userId: "kari", users: [], thread: { id: "t-kari" } });
   });
+  // Fix round 1 batch 4: with discovery not injected, the light read (run on
+  // every page navigation) used to rediscover every bot and log the missing-pin
+  // warn per read. `ivar` carries an unknown config key: discovery warns about
+  // it on every run, so its count is the discovery count.
+  test("fix round 1 B4: real discovery: light reads discover once and warn once", async () => {
+    const botsDir = await testTempDir(path.join(tmpdir(), "discuss-light-bots-"));
+    await mkdir(path.join(botsDir, "ivar"), { recursive: true });
+    await writeFile(path.join(botsDir, "ivar", "CLAUDE.md"), "# ivar\n");
+    await writeFile(path.join(botsDir, "ivar", "config.json"), JSON.stringify({ connector: "claude-sdk", modle: "x" }));
+    const prevBotsDir = process.env.MUNINN_BOTS_DIR;
+    process.env.MUNINN_BOTS_DIR = botsDir;
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "warning" }, { category: ["logtape", "meta"], sinks: [], lowestLevel: "warning" }],
+      reset: true,
+    });
+    const said = (needle: string) => records.filter((r) => r.message.join("").includes(needle)).length;
+    try {
+      __setWikiRegistryForTest([{ name: "agent", root: agent, source: "extra", synthesisBot: "ivar" }]);
+      const { app } = setup({ deps: { authMode: () => "off", bots: undefined } });
+      for (let i = 0; i < 3; i++) expect(((await (await read(app, {})).json()) as { bot: string }).bot).toBe("ivar");
+      expect(said("has unknown keys")).toBe(1);
+      __setWikiRegistryForTest([{ name: "agent", root: agent, source: "extra", synthesisBot: "missing" }]);
+      for (let i = 0; i < 3; i++) expect((await read(app, {})).status).toBe(503);
+      expect(said("pins synthesisBot")).toBe(1);
+    } finally {
+      await reset();
+      if (prevBotsDir === undefined) delete process.env.MUNINN_BOTS_DIR;
+      else process.env.MUNINN_BOTS_DIR = prevBotsDir;
+      await rm(botsDir, { recursive: true, force: true });
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
+    }
+  });
+
   test("a wiki pinned to a missing bot: 503 no-bot, as the full read", async () => {
     __setWikiRegistryForTest([{ name: "agent", root: agent, source: "extra", synthesisBot: "missing" }]);
     try {

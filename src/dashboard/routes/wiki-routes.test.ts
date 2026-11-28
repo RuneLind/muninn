@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import {
@@ -5100,5 +5101,51 @@ describe("/api/wiki/page discussWho (Discuss v3 P1)", () => {
     const r = await reader(app(), "pinned");
     expect(r.discussAgent).toBe(false);
     expect("discussWho" in r).toBe(false);
+  });
+
+  // Fix round 1 batch 4: a page navigation used to rediscover every bot (a
+  // parse per config.json, each with its own warns) and log the resolver's
+  // missing-pin warn, on every page JSON. The bot with an unknown config key
+  // counts discoveries: discovery warns about it on every run.
+  test("fix round 1 B4: page navigations discover once and warn once; a config.json edit shows on the next page", async () => {
+    await Bun.write(path.join(botsDir, "typobot", "CLAUDE.md"), "# typobot\n");
+    await Bun.write(path.join(botsDir, "typobot", "config.json"), JSON.stringify({ modle: "x" }));
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "warning" }, { category: ["logtape", "meta"], sinks: [], lowestLevel: "warning" }],
+      reset: true,
+    });
+    const said = (needle: string) => records.filter((r) => r.message.join("").includes(needle)).length;
+    try {
+      const a = app();
+      for (let i = 0; i < 3; i++) expect((await reader(a, "ghost")).discussWho).toBeNull();
+      expect(said("pins synthesisBot")).toBe(1);
+      expect(said("has unknown keys")).toBe(1);
+      for (let i = 0; i < 2; i++) expect(((await reader(a, "pinned")).discussWho as { model: string }).model).toBe("who-model-1");
+      expect(said("has unknown keys")).toBe(2);
+      // The memo is not frozen until restart: an edited config.json (another
+      // size, so the stamp moves even within one mtime tick) is read again.
+      await Bun.write(path.join(botsDir, "whobot", "config.json"), JSON.stringify({ connector: "copilot-sdk", model: "who-model-22" }));
+      expect(((await reader(a, "pinned")).discussWho as { model: string }).model).toBe("who-model-22");
+      // A role knob moves the fallback without any file change.
+      expect(((await reader(a, "plain")).discussWho as { bot: string }).bot).toBe("whobot");
+      process.env.RESEARCH_BOT = "nomodel";
+      expect(((await reader(a, "plain")).discussWho as { bot: string }).bot).toBe("nomodel");
+    } finally {
+      await reset();
+    }
+  });
+
+  test("fix round 1 B4: a read-only root names no bot (the turn is refused 403 there), as the shell's Ask line", async () => {
+    __setReadonlyWikiRootsForTest([root]);
+    try {
+      const r = await reader(app(), "pinned");
+      expect(r.discussAgent).toBe(true);
+      expect("discussWho" in r).toBe(true);
+      expect(r.discussWho).toBeNull();
+    } finally {
+      __setReadonlyWikiRootsForTest(undefined);
+    }
   });
 });

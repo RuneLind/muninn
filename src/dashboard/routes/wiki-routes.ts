@@ -234,7 +234,7 @@ import {
   type WikiDigest,
 } from "../../wiki/digest.ts";
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../../bots/config.ts";
-import { discussWhoFor } from "../../wiki/discuss-engine.ts";
+import { discussWhoHere } from "../../wiki/discuss-engine.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import {
@@ -1916,8 +1916,14 @@ export function registerWikiReadRoutes(
         mentionsHere,
         // Discuss v3 P1: who a turn runs on, by the thread read's bot rule
         // (null on a wiki pinned to a missing bot, where Ask's `askBot` falls
-        // back and Discuss refuses).
-        agentRulesOk ? discussWhoFor(entry, discoverAllBots(), config) : undefined,
+        // back and Discuss refuses). Null on a read-only root too, where the
+        // turn is refused 403 — as `askBot`, never a bot for a call that
+        // cannot happen. Memoized: this runs on every page navigation.
+        agentRulesOk
+          ? isReadonlyWikiRoot(readonlyCandidateRoot(entry, false) ?? "")
+            ? null
+            : discussWhoHere(entry, config)
+          : undefined,
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

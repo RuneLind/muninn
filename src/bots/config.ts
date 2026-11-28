@@ -557,6 +557,41 @@ export function resolveWikiSynthesisBot(
 }
 
 /**
+ * A key that changes whenever {@link resolveWikiSynthesisBot} over
+ * `discoverAllBots()` could answer differently for the same entry: the bots
+ * root, each bot folder (its mtime moves when a CLAUDE.md or config.json is
+ * added, removed or renamed in) and each `config.json`'s mtime and size, plus
+ * the two role knobs the fallback reads (DB override, then env). Built from
+ * `readdir` and `stat` only — no file is read or parsed, so nothing warns.
+ * For a memo over that resolution (the reader's who line, read on every page
+ * navigation); a caller that runs a turn still discovers afresh.
+ */
+export function wikiSynthesisInputsKey(): string {
+  const stamp = (p: string): string => {
+    try {
+      const s = statSync(p);
+      return `${s.mtimeMs}:${s.size}`;
+    } catch {
+      return "-";
+    }
+  };
+  const resolved = resolveBotsDir();
+  const parts: string[] = [
+    `research=${getRoleOverride("RESEARCH_BOT") ?? ""}|${process.env.RESEARCH_BOT ?? ""}`,
+    `summarizer=${getRoleOverride("SUMMARIZER_BOT") ?? ""}|${process.env.SUMMARIZER_BOT ?? ""}`,
+  ];
+  if (!existsSync(resolved)) return [...parts, `missing:${resolved}`].join("\n");
+  const { root, entries } = readBotsDirEntries(resolved);
+  parts.push(`${root}@${stamp(root)}`);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(root, entry.name);
+    parts.push(`${entry.name}@${stamp(dir)}/${stamp(join(dir, "config.json"))}`);
+  }
+  return parts.join("\n");
+}
+
+/**
  * Discovers bots that have both a CLAUDE.md and at least one platform token
  * (Telegram or Slack). Used for starting actual bot instances.
  */
