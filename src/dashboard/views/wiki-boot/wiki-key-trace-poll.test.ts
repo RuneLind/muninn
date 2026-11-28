@@ -713,6 +713,7 @@ test("D3 a follow-up on a trace thread read for one user carries that user's id,
     await reads[0]!.answer(
       json({
         userId: "popp",
+        userPostable: true,
         bot: "b",
         traceKey: KEY,
         thread: { id: "th-popp" },
@@ -746,7 +747,7 @@ test("D3b a follow-up after «Summarize» started the thread carries the turn's 
     summarize(card).click();
     await settle();
     const s = await posts[0]!.stream();
-    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp" });
+    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp", userPostable: true });
     await s.push("done", { answer: "SUMMARY." });
     await s.end();
     localStorage.setItem("muninn-discuss-user-b", "rune");
@@ -765,7 +766,7 @@ test("D3c a running turn's poll reads the thread for the user it was read for, t
   localStorage.setItem("muninn-discuss-user-b", "popp");
   try {
     await openCard();
-    await reads[0]!.answer(json({ userId: "popp", thread: { id: "th-1" }, messages: [{ id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "", endState: "running", error: null, assistantMessageId: null } }] }));
+    await reads[0]!.answer(json({ userId: "popp", userPostable: true, thread: { id: "th-1" }, messages: [{ id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "", endState: "running", error: null, assistantMessageId: null } }] }));
     localStorage.setItem("muninn-discuss-user-b", "rune");
     await fire();
     expect(reads.length).toBe(2);
@@ -828,7 +829,7 @@ test("R1/R2 a Trace card keeps the user its read or turn returned when none is k
   try {
     // A read of a listed user with no thread: kept (R1).
     let card = await openCard();
-    await reads[0]!.answer(json({ userId: "popp", bot: "b", users: [{ id: "popp", name: "Popp" }], thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] }));
+    await reads[0]!.answer(json({ userId: "popp", userPostable: true, bot: "b", users: [{ id: "popp", name: "Popp" }], thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] }));
     expect(localStorage.getItem("muninn-discuss-user-b")).toBe("popp");
     // Another window keeps Rune; «Summarize» (no thread yet) is still as Popp, the card's user (R2).
     localStorage.setItem("muninn-discuss-user-b", "rune");
@@ -848,7 +849,7 @@ test("R1/R2 a Trace card keeps the user its read or turn returned when none is k
     summarize(card).click();
     await settle();
     const s = await posts[0]!.stream();
-    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp" });
+    await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp", userPostable: true });
     expect(localStorage.getItem("muninn-discuss-user-b")).toBe("popp");
     await s.push("done", { answer: "ok" });
     await s.end();
@@ -908,4 +909,66 @@ test("W3 a send answered inside 5 s never shows the waiting line", async () => {
   // The timer was cleared before it fired.
   expect(waits.size).toBe(0);
   expect(waitingLine(card2)).toBeNull();
+});
+
+// ── Discuss v3 P1 fix round 3, the class check: the id a Trace send posts ──
+/*
+ * The Trace card's "listed" comes only from the server's `userPostable` for
+ * that id, on its thread read and on the `turn` frame: not from `users`
+ * (the row's `listsIt` axis, which must change nothing) and not from holding
+ * a thread. Every row: the read names popp, postable or not, with the key's
+ * thread or without, `users` listing popp or not; then the send the card
+ * offers (the follow-up on a thread, else «Summarize», whose `turn` frame
+ * states the same `userPostable`, then a follow-up). Want: postable → popp
+ * is posted and kept; not postable → nothing is posted (the engine's
+ * default user, who is popp) and nothing is kept. 2 × 2 × 2 = 8 rows.
+ */
+test("fix round 3 class check: a Trace send posts the read's or turn's user only when the server said it is postable, over postable × thread × `users`", async () => {
+  const failures: string[] = [];
+  for (const postable of [true, false]) {
+    for (const thread of [true, false]) {
+      for (const listsIt of [true, false]) {
+        const name = `postable=${postable} thread=${thread} users-lists-it=${listsIt}`;
+        localStorage.clear();
+        localStorage.setItem("muninn-discuss-bot-w", "b");
+        reads.length = 0;
+        posts.length = 0;
+        renderPage();
+        await settle();
+        const card = await openCard();
+        const users = listsIt ? [{ id: "popp", name: "Popp" }] : [];
+        const msgs = thread
+          ? [
+              { id: "m1", role: "user", content: Q1, turn: { id: "t1", seq: 1, question: Q1, answer: "A1", endState: "done", error: null, assistantMessageId: "m2" } },
+              { id: "m2", role: "assistant", content: "A1.", turn: null },
+            ]
+          : [];
+        await reads[0]!.answer(json({ userId: "popp", userPostable: postable, bot: "b", users, traceKey: KEY, thread: thread ? { id: "th-popp" } : null, messages: msgs, closed: [], closedTotal: 0, oneShot: [] }));
+        const want = postable ? "popp" : null;
+        const check = (what: string, got: unknown, w: unknown) => {
+          if (JSON.stringify(got) !== JSON.stringify(w)) failures.push(`${name}: ${what} ${JSON.stringify(got)}, want ${JSON.stringify(w)}`);
+        };
+        check("K after the read", localStorage.getItem("muninn-discuss-user-b"), want);
+        if (!thread) {
+          summarize(card).click();
+          await settle();
+          check("«Summarize» posts", posts[0]?.body.userId ?? null, want);
+          const s = await posts[0]!.stream();
+          await s.push("turn", { turnId: "t1", seq: 1, discussionId: "th-popp", userId: "popp", userPostable: postable });
+          await s.push("done", { answer: "ok" });
+          await s.end();
+          check("K after the turn", localStorage.getItem("muninn-discuss-user-b"), want);
+        }
+        card.querySelector<HTMLInputElement>(".wiki-trace-input")!.value = "And on Sundays?";
+        follow(card).dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await settle();
+        const f = posts.at(-1)!;
+        check("the follow-up posts", f.body.userId ?? null, want);
+        check("the follow-up's thread", f.body.discussionId ?? null, "th-popp");
+        await f.refuse(500, { error: "x" });
+      }
+    }
+  }
+  localStorage.clear();
+  expect(failures).toEqual([]);
 });

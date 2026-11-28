@@ -234,6 +234,7 @@ import {
   type WikiDigest,
 } from "../../wiki/digest.ts";
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../../bots/config.ts";
+import { discussWhoHere } from "../../wiki/discuss-engine.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
 import {
@@ -1862,6 +1863,11 @@ export function registerWikiReadRoutes(
     // false) on a page carrying none of the keys, which is most pages — the
     // client's one gate stays "is this key here at all".
 
+    // Discuss P3: the rules file is read only for an admin where the route is,
+    // and counts only when the discuss route would accept it (not a symlink,
+    // over the bound or unreadable: those it refuses with 422/503).
+    const agentRulesOk = tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok";
+
     return c.json({
       // The two callers that opt fields in — see `toListing`. Deliberately NOT
       // `listings()` below, whose arrays are the link-heavy pages' bulk.
@@ -1903,13 +1909,21 @@ export function registerWikiReadRoutes(
           }),
         // Discuss P1: only where its route is registered, as D7 above.
         tools,
-        // Discuss P3: the rules file is read only for an admin where the route is,
-        // and counts only when the discuss route would accept it (not a symlink,
-        // over the bound or unreadable: those it refuses with 422/503).
-        tools && (c.get("role") ?? "admin") === "admin" && (await readWikiAgentRules(path.resolve(resolveWikiRoot(entry?.root)))).state === "ok",
+        // Discuss P3: `agentRulesOk` above.
+        agentRulesOk,
         // Discuss v2 PR 5: «Where else» / «History» read the mentions route:
         // the key marks' gate above.
         mentionsHere,
+        // Discuss v3 P1: who a turn runs on, by the thread read's bot rule
+        // (null on a wiki pinned to a missing bot, where Ask's `askBot` falls
+        // back and Discuss refuses). Null on a read-only root too, where the
+        // turn is refused 403 — as `askBot`, never a bot for a call that
+        // cannot happen. Memoized: this runs on every page navigation.
+        agentRulesOk
+          ? isReadonlyWikiRoot(readonlyCandidateRoot(entry, false) ?? "")
+            ? null
+            : discussWhoHere(entry, config)
+          : undefined,
       ),
       // The answer cards' page-level flags, present only on a wiki that takes
       // answers and for a viewer the answer routes admit (`answersForViewer`):

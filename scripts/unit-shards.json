@@ -317,6 +317,7 @@
       "src/dashboard/views/wiki-boot/wiki-discuss-thread-race.test.ts",
       "src/dashboard/views/wiki-boot/wiki-discuss-thread-actions.test.ts",
       "src/dashboard/views/wiki-boot/wiki-selection-menu.test.ts",
+      "src/dashboard/views/wiki-boot/wiki-discuss-who.test.ts",
       "src/dashboard/views/wiki-boot/wiki-key-trace-poll.test.ts"
     ]
   ]

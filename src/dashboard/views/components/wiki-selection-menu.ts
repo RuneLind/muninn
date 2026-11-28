@@ -9,8 +9,10 @@
  *
  * - The bar shows on the `mouseup` that ends a selection in the article
  *   (the old Explain pill's trigger and checks: a page, not the graph, 3–1,500
- *   characters). A right-click inside the selection opens the menu instead;
- *   ⇧-right-click, or a right-click outside the selection, is the browser's.
+ *   characters), and on a selection that settles after a touch or pen press
+ *   (a long-press ends with no `mouseup`: `queueTouchSettle`), never on the
+ *   keyboard's Shift+arrow steps. A right-click inside the selection opens
+ *   the menu instead; ⇧-right-click, or a right-click outside the selection, is the browser's.
  * - «Explain with context» on a wiki with a wiki agent is a turn of the page's
  *   thread, sent through the pane's own entry (`startInlineTurn`): the same
  *   turn record the pane draws, so it is never a second copy, and the pane
@@ -44,11 +46,32 @@
  *   selection is scrolled out of the article pane; a scroll that moves the
  *   selection closes the menu.
  *
- * The bar's Explain and Fact check keep the ids `#wikiExplainBtn` and
- * `#wikiFactcheckBtn`, and every egress action carries `data-selact`, which
- * the read-only selectors name. Actions run on `mousedown` (its default
- * prevented, so the selection stays), as the old buttons did, and on a
- * keyboard `click`.
+ * - Who answers (Discuss v3 P1): Explain's tooltip is drawn by the bar (a
+ *   native `title` cannot hold a control): the sentence, then «Runs as
+ *   <user> · <model> · <connector> · Change…», the user the next turn runs as
+ *   (`discussRunsAsHere`, «…» while the page's light read is pending) and the
+ *   page payload's `discussWho`. «Change…» opens the who box: the users to
+ *   pick from (a pick is rule R3, `pickDiscussUser`, and closes the open turn
+ *   card), the bot and where it comes from, the model with «Change on /models
+ *   ↗». A wiki pinned to a bot that is missing has no one to answer: the
+ *   tooltip says so and Explain is the classic one. A turn card's head names
+ *   the same user, set when it is placed; placed while no read has named
+ *   the user (pending or refused), it is filled once from its own turn, and
+ *   a refused one says «not sent» (R6, `fillPendingWho`). The
+ *   who box follows the bar and hides with it; Escape closes it either way.
+ *   The menu (right-click, ⇧F10) has the same «Runs as» line under Explain
+ *   and «Change…» as a menu item the arrows reach; that who box opens beside
+ *   the menu, and closing it puts focus back on «Change…».
+ * - «One button» (Discuss v3 P1): the handoff's passage control is a bar item
+ *   («⌘ Ask Claude Code», or «💬 Ask about this» where the wiki has an agent
+ *   and no handoff), offered up to the handoff's own bound: a selection past
+ *   the bar's 1,500 characters gets only it and Copy.
+ *
+ * The bar's Explain, Fact check and handoff keep the ids `#wikiExplainBtn`,
+ * `#wikiFactcheckBtn` and `#wikiDiscussHandoffBtn`, and every egress action
+ * carries `data-selact`, which the read-only selectors name. Actions run on
+ * `mousedown` (its default prevented, so the selection stays), as the old
+ * buttons did, and on a keyboard `click`.
  */
 
 import { copyText } from "./copy-path.ts";
@@ -56,23 +79,44 @@ import { makeSseFrameParser } from "./client-runtime.ts";
 import { enhanceConfidenceHtml, renderStreamingBody } from "./wiki-ask-render.ts";
 import { readerSelectionText } from "./wiki-lens.ts";
 import { nearestHeading } from "./wiki-nearest-heading.ts";
-import { readSelectionPassage } from "./wiki-discuss-handoff.ts";
-import { discussAgentOn, discussSendBlocked, discussTurnForCard, discussUserNameHere, onDiscussChange, showTurnInDiscuss, startInlineTurn } from "./wiki-discuss-tab.ts";
+import { discussHandoffMode, mayBePassage, openDiscussHandoff, readSelectionPassage } from "./wiki-discuss-handoff.ts";
+import {
+  discussAgentOn,
+  discussRunsAsHere,
+  discussSendBlocked,
+  discussTurnForCard,
+  discussUserNameHere,
+  discussWhoUsersHere,
+  retryDiscussWho,
+  onDiscussChange,
+  pickDiscussUser,
+  showTurnInDiscuss,
+  startInlineTurn,
+} from "./wiki-discuss-tab.ts";
+import { HANDOFF_SELECTION_MAX } from "../../../wiki/discuss-bounds.ts";
 import { discussTurnBodyParts, findSamePassage, holdPassage, type HeldPassage } from "./wiki-discuss-state.ts";
 import {
   EXPLAIN_QUESTION,
   FOLLOW_QUESTION,
   SEL_BAR_ID,
   SEL_CARD_CLASS,
+  SEL_HANDOFF_BTN_ID,
   SEL_MENU_ID,
+  SEL_MENU_WHO_ID,
+  SEL_TIP_ID,
+  SEL_WHO_ID,
   detectKeys,
   followHeading,
   hasBox,
   historyHtml,
   inlineCardAnchor,
   inlineCardHtml,
-  inlineTurnSub,
   keyKindsFrom,
+  inlineTurnSub,
+  selRunsAsHtml,
+  selTipHtml,
+  selWhoFrom,
+  selWhoHtml,
   selBarHtml,
   selMenuOffers,
   selectionEndNode,
@@ -82,6 +126,7 @@ import {
   type CardKind,
   type SelAction,
   type SelMenuItem,
+  type SelWho,
 } from "./wiki-selection-menu-model.ts";
 import { WIKI_READ_SLICE_HIDDEN_SELECTOR, wikiToolsFlag } from "./wiki-read-slice.ts";
 import type { KeyKind } from "../../../wiki/key-kinds.ts";
@@ -115,6 +160,8 @@ export interface SelectionMenuDeps {
 interface Shown {
   text: string;
   heading: string;
+  /** Past the bar's own bound, within the handoff's: only the handoff and Copy. */
+  long?: boolean;
   /** The selection's range when it was shown (null on an explainer). */
   range: Range | null;
   explainer: boolean;
@@ -124,7 +171,7 @@ interface Shown {
 let deps: SelectionMenuDeps | null = null;
 let shown: Shown | null = null;
 /** The page's reader flags (`setSelectionMenuPage`). */
-let page: { mentions: boolean; trackerProjects: string[]; kinds: KeyKind[] } = { mentions: false, trackerProjects: [], kinds: [] };
+let page: { mentions: boolean; trackerProjects: string[]; kinds: KeyKind[]; who: SelWho | null | undefined } = { mentions: false, trackerProjects: [], kinds: [], who: undefined };
 /** The markup each turn card body was drawn from. */
 const drawnBody = new WeakMap<Element, string>();
 let repositionQueued = false;
@@ -166,6 +213,191 @@ function menu(): HTMLElement {
   return el;
 }
 
+// ── Who answers: Explain's tooltip and the who box (Discuss v3 P1) ──────
+
+/** The tooltip's «Runs as» part for the page shown: undefined where Explain
+ *  is no thread turn (no agent, an explainer's selection). */
+function tipWho(): SelWho | null | undefined {
+  return shown?.explainer || !discussAgentOn() ? undefined : page.who;
+}
+
+/** Put Explain's tooltip into the bar, right after Explain (so Tab goes from
+ *  Explain to «Change…»), hidden until Explain is hovered or focused. */
+function mountTip(b: HTMLElement): void {
+  const explain = b.querySelector('[data-selact="explain"]');
+  if (!explain) return;
+  const tip = document.createElement("div");
+  tip.id = SEL_TIP_ID;
+  tip.setAttribute("role", "tooltip");
+  tip.innerHTML = selTipHtml(tipWho(), discussRunsAsHere());
+  explain.after(tip);
+}
+
+let tipTimer: ReturnType<typeof setTimeout> | null = null;
+const TIP_HIDE_MS = 280;
+
+function showTip(): void {
+  if (tipTimer) clearTimeout(tipTimer);
+  tipTimer = null;
+  const tip = document.getElementById(SEL_TIP_ID);
+  if (!tip) return;
+  if (tipWho()) retryDiscussWho();
+  refreshTip();
+  tip.style.display = "block";
+}
+
+/** Hide the tooltip, at once or after a short delay (the pointer may be on its way into it). */
+function hideTip(now = false): void {
+  if (tipTimer) clearTimeout(tipTimer);
+  tipTimer = null;
+  const run = () => {
+    tipTimer = null;
+    const tip = document.getElementById(SEL_TIP_ID);
+    // Kept while focus is in it or on Explain (the keyboard's way to «Change…»).
+    const active = document.activeElement;
+    if (!now && tip && active && (tip.contains(active) || active.id === "wikiExplainBtn")) return;
+    if (tip) tip.style.display = "none";
+  };
+  if (now) run();
+  else tipTimer = setTimeout(run, TIP_HIDE_MS);
+}
+
+/** The «Runs as» part again (the read landed, a pick), its «Change…» button
+ *  left in place so focus on it survives. */
+function refreshTip(): void {
+  const tip = document.getElementById(SEL_TIP_ID);
+  if (!tip) return;
+  const who = tipWho();
+  const span = tip.querySelector<HTMLElement>("[data-seltip-who]");
+  const hasChange = !!tip.querySelector("[data-selwho-open]");
+  if (span && who !== undefined && hasChange === !!who) {
+    const html = selRunsAsHtml(who, discussRunsAsHere());
+    if (span.innerHTML !== html) span.innerHTML = html;
+    return;
+  }
+  const html = selTipHtml(who, discussRunsAsHere());
+  if (tip.innerHTML !== html) tip.innerHTML = html;
+}
+
+/** A pick's refusal, shown in the box until it is drawn for another reason. */
+let whoMessage: string | null = null;
+
+function whoBox(): HTMLElement {
+  let el = document.getElementById(SEL_WHO_ID);
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = SEL_WHO_ID;
+  // A group, never a dialog: `modalOpen()` reads every visible dialog as modal.
+  el.setAttribute("role", "group");
+  el.setAttribute("aria-label", "Who answers");
+  el.style.display = "none";
+  document.body.appendChild(el);
+  return el;
+}
+
+function whoBoxOpen(): boolean {
+  const el = document.getElementById(SEL_WHO_ID);
+  return !!el && el.style.display !== "none";
+}
+
+function paintWhoBox(): void {
+  const el = document.getElementById(SEL_WHO_ID);
+  const who = page.who;
+  if (!el || !who || !deps) return;
+  const users = discussWhoUsersHere();
+  const html = selWhoHtml({ wiki: deps.wiki(), who, runsAs: discussRunsAsHere(), users: users.users, choosable: users.choosable, message: whoMessage });
+  if (el.innerHTML !== html) {
+    const focused = (document.activeElement as HTMLElement | null)?.getAttribute?.("data-selwho-user");
+    el.innerHTML = html;
+    if (focused) el.querySelector<HTMLElement>(`[data-selwho-user="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  }
+}
+
+/** The menu's «Change…» item that opened the who box (focus goes back to it). */
+let whoOpener: HTMLElement | null = null;
+
+/** «Change…»: the who box, under the bar (beside the menu when the menu's
+ *  item opened it), focus on its current user (else its ✕). */
+function openWhoBox(from: HTMLElement | null): void {
+  if (!page.who) return;
+  whoOpener = from?.closest?.(`#${SEL_MENU_ID}`) ? from : null;
+  const el = whoBox();
+  whoMessage = null;
+  el.style.display = "block";
+  el.style.visibility = "";
+  retryDiscussWho();
+  paintWhoBox();
+  hideTip(true);
+  placeWhoBox();
+  (el.querySelector<HTMLElement>('[data-selwho-user][aria-pressed="true"]') ?? el.querySelector<HTMLElement>("[data-selwho-user]") ?? el.querySelector<HTMLElement>("[data-selwho-close]"))?.focus({ preventScroll: true });
+}
+
+/** Put the open who box under the bar (above it when there is no room). The
+ *  bar's placing calls it too, so the box follows the selection. */
+function placeWhoBox(): void {
+  const el = document.getElementById(SEL_WHO_ID);
+  if (!el || el.style.display === "none") return;
+  const w = el.offsetWidth || 360;
+  const h = el.offsetHeight || 220;
+  const vw = window.innerWidth || 1024;
+  const vh = window.innerHeight || 768;
+  const m = document.getElementById(SEL_MENU_ID);
+  if (m && m.style.display !== "none") {
+    // Beside the menu (right of it, else left), level with its «Change…».
+    const r = m.getBoundingClientRect();
+    const at = whoOpener?.isConnected ? whoOpener.getBoundingClientRect().top : r.top;
+    const left = r.right + 6 + w <= vw - 4 ? r.right + 6 : r.left - w - 6;
+    el.style.left = `${clamp(left, 4, Math.max(4, vw - w - 4))}px`;
+    el.style.top = `${clamp(at, 4, Math.max(4, vh - h - 4))}px`;
+    return;
+  }
+  const b = document.getElementById(SEL_BAR_ID)?.getBoundingClientRect();
+  const top = b ? (b.bottom + 6 + h > vh - 4 && b.top - h - 6 > 4 ? b.top - h - 6 : b.bottom + 6) : 8;
+  el.style.left = `${clamp(b?.left ?? 8, 4, Math.max(4, vw - w - 4))}px`;
+  el.style.top = `${clamp(top, 4, Math.max(4, vh - h - 4))}px`;
+}
+
+/** Close the who box; focus back, when it was inside the box, on the menu's
+ *  «Change…» that opened it while the menu shows, else on the bar's Explain. */
+function closeWhoBox(): void {
+  const el = document.getElementById(SEL_WHO_ID);
+  if (!el) return;
+  const focusIn = el.contains(document.activeElement);
+  const opener = whoOpener;
+  whoOpener = null;
+  el.style.display = "none";
+  whoMessage = null;
+  if (!focusIn) return;
+  const m = document.getElementById(SEL_MENU_ID);
+  if (opener?.isConnected && m && m.style.display !== "none" && m.contains(opener)) opener.focus({ preventScroll: true });
+  else document.getElementById("wikiExplainBtn")?.focus({ preventScroll: true });
+}
+
+/** A user picked in the who box (rule R3): refused while a turn runs (said in
+ *  the box); else the thread is that user's now, so the open turn card closes. */
+function pickWho(userId: string): void {
+  const cur = discussRunsAsHere();
+  if (cur.state === "user" && cur.userId === userId) return;
+  const r = pickDiscussUser(userId);
+  if ("refused" in r) {
+    whoMessage = r.refused;
+    paintWhoBox();
+    return;
+  }
+  whoMessage = null;
+  for (const card of Array.from(document.querySelectorAll(`#articleWrap .${SEL_CARD_CLASS}[data-sel-turn]`))) {
+    if (held?.el === card) held = null;
+    card.remove();
+    dropCard(card);
+  }
+  if (held?.el.hasAttribute("data-sel-turn")) {
+    dropCard(held.el);
+    held = null;
+  }
+  paintWhoBox();
+  refreshTip();
+}
+
 /** Is the bar or the menu on screen? (A bar hidden while its selection is
  *  scrolled away is not.) */
 export function selectionMenuOpen(): boolean {
@@ -175,16 +407,20 @@ export function selectionMenuOpen(): boolean {
   });
 }
 
-/** Hide both. Focus inside them goes back where the keyboard opened the menu
- *  from (a `[tabindex]` container in the article, `keyOpener`), else to the page. */
+/** Hide both, with Explain's tooltip and the who box. Focus inside them goes
+ *  back where the keyboard opened the menu from (a `[tabindex]` container in
+ *  the article, `keyOpener`), else to the page. */
 export function hideSelectionMenu(): void {
   shown = null;
   const back = keyOpener;
   keyOpener = null;
   const b = document.getElementById(SEL_BAR_ID);
   const m = document.getElementById(SEL_MENU_ID);
+  const w = document.getElementById(SEL_WHO_ID);
   const active = document.activeElement as HTMLElement | null;
-  const focusIn = !!active && (!!b?.contains(active) || !!m?.contains(active));
+  const focusIn = !!active && (!!b?.contains(active) || !!m?.contains(active) || !!w?.contains(active));
+  hideTip(true);
+  if (w) w.style.display = "none";
   if (b) b.style.display = "none";
   if (m) m.style.display = "none";
   if (!focusIn) return;
@@ -197,12 +433,14 @@ export function selectionMenuMentionsOn(): boolean {
   return page.mentions;
 }
 
-/** Per page render: the reader payload's mentions flag, tracker projects and key kinds. */
-export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjects?: unknown; keyKinds?: unknown } | null | undefined): void {
+/** Per page render: the reader payload's mentions flag, tracker projects, key
+ *  kinds and who answers a Discuss turn (`discussWho`, Discuss v3 P1). */
+export function setSelectionMenuPage(reader: { mentions?: unknown; trackerProjects?: unknown; keyKinds?: unknown; discussWho?: unknown } | null | undefined): void {
   page = {
     mentions: reader?.mentions === true,
     trackerProjects: Array.isArray(reader?.trackerProjects) ? (reader.trackerProjects as unknown[]).filter((p): p is string => typeof p === "string") : [],
     kinds: keyKindsFrom(reader?.keyKinds),
+    who: reader && "discussWho" in reader ? selWhoFrom(reader.discussWho) : undefined,
   };
   // The page rendered again (navigation, a reload, an Apply's commit): what
   // the files and history say may have moved.
@@ -274,8 +512,10 @@ function article(): HTMLElement | null {
   return document.querySelector<HTMLElement>("#articleWrap .wiki-article");
 }
 
-/** The live selection as the menu reads it, or null when it offers nothing. */
-function readSelection(): { text: string; heading: string; range: Range } | null {
+/** The live selection as the menu reads it, or null when it offers nothing.
+ *  Past the bar's 1,500 characters it is `long` (only the handoff, within its
+ *  own bound, and Copy are offered). */
+function readSelection(): { text: string; heading: string; range: Range; long: boolean } | null {
   if (!deps?.currentName() || deps.pageType() === "explainer") return null;
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
@@ -293,21 +533,25 @@ function readSelection(): { text: string; heading: string; range: Range } | null
   // Without the reader's own text (id nouns, fold sizes): the server locates
   // this in the page source, which has none of it.
   const text = readerSelectionText(sel).trim();
-  if (text.length < SEL_MIN_CHARS || text.length > SEL_MAX_CHARS) return null;
-  return { text, heading: nearestHeading(range), range: range.cloneRange() };
+  const long = text.length > SEL_MAX_CHARS;
+  if (text.length < SEL_MIN_CHARS || (long && (!discussHandoffMode() || text.length > HANDOFF_SELECTION_MAX))) return null;
+  return { text, heading: nearestHeading(range), range: range.cloneRange(), long };
 }
 
 /** The actions this viewer sees. Under the read slice its CSS hides the
  *  egress actions (`wiki-read-slice.ts`): they are not offered at all, by the
  *  same selector, matched on each action's own bar button. */
-function itemsFor(text: string, explainer: boolean): SelMenuItem[] {
+function itemsFor(text: string, explainer: boolean, long = false): SelMenuItem[] {
   const a = article();
   const items = selMenuItems({
     text,
     explainer,
     mentions: page.mentions,
     follow: !explainer && discussAgentOn() && !!a && !!followHeading(a),
-    keys: detectKeys(text, page.trackerProjects, page.kinds),
+    keys: long ? [] : detectKeys(text, page.trackerProjects, page.kinds),
+    // The handoff's own cheap check (its raw-text bounds, one article, no peek card).
+    handoff: !explainer && mayBePassage(window.getSelection()) ? discussHandoffMode() : null,
+    long,
   });
   if (wikiToolsFlag()) return items;
   const tpl = document.createElement("template");
@@ -320,13 +564,16 @@ function itemsFor(text: string, explainer: boolean): SelMenuItem[] {
 export function maybeShowSelectionBar(): void {
   const s = readSelection();
   if (!s) return hideSelectionMenu();
-  const items = itemsFor(s.text, false);
+  const items = itemsFor(s.text, false, s.long);
   if (!selMenuOffers(items)) return hideSelectionMenu();
   shown = { ...s, explainer: false, items };
   const m = document.getElementById(SEL_MENU_ID);
   if (m) m.style.display = "none";
+  const w = document.getElementById(SEL_WHO_ID);
+  if (w) w.style.display = "none";
   const b = bar();
   b.innerHTML = selBarHtml(shown.items);
+  mountTip(b);
   b.style.display = "flex";
   placeBar();
 }
@@ -339,6 +586,7 @@ export function showSelectionBarForExplainer(text: string, heading: string): voi
   shown = { text, heading, range: null, explainer: true, items };
   const b = bar();
   b.innerHTML = selBarHtml(shown.items);
+  mountTip(b);
   b.style.display = "flex";
   placeBar();
 }
@@ -374,6 +622,9 @@ function placeBar(): void {
   // No layout to tell by (an explainer's bar, a DOM without one): shown.
   const inView = !box || box.rects.some((r) => r.bottom > area.top && r.top < area.bottom);
   b.style.visibility = inView ? "" : "hidden";
+  // The who box hides with the bar (it stays open: Escape still closes it).
+  const who = document.getElementById(SEL_WHO_ID);
+  if (who) who.style.visibility = inView ? "" : "hidden";
   if (!inView) return;
   if (shown.range) {
     rect = box ?? shown.range.getBoundingClientRect();
@@ -391,6 +642,7 @@ function placeBar(): void {
   const top = below + h > vh - 4 && rect.top - h - 6 > 4 ? rect.top - h - 6 : below;
   b.style.left = `${clamp(rect.left, 4, Math.max(4, vw - w - 4))}px`;
   b.style.top = `${clamp(top, area.top + 4, Math.max(area.top + 4, vh - h - 4))}px`;
+  placeWhoBox();
 }
 
 function queueReposition(): void {
@@ -419,20 +671,25 @@ function onContextMenu(e: MouseEvent): void {
   if (e.shiftKey || !document.getElementById("articleWrap")?.contains(e.target as Node)) return;
   const s = readSelection();
   if (!s || !onSelection(s.range, e.clientX, e.clientY)) return;
-  const items = itemsFor(s.text, false);
+  const items = itemsFor(s.text, false, s.long);
   // Nothing but Copy: the browser's own menu, untouched.
   if (!selMenuOffers(items)) return;
   e.preventDefault();
   showMenu(s, items, e.clientX, e.clientY);
 }
 
-function showMenu(s: { text: string; heading: string; range: Range }, items: SelMenuItem[], x: number, y: number): HTMLElement {
+function showMenu(s: { text: string; heading: string; range: Range; long: boolean }, items: SelMenuItem[], x: number, y: number): HTMLElement {
   shown = { ...s, explainer: false, items };
   keyOpener = null;
   const b = document.getElementById(SEL_BAR_ID);
   if (b) b.style.display = "none";
+  const whoEl = document.getElementById(SEL_WHO_ID);
+  if (whoEl) whoEl.style.display = "none";
   const m = menu();
-  m.innerHTML = selMenuHtml(shown.items, s.text);
+  // Explain's «Runs as» line and «Change…», as the bar's tooltip has them.
+  const who = tipWho();
+  if (who) retryDiscussWho();
+  m.innerHTML = selMenuHtml(shown.items, s.text, who === undefined ? undefined : { who, runsAs: discussRunsAsHere() });
   m.style.display = "block";
   const w = m.offsetWidth || 270;
   const h = m.offsetHeight || 300;
@@ -446,7 +703,7 @@ function showMenu(s: { text: string; heading: string; range: Range }, items: Sel
 function openMenuFromKeyboard(): boolean {
   const s = readSelection();
   if (!s) return false;
-  const items = itemsFor(s.text, false);
+  const items = itemsFor(s.text, false, s.long);
   if (!selMenuOffers(items)) return false;
   const box = selectionBox(s.range);
   const from = document.activeElement;
@@ -463,7 +720,8 @@ function moveFocus(e: KeyboardEvent): boolean {
   const box = active?.closest?.<HTMLElement>(`#${SEL_BAR_ID}, #${SEL_MENU_ID}`);
   if (!box || !active) return false;
   const [prev, next] = box.id === SEL_MENU_ID ? ["ArrowUp", "ArrowDown"] : ["ArrowLeft", "ArrowRight"];
-  const items = Array.from(box.querySelectorAll<HTMLElement>("[data-selact]"));
+  // The menu's «Change…» is one of its items (the bar's is in Explain's tooltip, reached with Tab).
+  const items = Array.from(box.querySelectorAll<HTMLElement>(box.id === SEL_MENU_ID ? "[data-selact], [data-selwho-open]" : "[data-selact]"));
   const i = items.indexOf(active);
   const n = items.length;
   const to = e.key === "Home" ? 0 : e.key === "End" ? n - 1 : e.key === next ? (i + 1) % n : e.key === prev ? (i - 1 + n) % n : -1;
@@ -485,8 +743,9 @@ function activate(act: SelAction, key: string | null): void {
   if (EGRESS.has(act) && discussSendBlocked()) return;
   switch (act) {
     case "explain":
-      // No thread to take the turn (no wiki agent, an explainer): the classic answer, still in a card.
-      if (s.explainer || !discussAgentOn()) classicExplainCard(s, "");
+      // No thread to take the turn (no wiki agent, an explainer, a wiki pinned
+      // to a bot that is missing): the classic answer, still in a card.
+      if (s.explainer || !discussAgentOn() || page.who === null) classicExplainCard(s, "");
       else threadCard("explain", s, EXPLAIN_QUESTION, "explore", (why) => classicExplainCard(s, why));
       return;
     case "follow":
@@ -506,7 +765,39 @@ function activate(act: SelAction, key: string | null): void {
       // A detected key's chip opens its Trace (PR 6), not «Where else».
       if (key) openTrace(key, s.range);
       return;
+    case "handoff":
+      // The panel reads the live selection (the press kept it); closing it
+      // puts the bar back for that selection with focus on this item.
+      openDiscussHandoff(true, null, restoreHandoffItem);
+      return;
   }
+}
+
+/** After the handoff panel closes with its passage put back: the bar for the
+ *  selection again, focus on its handoff item (the control that opened it).
+ *  A passage scrolled out of the pane meanwhile is brought back first, so the
+ *  bar shows; with no bar to return to, focus goes to the article pane, never
+ *  to <body> (the panel's focused box is hidden now). */
+function restoreHandoffItem(): void {
+  maybeShowSelectionBar();
+  const b = document.getElementById(SEL_BAR_ID);
+  if (shown?.range && b && b.style.display !== "none" && b.style.visibility === "hidden") {
+    // The article pane scrolls (`readingArea`): the passage's first line a third down it.
+    const box = selectionBox(shown.range);
+    const wrap = document.getElementById("articleWrap");
+    if (box && wrap) {
+      const area = readingArea();
+      wrap.scrollTop += box.top - area.top - (area.bottom - area.top) / 3;
+    }
+    placeBar();
+  }
+  const btn = document.getElementById(SEL_HANDOFF_BTN_ID);
+  if (btn && selectionMenuOpen()) btn.focus({ preventScroll: true });
+  if (btn && document.activeElement === btn) return;
+  const wrap = document.getElementById("articleWrap");
+  if (!wrap) return;
+  if (!wrap.hasAttribute("tabindex")) wrap.setAttribute("tabindex", "-1");
+  wrap.focus({ preventScroll: true });
 }
 
 /** An inline card at `range` (before an explainer's frame when null): the
@@ -657,11 +948,24 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
-  const card = placeCard(s, inlineCardHtml(kind, inlineTurnSub(discussUserNameHere()), "", r.key));
+  // The head names the id the turn's POST carried (R6), set now when a read
+  // has named it; else «…» (or a read's refusal) is reserved, filled once
+  // from the card's own turn (`fillPendingWho`). Never «Runs as»: a POST
+  // that carried no id runs as the engine's default user, which may have
+  // moved since the read «Runs as» comes from.
+  const sent = discussTurnForCard(r.key)?.turn.sentUser;
+  const name = typeof sent === "string" ? discussUserNameHere(sent) : null;
+  const runsAs = discussRunsAsHere();
+  const card = placeCard(s, inlineCardHtml(kind, name ? inlineTurnSub(name) : runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…"), "", r.key));
   if (!card) return;
+  if (!name) card.setAttribute(WHO_PENDING_ATTR, "");
   holdCard(card, s);
   paintTurnCard(card);
 }
+
+/** A turn card placed while no read had named the user: its head's sub
+ *  line is filled once, when a read names the user. */
+const WHO_PENDING_ATTR = "data-sel-who-pending";
 
 /** Explain where no thread takes the turn (no wiki agent, an explainer) or
  *  the page's thread cannot: the classic `/api/wiki/explain` stream, painted
@@ -732,16 +1036,60 @@ function paintTurnCard(card: Element): void {
   const key = card.getAttribute("data-sel-turn");
   const body = card.querySelector(".wiki-sel-card-body");
   if (!key || !body) return;
+  fillPendingWho(card);
   const found = discussTurnForCard(key);
-  // The sub line is set once, when `threadCard` places the card: a repaint
-  // after a thread read named the user moved the text below under the
-  // reader's drag (#913 CI).
+  // The sub line is set once, when `threadCard` places the card (or filled
+  // once by `fillPendingWho`): a repaint after a thread read named the user
+  // moved the text below under the reader's drag (#913 CI).
   const html = found
     ? discussTurnBodyParts(found.turn, found.current).join("") || ""
     : `<div class="wiki-discuss-hint">This turn is no longer in the page's discussion.</div>`;
   if (drawnBody.get(body) === html) return;
   body.innerHTML = html;
   drawnBody.set(body, html);
+}
+
+/** Fill a pending card's sub line once, from its own turn (the head is one
+ *  `nowrap` line, so nothing below it moves), never again after (R6): the id
+ *  its POST carried, else the user its `turn` frame says it ran as, once a
+ *  read knows that user's name. Never «Runs as»: a read that lands while the
+ *  POST is in flight may name a default user who moved after the engine took
+ *  the turn (fix round 3). Never a later turn's user: a pick after the turn
+ *  (R3) names another. A turn the route refused never ran: «not sent». A
+ *  turn that ended, or left the discussion (a pick, Start over), before its
+ *  user was named: the nameless line. While the turn is live with no user
+ *  named, a read's refusal shows its text and the card stays pending. */
+function fillPendingWho(card: Element): void {
+  if (!card.hasAttribute(WHO_PENDING_ATTR)) return;
+  const key = card.getAttribute("data-sel-turn");
+  const turn = key ? (discussTurnForCard(key)?.turn ?? null) : null;
+  const id = typeof turn?.sentUser === "string" ? turn.sentUser : (turn?.userId ?? null);
+  let text: string;
+  if (turn?.state === "refused") text = TURN_NOT_SENT;
+  else if (id) {
+    const name = discussUserNameHere(id);
+    if (!name) return;
+    text = inlineTurnSub(name);
+  } else if (!turn || (turn.state !== "sending" && turn.state !== "running")) text = inlineTurnSub(null);
+  else {
+    // Still sending or running, its POST carried no id and its `turn` frame
+    // has not named the user yet: wait for it, «…» reserved (a read's
+    // refusal meanwhile in its place, gone again once a read answers).
+    const runsAs = discussRunsAsHere();
+    setCardSub(card, runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…"));
+    return;
+  }
+  card.removeAttribute(WHO_PENDING_ATTR);
+  setCardSub(card, text);
+}
+
+/** A refused turn card's sub line: the turn never ran as anyone. */
+const TURN_NOT_SENT = "not sent";
+
+function setCardSub(card: Element, sub: string): void {
+  const el = card.querySelector(".wiki-sel-card-sub");
+  const text = `· ${sub}`;
+  if (el && el.textContent !== text) el.textContent = text;
 }
 
 function paintTurnCards(): void {
@@ -807,6 +1155,51 @@ function scrollMovesSelection(t: EventTarget | null): boolean {
   return !!frame && t.contains(frame);
 }
 
+/** The input behind the last press or key: a selection that settles after a
+ *  touch (or pen) press shows the bar (`queueTouchSettle`). */
+let lastInput: "mouse" | "touch" | "key" | null = null;
+/** A touch selection is settled when it has not changed for this long (a
+ *  long-press, then its handles dragged). */
+export const TOUCH_SETTLE_MS = 350;
+let touchTimer: ReturnType<typeof setTimeout> | null = null;
+/** The touch selection the last settle evaluated, by its ends and text:
+ *  evaluated once until the selection itself changes. Reading a selection
+ *  can set it and restore it (a DecisionLog's authored text,
+ *  `authoredSelectionText`), which fires `selectionchange` again with the
+ *  same selection; without this each settle queued the next, forever, when
+ *  the bar was refused (2 characters). Cleared when the selection collapses. */
+let settledSel: { a: Node | null; ao: number; f: Node | null; fo: number; text: string } | null = null;
+
+function sameSettled(sel: Selection): boolean {
+  const s = settledSel;
+  return !!s && s.a === sel.anchorNode && s.ao === sel.anchorOffset && s.f === sel.focusNode && s.fo === sel.focusOffset && s.text === sel.toString();
+}
+
+function queueTouchSettle(): void {
+  if (touchTimer) clearTimeout(touchTimer);
+  touchTimer = setTimeout(() => {
+    touchTimer = null;
+    if (lastInput !== "touch") return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      settledSel = null;
+      return;
+    }
+    if (sameSettled(sel)) return;
+    // Already shown for this very selection (the bar, or the menu a long-press opened).
+    const r = sel.getRangeAt(0);
+    let same = false;
+    try {
+      same = !!shown?.range && shown.range.compareBoundaryPoints(Range.START_TO_START, r) === 0 && shown.range.compareBoundaryPoints(Range.END_TO_END, r) === 0;
+    } catch {
+      /* the shown range's nodes left the document: not the same selection */
+    }
+    settledSel = { a: sel.anchorNode, ao: sel.anchorOffset, f: sel.focusNode, fo: sel.focusOffset, text: sel.toString() };
+    if (same && selectionMenuOpen()) return;
+    maybeShowSelectionBar();
+  }, TOUCH_SETTLE_MS);
+}
+
 /** Wire the menu once, at boot. */
 export function initSelectionMenu(d: SelectionMenuDeps): void {
   deps = d;
@@ -825,10 +1218,17 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   });
   // On the document: the keyboard's own context menu goes to the focused element.
   document.addEventListener("contextmenu", (e) => onContextMenu(e as MouseEvent));
+  // Which input made the selection: a touch long-press ends with no mouseup
+  // (iOS/iPadOS), so a selection that settles after a touch press shows the
+  // bar; the keyboard's Shift+arrow steps never do (its way in is ⇧F10).
+  document.addEventListener("pointerdown", (e) => void (lastInput = (e as PointerEvent).pointerType === "mouse" ? "mouse" : "touch"), true);
+  document.addEventListener("keydown", () => void (lastInput = "key"), true);
   // Dismiss on selection collapse and Escape.
   document.addEventListener("selectionchange", () => {
     const sel = window.getSelection();
     if ((!sel || sel.isCollapsed) && shown && !shown.explainer) hideSelectionMenu();
+    if (!sel || sel.isCollapsed) settledSel = null;
+    if (lastInput === "touch") queueTouchSettle();
   });
   document.addEventListener("keydown", (e) => {
     // The keyboard's context-menu gesture: our menu for a selection that offers it.
@@ -839,6 +1239,9 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
       if (enterIsOurs(e.target) && openMenuFromKeyboard()) e.preventDefault();
       return;
     }
+    // The who box first, open whether or not the bar shows (it hides with a
+    // bar whose selection is scrolled away).
+    if (e.key === "Escape" && whoBoxOpen()) return closeWhoBox();
     if (!selectionMenuOpen()) return;
     if (e.key === "Escape") return hideSelectionMenu();
     if (moveFocus(e)) return e.preventDefault();
@@ -866,7 +1269,9 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
       }
       return;
     }
-    if (t.closest?.(`#${SEL_BAR_ID}, #${SEL_MENU_ID}`)) {
+    // The bar, the menu, Explain's tooltip (inside the bar) and the who box
+    // keep the selection; their own controls act on `click`.
+    if (t.closest?.(`#${SEL_BAR_ID}, #${SEL_MENU_ID}, #${SEL_WHO_ID}`)) {
       e.preventDefault();
       return;
     }
@@ -880,6 +1285,21 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
     if (act && (e as MouseEvent).detail === 0) {
       e.preventDefault();
       activate(act.dataset.selact as SelAction, act.dataset.selkey ?? null);
+      return;
+    }
+    const whoOpen = t.closest?.<HTMLElement>("[data-selwho-open]");
+    if (whoOpen) {
+      e.preventDefault();
+      openWhoBox(whoOpen);
+      return;
+    }
+    if (t.closest?.("[data-selwho-close]")) {
+      closeWhoBox();
+      return;
+    }
+    const whoUser = t.closest?.<HTMLElement>("[data-selwho-user]");
+    if (whoUser) {
+      pickWho(whoUser.dataset.selwhoUser ?? "");
       return;
     }
     const close = t.closest?.(`.${SEL_CARD_CLASS} [data-sel-card-close]`);
@@ -909,6 +1329,35 @@ export function initSelectionMenu(d: SelectionMenuDeps): void {
   );
   window.addEventListener("resize", queueReposition);
   onDiscussChange(paintTurnCards);
+  // The «Runs as» line follows the reads and picks while the tooltip or box shows.
+  onDiscussChange(() => {
+    if (document.getElementById(SEL_TIP_ID)?.style.display === "block") refreshTip();
+    const menuWho = document.querySelector<HTMLElement>(`#${SEL_MENU_WHO_ID} [data-seltip-who]`);
+    const who = tipWho();
+    if (menuWho && who !== undefined) {
+      const html = selRunsAsHtml(who, discussRunsAsHere());
+      if (menuWho.innerHTML !== html) menuWho.innerHTML = html;
+    }
+    if (whoBoxOpen()) paintWhoBox();
+  });
+  // Explain's tooltip: on hover or focus, kept while the pointer or focus is
+  // in it, hidden a moment after both leave.
+  document.addEventListener("mouseover", (e) => {
+    const t = e.target as Element | null;
+    if (t?.closest?.(`#${SEL_TIP_ID}, #${SEL_BAR_ID} #wikiExplainBtn`)) showTip();
+  });
+  document.addEventListener("mouseout", (e) => {
+    const t = e.target as Element | null;
+    const to = (e as MouseEvent).relatedTarget as Element | null;
+    if (!t?.closest?.(`#${SEL_TIP_ID}, #${SEL_BAR_ID} #wikiExplainBtn`)) return;
+    if (to?.closest?.(`#${SEL_TIP_ID}, #${SEL_BAR_ID} #wikiExplainBtn`)) return;
+    hideTip();
+  });
+  document.addEventListener("focusin", (e) => {
+    const t = e.target as Element | null;
+    if (t?.closest?.(`#${SEL_TIP_ID}, #${SEL_BAR_ID} #wikiExplainBtn`)) showTip();
+    else if (document.getElementById(SEL_TIP_ID)?.style.display === "block") hideTip(true);
+  });
   // A card follows its text's visibility: graph mode, a lens, a fold or a
   // DecisionLog «Vis alle» each change a class or attribute in the pane.
   const wrapEl = document.getElementById("articleWrap");

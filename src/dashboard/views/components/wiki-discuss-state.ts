@@ -87,6 +87,13 @@ export interface DiscussTurnView {
   passageGone: boolean;
   /** The send's request had no answer after {@link DISCUSS_WAITING_MS}. */
   waiting?: boolean;
+  /** The user the route ran the turn as (its `turn` frame): an inline card's
+   *  head when the POST carried no id. */
+  userId?: string | null;
+  /** The id the turn's POST carried, null when it carried none (the engine's
+   *  default user runs it), undefined for a turn read back from the thread:
+   *  an inline card's head names it (R6). */
+  sentUser?: string | null;
 }
 
 /** How long a Discuss send may wait for response headers before the turn says so. */
@@ -247,7 +254,9 @@ export interface DiscussionView {
   userName?: string | null;
   users?: { id: string; name: string }[];
   userChoosable?: boolean;
-  /** The route can take `userId` as a posted id: it holds a thread, or the read listed it. */
+  /** The engine takes `userId` as a posted id: the server's `userPostable`
+   *  for that id, from the read or `turn` frame that named it (never derived
+   *  from `users`, from holding a thread or from a send answered as it). */
   userListed?: boolean;
   /** The «as <name> ▾» picker is open. */
   userMenu?: boolean;
@@ -255,6 +264,14 @@ export interface DiscussionView {
   mode?: "explore" | "edit";
   /** Where the thread read stands for this page. */
   load?: "loading" | "done" | "failed";
+  /** Discuss v3 P1: a read (the light one or the full one) has named the
+   *  user, or refused (`whoRefusal`): the «Runs as» line is no longer «…». */
+  whoKnown?: boolean;
+  /** The light read is in flight. */
+  whoLoading?: boolean;
+  /** A read's refusal text (no chat user set up, no bot), shown in the
+   *  user's place; cleared by a read that names the user. */
+  whoRefusal?: string | null;
   /** Why the thread read failed; a successful read clears it. */
   loadError?: string | null;
   /** Why «Start over» or a Delete failed; kept through the read that follows
@@ -509,6 +526,34 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
   if (!d.userChoosable) d.userMenu = false;
 }
 
+/** Who the next turn runs as: «…» until a read answers, a read's refusal,
+ *  or the user (by /chat name, else by id). */
+export type DiscussRunsAs = { state: "pending" } | { state: "refused"; text: string } | { state: "user"; userId: string; name: string };
+
+/**
+ * Discuss v3 P1: the «Runs as» user for a view. `sendUser` is what the send
+ * names (`sendUserOf`, rule R2); when it names none the engine runs the turn
+ * as the user the read resolved (`d.userId`, the bot's default user). Pending
+ * while no read has named the user or refused (`whoKnown`). The name is the
+ * read's when it is the read's user, else from the users the read listed,
+ * else the id: a default user who is not listed has no /chat name.
+ */
+export function discussRunsAs(d: DiscussionView | null, sendUser: string | null): DiscussRunsAs {
+  if (!d) return { state: "pending" };
+  const id = sendUser ?? d.userId ?? null;
+  if (!d.whoKnown || !id) return d.whoRefusal ? { state: "refused", text: d.whoRefusal } : { state: "pending" };
+  const name = (id === d.userId ? d.userName : null) ?? d.users?.find((u) => u.id === id)?.name ?? id;
+  return { state: "user", userId: id, name };
+}
+
+/** A user's name as the view knows it, by the same rule as
+ *  {@link discussRunsAs}: the read's name for its user, else the users it
+ *  listed, else the id once a read named the user; null before (not known yet). */
+export function discussUserName(d: DiscussionView | null, id: string): string | null {
+  if (!d) return null;
+  return (id === d.userId ? d.userName : null) ?? d.users?.find((u) => u.id === id)?.name ?? (d.whoKnown ? id : null);
+}
+
 /** The «as <name> ▾» button in the tab's bar: the thread's user by name, a
  *  button only when the reader may switch; empty while no name is known. */
 export function discussUserButtonHtml(d: DiscussionView | null, blockedWhy: string | null = null): string {
@@ -595,6 +640,7 @@ export function applyDiscussFrame(t: DiscussTurnView, event: string, data: Recor
       if (typeof data.seq === "number") t.seq = data.seq;
       if (typeof data.model === "string" && data.model) t.model = data.model;
       if (typeof data.connector === "string" && data.connector) t.connector = data.connector;
+      if (typeof data.userId === "string" && data.userId) t.userId = data.userId;
       t.state = "running";
       return typeof data.discussionId === "string" ? { discussionId: data.discussionId } : {};
     case "status":

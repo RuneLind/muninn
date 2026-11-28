@@ -49,7 +49,7 @@ import path from "node:path";
 import type { Config } from "../config.ts";
 import { resolveServingProfile } from "../config.ts";
 import { getLog } from "../logging.ts";
-import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig, type ConnectorType } from "../bots/config.ts";
+import { discoverAllBots, resolveWikiSynthesisBot, wikiSynthesisInputsKey, type BotConfig, type ConnectorType } from "../bots/config.ts";
 import { executeOneShot } from "../ai/one-shot.ts";
 import { toolSurfaceBlocker, type ToolSurface } from "../ai/tool-surface.ts";
 import { snapshotRootDir } from "../ai/agent-cwd.ts";
@@ -105,7 +105,7 @@ import { realGhCheckDeps, type GhCheckDeps } from "./work-map/gh-check.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "./plan-card.ts";
 import { planCardFromOutcome, runPlanCard } from "./plan-card-run.ts";
 import { getWikiRegistry } from "./registry-memo.ts";
-import { botWikis, resolveWikiRequest } from "./registry.ts";
+import { botWikis, resolveWikiRequest, type WikiRegistryEntry } from "./registry.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "./readonly.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot, type WikiIndex } from "./store.ts";
 import { discussToolLine } from "./discuss-tool-line.ts";
@@ -205,6 +205,78 @@ export function startDiscussTurnSweep(close: typeof closeAbandonedDiscussTurns =
 export function stopDiscussTurnSweep(): void {
   if (sweepTimer) clearInterval(sweepTimer);
   sweepTimer = null;
+}
+
+/** The model a Discuss turn is asked to run on: the bot's, else the
+ *  instance's. One function for the engine's `turn` frame and the reader's
+ *  «Runs as» line (Discuss v3 P1), so the two cannot disagree. */
+export function discussPlannedModel(bot: Pick<BotConfig, "model">, config: Pick<Config, "claudeModel">): string | null {
+  return bot.model ?? config.claudeModel ?? null;
+}
+
+/** The bot Discuss runs on for a wiki, by the thread read's rule: a pinned
+ *  wiki runs on its pin or on nothing (Ask's resolver falls back; Discuss
+ *  refuses `no-bot`). Null when no bot answers. */
+export function resolveDiscussBot(entry: WikiRegistryEntry | undefined, bots: BotConfig[]): { bot: BotConfig; origin: "pinned" | "owner" | "fallback" } | null {
+  const { bot, origin } = resolveWikiSynthesisBot(entry, bots);
+  if (!bot || (entry?.synthesisBot && origin !== "pinned")) return null;
+  return { bot, origin };
+}
+
+/** Who answers a Discuss turn on this wiki, for the reader's tooltip and who
+ *  box: the bot, where it comes from, its connector and planned model. */
+export interface DiscussWho {
+  bot: string;
+  origin: "pinned" | "owner" | "fallback";
+  connector: ConnectorType;
+  model: string | null;
+}
+
+export function discussWhoFor(entry: WikiRegistryEntry | undefined, bots: BotConfig[], config: Pick<Config, "claudeModel">): DiscussWho | null {
+  return whoOf(resolveDiscussBot(entry, bots), config);
+}
+
+function whoOf(hit: { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null, config: Pick<Config, "claudeModel">): DiscussWho | null {
+  if (!hit) return null;
+  return { bot: hit.bot.name, origin: hit.origin, connector: hit.bot.connector ?? "claude-cli", model: discussPlannedModel(hit.bot, config) };
+}
+
+/** The fields of a bot the reader's who line and the thread read use. */
+export type DiscussBotRef = Pick<BotConfig, "name" | "connector" | "model">;
+
+/** Per wiki entry, the last {@link resolveDiscussBot} answer over
+ *  `discoverAllBots()`, valid while `wikiSynthesisInputsKey()` is unchanged. */
+let botHereInputs: string | null = null;
+const botHere = new Map<string, { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null>();
+
+/**
+ * {@link resolveDiscussBot} over the discovered bots, memoized for the reads a
+ * page navigation makes (the page JSON's `discussWho`, the thread read). A
+ * navigation used to walk every bot folder, parse each config.json and, on a
+ * wiki pinned to a missing bot, log the resolver's warn — per page. The memo
+ * is dropped when `wikiSynthesisInputsKey()` changes (a bot folder or
+ * config.json added, removed or edited, `MUNINN_BOTS_DIR`, a RESEARCH_BOT /
+ * SUMMARIZER_BOT override or env), so a config edit shows on the next read;
+ * that check is a `readdir` and `stat`s, never a parse. A turn
+ * (`runDiscussTurn`) still discovers afresh.
+ */
+export function resolveDiscussBotHere(entry: WikiRegistryEntry | undefined): { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null {
+  const inputs = wikiSynthesisInputsKey();
+  if (inputs !== botHereInputs) {
+    botHere.clear();
+    botHereInputs = inputs;
+  }
+  const key = `${entry?.name ?? ""}\0${entry?.source ?? ""}\0${entry?.synthesisBot ?? ""}`;
+  if (botHere.has(key)) return botHere.get(key)!;
+  const hit = resolveDiscussBot(entry, discoverAllBots());
+  const ref = hit ? { bot: { name: hit.bot.name, connector: hit.bot.connector, model: hit.bot.model }, origin: hit.origin } : null;
+  botHere.set(key, ref);
+  return ref;
+}
+
+/** {@link discussWhoFor} through {@link resolveDiscussBotHere}. */
+export function discussWhoHere(entry: WikiRegistryEntry | undefined, config: Pick<Config, "claudeModel">): DiscussWho | null {
+  return whoOf(resolveDiscussBotHere(entry), config);
 }
 
 type SurfaceKind = "readSearch" | "mcpTools";
@@ -406,6 +478,18 @@ export interface StartedDiscussTurn {
   release(): void;
 }
 
+/**
+ * Discuss v3 P1 fix round 3 (the class check): would the engine take
+ * `userId` if a request posted it? `resolveUser`'s own rule: a posted id must
+ * be one of the bot's chat users. The one place that decides it, for every
+ * answer that names a user (both thread reads, the trace read and the `turn`
+ * frame), so the client never guesses it from `users` (empty on an
+ * authenticating instance) or from holding a thread.
+ */
+export function discussUserPostable(users: readonly { id: string }[], userId: string): boolean {
+  return users.some((u) => u.id === userId);
+}
+
 export interface DiscussEngine {
   start(req: DiscussRequest): Promise<DiscussRefusal | StartedDiscussTurn>;
   /** The thread's user for a page read (`GET /api/wiki/discuss/thread`): the
@@ -457,6 +541,8 @@ interface Prepared {
   location: unknown;
   userId: string;
   username: string | null;
+  /** {@link discussUserPostable} for `userId`: rides the `turn` frame. */
+  userPostable: boolean;
 }
 
 export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}): DiscussEngine {
@@ -476,8 +562,8 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
   // Read-only roots never get here (the egress prologue refuses them), so a miss may start the refresh.
   const defaultMentions = (input: MentionsInput) => buildMentions(input, { git, gh: (gh ??= realGhCheckDeps()), now: Date.now });
   let inflight = 0;
-  /** The model a turn is asked to run on: the bot's, else the instance's. */
-  const plannedModel = (p: Prepared): string | null => p.bot.model ?? config.claudeModel ?? null;
+  /** The model a turn is asked to run on (`discussPlannedModel`). */
+  const plannedModel = (p: Prepared): string | null => discussPlannedModel(p.bot, config);
 
   async function resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null; users: { id: string; name: string }[] } | DiscussRefusal> {
     const users = deps.chatUsers ? await deps.chatUsers(botName) : [];
@@ -587,12 +673,16 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     // (one /chat lists for the bot), else the bot's default chat user.
     let userId: string;
     let username: string | null = null;
-    if (req.threadUser) userId = req.threadUser;
-    else {
+    let userPostable: boolean;
+    if (req.threadUser) {
+      userId = req.threadUser;
+      userPostable = discussUserPostable(deps.chatUsers ? await deps.chatUsers(bot.name) : [], userId);
+    } else {
       const who = await resolveUser(bot.name, body.userId);
       if ("refused" in who) return who;
       userId = who.userId;
       username = who.username;
+      userPostable = discussUserPostable(who.users, userId);
     }
 
     const wikiName = entry?.name ?? "";
@@ -662,6 +752,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
       location,
       userId,
       username,
+      userPostable,
     };
   }
 
@@ -789,7 +880,7 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
         try {
           // The planned model rides the `turn` event: the first frame, before
           // the snapshot and card phases, so the reader sees it from the start.
-          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, seq: turn.seq, location: p.location, mode: p.mode, model: plannedModel(p), connector: p.connector });
+          emit("turn", { turnId: turn.id, discussionId: threadId, threadId, userId: p.userId, userName: p.username, userPostable: p.userPostable, seq: turn.seq, location: p.location, mode: p.mode, model: plannedModel(p), connector: p.connector });
           await runTurn(p, threadId, turn, emit, mirrored);
         } finally {
           clearInterval(beat);

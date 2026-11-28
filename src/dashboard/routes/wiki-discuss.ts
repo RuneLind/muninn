@@ -30,7 +30,7 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { getLog } from "../../logging.ts";
 import { authMode } from "../../auth/policy.ts";
-import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
+import { discoverAllBots } from "../../bots/config.ts";
 import {
   getDiscussTurn,
   listClosedThreadMessages,
@@ -47,7 +47,10 @@ import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
 import {
   createDiscussEngine,
+  discussUserPostable,
   parseDiscussBody,
+  resolveDiscussBot,
+  resolveDiscussBotHere,
   sharedDiscussEngine,
   TRACE_AUTH_REFUSAL,
   type DiscussEngine,
@@ -267,6 +270,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
   // Beside `userId`: `userName` (its /chat name), `userChoosable` and `users`
   // (the bot's /chat users, empty unless choosable), for the tab's «as <name> ▾».
+  // `?who=1` is the light read: those fields, `bot` and the live thread's id only.
   //
   // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
   // the Trace view): the thread and its messages; a trace has no closed list
@@ -284,11 +288,21 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const index = await getWikiIndex({ root: entry?.root });
       const meta = index?.resolveRelPath(relPathQ);
       if (!meta) return c.json({ error: `no wiki page for relPath "${relPathQ}"` }, 404);
-      const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
-      if (!bot || (entry?.synthesisBot && origin !== "pinned")) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
+      // Memoized when discovery is not injected: the light read runs on every
+      // page navigation (`resolveDiscussBotHere`).
+      const bot = (deps.bots ? resolveDiscussBot(entry, deps.bots()) : resolveDiscussBotHere(entry))?.bot;
+      if (!bot) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
       const who = await engine.resolveUser(bot.name, postedUser || undefined);
       if ("refused" in who) return c.json(who.body, who.status);
       const wikiName = entry?.name ?? "";
+      // The light read (Discuss v3 P1): the user fields only (`userPostable`
+      // among them, as on the full read), for the reader's «Runs as» line
+      // before any turn, and the live thread's id alone (no messages, closed
+      // list or one-shot turns).
+      if (c.req.query("who") === "1") {
+        const live = await (deps.threads?.live ?? getLiveWikiThread)(who.userId, bot.name, wikiName, meta.relPath);
+        return c.json({ userId: who.userId, ...whoFields(who), thread: live ? { id: live.id } : null, bot: bot.name });
+      }
       const thread = await getLiveWikiThread(who.userId, bot.name, wikiName, meta.relPath);
       const [messages, closed, closedTotal, oneShot] = await Promise.all([
         thread ? listThreadMessagesWithTurns(thread.id) : Promise.resolve([]),
@@ -322,12 +336,15 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     }
   });
 
-  /** The thread's user by name, and whether the reader may choose another:
-   *  only with `MUNINN_AUTH=off`, where the pane's `userId` picks the thread.
-   *  On an authenticating instance no user list is sent and no picker shows. */
-  function whoFields(who: { username: string | null; users: { id: string; name: string }[] }): { userName: string | null; userChoosable: boolean; users: { id: string; name: string }[] } {
+  /** The thread's user by name, whether the engine would take that id if it
+   *  were posted (`userPostable`, from `resolveUser`'s own list whatever the
+   *  auth mode: the client's only source for posting it), and whether the
+   *  reader may choose another: only with `MUNINN_AUTH=off`, where the pane's
+   *  `userId` picks the thread. On an authenticating instance no user list is
+   *  sent and no picker shows. */
+  function whoFields(who: { userId: string; username: string | null; users: { id: string; name: string }[] }): { userName: string | null; userPostable: boolean; userChoosable: boolean; users: { id: string; name: string }[] } {
     const choosable = (deps.authMode ?? authMode)() === "off";
-    return { userName: who.username, userChoosable: choosable, users: choosable ? who.users : [] };
+    return { userName: who.username, userPostable: discussUserPostable(who.users, who.userId), userChoosable: choosable, users: choosable ? who.users : [] };
   }
 
   async function traceThreadRead(c: Context, raw: string): Promise<Response> {
@@ -338,8 +355,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     try {
       const { entry, unknownWiki, wiki } = resolveWikiRequest(getWikiRegistry(), c.req.query("wiki"), undefined, process.env.WIKI_DIR);
       if (unknownWiki) return c.json({ error: `no wiki configured for "${wiki || "(none)"}"` }, 404);
-      const { bot, origin } = resolveWikiSynthesisBot(entry, (deps.bots ?? discoverAllBots)());
-      if (!bot || (entry?.synthesisBot && origin !== "pinned")) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
+      const bot = resolveDiscussBot(entry, (deps.bots ?? discoverAllBots)())?.bot;
+      if (!bot) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
       const postedUser = c.req.query("userId");
       const who = await engine.resolveUser(bot.name, postedUser || undefined);
       if ("refused" in who) return c.json(who.body, who.status);

@@ -51,7 +51,7 @@
  * points at an empty temp dir so no user settings reach it.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -60,7 +60,8 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
-import { DISCUSS_HANDOFF_PANEL_ID, DISCUSS_HANDOFF_SEL_BTN_ID } from "../src/dashboard/views/components/wiki-discuss-handoff.ts";
+import { DISCUSS_HANDOFF_PANEL_ID } from "../src/dashboard/views/components/wiki-discuss-handoff.ts";
+import { SEL_HANDOFF_BTN_ID } from "../src/dashboard/views/components/wiki-selection-menu-model.ts";
 
 const PORT = e2ePort("wiki-discuss-tab");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -319,9 +320,29 @@ async function selectText(page: Page, text: string, nth = 0): Promise<void> {
   );
 }
 
+/** The passage control for the live selection: the selection bar's item
+ *  since Discuss v3 P1, shown on the article's mouseup (a script selection
+ *  dispatches none of its own). */
+async function passageControl(page: Page): Promise<Locator> {
+  await page.evaluate(() => {
+    // A reader selects what is on screen: the bar hides while its selection is scrolled away.
+    const r = getSelection()!.getRangeAt(0);
+    // An inner scroller (a results table, a wide table) first, then the pane.
+    (r.startContainer.nodeType === 1 ? (r.startContainer as Element) : r.startContainer.parentElement)!.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const wrapEl = document.getElementById("articleWrap")!;
+    const box = r.getBoundingClientRect();
+    const pane = wrapEl.getBoundingClientRect();
+    if (box.bottom > pane.bottom || box.top < pane.top) wrapEl.scrollTop += box.top - pane.top - pane.height / 3;
+    document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  });
+  const btn = page.locator(`#wikiSelBar #${SEL_HANDOFF_BTN_ID}`);
+  await expect(btn).toBeVisible();
+  return btn;
+}
+
 /** «Ask here» on the live selection; resolves when turn `seq` is done. */
 async function askHere(page: Page, question: string, seq: number): Promise<void> {
-  await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+  await (await passageControl(page)).click();
   const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
   await expect(panel).toBeVisible();
   await panel.locator("textarea.wiki-handoff-q").fill(question);
@@ -450,10 +471,11 @@ test.describe("Wiki reader: the Discuss tab", () => {
     await expect(page.locator("#wikiChatOpt")).toBeHidden();
     await page.locator('[data-conntab="conn"]').click();
 
-    // Select the bullet; the selection control opens P1's panel with «Ask here».
+    // Select the bullet; the selection bar's passage item opens P1's panel with «Ask here».
     await selectBullet(page);
-    const selBtn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
-    await expect(selBtn).toBeVisible();
+    const selBtn = await passageControl(page);
+    // No handoff on this wiki: the wiki agent's label.
+    await expect(selBtn).toHaveText("💬 Ask about this");
     await selBtn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel).toBeVisible();
@@ -810,7 +832,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
     test.setTimeout(120_000);
     await openPage(page, WIKI, OTHER_REL);
     await selectText(page, "Nothing here.");
-    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    await (await passageControl(page)).click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await panel.locator("textarea.wiki-handoff-q").fill("What is here?");
     // The stream is held after its first delta, so the turn still runs when the press is released.
@@ -972,7 +994,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
     // No passage control either: the wiki has no handoff, and the agent is off here.
     await selectBullet(page);
     await page.waitForTimeout(200);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toHaveCount(0);
     // Forced visible, the tab's controls still send nothing: click, mousedown, Enter.
     await page.evaluate(() => {
       document.querySelector<HTMLElement>('[data-conntab="discuss"]')!.hidden = false;

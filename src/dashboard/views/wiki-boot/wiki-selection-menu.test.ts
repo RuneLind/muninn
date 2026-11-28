@@ -53,16 +53,20 @@
  *   replaces it, on the page or while out for a render, and its drop hook
  *   aborts its stream at once; while out for a render of its own page it is
  *   live (`inlineCardLive`), so a frame then neither aborts nor is lost.
+ * - Discuss v3 P1 fix round 2 batch 3 (mutants earlier rounds left alive): the
+ *   menu hides the who box, asks again for a light read that got no answer and
+ *   names the user once a read lands; a touch selection that settles under the
+ *   long-press's menu leaves the menu, and one that collapsed unseen is forgotten.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { DISCUSS_TAB, discussRunsAsHere, initDiscussTab, pickDiscussUser, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { DISCUSS_WAITING_MS, DISCUSS_WAITING_TEXT, LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
-import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
+import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, TOUCH_SETTLE_MS, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
 import { inlineCardHtml } from "../components/wiki-selection-menu-model.ts";
 import { initKeyTrace, openTrace } from "../components/wiki-key-trace.ts";
 
@@ -88,6 +92,8 @@ let traceReadSignal: AbortSignal | null = null;
 let close: (() => void) | null = null;
 /** While set, a Discuss POST has no response (no headers) until it settles. */
 let postGate: Promise<void> | null = null;
+/** While set, a Discuss POST is answered with it instead of a stream (a refusal). */
+let postAnswer: (() => Response) | null = null;
 /** Every tab the shell was asked to show. */
 const switched: string[] = [];
 /** The pages rendered again after an Apply. */
@@ -180,6 +186,7 @@ beforeAll(() => {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       postSignal = init.signal ?? null;
       if (postGate) await postGate;
+      if (postAnswer) return postAnswer();
       const enc = new TextEncoder();
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
@@ -1848,46 +1855,163 @@ test("12c: a new inline card while the Trace card is out for a render: the held 
   }
 });
 
-test("PR 913 F4 + CI: a turn card's sub line is set once, when the card is placed: a later thread read or a switch never repaints it (no layout shift)", async () => {
+test("PR 913 F4 + CI, Discuss v3 P1: a turn card's head names the «Runs as» user; placed while the read is pending it holds «…» and is filled once; no turn frame, later read or pick repaints it", async () => {
   discussWiki = "w-owner";
-  const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
-  threadRead = (url) => {
-    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
-    return json({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-owner", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
-  };
+  const users = [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }];
+  let releaseWho: () => void = () => {};
+  const whoHeld = new Promise<void>((r) => (releaseWho = r));
+  let releaseFull: () => void = () => {};
+  const fullHeld = new Promise<void>((r) => (releaseFull = r));
+  const body = (userId: string) => ({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-owner", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  threadRead = ((url: string) => {
+    const q = new URL(url, "http://x").searchParams;
+    const userId = q.get("userId") ?? "u1";
+    // Both reads held: the card is placed while neither has landed.
+    return (q.get("who") === "1" ? whoHeld : fullHeld).then(() => json(body(userId)));
+  }) as unknown as (url: string) => Response;
   try {
     renderPage();
     await selectText(NIGHT);
     act(document.getElementById("wikiExplainBtn")!);
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
+    const sub = () => card.querySelector(".wiki-sel-card-sub")!.textContent;
+    expect(sub()).toBe("· a turn in …'s discussion of this page");
+    // The turn frame names the user: still «…» (no repaint on `turn`).
+    push!("turn", { turnId: "owner-1", seq: 1, discussionId: "thread-kari", userId: "u1" });
     await settle();
-    push!("turn", { turnId: "owner-1", seq: 1, discussionId: "thread-popp", userId: "u1" });
+    expect(sub()).toBe("· a turn in …'s discussion of this page");
+    // The read lands: filled once, the same element.
+    const subEl = card.querySelector(".wiki-sel-card-sub");
+    releaseFull();
+    releaseWho();
+    await settle();
+    expect(sub()).toBe("· a turn in Kari's discussion of this page");
+    expect(card.querySelector(".wiki-sel-card-sub") === subEl).toBe(true);
     push!("done", { answer: "ok", proposedEdit: null });
     close!();
     await settle();
-    // Placed before the thread read named the user: it keeps the plain sub line.
-    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')!;
-    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
-    // Placed after it: named.
-    await selectText("Check the berth list.");
-    act(document.getElementById("wikiExplainBtn")!);
-    await settle();
-    const named = Array.from(document.querySelectorAll('#articleWrap .wiki-sel-card[data-sel-card="explain"]')).find((c) => c !== card)!;
-    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
-    push!("turn", { turnId: "owner-2", seq: 2, discussionId: "thread-popp", userId: "u1" });
-    push!("done", { answer: "ok too", proposedEdit: null });
-    close!();
-    await settle();
-    // «as Popp ▾» → Rune: the page's discussion is Rune's now, the card's turn is still Popp's.
+    // «as Kari ▾» → Ola: the card's turn is still Kari's, never repainted.
     (document.querySelector("#discussBody [data-discuss-as]") as HTMLButtonElement).click();
     document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "u2";
     (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
     await settle();
-    expect(document.querySelector("#discussBody [data-discuss-as]")!.textContent).toBe("as Rune ▾");
-    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in this page's discussion");
-    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Popp's discussion of this page");
+    expect(document.querySelector("#discussBody [data-discuss-as]")!.textContent).toBe("as Ola ▾");
+    expect(sub()).toBe("· a turn in Kari's discussion of this page");
+    // A card placed now names the picked user from the moment it is placed.
+    await selectText("Check the berth list.");
+    act(document.getElementById("wikiExplainBtn")!);
+    const named = Array.from(document.querySelectorAll('#articleWrap .wiki-sel-card[data-sel-card="explain"]')).find((c) => c !== card)!;
+    expect(named.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Ola's discussion of this page");
+    expect(posts.at(-1)!.userId).toBe("u2");
+    push!("turn", { turnId: "owner-2", seq: 1, discussionId: "thread-ola", userId: "u2" });
+    push!("done", { answer: "ok too", proposedEdit: null });
+    close!();
+    await settle();
+  } finally {
+    releaseWho();
+    releaseFull();
+    discussWiki = "w";
+    threadRead = null;
+  }
+});
+
+test("Discuss v3 P1: Explain's tooltip names the user and the bot's model before any POST; «Change…» opens the who box (a group, not a dialog); a pick there closes the open turn card, and a pick while a turn runs is refused", async () => {
+  discussWiki = "w-who";
+  const users = [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }];
+  localStorage.setItem("muninn-discuss-bot-w-who", "b-who");
+  localStorage.setItem("muninn-discuss-user-b-who", "u2");
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
+    return json({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-who", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  };
+  const who = { bot: "b-who", origin: "pinned", connector: "copilot-sdk", model: "claude-sonnet-5.5" };
+  try {
+    const before = posts.length;
+    document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${NIGHT}<br><br>${EDIT_OLD}<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+    setDiscussAgentEnabled(true);
+    setSelectionMenuPage({ mentions: true, keyKinds: [{ name: "case", pattern: "MEL-\\d+" }], discussWho: who });
+    await settle();
+    // The page render read the user (the light read), as the kept user.
+    expect(reads.some((u) => u.includes("who=1") && u.includes("userId=u2"))).toBe(true);
+    await selectText(NIGHT);
+    const explain = document.getElementById("wikiExplainBtn")!;
+    expect(explain.hasAttribute("title")).toBe(false);
+    explain.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    const tip = document.getElementById("wikiSelTip")!;
+    expect(tip.style.display).toBe("block");
+    expect(tip.textContent).toContain("What this means, why it is here and what led to it");
+    expect(tip.textContent).toContain("Runs as Ola · claude-sonnet-5.5 · copilot-sdk · Change…");
+    expect(posts.length).toBe(before);
+    // «Change…»: its press keeps the selection; its click opens the box.
+    const change = tip.querySelector("[data-selwho-open]")!;
+    const pressed = new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 });
+    change.dispatchEvent(pressed);
+    expect(pressed.defaultPrevented).toBe(true);
+    (change as HTMLButtonElement).click();
+    const box = document.getElementById("wikiSelWho")!;
+    expect(box.style.display).toBe("block");
+    expect(box.getAttribute("role")).toBe("group");
+    expect(box.textContent).toContain("b-who");
+    expect(box.textContent).toContain("The connector is fixed on this wiki");
+    expect(box.querySelector('a[href="/models?bot=b-who"]')).toBeTruthy();
+    expect(box.querySelector('[data-selwho-user="u2"]')!.getAttribute("aria-pressed")).toBe("true");
+    // An Explain card, then the pick closes it and the next turn is Kari's.
+    act(explain);
+    await settle();
+    expect(posts.at(-1)!.userId).toBe("u2");
+    const card = document.querySelector('#articleWrap .wiki-sel-card[data-sel-turn]')!;
+    expect(card.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Ola's discussion of this page");
+    // While the turn runs a pick is refused, said in the box.
+    await selectText("Check the berth list.");
+    document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    (document.querySelector("#wikiSelTip [data-selwho-open]") as HTMLButtonElement).click();
+    (document.querySelector('#wikiSelWho [data-selwho-user="u1"]') as HTMLButtonElement).click();
+    expect(document.querySelector("#wikiSelWho [role=alert]")!.textContent).toContain("A turn is still running");
+    expect(localStorage.getItem("muninn-discuss-user-b-who")).toBe("u2");
+    expect(card.isConnected).toBe(true);
+    push!("turn", { turnId: "who-1", seq: 1, discussionId: "thread-ola", userId: "u2" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    (document.querySelector('#wikiSelWho [data-selwho-user="u1"]') as HTMLButtonElement).click();
+    await settle();
+    expect(localStorage.getItem("muninn-discuss-user-b-who")).toBe("u1");
+    expect(card.isConnected).toBe(false);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.userId).toBe("u1");
+    const next = document.querySelector('#articleWrap .wiki-sel-card[data-sel-turn]')!;
+    expect(next.querySelector(".wiki-sel-card-sub")!.textContent).toBe("· a turn in Kari's discussion of this page");
+    push!("turn", { turnId: "who-2", seq: 1, discussionId: "thread-kari", userId: "u1" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
   } finally {
     discussWiki = "w";
     threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("Discuss v3 P1: a wiki pinned to a missing bot: the tooltip says no bot answers, and Explain is the classic card", async () => {
+  discussWiki = "w-ghost";
+  try {
+    renderPage();
+    setSelectionMenuPage({ mentions: true, discussWho: null });
+    await selectText(NIGHT);
+    document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    const tip = document.getElementById("wikiSelTip")!;
+    expect(tip.textContent).toContain("No bot answers here");
+    expect(tip.querySelector("[data-selwho-open]")).toBeNull();
+    const before = { posts: posts.length, explain: explainAsked.length };
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.length).toBe(before.posts);
+    expect(explainAsked.length).toBe(before.explain + 1);
+  } finally {
+    discussWiki = "w";
   }
 });
 
@@ -1946,5 +2070,706 @@ test("a send held back past 5 s: the inline card and the pane both say it is sti
     Object.defineProperty(globalThis, "clearTimeout", ct);
     postGate = null;
     discussWiki = "w";
+  }
+});
+
+// Discuss v3 P1 fix round 1 batch 1: the light read (`?who=1`) keeps no user,
+// decides `userListed` by the full read's one rule, follows the full read's
+// re-reads with its `holds` guard, and a reset view reads it again.
+const whoBody = (userId: string, extra: Record<string, unknown> = {}) => ({ userId, userName: userId === "u2" ? "Ola" : userId === "u1" ? "Kari" : null, userPostable: userId === "u1" || userId === "u2", userChoosable: true, users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }], thread: null, ...extra });
+const fullExtra = { messages: [], closed: [], closedTotal: 0, oneShot: [] };
+
+test("fix round 1 F1: a page render's light read keeps no user: the bot is learned, the kept user stays unset, «Runs as» names the read's user", async () => {
+  discussWiki = "w-k1";
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    // `userListed: true` as the light read's server sent it before this fix (the client now ignores it): u1 is listed either way.
+    return json({ ...whoBody(new URL(url, "http://x").searchParams.get("userId") ?? "u1", { bot: "b-k1", userListed: true }), ...(url.includes("who=1") ? {} : fullExtra) });
+  };
+  try {
+    renderPage();
+    await settle();
+    expect(reads.filter((u) => u.includes("who=1")).length).toBe(1);
+    expect(localStorage.getItem("muninn-discuss-bot-w-k1")).toBe("b-k1");
+    expect(localStorage.getItem("muninn-discuss-user-b-k1")).toBeNull();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u1", name: "Kari" });
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F2: the light read's `userListed` is the full read's rule: a default user holding the page's thread but not listed is not sent (fix round 2), nor one an authenticating instance names (no `users`)", async () => {
+  let releaseFull: () => void = () => {};
+  const fullHeld = new Promise<void>((r) => (releaseFull = r));
+  try {
+    // (a) The default user u9 is not in `users` but holds the page's live thread.
+    discussWiki = "w-l1";
+    threadRead = ((url: string) => {
+      if (!url.includes("who=1")) return fullHeld.then(() => json({ error: "held" }, 503));
+      return json({ userId: "u9", userName: null, userChoosable: true, users: [{ id: "u1", name: "Kari" }], thread: { id: "t9" }, bot: "b-l1" });
+    }) as unknown as (url: string) => Response;
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.userId).toBeUndefined();
+    push!("turn", { turnId: "l1-1", seq: 1, discussionId: "t9", userId: "u9" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    // (b) MUNINN_AUTH ≠ off: no `users`, no thread; even a body claiming
+    // `userListed` (the old light read's server rule) is not taken.
+    discussWiki = "w-l2";
+    threadRead = ((url: string) => {
+      if (!url.includes("who=1")) return fullHeld.then(() => json({ error: "held" }, 503));
+      return json({ userId: "kari", userName: "Kari", userChoosable: false, users: [], thread: null, userListed: true, bot: "b-l2" });
+    }) as unknown as (url: string) => Response;
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.wiki).toBe("w-l2");
+    expect(posts.at(-1)!.userId).toBeUndefined();
+    push!("turn", { turnId: "l2-1", seq: 1, discussionId: "t-kari", userId: "kari" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+  } finally {
+    releaseFull();
+    await settle();
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F3a: a view another page's pick resets reads its light read again on its next render, as the picked user", async () => {
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    return json({ ...whoBody(new URL(url, "http://x").searchParams.get("userId") ?? "u1", { bot: "b-r" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  };
+  const lightFor = (wiki: string) => reads.filter((u) => u.includes("who=1") && new URL(u, "http://x").searchParams.get("wiki") === wiki);
+  try {
+    discussWiki = "w-r1";
+    renderPage();
+    await settle();
+    expect(lightFor("w-r1").length).toBe(1);
+    discussWiki = "w-r2";
+    renderPage();
+    await settle();
+    expect(pickDiscussUser("u2")).toEqual({ ok: true });
+    await settle();
+    discussWiki = "w-r1";
+    renderPage();
+    await settle();
+    expect(lightFor("w-r1").length).toBe(2);
+    expect(new URL(lightFor("w-r1")[1]!, "http://x").searchParams.get("userId")).toBe("u2");
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u2", name: "Ola" });
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F3b: a view holding a thread whose light read is refused unknown-user does not read again as the default: its user and thread stay paired", async () => {
+  discussWiki = "w-h";
+  localStorage.setItem("muninn-discuss-bot-w-h", "b-h");
+  localStorage.setItem("muninn-discuss-user-b-h", "u7");
+  const reads: string[] = [];
+  let light = 0;
+  threadRead = (url: string) => {
+    reads.push(url);
+    if (!url.includes("who=1")) return json({ error: "down" }, 503);
+    light++;
+    if (light === 1) return json({ error: "down" }, 503);
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (userId === "u7") return json({ error: 'the user "u7" is not one of b-h\'s chat users', reason: "unknown-user", users: [{ id: "u1", name: "Kari" }] }, 422);
+    return json({ ...whoBody(userId ?? "u1", { bot: "b-h" }) });
+  };
+  try {
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.userId).toBe("u7");
+    push!("turn", { turnId: "h-1", seq: 1, discussionId: "t-u7", userId: "u7", userPostable: true });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    const mark = reads.length;
+    renderPage();
+    await settle();
+    const after = reads.slice(mark).filter((u) => u.includes("who=1"));
+    expect(after.map((u) => new URL(u, "http://x").searchParams.get("userId"))).toEqual(["u7"]);
+    await selectText("Check the berth list.");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect({ userId: posts.at(-1)!.userId, discussionId: posts.at(-1)!.discussionId }).toEqual({ userId: "u7", discussionId: "t-u7" });
+    push!("turn", { turnId: "h-2", seq: 2, discussionId: "t-u7", userId: "u7" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+// Discuss v3 P1 fix round 1 batch 2: a refused light read never sticks in a
+// card head or the tooltip; a `no-user` refusal's users reach the who box and
+// a pending read never says «Not choosable»; the who box follows the bar and
+// Escape closes it while the bar is hidden.
+const WHO_P1 = { bot: "b-f", origin: "owner", connector: "copilot-sdk", model: "claude-sonnet-5.5" };
+
+/** The page renders with the bar's who line (`discussWho`). */
+function renderWhoPage(): void {
+  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-article"><h2>Brief</h2>${NIGHT}<br><br>${EDIT_OLD}<h2>Oppfølging</h2><ul><li>Check the berth list.</li></ul></div>`;
+  setDiscussAgentEnabled(true);
+  setSelectionMenuPage({ mentions: true, keyKinds: [{ name: "case", pattern: "MEL-\\d+" }], discussWho: WHO_P1 });
+}
+
+/** A fetch that never reached the server: `getThread` reads it as status 0. */
+const unanswered = () => Promise.reject(new TypeError("Failed to fetch")) as unknown as Response;
+const escape = () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+const lastTurnCard = () => Array.from(document.querySelectorAll('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]')).at(-1)!;
+async function finishWhoTurn(id: string, userId: string): Promise<void> {
+  push!("turn", { turnId: id, seq: 1, discussionId: `t-${id}`, userId });
+  push!("done", { answer: "ok", proposedEdit: null });
+  close!();
+  await settle();
+}
+async function openWho(): Promise<HTMLElement> {
+  document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+  (document.querySelector("#wikiSelTip [data-selwho-open]") as HTMLButtonElement).click();
+  await settle();
+  return document.getElementById("wikiSelWho")!;
+}
+function resetWho(): void {
+  escape();
+  discussWiki = "w";
+  threadRead = null;
+  localStorage.clear();
+}
+
+test("fix round 1 batch 2 F1a, fix round 3: a light read that got no answer: the refusal leaves the card head when the full read answers, and the head is filled once with the user the turn's own frame names (the POST carried no id)", async () => {
+  let releaseFull: () => void = () => {};
+  const fullHeld = new Promise<void>((r) => (releaseFull = r));
+  discussWiki = "w-f1a";
+  threadRead = ((url: string) => {
+    if (url.includes("who=1")) return unanswered();
+    return fullHeld.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...fullExtra }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    expect(discussRunsAsHere()).toEqual({ state: "refused", text: "the server did not answer" });
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(subEl.textContent).toBe("· the server did not answer");
+    releaseFull();
+    await settle();
+    expect(card.querySelector(".wiki-sel-card-sub") === subEl).toBe(true);
+    // The read answered: its refusal is gone, but «Runs as» never names the turn (fix round 3).
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await finishWhoTurn("f1a", "u1");
+    expect(subEl.textContent).toBe("· a turn in Kari's discussion of this page");
+  } finally {
+    releaseFull();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 1 batch 2 F1b: a light read that got no answer is read again when the reader hovers Explain, and the tooltip names the user", async () => {
+  discussWiki = "w-f1b";
+  let light = 0;
+  threadRead = ((url: string) => {
+    if (!url.includes("who=1")) return json({ error: "no full read here" }, 500);
+    light++;
+    return light === 1 ? unanswered() : json(whoBody("u2", { bot: "b-f" }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    expect(light).toBe(1);
+    await selectText(NIGHT);
+    document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(light).toBe(2);
+    expect(document.getElementById("wikiSelTip")!.textContent).toContain("Runs as Ola · claude-sonnet-5.5 · copilot-sdk");
+    // Read once it named the user: another hover reads nothing.
+    document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    await settle();
+    expect(light).toBe(2);
+  } finally {
+    resetWho();
+  }
+});
+
+test("fix round 1 batch 2 F1c: a card placed while the light read is pending, the turn's full read then refused: the head shows the refusal, and a later read naming Kari still fills it", async () => {
+  discussWiki = "w-f1c";
+  let releaseLight: () => void = () => {};
+  const lightHeld = new Promise<void>((r) => (releaseLight = r));
+  let full = 0;
+  threadRead = ((url: string) => {
+    if (url.includes("who=1")) return lightHeld.then(() => json(whoBody("u1", { bot: "b-f" })));
+    full++;
+    return json({ error: "down" }, 503);
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await settle();
+    expect(full).toBe(1);
+    expect(subEl.textContent).toBe("· down");
+    await finishWhoTurn("f1c", "u1");
+    // The first light read went stale (the full read started after it); the
+    // page renders again and its new light read names Kari.
+    releaseLight();
+    await settle();
+    expect(subEl.textContent).toBe("· down");
+    renderWhoPage();
+    await settle();
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-sub") === subEl).toBe(true);
+    expect(subEl.textContent).toBe("· a turn in Kari's discussion of this page");
+  } finally {
+    releaseLight();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 2 F1: a card whose POST was refused `no-user` says «not sent», and a pick in the Discuss tab afterwards never names the picked user in it", async () => {
+  discussWiki = "w-r2b2";
+  const noUser = () => json({ error: "pick the user this discussion belongs to: b-f has no default chat user", reason: "no-user", bot: "b-f", users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }] }, 422);
+  threadRead = (url: string) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    return userId ? json({ ...whoBody(userId, { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }) : noUser();
+  };
+  postAnswer = noUser;
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    await settle();
+    expect(posts.at(-1)!.userId).toBeUndefined();
+    // The POST was refused: the turn never ran as anyone.
+    expect(subEl.textContent).toBe("· not sent");
+    expect(card.hasAttribute("data-sel-who-pending")).toBe(false);
+    postAnswer = null;
+    // The refusal's picker in the Discuss tab (the path that leaves inline cards open).
+    document.querySelector<HTMLSelectElement>("#discussBody .wiki-discuss-user-select")!.value = "u2";
+    (document.querySelector("#discussBody [data-discuss-pick-user]") as HTMLButtonElement).click();
+    await settle();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u2", name: "Ola" });
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("This turn is no longer in the page's discussion.");
+    expect(subEl.textContent).toBe("· not sent");
+  } finally {
+    postAnswer = null;
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 2 F1: a pending card whose turn ends before the route names its user keeps the nameless line; a read naming Kari afterwards never fills it", async () => {
+  discussWiki = "w-r2b2-end";
+  let releaseReads: () => void = () => {};
+  const held = new Promise<void>((r) => (releaseReads = r));
+  threadRead = ((url: string) => held.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }))) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await settle();
+    // The stream closes with no frame: the turn ended, its user never named.
+    close!();
+    await settle();
+    expect(subEl.textContent).toBe("· a turn in this page's discussion");
+    releaseReads();
+    await settle();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u1", name: "Kari" });
+    expect(subEl.textContent).toBe("· a turn in this page's discussion");
+  } finally {
+    releaseReads();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 3: a pending card whose POST carried the kept user names that user once a read knows the name, though its turn ended before any `turn` frame", async () => {
+  discussWiki = "w-r3-sent";
+  localStorage.setItem("muninn-discuss-bot-w-r3-sent", "b-f");
+  localStorage.setItem("muninn-discuss-user-b-f", "u2");
+  let releaseReads: () => void = () => {};
+  const held = new Promise<void>((r) => (releaseReads = r));
+  threadRead = ((url: string) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
+    return held.then(() => json({ ...whoBody(userId, { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(posts.at(-1)!.userId).toBe("u2");
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await settle();
+    // The stream closes with no frame; the POST carried u2, so the head is u2's once named.
+    close!();
+    await settle();
+    releaseReads();
+    await settle();
+    expect(subEl.textContent).toBe("· a turn in Ola's discussion of this page");
+  } finally {
+    releaseReads();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 1 batch 2 F2a: «Change…» while the light read is pending never says «Not choosable»; the users appear when it lands", async () => {
+  discussWiki = "w-f2a";
+  let releaseLight: () => void = () => {};
+  const lightHeld = new Promise<void>((r) => (releaseLight = r));
+  threadRead = ((url: string) => lightHeld.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }))) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    const box = await openWho();
+    expect(box.style.display).toBe("block");
+    expect(box.textContent).not.toContain("Not choosable");
+    releaseLight();
+    await settle();
+    expect(box.querySelector('[data-selwho-user="u1"]')!.getAttribute("aria-pressed")).toBe("true");
+  } finally {
+    releaseLight();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 1 batch 2 F2b: a `no-user` light read: the who box offers the refusal's users, and a pick there reads as that user", async () => {
+  discussWiki = "w-f2b";
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (!userId) return json({ error: "pick the user this discussion belongs to: b-f has no default chat user", reason: "no-user", bot: "b-f", users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }] }, 422);
+    return json({ ...whoBody(userId, { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  };
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    const box = await openWho();
+    expect(box.textContent).not.toContain("Not choosable");
+    expect(Array.from(box.querySelectorAll("[data-selwho-user]")).map((b) => b.getAttribute("data-selwho-user"))).toEqual(["u1", "u2"]);
+    (box.querySelector('[data-selwho-user="u2"]') as HTMLButtonElement).click();
+    await settle();
+    expect(localStorage.getItem("muninn-discuss-user-b-f")).toBe("u2");
+    expect(reads.some((u) => !u.includes("who=1") && new URL(u, "http://x").searchParams.get("userId") === "u2")).toBe(true);
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u2", name: "Ola" });
+  } finally {
+    resetWho();
+  }
+});
+
+/** The selection's line on screen at `top` (happy-dom lays nothing out), and the bar's box where `placeBar` put it. */
+function layOut(getTop: () => number): () => void {
+  const proto = (globalThis as unknown as { Range: { prototype: { getClientRects: () => unknown } } }).Range.prototype;
+  const realRects = proto.getClientRects;
+  proto.getClientRects = () => [{ left: 40, right: 240, top: getTop(), bottom: getTop() + 20, width: 200, height: 20 }];
+  return () => void (proto.getClientRects = realRects);
+}
+function barBoxFromStyle(): void {
+  const bar = barEl();
+  (bar as unknown as { getBoundingClientRect: () => unknown }).getBoundingClientRect = () => {
+    const top = parseFloat(bar.style.top) || 0;
+    const left = parseFloat(bar.style.left) || 0;
+    return { left, top, bottom: top + 36, right: left + 320, width: 320, height: 36 };
+  };
+}
+const scrollArticle = async () => {
+  document.getElementById("articleWrap")!.dispatchEvent(new Event("scroll"));
+  await settle();
+};
+
+test("fix round 1 batch 2 F3a: the who box follows the bar when the selection moves, and hides with it when the selection leaves the pane", async () => {
+  discussWiki = "w-f3a";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  let selTop = 100;
+  const restore = layOut(() => selTop);
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    barBoxFromStyle();
+    const bar = barEl();
+    expect(bar.style.top).toBe("126px");
+    const box = await openWho();
+    expect(box.style.top).toBe("168px");
+    selTop = 300;
+    await scrollArticle();
+    expect(bar.style.top).toBe("326px");
+    expect(box.style.top).toBe("368px");
+    selTop = -200;
+    await scrollArticle();
+    expect(bar.style.visibility).toBe("hidden");
+    expect(box.style.visibility).toBe("hidden");
+    selTop = 100;
+    await scrollArticle();
+    expect(bar.style.visibility).toBe("");
+    expect(box.style.visibility).toBe("");
+    expect(box.style.top).toBe("168px");
+  } finally {
+    restore();
+    resetWho();
+  }
+});
+
+test("fix round 1 batch 2 F3b: Escape closes the who box while the bar is hidden (its selection scrolled out of the pane); the bar comes back without it", async () => {
+  discussWiki = "w-f3b";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  let selTop = 100;
+  const restore = layOut(() => selTop);
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    barBoxFromStyle();
+    const box = await openWho();
+    expect(box.style.display).toBe("block");
+    selTop = -200;
+    await scrollArticle();
+    expect(barEl().style.visibility).toBe("hidden");
+    escape();
+    expect(box.style.display).toBe("none");
+    selTop = 100;
+    await scrollArticle();
+    expect(barEl().style.visibility).toBe("");
+    expect(barEl().style.display).toBe("flex");
+    expect(box.style.display).toBe("none");
+  } finally {
+    restore();
+    resetWho();
+  }
+});
+
+// ── Fix round 1 batch 3 ─────────────────────────────────────────────────
+
+/** Select `text` as the keyboard does: no mouse event, so no bar. */
+function selectByKeys(text: string): void {
+  const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, 4);
+  for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+    const i = (t.textContent ?? "").indexOf(text);
+    if (i === -1) continue;
+    window.getSelection()!.setBaseAndExtent(t, i, t, i + text.length);
+    return;
+  }
+  throw new Error(text);
+}
+
+test("fix round 1 batch 3 K1: the keyboard menu names who Explain runs as and offers «Change…» to the arrow keys; it opens the who box with focus in it, and Escape puts focus back on «Change…»", async () => {
+  discussWiki = "w-k1";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  try {
+    renderWhoPage();
+    await settle();
+    selectByKeys(NIGHT);
+    expect(document.getElementById("wikiSelBar")?.style.display ?? "none").toBe("none");
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    const m = document.getElementById("wikiSelMenu")!;
+    expect(m.style.display).toBe("block");
+    expect(m.querySelector("[data-seltip-who]")?.textContent ?? null).toBe("Runs as Kari · claude-sonnet-5.5 · copilot-sdk");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selact")).toBe("explain");
+    // ↓ from Explain: «Change…», a menu item.
+    key(document.activeElement!, "ArrowDown");
+    const change = m.querySelector<HTMLElement>("[data-selwho-open]");
+    expect(change?.getAttribute("role") ?? null).toBe("menuitem");
+    expect(document.activeElement === change).toBe(true);
+    // Enter on a button is its click (detail 0).
+    change!.click();
+    await settle();
+    const box = document.getElementById("wikiSelWho")!;
+    expect(box.style.display).toBe("block");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selwho-user")).toBe("u1");
+    // Escape closes the box only: focus back on «Change…», the menu still open.
+    escape();
+    expect(box.style.display).toBe("none");
+    expect(m.style.display).toBe("block");
+    expect(document.activeElement === change).toBe(true);
+    key(document.activeElement!, "ArrowDown");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selact")).toBe("where");
+    escape();
+    expect(m.style.display).toBe("none");
+  } finally {
+    resetWho();
+  }
+});
+
+// ── Fix round 2 batch 3: mutants that survived earlier rounds ───────────
+
+/** A right-click on the selection's laid-out line (`layOut` puts it at 40–240 × top–top+20),
+ *  after the window in which a `contextmenu` is taken as a keyboard gesture's
+ *  echo (`KEY_MENU_MS`, 500 ms after an earlier test's ⇧F10) has passed. */
+async function rightClick(wait = true): Promise<MouseEvent> {
+  if (wait) await keyWindowPassed();
+  const top = 100;
+  const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: top + 10 });
+  document.querySelector(".wiki-article")!.dispatchEvent(ev);
+  return ev;
+}
+/** A touch press: the input a selection that settles counts as a long-press's. */
+const keyWindowPassed = () => new Promise((r) => setTimeout(r, 520));
+const touchDown = () => document.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "touch", bubbles: true }));
+/** A mouse press: back to mouse input, so no later selection settles as touch. */
+const mouseDown = () => document.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "mouse", bubbles: true }));
+const settleTouch = () => new Promise((r) => setTimeout(r, TOUCH_SETTLE_MS + 80));
+const menuEl = () => document.getElementById("wikiSelMenu");
+const shownNow = (el: HTMLElement | null) => !!el && el.style.display !== "none";
+
+test("fix round 2 batch 3: the right-click menu hides the who box the bar's «Change…» opened", async () => {
+  discussWiki = "w-b3-who";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  const restore = layOut(() => 100);
+  try {
+    renderWhoPage();
+    await settle();
+    await selectText(NIGHT);
+    const box = await openWho();
+    expect(box.style.display).toBe("block");
+    expect((await rightClick()).defaultPrevented).toBe(true);
+    expect(shownNow(menuEl())).toBe(true);
+    expect(box.style.display).toBe("none");
+  } finally {
+    restore();
+    escape();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: the menu opened while the light read is pending names the user once the read lands", async () => {
+  discussWiki = "w-b3-menuwho";
+  let releaseLight: () => void = () => {};
+  const lightHeld = new Promise<void>((r) => (releaseLight = r));
+  threadRead = ((url: string) => lightHeld.then(() => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }))) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    selectByKeys(NIGHT);
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    const line = () => menuEl()!.querySelector("#wikiSelMenuWho [data-seltip-who]")?.textContent ?? null;
+    expect(line()).toBe("Runs as … · claude-sonnet-5.5 · copilot-sdk");
+    releaseLight();
+    await settle();
+    expect(shownNow(menuEl())).toBe(true);
+    expect(line()).toBe("Runs as Kari · claude-sonnet-5.5 · copilot-sdk");
+  } finally {
+    releaseLight();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a light read that got no answer is read again when the menu opens (no hover), and the menu names the user", async () => {
+  discussWiki = "w-b3-retry";
+  let light = 0;
+  threadRead = ((url: string) => {
+    if (!url.includes("who=1")) return json({ error: "no full read here" }, 500);
+    light++;
+    return light === 1 ? unanswered() : json(whoBody("u2", { bot: "b-f" }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await settle();
+    expect(light).toBe(1);
+    selectByKeys(NIGHT);
+    // No bar and no tooltip: only the menu can ask again.
+    expect(document.getElementById("wikiSelBar")?.style.display ?? "none").toBe("none");
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    await settle();
+    expect(light).toBe(2);
+    expect(menuEl()!.querySelector("#wikiSelMenuWho [data-seltip-who]")?.textContent ?? null).toBe("Runs as Ola · claude-sonnet-5.5 · copilot-sdk");
+  } finally {
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a touch selection the long-press's menu opened for stays in the menu when it settles: no bar over it", async () => {
+  discussWiki = "w-b3-touchmenu";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  const restore = layOut(() => 100);
+  try {
+    renderWhoPage();
+    await settle();
+    await keyWindowPassed();
+    touchDown();
+    selectByKeys(NIGHT);
+    // The long-press's menu, before the selection settles.
+    expect((await rightClick(false)).defaultPrevented).toBe(true);
+    expect(shownNow(menuEl())).toBe(true);
+    await settleTouch();
+    expect(shownNow(menuEl())).toBe(true);
+    expect(shownNow(document.getElementById("wikiSelBar"))).toBe(false);
+  } finally {
+    mouseDown();
+    restore();
+    escape();
+    window.getSelection()!.removeAllRanges();
+    resetWho();
+  }
+});
+
+test("fix round 2 batch 3: a touch selection that collapsed unseen before it settled is forgotten: the same selection made again shows the bar", async () => {
+  discussWiki = "w-b3-collapse";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  try {
+    renderWhoPage();
+    await settle();
+    touchDown();
+    selectByKeys(NIGHT);
+    await settleTouch();
+    expect(shownNow(barEl())).toBe(true);
+    escape();
+    expect(shownNow(barEl())).toBe(false);
+    // Escape's keydown made the input a key's: touch again. Another selection,
+    // then collapsed in place: no `selectionchange` reports the collapse, so
+    // only the settle that follows can forget the first one.
+    touchDown();
+    selectByKeys(EDIT_OLD);
+    window.getSelection()!.getRangeAt(0).collapse(true);
+    expect(window.getSelection()!.isCollapsed).toBe(true);
+    await settleTouch();
+    selectByKeys(NIGHT);
+    await settleTouch();
+    expect(shownNow(barEl())).toBe(true);
+  } finally {
+    mouseDown();
+    escape();
+    window.getSelection()!.removeAllRanges();
+    resetWho();
   }
 });

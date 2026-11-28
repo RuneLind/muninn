@@ -557,6 +557,46 @@ export function resolveWikiSynthesisBot(
 }
 
 /**
+ * A key that changes whenever {@link resolveWikiSynthesisBot} over
+ * `discoverAllBots()` could answer differently for the same entry: the bots
+ * root, each bot folder (a CLAUDE.md or config.json added, removed or renamed
+ * in) and each `config.json`, each stamped by ctime and size (ctime moves on
+ * every content write, chmod and utimes, so a permission-only change or a
+ * write with its old mtime restored is seen too), plus the two role knobs the
+ * fallback reads (DB override, then env). Built from `readdir` and `stat`
+ * only: no config.json is read or parsed, so no discovery warn fires; a bad
+ * `MUNINN_BOTS_DIR` is warned by `resolveBotsDir`/`readBotsDirEntries`, once
+ * per value. For a memo over that resolution (the reader's who line, read on
+ * every page navigation); a caller that runs a turn still discovers afresh.
+ */
+export function wikiSynthesisInputsKey(): string {
+  const stamp = (p: string): string => {
+    try {
+      // Nanoseconds: Bun's `ctimeMs` is a whole millisecond, and a write, a
+      // chmod and a utimes inside one millisecond would share it.
+      const s = statSync(p, { bigint: true });
+      return `${s.ctimeNs}:${s.size}`;
+    } catch {
+      return "-";
+    }
+  };
+  const resolved = resolveBotsDir();
+  const parts: string[] = [
+    `research=${getRoleOverride("RESEARCH_BOT") ?? ""}|${process.env.RESEARCH_BOT ?? ""}`,
+    `summarizer=${getRoleOverride("SUMMARIZER_BOT") ?? ""}|${process.env.SUMMARIZER_BOT ?? ""}`,
+  ];
+  if (!existsSync(resolved)) return [...parts, `missing:${resolved}`].join("\n");
+  const { root, entries } = readBotsDirEntries(resolved);
+  parts.push(`${root}@${stamp(root)}`);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(root, entry.name);
+    parts.push(`${entry.name}@${stamp(dir)}/${stamp(join(dir, "config.json"))}`);
+  }
+  return parts.join("\n");
+}
+
+/**
  * Discovers bots that have both a CLAUDE.md and at least one platform token
  * (Telegram or Slack). Used for starting actual bot instances.
  */

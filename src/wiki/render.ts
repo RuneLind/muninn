@@ -490,6 +490,20 @@ export interface ReaderPayload {
    *  key chips classify with `classifyKey`, as the mentions route does.
    *  Absent on a wiki with none. */
   keyKinds?: { name: string; pattern: string }[];
+  /** Discuss v3 P1: who answers a Discuss turn here (the bot, where it comes
+   *  from, its connector and planned model), for the selection bar's «Runs
+   *  as» line and the who box. Present only with `discussAgent`; null when no
+   *  bot answers (a wiki pinned to a bot that is missing). Computed by the
+   *  page route, which may read bot config (this module may not). */
+  discussWho?: ReaderDiscussWho | null;
+}
+
+/** The page route's `discussWhoFor` answer, as the payload carries it. */
+export interface ReaderDiscussWho {
+  bot: string;
+  origin: "pinned" | "owner" | "fallback";
+  connector: string;
+  model: string | null;
 }
 
 export interface ViewerRoles {
@@ -515,9 +529,13 @@ export function readerPayload(
   /** Whether the mentions route answers here (Discuss v2 PR 5): registered
    *  with the tool half and `MUNINN_AUTH` off, computed by the caller. */
   mentionsRoute = false,
+  /** Discuss v3 P1: who answers here, computed by the caller (undefined: not
+   *  computed, the field stays out). Sent only where `discussAgent` holds. */
+  discussWho?: ReaderDiscussWho | null,
 ): ReaderPayload {
   const trackerProjects = [...new Set((readerConfig?.trackers ?? []).flatMap((t) => t.projects))];
   const keyKinds = (readerConfig?.keys ?? []).map((k) => ({ name: k.name, pattern: k.pattern }));
+  const discussAgent = handoffRoute && agentRules && viewer.admin;
   return {
     ...(trackerProjects.length ? { trackerProjects } : {}),
     ...(keyKinds.length ? { keyKinds } : {}),
@@ -528,8 +546,9 @@ export function readerPayload(
     roles: { keys: readerConfig?.roleKeys ?? [], viewer: viewer.roles, preview: viewer.admin },
     discussHandoff: handoffRoute && readerConfig?.discuss?.handoff === true && viewer.admin,
     // The discuss route sits in the same tool half as the handoff's.
-    discussAgent: handoffRoute && agentRules && viewer.admin,
+    discussAgent,
     mentions: mentionsRoute && viewer.admin,
+    ...(discussAgent && discussWho !== undefined ? { discussWho } : {}),
   };
 }
 

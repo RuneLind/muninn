@@ -30,8 +30,26 @@ export function hasBox(el: Element): boolean {
  *  read-only guards and every spec that drives a selection key on them. */
 export const SEL_EXPLAIN_BTN_ID = "wikiExplainBtn";
 export const SEL_FACTCHECK_BTN_ID = "wikiFactcheckBtn";
+/** The passage button that was the breadcrumb's (Discuss v3 P1, «One button»):
+ *  the same id, so the read-only and read-slice selectors still name it. */
+export const SEL_HANDOFF_BTN_ID = "wikiDiscussHandoffBtn";
+/** The tooltip the bar draws for Explain (a native `title` cannot hold «Change…»). */
+export const SEL_TIP_ID = "wikiSelTip";
+/** The who box «Change…» opens. A group, never a dialog: `modalOpen()` reads
+ *  every visible `[role="dialog"]` as a modal and kills the single-key shortcuts. */
+export const SEL_WHO_ID = "wikiSelWho";
 
-export type SelAction = "explain" | "where" | "history" | "factcheck" | "copy" | "follow" | "key";
+export type SelAction = "explain" | "where" | "history" | "factcheck" | "copy" | "follow" | "key" | "handoff";
+
+/** The handoff's passage action as the wiki offers it: Copy prompt with
+ *  `discuss.handoff` («code»), else the wiki agent's «Ask here» («agent»). */
+export type HandoffMode = "code" | "agent";
+export const HANDOFF_ITEMS: Record<HandoffMode, { label: string; title: string }> = {
+  code: { label: "⌘ Ask Claude Code", title: "Copy a prompt for Claude Code about this passage" },
+  agent: { label: "💬 Ask about this", title: "Ask the wiki agent about this passage" },
+};
+/** Explain's sentence: the first line of its tooltip. */
+export const EXPLAIN_TITLE = "What this means, why it is here and what led to it";
 
 /** The question an «Explain with context» turn asks; the passage and its
  *  place on the page go with it as the turn's selection fields. */
@@ -55,6 +73,12 @@ export interface SelMenuInput {
   follow: boolean;
   /** The keys found in the selection ({@link detectKeys}). */
   keys: string[];
+  /** The handoff's passage action, when the wiki offers it and the selection
+   *  may be a passage (Discuss v3 P1); null or absent: none. */
+  handoff?: HandoffMode | null;
+  /** The selection is past the bar's own bound (1,500 characters) but within
+   *  the handoff's: only the handoff and Copy are offered. */
+  long?: boolean;
 }
 
 export interface SelMenuItem {
@@ -70,7 +94,9 @@ export interface SelMenuItem {
  *  «History» search the whole selection, so they show only when the route
  *  accepts it as a key: 3–80 characters on one line. */
 export function selMenuItems(s: SelMenuInput): SelMenuItem[] {
-  const items: SelMenuItem[] = [{ act: "explain", label: "✨ Explain with context", title: "What this means, why it is here and what led to it" }];
+  const handoff = s.handoff && !s.explainer ? { act: "handoff" as const, ...HANDOFF_ITEMS[s.handoff] } : null;
+  if (s.long) return [...(handoff ? [handoff] : []), { act: "copy", label: "⧉ Copy", title: "Copy the selected text" }];
+  const items: SelMenuItem[] = [{ act: "explain", label: "✨ Explain with context", title: EXPLAIN_TITLE }];
   const searchable = s.mentions && "key" in parseMentionKey(s.text);
   if (searchable) {
     items.push({ act: "where", label: "🔗 Where else", title: "Every line in the wiki that names this, with no model" });
@@ -78,6 +104,7 @@ export function selMenuItems(s: SelMenuInput): SelMenuItem[] {
   }
   items.push({ act: "factcheck", label: "✓ Fact check", title: "Fact-check this passage against the web" });
   items.push({ act: "copy", label: "⧉ Copy", title: "Copy the selected text" });
+  if (handoff) items.push(handoff);
   if (s.follow && !s.explainer) items.push({ act: "follow", label: "＋ Add to Oppfølging", title: "Propose this as a point under the page's Oppfølging heading (an Edit turn)" });
   if (s.mentions) {
     for (const key of s.keys) if (!(searchable && key === s.text.trim())) items.push({ act: "key", key, label: `🧭 ${key}`, title: `Trace ${key}: its mentions and timeline` });
@@ -86,35 +113,132 @@ export function selMenuItems(s: SelMenuInput): SelMenuItem[] {
 }
 
 /** Does the list offer more than «Copy»? A Copy-only bar (the read slice
- *  hides the rest) is no better than the browser's own menu: no bar then. */
+ *  hides the rest, or a long selection on a wiki with no handoff) is no
+ *  better than the browser's own menu: no bar then. */
 export function selMenuOffers(items: readonly SelMenuItem[]): boolean {
   return items.some((it) => it.act !== "copy");
 }
 
-function itemAttrs(it: SelMenuItem): string {
-  return `data-selact="${it.act}"${it.key ? ` data-selkey="${esc(it.key)}"` : ""} title="${esc(it.title)}"`;
+function itemAttrs(it: SelMenuItem, title = true): string {
+  return `data-selact="${it.act}"${it.key ? ` data-selkey="${esc(it.key)}"` : ""}${title ? ` title="${esc(it.title)}"` : ""}`;
 }
 
-/** The bar's buttons. Explain and Fact check keep the breadcrumb buttons' ids. */
+const BAR_IDS: Partial<Record<SelAction, string>> = { explain: SEL_EXPLAIN_BTN_ID, factcheck: SEL_FACTCHECK_BTN_ID, handoff: SEL_HANDOFF_BTN_ID };
+
+/** The bar's buttons. Explain, Fact check and the handoff keep the breadcrumb
+ *  buttons' ids. Explain has no native `title`: the bar draws its tooltip
+ *  ({@link selTipHtml}), which names who a turn runs as. */
 export function selBarHtml(items: SelMenuItem[]): string {
   return items
     .map((it, i) => {
-      const id = it.act === "explain" ? ` id="${SEL_EXPLAIN_BTN_ID}"` : it.act === "factcheck" ? ` id="${SEL_FACTCHECK_BTN_ID}"` : "";
+      const id = BAR_IDS[it.act] ? ` id="${BAR_IDS[it.act]}"` : "";
       const cls = `wiki-selbar-btn${i === 0 ? " def" : ""}${it.act === "key" ? " chip" : ""}`;
-      return `<button type="button" class="${cls}"${id} ${itemAttrs(it)}>${esc(it.label)}</button>`;
+      const tip = it.act === "explain" ? ` aria-describedby="${SEL_TIP_ID}"` : "";
+      return `<button type="button" class="${cls}"${id} ${itemAttrs(it, it.act !== "explain")}${tip}>${esc(it.label)}</button>`;
     })
     .join("");
 }
 
-/** The right-click menu: the quoted selection, the same actions, the key
- *  chips under «For this selection», and how to reach the browser's menu. */
-export function selMenuHtml(items: SelMenuItem[], text: string): string {
+// ── Who answers (Discuss v3 P1) ─────────────────────────────────────────
+
+/** Who a Discuss turn runs on here, as the page payload's `discussWho` says. */
+export interface SelWho {
+  bot: string;
+  origin: "pinned" | "owner" | "fallback";
+  connector: string;
+  model: string | null;
+}
+
+/** The «Runs as» user: «…» while the read is pending, a refusal's text, or the user. */
+export type SelRunsAs = { state: "pending" } | { state: "refused"; text: string } | { state: "user"; userId: string; name: string };
+
+/** The page payload's `discussWho`: an object (who answers), null (no bot
+ *  answers here) or undefined (not sent: no wiki agent, or an old payload). */
+export function selWhoFrom(raw: unknown): SelWho | null | undefined {
+  if (raw === null) return null;
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.bot !== "string" || typeof r.connector !== "string") return undefined;
+  const origin = r.origin === "pinned" || r.origin === "owner" ? r.origin : "fallback";
+  return { bot: r.bot, origin, connector: r.connector, model: typeof r.model === "string" && r.model ? r.model : null };
+}
+
+/** Explain's tooltip, second line: who the turn runs as (HTML). */
+export function selRunsAsHtml(who: SelWho | null, runsAs: SelRunsAs): string {
+  if (!who) return "No bot answers here: Explain answers without the wiki's agent.";
+  const user = runsAs.state === "user" ? `<b>${esc(runsAs.name)}</b>` : runsAs.state === "refused" ? esc(runsAs.text) : "…";
+  return `Runs as ${user} · ${[who.model, who.connector].filter(Boolean).map((x) => esc(x!)).join(" · ")}`;
+}
+
+/**
+ * The tooltip the bar draws under Explain: the sentence, then (on a wiki with
+ * an agent, for a thread turn) «Runs as <user> · <model> · <connector> ·
+ * Change…». `who` undefined: the sentence only (no agent, an explainer).
+ * «Change…» is a button the keyboard reaches with Tab from Explain.
+ */
+export function selTipHtml(who: SelWho | null | undefined, runsAs: SelRunsAs): string {
+  const l2 =
+    who === undefined
+      ? ""
+      : `<div class="wiki-seltip-l2"><span data-seltip-who>${selRunsAsHtml(who, runsAs)}</span>${who ? ` · <button type="button" class="wiki-seltip-change" data-selwho-open>Change…</button>` : ""}</div>`;
+  return `<div class="wiki-seltip-l1">${esc(EXPLAIN_TITLE)}</div>${l2}`;
+}
+
+const ORIGIN_WORDS: Record<SelWho["origin"], string> = {
+  pinned: "Pinned to this wiki in the server's setup. Not a choice per turn.",
+  owner: "The wiki's own bot. Not a choice per turn.",
+  fallback: "The research bot role on /models answers on this wiki.",
+};
+
+/**
+ * The who box «Change…» opens: the users to pick from (where the read says
+ * the user can be chosen), the bot and where it comes from, and the model
+ * with «Change on /models ↗». Nothing here changes a connector; on a pinned
+ * wiki the box says the connector is fixed there. `message` is a pick's
+ * refusal (shown as an alert). `choosable` null: no read has answered yet,
+ * so the box neither offers users nor says they are not choosable.
+ */
+export function selWhoHtml(opts: { wiki: string; who: SelWho; runsAs: SelRunsAs; users: { id: string; name: string }[]; choosable: boolean | null; message: string | null }): string {
+  const { who, runsAs } = opts;
+  const current = runsAs.state === "user" ? runsAs.userId : null;
+  const userCell =
+    opts.choosable && opts.users.length
+      ? `<div class="wiki-selwho-users">${opts.users.map((u) => `<button type="button" class="wiki-selwho-user" data-selwho-user="${esc(u.id)}" aria-pressed="${u.id === current}">${esc(u.name)}</button>`).join("")}</div>` +
+        `<div class="wiki-selwho-h">The ${esc(who.bot)} bot's /chat users. Each has their own discussion of a page. Kept in this browser.</div>`
+      : `<div>${runsAs.state === "user" ? esc(runsAs.name) : runsAs.state === "refused" ? esc(runsAs.text) : "…"}</div>` +
+        (opts.choosable === false ? `<div class="wiki-selwho-h">Not choosable on this instance.</div>` : "");
+  const fixed = who.origin === "pinned" ? `The connector is fixed on this wiki: it is ${esc(who.bot)}'s.` : "Nothing here changes the connector.";
+  return (
+    `<div class="wiki-selwho-hd"><span>Who answers on ${esc(opts.wiki)}</span><button type="button" class="wiki-selwho-x" data-selwho-close aria-label="Close">✕</button></div>` +
+    `<div class="wiki-selwho-row"><span class="wiki-selwho-k">User</span><div>${userCell}</div></div>` +
+    `<div class="wiki-selwho-row"><span class="wiki-selwho-k">Bot</span><div><div>${esc(who.bot)}</div><div class="wiki-selwho-h">${esc(ORIGIN_WORDS[who.origin])}</div></div></div>` +
+    `<div class="wiki-selwho-row"><span class="wiki-selwho-k">Model</span><div><div>${[who.model, who.connector].filter(Boolean).map((x) => esc(x!)).join(" · ")} <a class="wiki-selwho-models" href="/models?bot=${encodeURIComponent(who.bot)}" target="_blank" rel="noopener">Change on /models ↗</a></div>` +
+    `<div class="wiki-selwho-h">The bot's model, for every turn on this wiki. ${fixed}</div></div></div>` +
+    (opts.message ? `<div class="wiki-discuss-error wiki-selwho-msg" role="alert">${esc(opts.message)}</div>` : "")
+  );
+}
+
+/** The menu's «Runs as» line under Explain (its `aria-describedby` target). */
+export const SEL_MENU_WHO_ID = "wikiSelMenuWho";
+
+/** The right-click and keyboard menu: the quoted selection, the same actions,
+ *  the key chips under «For this selection», and how to reach the browser's
+ *  menu. With `who` (Explain is a thread turn here) Explain is followed by the
+ *  tooltip's «Runs as» line and a «Change…» menu item (`data-selwho-open`),
+ *  which the arrow keys reach (Discuss v3 P1 fix round 1 batch 3). */
+export function selMenuHtml(items: SelMenuItem[], text: string, who?: { who: SelWho | null; runsAs: SelRunsAs }): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const quote = flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
   const main = items.filter((it) => it.act !== "key");
   const chips = items.filter((it) => it.act === "key");
+  const whoRows = (it: SelMenuItem) =>
+    it.act !== "explain" || !who
+      ? ""
+      : `<div class="wiki-selmenu-who" id="${SEL_MENU_WHO_ID}"><span data-seltip-who>${selRunsAsHtml(who.who, who.runsAs)}</span></div>` +
+        (who.who ? `<button type="button" role="menuitem" class="wiki-selmenu-it wiki-selmenu-change" data-selwho-open aria-label="Change who answers"><span>Change…</span></button>` : "");
   const row = (it: SelMenuItem, i: number) =>
-    `<button type="button" role="menuitem" class="wiki-selmenu-it${i === 0 ? " def" : ""}" ${itemAttrs(it)}><span>${esc(it.label)}</span>${i === 0 ? '<span class="k">↵</span>' : ""}</button>`;
+    `<button type="button" role="menuitem" class="wiki-selmenu-it${i === 0 ? " def" : ""}" ${itemAttrs(it)}${it.act === "explain" && who ? ` aria-describedby="${SEL_MENU_WHO_ID}"` : ""}><span>${esc(it.label)}</span>${i === 0 ? '<span class="k">↵</span>' : ""}</button>` +
+    whoRows(it);
   return (
     `<div class="wiki-selmenu-hd">«${esc(quote)}»</div>` +
     main.map(row).join("") +
@@ -272,6 +396,7 @@ export function inlineTurnSub(userName: string | null | undefined): string {
   return userName ? `a turn in ${userName}'s discussion of this page` : "a turn in this page's discussion";
 }
 
+
 /** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
  *  `data-reader-only` keeps it out of every read of the page's own text (a
  *  later selection's context, Explain, fact check). */
@@ -393,6 +518,8 @@ export function selectionMenuStyles(): string {
     .wiki-selmenu-sep { border-top: 1px solid var(--border-secondary); margin: 4px 0; }
     .wiki-selmenu-hd { font-size: 11px; color: var(--text-dim); padding: 4px 10px 2px; text-transform: uppercase; letter-spacing: 0.04em; }
     .wiki-selmenu-hd:first-child { text-transform: none; letter-spacing: 0; font-style: italic; }
+    .wiki-selmenu-who { padding: 0 10px 2px 28px; font-size: 12px; color: var(--text-secondary); }
+    .wiki-selmenu-it.wiki-selmenu-change { padding: 2px 10px 4px 28px; font-size: 12px; color: var(--accent-light); }
     .wiki-selmenu-foot { display: flex; justify-content: space-between; gap: 12px; padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
     .${SEL_CARD_CLASS} {
       border: 1px solid var(--accent); border-left-width: 4px; border-radius: 8px;
@@ -403,6 +530,37 @@ export function selectionMenuStyles(): string {
     .wiki-sel-card-title { font-weight: 600; }
     .wiki-sel-card-moved { margin: 0 0 6px; }
     .wiki-sel-card-sub { font-weight: 400; color: var(--text-dim); }
+    /* A thread turn's head is one line at a fixed height: its sub line is
+       filled once when the read lands and must not move the text below (R6). */
+    .${SEL_CARD_CLASS}[data-sel-turn] .wiki-sel-card-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #${SEL_TIP_ID} {
+      position: absolute; top: calc(100% + 6px); left: 0; display: none; z-index: 46; width: max-content; max-width: 380px;
+      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 8px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22); padding: 7px 11px; font-size: 13px; line-height: 1.45; white-space: normal;
+    }
+    .wiki-seltip-l2 { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border-secondary); color: var(--text-secondary); }
+    .wiki-seltip-change, .wiki-selwho-x {
+      background: none; border: 0; padding: 0; color: var(--accent-light); font: inherit; cursor: pointer; text-decoration: underline;
+    }
+    .wiki-seltip-change:focus-visible, .wiki-selwho-user:focus-visible, .wiki-selwho-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #${SEL_WHO_ID} {
+      position: fixed; z-index: 47; display: none; width: 360px; max-width: calc(100vw - 16px);
+      background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 10px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22); padding: 10px 14px; font-size: 13px;
+    }
+    .wiki-selwho-hd { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; margin-bottom: 6px; }
+    .wiki-selwho-x { text-decoration: none; color: var(--text-secondary); }
+    .wiki-selwho-row { display: grid; grid-template-columns: 54px 1fr; gap: 4px 10px; padding: 7px 0; border-top: 1px solid var(--border-secondary); }
+    .wiki-selwho-k { color: var(--text-secondary); font-size: 12.5px; }
+    .wiki-selwho-h { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+    .wiki-selwho-users { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wiki-selwho-user {
+      background: transparent; border: 1px solid var(--border-primary); color: var(--text-primary);
+      border-radius: 999px; padding: 2px 10px; font: inherit; cursor: pointer;
+    }
+    .wiki-selwho-user[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); font-weight: 600; }
+    .wiki-selwho-models { color: var(--accent-light); margin-left: 4px; }
+    .wiki-selwho-msg { margin-top: 6px; }
     .wiki-sel-card-tools { display: flex; gap: 6px; flex-shrink: 0; }
     .wiki-sel-card-btn {
       background: transparent; border: 1px solid var(--border-primary); color: var(--text-secondary);

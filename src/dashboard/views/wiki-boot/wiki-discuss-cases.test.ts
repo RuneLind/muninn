@@ -19,13 +19,15 @@ import { readerArticle } from "./discuss-reader-article.ts";
 import {
   DISCUSS_HANDOFF_PAGE_BTN_ID,
   DISCUSS_HANDOFF_PANEL_ID,
-  DISCUSS_HANDOFF_SEL_BTN_ID,
+  discussHandoffMode,
   initDiscussHandoff,
+  mayBePassage,
   openDiscussHandoff,
   setDiscussHandoffEnabled,
 } from "../components/wiki-discuss-handoff.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_INPUT_ID, discussAgentOn, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
+import { SEL_HANDOFF_BTN_ID } from "../components/wiki-selection-menu-model.ts";
 import { applyWikiReadonlyInputLocks, installWikiReadonlyGuard, WIKI_READONLY_INPUT_PLACEHOLDER } from "../components/wiki-readonly-client.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
@@ -762,19 +764,23 @@ describe("seeded guard: a range stated as found is the selection's own line", ()
 });
 
 describe("«Ask Claude Code»: the selection is read when the control is activated, not on every change", () => {
+  // Discuss v3 P1 («One button»): the passage control is the selection bar's
+  // item. The bar offers it on the handoff's cheap check (`mayBePassage`: no
+  // reading class, no context); opening the panel reads the selection once.
   const settle = () => new Promise((r) => setTimeout(r, 120));
   const change = () => document.dispatchEvent(new Event("selectionchange"));
-  const btn = () => document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)!;
   const panelEl = () => document.getElementById(DISCUSS_HANDOFF_PANEL_ID);
-  test("a settled selectionchange shows the control without the reading class; activating reads once; the control follows the panel", async () => {
+  test("a selectionchange reads nothing; the cheap check offers it; opening reads once; the breadcrumb keeps only the page control", async () => {
     document.body.innerHTML =
       `<div id="wikiBreadcrumb"><button id="wikiFactcheckArticleBtn" type="button">Fact check page</button></div>` +
       `<div class="wiki-article"><h2>Brief</h2><p>The pier opens at six.</p><p>The night route is unchanged.</p></div>`;
     initDiscussHandoff({ wiki: () => "w", relPath: () => "plans/harbour.mdx" });
     setDiscussHandoffEnabled(true);
+    expect(discussHandoffMode()).toBe("code");
+    // The passage control is no longer in the breadcrumb; the whole-page one is.
+    expect(document.getElementById(SEL_HANDOFF_BTN_ID)).toBeNull();
+    expect(document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)).not.toBeNull();
     const root = document.documentElement;
-    // Every time the root gets the reading class: one per full read of the selection.
-    expect(root.classList).toBe(root.classList);
     const list = root.classList;
     const realAdd = list.add.bind(list);
     const reads: string[] = [];
@@ -789,36 +795,27 @@ describe("«Ask Claude Code»: the selection is read when the control is activat
     sel.addRange(rangeOf(article, "The pier opens at six."));
     change();
     await settle();
-    await flush();
-    expect(btn().style.display).toBe("");
+    expect(mayBePassage(sel)).toBe(true);
     expect(reads).toEqual([]);
 
-    btn().click();
+    openDiscussHandoff(true);
     await flush();
     expect(panelEl()?.hidden).toBe(false);
     expect(panelEl()!.querySelector(".wiki-handoff-quote")!.textContent).toBe("The pier opens at six.");
     expect(reads.length).toBe(1);
 
-    // Open on a passage, the control is its opener: it stays though the page's selection goes.
-    sel.removeAllRanges();
-    change();
-    await settle();
-    expect(btn().style.display).toBe("");
-
-    // Open on the whole page, the control follows the selection the reader makes meanwhile.
+    // The whole page from the breadcrumb, a new selection meanwhile: nothing more is read.
     document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)!.click();
     expect(panelEl()!.querySelector(".wiki-handoff-whole")).not.toBeNull();
-    change();
-    await settle();
-    expect(btn().style.display).toBe("none");
+    sel.removeAllRanges();
     sel.addRange(rangeOf(article, "The night route is unchanged."));
     change();
     await settle();
-    expect(btn().style.display).toBe("");
-    await flush();
     expect(reads.length).toBe(1);
-    delete (list as { add?: unknown }).add;
+    // Off: the bar offers no handoff item.
     setDiscussHandoffEnabled(false);
+    expect(discussHandoffMode()).toBeNull();
+    delete (list as { add?: unknown }).add;
     document.body.innerHTML = "";
   });
 });
@@ -917,6 +914,8 @@ describe("the handoff panel with the wiki agent on (fix round 1)", () => {
     calls = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      // The page render's light read of the user (Discuss v3 P1): not a call these cases count.
+      if (url.includes("who=1")) return new Response(JSON.stringify({ error: "no light read here" }), { status: 503, headers: { "Content-Type": "application/json" } });
       calls.push({ url, body: String(init?.body ?? "") });
       return respond(url);
     }) as typeof fetch;

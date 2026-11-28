@@ -129,6 +129,8 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   '[data-selact="explain"]',
   '[data-selact="factcheck"]',
   '[data-selact="follow"]',
+  // Not the handoff's item (`[data-selact="handoff"]`, Discuss v3 P1): Copy
+  // prompt calls no model, and «Ask here» is blocked inside its panel.
   // Breadcrumb article actions.
   "#wikiFactcheckArticleBtn",
   "#wikiDiscussBtn",

@@ -361,8 +361,14 @@ export async function renderModelsPage(): Promise<string> {
     ${statusChipsScript()}
     ${pageHeaderScript("models")}
 
+    // \`?bot=\` (the wiki reader's «Change on /models ↗», Discuss v3 P1) opens on
+    // that bot before the shared last-selected one, and never writes it: only
+    // a pick on this page does.
     let selectedBot = '';
-    try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
+    const botParam = new URLSearchParams(location.search).get('bot') || '';
+    let storedBot = '';
+    try { storedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
+    selectedBot = botParam || storedBot;
 
     let botNames = [];      // all discovered bot names (for role selectors)
     let lastData = null;    // last overview payload
@@ -455,6 +461,14 @@ export async function renderModelsPage(): Promise<string> {
         const container = document.getElementById('botSelector');
         const bots = res.bots || [];
         botNames = bots.slice();
+        // \`/api/bots\` lists bots with messages: a \`?bot=\` it lacks gets a pill
+        // when it is a discovered bot, else the stored bot is shown instead.
+        if (botParam && selectedBot === botParam && !bots.includes(botParam)) {
+          let known = false;
+          try { known = ((await fetch('/api/bots/config').then(r => r.json())).bots || []).some(b => b.name === botParam); } catch {}
+          if (known) bots.push(botParam);
+          else selectedBot = storedBot;
+        }
         if (!selectedBot && bots.length > 0) selectedBot = bots[0];
         container.innerHTML = bots.map(b =>
           '<button class="bot-pill' + (selectedBot === b ? ' active' : '') + '" data-bot="' + esc(b) + '">' +

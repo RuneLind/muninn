@@ -82,7 +82,6 @@ Pages and routes:
 - ⚠️ `isMetaStem` is case-sensitive on all three stems. Feed it `pageStemOf`, which strips ANY extension: `wikiPageStem` strips only `.md`/`.mdx`, so `plans/index.html` passes as an ordinary page.
 - ⚠️ A `display` declaration on a class beats the user agent's own `[hidden]` rule, green through every unit test and caught by the e2e: `.wiki-prov-chain[hidden] { display: none; }` rides beside its `display: flex`.
 - `modalOpen()` reads every visible `[role="dialog"]` as a modal, so a non-modal panel with that role kills the reader's single-key shortcuts page-wide.
-- `isPathConfined` is LEXICAL, so a symlink inside the wiki that points outside it passes: the Stamp route adds realpath containment for that reason.
 - The older `fencedLineMask` and `frontmatterEndLine` (`wiki-integrate.ts`: a `~~~` fence counts, an unclosed opener runs to the end, an indented `---` ends the frontmatter) disagree with the reader's rule (`readerFencedLines`: backticks only, an unclosed opener stays prose; `frontmatterBodyLine`). Find the helpers a check calls, one hop down: `fenceLineStates` with `"literal"` is a third (`~~~` counts, unclosed stays prose); a check can mix them.
 
 ## Index
@@ -138,6 +137,7 @@ Pages and routes:
 - Stale check — the fix paths (PR 3: `stale-fix.ts`, `stale-fix-verdicts.ts`, Apply, Send to Gardener) [trap]
 - Status date check (`status-date-check.ts`, `GET /api/wiki/claim-check`)
 - Discuss handoff (`discuss-locate.ts`) [trap]
+- Discuss who answers (`discuss-engine.ts`)
 - Work map (`src/wiki/work-map/`, `.work-map.json`, `WORK_MAP_WIKIS`) [trap]
 - Decision triage (`src/wiki/decision-triage/`, `DECISION_TRIAGE_REPO_ROOTS`)
 - Owner-step checks (`src/wiki/step-checks/`, `GET /api/wiki/step-checks`, `MUNINN_MACHINE`) [trap]

@@ -15,15 +15,17 @@
  *     characters (offered, located whole), and a checklist row selected from
  *     its ✗ (the mark is hidden from the reading by CSS, the `[ ]` dropped by
  *     the collapse).
- *  4. **The controls as a keyboard user meets them.** A selection made or
- *     extended with Shift+ArrowRight is the one offered and quoted; Tab to the
- *     selection's control and press Enter; Escape closes the panel wherever
- *     focus is and returns focus to the control, which a late `selectionchange`
- *     does not hide; a passage selected with the mouse while the panel is
- *     open is the one a second activation asks about, and closing the panel
- *     keeps it; Copy is disabled while its request runs; a
- *     non-JSON answer shows its status. The whole-page control shows on an
- *     HTML explainer page too.
+ *  4. **The controls as a keyboard user meets them.** Since Discuss v3 P1 the
+ *     passage control is the selection bar's item (`#wikiDiscussHandoffBtn`
+ *     in the bar; the breadcrumb keeps the whole-page one). A selection made
+ *     or extended with Shift+ArrowRight is the one offered and quoted; ⇧F10
+ *     opens the menu on a keyboard selection, End reaches the item and Enter
+ *     opens it; Escape closes the panel wherever focus is and puts the bar
+ *     back with focus on its item, which a late `selectionchange` does not
+ *     hide; a passage selected with the mouse while the panel is open is the
+ *     one a second activation asks about, and closing the panel keeps it;
+ *     Copy is disabled while its request runs; a non-JSON answer shows its
+ *     status. The whole-page control shows on an HTML explainer page too.
  *  5. **Off the page.** A selection inside a link's peek card offers no
  *     control; the start view closes the panel and removes the controls,
  *     and a page shown again brings them back.
@@ -45,8 +47,8 @@ import { e2ePort } from "./ports.ts";
 import {
   DISCUSS_HANDOFF_PAGE_BTN_ID,
   DISCUSS_HANDOFF_PANEL_ID,
-  DISCUSS_HANDOFF_SEL_BTN_ID,
 } from "../src/dashboard/views/components/wiki-discuss-handoff.ts";
+import { SEL_HANDOFF_BTN_ID } from "../src/dashboard/views/components/wiki-selection-menu-model.ts";
 
 const PORT = e2ePort("wiki-discuss-handoff");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -203,6 +205,13 @@ async function select(page: Page, text: string, n: number, upTo?: string, mouseu
       const sel = getSelection()!;
       sel.removeAllRanges();
       sel.addRange(r);
+      // A reader selects what is on screen: the selection bar hides while its selection is scrolled away.
+      if (mouseup) {
+        const wrapEl = document.getElementById("articleWrap")!;
+        const box = r.getBoundingClientRect();
+        const pane = wrapEl.getBoundingClientRect();
+        if (box.bottom > pane.bottom || box.top < pane.top) wrapEl.scrollTop += box.top - pane.top - pane.height / 3;
+      }
       if (mouseup) document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     },
     { text, n, upTo, mouseup },
@@ -249,7 +258,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
     await select(page, "The pier opens at six.", 2);
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await expect(btn).toBeVisible();
     await btn.click();
     // The panel is not a dialog: the reader's single-key shortcuts stay on outside it.
@@ -266,7 +275,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
     await select(page, "B4, late", 1, "first bell.");
-    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    await page.locator(`#${SEL_HANDOFF_BTN_ID}`).click();
     const clip = await askAndCopy(page, "Which time does B4 read?");
     expect(clip).toContain("Passage (line 11, Harbour timetable › Brief):");
     expect(clip).toContain("> B4, late. The ferry's dock_time is earlier than the first bell.");
@@ -301,7 +310,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await expect(pageBtn).toBeVisible();
     await expect(pageBtn).toHaveCSS("opacity", "1");
     await select(page, "The night route is unchanged.", 1);
-    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    await page.locator(`#${SEL_HANDOFF_BTN_ID}`).click();
     const clip = await askAndCopy(page, "Is it?");
     expect(clip).toContain(`${roRoot}/${REL}`);
     expect(clip).toContain("Passage (line 12,");
@@ -312,9 +321,9 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await openPage(page, WIKI);
     await select(page, "Line 0 of the long section", 1, "berth number 29.");
     expect(await page.evaluate(() => getSelection()!.toString().length)).toBeGreaterThan(1500);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toBeVisible();
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toBeVisible();
     await expect(page.locator("#wikiExplainBtn")).toBeHidden();
-    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    await page.locator(`#${SEL_HANDOFF_BTN_ID}`).click();
     const clip = await askAndCopy(page, "Which berths?");
     expect(clip).toContain("Passage (lines 24–53, Harbour timetable › Long):");
   });
@@ -323,28 +332,25 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
     await select(page, "✗", 1, "at the pier");
-    await page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`).click();
+    await page.locator(`#${SEL_HANDOFF_BTN_ID}`).click();
     const clip = await askAndCopy(page, "Who hangs them?");
     expect(clip).toContain("Passage (line 60, Harbour timetable › Boards):");
     expect(clip).toContain("> Hang the new boards at the pier");
     expect(clip).not.toContain("✗");
   });
 
-  test("keyboard: Tab to the control, Enter opens; Escape with focus on the page closes and returns focus", async ({ page }) => {
+  test("keyboard: ⇧F10 opens the menu, End reaches the item, Enter opens; Escape with focus on the page closes and returns focus to the bar's item", async ({ page }) => {
     await openPage(page, WIKI);
-    // No mouseup: Explain and Fact check stay hidden, the handoff shows.
+    // No mouseup: no bar. The keyboard's way in is the menu.
     await select(page, "The night route is unchanged.", 1, undefined, false);
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
-    await expect(btn).toBeVisible();
-    // Reach the control from the nearest shown control before it, as Tab does.
-    await btn.evaluate((b) => {
-      let el = b.previousElementSibling as HTMLElement | null;
-      while (el && (el.tagName !== "BUTTON" || el.offsetParent === null)) el = el.previousElementSibling as HTMLElement | null;
-      if (!el) throw new Error("no shown control before the handoff");
-      el.focus();
-    });
-    await page.keyboard.press("Tab");
-    await expect(btn).toBeFocused();
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
+    await expect(btn).toHaveCount(0);
+    await page.keyboard.press("Shift+F10");
+    const item = page.locator('#wikiSelMenu [data-selact="handoff"]');
+    await expect(item).toBeVisible();
+    await expect(item).toHaveText("⌘ Ask Claude Code");
+    await page.keyboard.press("End");
+    await expect(item).toBeFocused();
     await page.keyboard.press("Enter");
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel).toBeVisible();
@@ -372,14 +378,14 @@ test.describe("Wiki reader: Ask Claude Code", () => {
       }
       throw new Error("no start text");
     });
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
-    await page.waitForTimeout(150);
-    await expect(btn).toBeHidden();
     const passage = "The night route is unchanged.";
     for (let i = 1; i < passage.length; i++) await page.keyboard.press("Shift+ArrowRight");
     expect(await page.evaluate(() => getSelection()!.toString())).toBe(passage);
-    await expect(btn).toBeVisible();
-    await btn.click();
+    // The keyboard's menu on the keyboard's selection: the item is offered there.
+    await page.keyboard.press("Shift+F10");
+    await page.keyboard.press("End");
+    await expect(page.locator('#wikiSelMenu [data-selact="handoff"]')).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(page.locator(`#${DISCUSS_HANDOFF_PANEL_ID} .wiki-handoff-quote`)).toHaveText(passage);
     const clip = await askAndCopy(page, "Since when?");
     expect(clip).toContain("Passage (line 12, Harbour timetable › Brief):");
@@ -390,7 +396,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
     await select(page, "The night route", 1);
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await expect(btn).toBeVisible();
     for (let i = 0; i < " is unchanged.".length; i++) await page.keyboard.press("Shift+ArrowRight");
     const live = await page.evaluate(() => getSelection()!.toString());
@@ -405,7 +411,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
   test("a selectionchange that arrives after the panel closed keeps the control, its focus and the selection", async ({ page }) => {
     await openPage(page, WIKI);
     await select(page, "The night route is unchanged.", 1);
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await btn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
@@ -423,9 +429,9 @@ test.describe("Wiki reader: Ask Claude Code", () => {
   test("a passage selected with the mouse while the panel is open: activating the control asks about it", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
-    // No mouseup: Explain stays hidden, so the drag's press hides nothing and the article does not move under it.
-    await select(page, "The pier opens at six.", 1, undefined, false);
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    // The bar floats over the page: the drag's press that hides it moves no text.
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await btn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel.locator(".wiki-handoff-quote")).toHaveText("The pier opens at six.");
@@ -440,8 +446,8 @@ test.describe("Wiki reader: Ask Claude Code", () => {
 
   test("closing the panel keeps a selection made while it was open", async ({ page }) => {
     await openPage(page, WIKI);
-    await select(page, "The pier opens at six.", 1, undefined, false); // no mouseup: see the test above
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await btn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel).toBeVisible();
@@ -452,6 +458,70 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await page.waitForTimeout(150);
     await expect(btn).toBeVisible();
     expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
+  });
+
+  test("fix round 1 batch 3 K3: closing the panel after its passage was scrolled out of the pane brings it back and focuses the bar's item; with no selection to offer, focus lands on the article pane, never <body>", async ({ page }) => {
+    await openPage(page, WIKI);
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    const wrap = page.locator("#articleWrap");
+    await wrap.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    // The passage is out of the pane: the bar for it would be hidden.
+    const outOfPane = () =>
+      page.evaluate(() => {
+        const r = getSelection()!.rangeCount ? getSelection()!.getRangeAt(0).getBoundingClientRect() : null;
+        const pane = document.getElementById("articleWrap")!.getBoundingClientRect();
+        return !r || r.bottom <= pane.top || r.top >= pane.bottom;
+      });
+    expect(await page.evaluate(() => document.getElementById("articleWrap")!.scrollTop)).toBeGreaterThan(0);
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(btn).toBeVisible();
+    await expect(btn).toBeFocused();
+    expect(await outOfPane()).toBe(false);
+
+    // The passage's text gone while the panel was open: no bar to return to.
+    await btn.click();
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) if (t.data.includes("The pier opens at six.")) return void t.remove();
+    });
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await page.waitForTimeout(100);
+    const active = await page.evaluate(() => ({ tag: document.activeElement?.tagName ?? null, id: document.activeElement?.id ?? null }));
+    expect(active.tag).not.toBe("BODY");
+    expect(active.id).toBe("articleWrap");
+  });
+
+  // Fix round 2 batch 3: the case above scrolls, and a scrolling pane is
+  // focusable in Chromium without a tabindex. A pane with nothing to scroll is
+  // focusable only through the `tabindex="-1"` the close gives it.
+  test("fix round 2 batch 3: with no bar to return to and an article pane that does not scroll, closing the panel still focuses the pane", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 4000 });
+    await openPage(page, WIKI);
+    const wrap = page.locator("#articleWrap");
+    expect(await wrap.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+    expect(await wrap.getAttribute("tabindex")).toBeNull();
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) if (t.data.includes("The pier opens at six.")) return void t.remove();
+    });
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await page.waitForTimeout(100);
+    const active = await page.evaluate(() => ({ tag: document.activeElement?.tagName ?? null, id: document.activeElement?.id ?? null }));
+    expect(active.tag).not.toBe("BODY");
+    expect(active.id).toBe("articleWrap");
   });
 
   test("Copy is disabled while its request runs, and a non-JSON answer shows its status", async ({ page }) => {
@@ -487,9 +557,11 @@ test.describe("Wiki reader: Ask Claude Code", () => {
   test("a selection inside a link's peek card offers no control: the card is not the page", async ({ page }) => {
     await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(PEEK_REL)}`);
     await expect(page.locator(".wiki-article")).toContainText("The gate shuts at dusk.");
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
     await select(page, "The gate opens at dawn", 1, "for the carts.");
     await expect(btn).toBeVisible();
+    // Let the bar go first: it covers the link the hover needs.
+    await page.keyboard.press("Escape");
     await page.locator(".wiki-article a", { hasText: "the first part" }).hover();
     const peek = page.locator(".wiki-article .wiki-ref-peek");
     await expect(peek).toContainText("The gate opens at dawn");
@@ -499,6 +571,8 @@ test.describe("Wiki reader: Ask Claude Code", () => {
         const i = t.data.indexOf("The gate opens");
         if (i === -1) continue;
         getSelection()!.setBaseAndExtent(t, i, t, t.data.length);
+        // Released as a mouse selection is: the bar reads it.
+        document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
         return;
       }
       throw new Error("no text in the peek card");
@@ -517,12 +591,12 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await expect(page).not.toHaveURL(/relPath=/);
     await expect(panel).toBeHidden();
     await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toHaveCount(0);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toHaveCount(0);
     await page.goBack();
     await expect(page.locator(".wiki-article")).toContainText("The night route is unchanged.");
     await expect(page.locator(`#${DISCUSS_HANDOFF_PAGE_BTN_ID}`)).toBeVisible();
     await select(page, "The night route is unchanged.", 1);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toBeVisible();
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toBeVisible();
   });
 
   test("a wiki without discuss.handoff shows neither control", async ({ page }) => {
@@ -531,6 +605,67 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     await select(page, "The night route is unchanged.", 1);
     // Explain shows for the same selection: the selection was read.
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toHaveCount(0);
+  });
+});
+
+test.describe("Wiki reader: Ask Claude Code on a touch screen", () => {
+  test.use({ hasTouch: true });
+
+  /** A tap on `text`'s middle: the touch pointer a long-press starts with. */
+  async function tapOn(page: Page, text: string): Promise<void> {
+    const at = await page.evaluate((text) => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf(text);
+        if (i === -1) continue;
+        const r = document.createRange();
+        r.setStart(t, i);
+        r.setEnd(t, i + text.length);
+        const b = r.getBoundingClientRect();
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+      }
+      throw new Error(`no text ${text}`);
+    }, text);
+    await page.touchscreen.tap(at.x, at.y);
+  }
+
+  test("fix round 1 batch 3 K2: a long-press selection (a touch pointer, then the selection, no mouseup) shows the bar once it settles, and a tap on its item opens the panel on it; Shift+arrow steps after a touch show no bar", async ({ page }) => {
+    await openPage(page, WIKI);
+    const passage = "The night route is unchanged.";
+    // The long-press: its touch, then the selection it leaves (no mouseup follows one on iOS).
+    await tapOn(page, passage);
+    // The tap's emulated mouse events (their mouseup shows the bar for any live selection) let through first.
+    await page.waitForTimeout(700);
+    await select(page, passage, 1, undefined, false);
+    const btn = page.locator(`#${SEL_HANDOFF_BTN_ID}`);
+    await expect(btn).toBeVisible();
+    await expect(btn).toHaveText("⌘ Ask Claude Code");
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await btn.tap();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator(".wiki-handoff-quote")).toHaveText(passage);
+    await panel.locator("[data-handoff=close]").tap();
+    await expect(panel).toBeHidden();
+
+    // A touch, then a keyboard selection: no bar on its steps (the keyboard's way in is ⇧F10).
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    // Apart from the last tap (no double tap), and its emulated mouse events let through before the keys.
+    await page.waitForTimeout(700);
+    await tapOn(page, "The pier opens at six.");
+    await page.waitForTimeout(700);
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    await expect(page.locator("#wikiSelBar")).toBeHidden();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf("The pier opens");
+        if (i !== -1) return void getSelection()!.setBaseAndExtent(t, i, t, i + 1);
+      }
+    });
+    for (let i = 1; i < "The pier opens at six.".length; i++) await page.keyboard.press("Shift+ArrowRight");
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe("The pier opens at six.");
+    await page.waitForTimeout(800);
+    await expect(page.locator("#wikiSelBar")).toBeHidden();
   });
 });
