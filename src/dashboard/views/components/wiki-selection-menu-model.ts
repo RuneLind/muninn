@@ -52,9 +52,9 @@ export const HANDOFF_ITEMS: Record<HandoffMode, { label: string; title: string }
 /** Explain's sentence: the first line of its tooltip. */
 export const EXPLAIN_TITLE = "What this means, why it is here and what led to it";
 
-/** The question an «Explain with context» turn asks; the passage and its
- *  place on the page go with it as the turn's selection fields. */
-export const EXPLAIN_QUESTION = "Explain this passage with context: what it means, why it is here, and what led to it.";
+/** The question an «Explain with context» turn asks (in `discuss-bounds.ts`,
+ *  where /chat reads it too, to draw an Explain turn as its chip). */
+export { EXPLAIN_QUESTION } from "../../../wiki/discuss-bounds.ts";
 /** The Edit turn «Add to Oppfølging» asks. */
 export const FOLLOW_QUESTION =
   "Add this passage to the page as a new point under the «Oppfølging» heading, in the page's own words and form. Propose it as an edit.";

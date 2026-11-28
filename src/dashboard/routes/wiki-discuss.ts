@@ -277,6 +277,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // Beside `userId`: `userName` (its /chat name), `userChoosable` and `users`
   // (the bot's /chat users, empty unless choosable), for the tab's «as <name> ▾».
   // `?who=1` is the light read: those fields, `bot` and the live thread's id only.
+  // `?closed=1` is the list-only read: `userId`, `bot`, `closed` (no messages) and `closedTotal`.
   //
   // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
   // the Trace view): the thread and its messages; a trace has no closed list
@@ -308,6 +309,21 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       if (c.req.query("who") === "1") {
         const live = await (deps.threads?.live ?? getLiveWikiThread)(who.userId, bot.name, wikiName, meta.relPath);
         return c.json({ userId: who.userId, ...whoFields(who), thread: live ? { id: live.id } : null, bot: bot.name });
+      }
+      // The list-only read (Discuss v3 P4): the page's closed threads without
+      // their messages, for /chat's «Earlier discussions», which opens each one
+      // in /chat itself. The same user rule and bounds as the full read.
+      if (c.req.query("closed") === "1") {
+        const [closed, closedTotal] = await Promise.all([
+          listClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath, DISCUSS_EARLIER_THREADS_MAX),
+          countClosedWikiThreads(who.userId, bot.name, wikiName, meta.relPath),
+        ]);
+        return c.json({
+          userId: who.userId,
+          bot: bot.name,
+          closed: closed.map((t) => ({ id: t.id, name: t.name, createdAt: t.createdAt, closedAt: t.closedAt ?? null })),
+          closedTotal,
+        });
       }
       const thread = await getLiveWikiThread(who.userId, bot.name, wikiName, meta.relPath);
       const [messages, closed, closedTotal, oneShot] = await Promise.all([

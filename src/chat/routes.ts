@@ -32,6 +32,10 @@ import { agentStatus } from "../observability/agent-status.ts";
 import { applyCors, corsHeaders } from "../auth/cors.ts";
 import { sharedDiscussEngine, type DiscussEngine } from "../wiki/discuss-engine.ts";
 import { chatUsersFor, runWikiThreadTurnFromChat } from "./wiki-mirror.ts";
+import { listWikiTurnsByUserMessage, type ChatWikiTurn } from "../db/wiki-discuss-chat.ts";
+import { getWikiRegistry } from "../wiki/registry-memo.ts";
+import { resolveWikiRequest } from "../wiki/registry.ts";
+import { getWikiIndex } from "../wiki/store.ts";
 
 const log = getLog("chat");
 
@@ -61,6 +65,37 @@ function stripSharePrompts(prompts: BotConfig["prompts"]): BotConfig["prompts"] 
   if (!prompts) return prompts;
   const { share: _share, shareVariants: _shareVariants, ...rest } = prompts;
   return rest;
+}
+
+/**
+ * A wiki thread's extras on /chat's message read (Discuss v3 P4): each user
+ * message's turn (from the ledger, joined on `user_message_id`) and the page
+ * the header names, its title from the wiki index as the thread read finds it.
+ * Null for any other thread, and for a wiki thread that is not the
+ * conversation's own user's on its bot: the messages are already read for that
+ * user only, and the page must not be named from someone else's thread.
+ */
+async function wikiThreadRead(
+  threadId: string,
+  userId: string,
+  botName: string,
+  msgs: { id: string; role: string }[],
+): Promise<{ turns: Map<string, ChatWikiTurn>; page: { wiki: string; relPath: string | null; traceKey: string | null; title: string | null } } | null> {
+  if (!isValidUuid(threadId)) return null;
+  const thread = await getThreadById(threadId);
+  if (!thread || thread.kind !== "wiki" || thread.userId !== userId || thread.botName !== botName) return null;
+  const turns = await listWikiTurnsByUserMessage(thread.id, msgs.filter((m) => m.role === "user").map((m) => m.id));
+  let title: string | null = null;
+  if (thread.relPath) {
+    try {
+      const { entry, unknownWiki } = resolveWikiRequest(getWikiRegistry(), thread.wiki, undefined, process.env.WIKI_DIR);
+      if (!unknownWiki) title = (await getWikiIndex({ root: entry?.root }))?.resolveRelPath(thread.relPath)?.title ?? null;
+    } catch (err) {
+      // The header falls back to the path; the messages still read.
+      log.warn("wiki thread title lookup failed: {error}", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { turns, page: { wiki: thread.wiki ?? "", relPath: thread.relPath ?? null, traceKey: thread.traceKey ?? null, title } };
 }
 
 /**
@@ -549,17 +584,24 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config, opts: 
       threadId || undefined,
       true,
     );
+    const messages = msgs.map((m) => ({
+      id: m.id,
+      sender: roleToSender(m.role),
+      text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
+      timestamp: m.createdAt,
+      threadId: m.threadId,
+      traceId: m.traceId,
+      fromPeerId: m.fromPeerId,
+      model: m.model,
+    }));
+    const wiki = threadId ? await wikiThreadRead(threadId, conversation.userId, conversation.botName, msgs) : null;
+    if (!wiki) return c.json({ messages });
     return c.json({
-      messages: msgs.map((m) => ({
-        id: m.id,
-        sender: roleToSender(m.role),
-        text: raw ? m.content : (isWeb && m.role === "assistant" ? formatWebHtml(m.content) : m.content),
-        timestamp: m.createdAt,
-        threadId: m.threadId,
-        traceId: m.traceId,
-        fromPeerId: m.fromPeerId,
-        model: m.model,
-      })),
+      messages: messages.map((m) => {
+        const turn = m.sender === "user" ? wiki.turns.get(m.id) : undefined;
+        return turn ? { ...m, turn: { id: turn.id, question: turn.question, passage: turn.passage } } : m;
+      }),
+      wikiPage: wiki.page,
     });
   });
 

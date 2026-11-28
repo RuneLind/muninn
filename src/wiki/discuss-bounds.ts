@@ -43,3 +43,9 @@ export const STORED_EDIT_MARKER = "_(Proposed edit: preview and apply it in the 
  *  it: «Earlier discussions» (a closed thread's {@link STORED_EDIT_MARKER}, an
  *  old one-shot turn's edit block) and /chat on a closed wiki thread. */
 export const EARLIER_EDIT_NOTE = "_(This answer proposed an edit; an earlier discussion cannot apply it.)_";
+
+/** The question an «Explain with context» turn asks; the passage and its
+ *  place on the page go with it as the turn's selection fields. Here, not in
+ *  the selection menu's module, so /chat can tell an Explain turn by its
+ *  ledger row's question and draw it as a chip (Discuss v3 P4). */
+export const EXPLAIN_QUESTION = "Explain this passage with context: what it means, why it is here, and what led to it.";

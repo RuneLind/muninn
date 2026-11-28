@@ -13,7 +13,11 @@
  * keeping its text and showing the refusal; «Start over» moving the thread
  * under «Earlier discussions» beside an old one-shot turn, and Delete; the
  * «as <name> ▾» picker switching the pane to a second /chat user's own thread,
- * and the turn's tool calls as a /chat-style tool group with its model line.
+ * and the turn's tool calls as a /chat-style tool group with its model line;
+ * and (Discuss v3 P4) a seeded Explain thread in /chat: the page bar with the
+ * page's title, the Explain chip, «⌘ Continue in Claude Code», «Start over»
+ * leaving it read-only under «Earlier discussions», and the page's next
+ * Explain opening a new thread that /chat lists.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`), a throwaway `claude-sdk` bot under `MUNINN_BOTS_DIR`, a
@@ -33,6 +37,7 @@ import path from "node:path";
 import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { EXPLAIN_QUESTION } from "../src/wiki/discuss-bounds.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 
 const PORT = e2ePort("wiki-discuss-thread");
@@ -67,6 +72,11 @@ const Q3 = "Fix the night route line.";
 const Q4 = "Sent from chat: is the morning stop new?";
 const Q5 = "Sent while the last turn runs";
 const OLD_Q = "Is the berth list current?";
+/** Discuss v3 P4's page: a seeded Explain thread of it, read in /chat. */
+const REL2 = "plans/harbour.mdx";
+const PAGE2 = ["---", "title: Harbour plan", "---", "", "# Harbour plan", "", "## Brief", "", "- The quay opens at dawn.", "- The crane moves in spring.", ""].join("\n");
+const PASSAGE2 = "The quay opens at dawn.";
+const EXPLAIN_Q = "Explain this passage with context: what it means, why it is here, and what led to it.";
 const OLD_EDIT_JSON = JSON.stringify({ edits: [{ old: "The morning route adds a stop.", new: "The morning route adds two stops.", reason: "October list." }] });
 
 let server: ChildProcess | undefined;
@@ -140,6 +150,7 @@ test.beforeAll(async () => {
   root = path.join(scratch, "wiki");
   await mkdir(path.join(root, "plans"), { recursive: true });
   await writeFile(path.join(root, REL), PAGE, "utf8");
+  await writeFile(path.join(root, REL2), PAGE2, "utf8");
   await writeFile(path.join(root, ".wiki-agent.md"), RULES, "utf8");
   const init = spawnSync("git", ["init", "-q", "-b", "main", root], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`git init: ${init.stderr}`);
@@ -157,6 +168,8 @@ test.beforeAll(async () => {
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
   // A clean slate for this wiki and user (a rerun on the same database).
   await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2})`;
+  // A deleted thread leaves its messages behind with no thread, where the main thread's read shows them.
+  await sql`DELETE FROM messages WHERE user_id IN (${USER}, ${USER2})`;
   await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`;
   await sql`INSERT INTO users (id, username, platform) VALUES (${USER}, 'E2E Thread', 'web') ON CONFLICT (id) DO NOTHING`;
   await sql`INSERT INTO users (id, username, platform) VALUES (${USER2}, 'E2E Other', 'web') ON CONFLICT (id) DO NOTHING`;
@@ -223,6 +236,7 @@ test.afterAll(async () => {
   }
   if (sql) {
     await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2})`.catch(() => {});
+    await sql`DELETE FROM messages WHERE user_id IN (${USER}, ${USER2})`.catch(() => {});
     await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`.catch(() => {});
     await sql`DELETE FROM connectors WHERE name = 'e2e-thread-conn'`.catch(() => {});
     await sql.end({ timeout: 2 });
@@ -488,4 +502,123 @@ test("a send the browser holds back past 5 s says it is still waiting on the tur
   await expect(page.locator("#discussBody [data-discuss-waiting]")).toHaveCount(0, { timeout: 15_000 });
   const asked = page.locator("#discussBody .wiki-discuss-turn").filter({ has: page.locator(".wiki-discuss-q", { hasText: q }) });
   await expect(asked).toHaveAttribute("data-turn-state", "done", { timeout: 90_000 });
+});
+
+/** A real mouse drag over the first copy of `text` in the article. */
+async function dragSelect(page: Page, text: string): Promise<void> {
+  await page.evaluate(() => getSelection()!.removeAllRanges());
+  const at = await page.evaluate((text) => {
+    const article = document.querySelector("#articleWrap .wiki-article")!;
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      const i = t.data.indexOf(text);
+      if (i === -1) continue;
+      const r = document.createRange();
+      r.setStart(t, i);
+      r.setEnd(t, i + text.length);
+      const rect = r.getBoundingClientRect();
+      return { x0: rect.left + 1, x1: rect.right - 1, y: rect.top + rect.height / 2 };
+    }
+    throw new Error(`no text ${text}`);
+  }, text);
+  await page.mouse.move(at.x0, at.y);
+  await page.mouse.down();
+  await page.mouse.move(at.x1, at.y, { steps: 8 });
+  await page.mouse.up();
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(text);
+}
+
+test("/chat on a seeded Explain thread: the page bar and the chip, Continue, Start over leaves it read-only under Earlier discussions, and the page's next Explain opens a new thread /chat lists", async ({ page, context }) => {
+  test.setTimeout(180_000);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  expect(EXPLAIN_Q).toBe(EXPLAIN_QUESTION);
+  // The seeded thread: one Explain turn and its two messages, as the engine stores them.
+  const [seeded] = await sql!`
+    INSERT INTO threads (user_id, bot_name, name, is_active, kind, wiki, rel_path)
+    VALUES (${USER}, ${BOT}, 'wiki: harbour plan', false, 'wiki', ${WIKI}, ${REL2}) RETURNING id`;
+  const threadId = seeded!.id as string;
+  const [um] = await sql!`
+    INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id, created_at)
+    VALUES (${USER}, ${BOT}, 'user', ${`> ${PASSAGE2}\n\n${EXPLAIN_QUESTION}`}, 'wiki', 'web', ${threadId}, now() - interval '2 minutes') RETURNING id`;
+  const [am] = await sql!`
+    INSERT INTO messages (user_id, bot_name, role, content, source, platform, thread_id, created_at)
+    VALUES (${USER}, ${BOT}, 'assistant', 'SEEDED-ANSWER: the quay opens at dawn since the ferry moved.', 'wiki', 'web', ${threadId}, now() - interval '1 minute') RETURNING id`;
+  const pageHash = createHash("sha256").update(PAGE2).digest("hex");
+  const [seededTurn] = await sql!`
+    INSERT INTO wiki_discuss_turns (discussion_id, seq, wiki, rel_path, page_hash, thread_id, user_message_id, assistant_message_id, selection, question, answer, end_state, bot_name, connector, finished_at, sent_from)
+    VALUES (${threadId}, 1, ${WIKI}, ${REL2}, ${pageHash}, ${threadId}, ${um!.id}, ${am!.id}, ${PASSAGE2}, ${EXPLAIN_QUESTION}, 'SEEDED-ANSWER: the quay opens at dawn since the ferry moved.', 'done', ${BOT}, 'claude-sdk', now(), 'card')
+    RETURNING id`;
+  const turnId = seededTurn!.id as string;
+
+  // The message read /chat makes: the turn on the user message, the page with its title.
+  const read = page.waitForResponse((r) => r.url().includes("/messages?thread=" + threadId));
+  await page.goto(`${BASE}/chat?bot=${BOT}&thread=${threadId}&user=${USER}`);
+  const readRes = await read;
+  const readBody = (await readRes.json()) as { messages: { sender: string; turn?: unknown }[]; wikiPage: unknown };
+  // A chat thread's read on the same conversation: as before, no page and no turns.
+  const [main] = await sql!`SELECT id FROM threads WHERE user_id = ${USER} AND bot_name = ${BOT} AND name = 'main'`;
+  await sql!`INSERT INTO messages (user_id, bot_name, role, content, platform, thread_id) VALUES (${USER}, ${BOT}, 'user', 'A chat line.', 'web', ${main!.id})`;
+  const chatRead = (await (await fetch(readRes.url().replace(/\?thread=.*$/, `?thread=${main!.id}`))).json()) as Record<string, unknown>;
+  expect(Object.keys(chatRead)).toEqual(["messages"]);
+  expect((chatRead.messages as { text: string }[]).map((m) => m.text)).toEqual(["A chat line."]);
+  expect((chatRead.messages as Record<string, unknown>[]).every((m) => !("turn" in m))).toBe(true);
+  if (process.env.E2E_P4_JSON) await writeFile(process.env.E2E_P4_JSON, JSON.stringify({ wikiRead: readBody, chatRead }, null, 2));
+  expect(readBody.wikiPage).toEqual({ wiki: WIKI, relPath: REL2, traceKey: null, title: "Harbour plan" });
+  expect(readBody.messages.find((m) => m.sender === "user")?.turn).toEqual({ id: turnId, question: EXPLAIN_QUESTION, passage: PASSAGE2 });
+
+  const bar = page.locator("#chatWikiBar");
+  await expect(bar.locator("[data-wiki-page-title]")).toHaveText("Harbour plan");
+  await expect(bar.locator(".chat-wiki-name")).toHaveText(WIKI);
+  await expect(bar.locator("[data-wiki-back]")).toHaveText("↩ Back to the page");
+  await expect(bar.locator("[data-wiki-back]")).toHaveAttribute("href", `/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL2)}`);
+  const chip = page.locator("#chatMessages .msg-user .chat-explain-chip");
+  await expect(chip).toHaveText(`✨ Explain · «${PASSAGE2}»`);
+  await expect(chip).toHaveAttribute("href", `/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL2)}&turn=${turnId}`);
+  await expect(page.locator("#chatMessages .msg-user")).not.toContainText(EXPLAIN_QUESTION);
+  // «⌘ Continue in Claude Code» under the last answer, on the seeded turn.
+  const cont = page.locator("#chatMessages .chat-wiki-continue");
+  await expect(cont.locator("xpath=preceding-sibling::*[1]")).toHaveClass(/msg-bot/);
+  const contRes = page.waitForResponse((r) => r.url().endsWith("/api/wiki/discuss/continue"));
+  await cont.locator("[data-chat-continue]").click();
+  const contBody = (await (await contRes).json()) as { prompt?: string };
+  expect(contBody.prompt).toContain(PASSAGE2);
+  await expect(cont.locator("[data-chat-continue-status]")).toContainText(/Copied|copy it by hand/);
+  await shot(page, "p4-1-chat-wiki-bar-chip");
+
+  // Start over: closed through the tab's route; read-only here, listed under Earlier discussions.
+  const closeRes = page.waitForResponse((r) => r.url().endsWith("/api/wiki/discuss/thread/close"));
+  await bar.locator("[data-wiki-start-over]").click();
+  expect((await closeRes).status()).toBe(200);
+  await expect(page.locator("#chatHeader .chat-title")).toContainText("(closed)");
+  await expect(page.locator("#chatInput")).toBeDisabled();
+  await expect(page.locator("#chatInput")).toHaveAttribute("placeholder", "Closed with Start over: the page's next question starts a new discussion.");
+  await expect(bar.locator("[data-wiki-closed]")).toHaveText("Closed with Start over: the page's next question starts a new discussion.");
+  await expect(bar.locator("[data-wiki-start-over]")).toHaveCount(0);
+  await expect(bar.locator("[data-wiki-back]")).toBeVisible();
+  await expect(bar.locator("[data-wiki-earlier-list] > summary")).toHaveText("Earlier discussions (1)");
+  await bar.locator("[data-wiki-earlier-list] > summary").click();
+  await expect(bar.locator(`[data-wiki-earlier="${threadId}"]`)).toBeVisible();
+  await expect(chip).toBeVisible();
+  await expect(page.locator(`.thread-item[data-id="${threadId}"]`)).toHaveCount(0);
+  expect((await sql!`SELECT closed_at FROM threads WHERE id = ${threadId}`)[0]!.closed_at).not.toBeNull();
+  await shot(page, "p4-2-chat-closed-earlier");
+
+  // The page's next Explain opens the new thread (D14), which /chat lists.
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(REL2)}`);
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText(PASSAGE2);
+  await dragSelect(page, "quay");
+  await page.locator("#wikiSelBar #wikiExplainBtn").click();
+  const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+  await expect(card.locator(".wiki-discuss-answer").first()).toContainText("The night route is named on this page only.", { timeout: 90_000 });
+  const [fresh] = await sql!`SELECT id FROM threads WHERE kind = 'wiki' AND wiki = ${WIKI} AND rel_path = ${REL2} AND user_id = ${USER} AND closed_at IS NULL`;
+  expect(fresh!.id).not.toBe(threadId);
+  await page.goto(`${BASE}/chat?bot=${BOT}&user=${USER}`);
+  const item = page.locator(`.thread-item.wiki[data-id="${fresh!.id}"]`);
+  await expect(item).toBeVisible({ timeout: 20_000 });
+  await item.click();
+  // The engine's own Explain turn reads as the chip too, and the closed thread is its page's earlier one.
+  await expect(page.locator("#chatMessages .msg-user .chat-explain-chip")).toHaveText("✨ Explain · «quay»");
+  await expect(page.locator("#chatWikiBar [data-wiki-start-over]")).toBeVisible();
+  await expect(page.locator("#chatWikiBar [data-wiki-earlier-list] > summary")).toHaveText("Earlier discussions (1)");
+  await shot(page, "p4-3-chat-new-thread");
 });

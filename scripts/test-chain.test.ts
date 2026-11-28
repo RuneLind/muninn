@@ -90,6 +90,7 @@ describe("the live chain", () => {
       "src/dashboard/routes/wiki-discuss-db.test.ts",
       "src/dashboard/routes/wiki-discuss-apply-db.test.ts",
       "src/dashboard/routes/research-chat-wiki-thread-db.test.ts",
+      "src/chat/wiki-thread-read-db.test.ts",
       "src/bot/handler.test.ts",
       "src/bot/middleware.test.ts",
       "watchers",
