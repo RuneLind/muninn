@@ -297,8 +297,8 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       // The light read (Discuss v3 P1): the user fields only, for the reader's
       // «Runs as» line before any turn, and the live thread's id alone (no
       // messages, closed list or one-shot turns). The client decides
-      // `userListed` from `thread` and `users` with the one rule both reads
-      // use (`threadReadListsUser`), so the light read never claims it.
+      // `userListed` from `users` and the id it posted with the one rule both
+      // reads use (`threadReadListsUser`), so the light read never claims it.
       if (c.req.query("who") === "1") {
         const live = await (deps.threads?.live ?? getLiveWikiThread)(who.userId, bot.name, wikiName, meta.relPath);
         return c.json({ userId: who.userId, ...whoFields(who), thread: live ? { id: live.id } : null, bot: bot.name });

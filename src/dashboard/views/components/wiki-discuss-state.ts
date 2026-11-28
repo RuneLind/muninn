@@ -247,7 +247,8 @@ export interface DiscussionView {
   userName?: string | null;
   users?: { id: string; name: string }[];
   userChoosable?: boolean;
-  /** The route can take `userId` as a posted id: it holds a thread, or the read listed it. */
+  /** The engine takes `userId` as a posted id: a read or send posted it and
+   *  was answered as it, or a read listed it in `users` (never "holds a thread"). */
   userListed?: boolean;
   /** The «as <name> ▾» picker is open. */
   userMenu?: boolean;
@@ -519,12 +520,16 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
 
 /**
  * Rule R2's `userListed`, one rule for both thread reads (the full read and
- * the light `?who=1` read): the read's user holds the page's live thread, or
- * is in the `users` the read sent (empty on an authenticating instance).
+ * the light `?who=1` read): the engine takes the read's user as a posted id.
+ * It does exactly when that id is one of the bot's chat users, so: the read
+ * posted it (`asUser`) and was answered as it, or it is in the `users` the
+ * read sent (empty on an authenticating instance). Holding the page's live
+ * thread is no evidence: a default user who is not a chat user holds one,
+ * and a turn posted as them is refused 422 `unknown-user` (fix round 2).
  */
-export function threadReadListsUser(b: Record<string, unknown>): boolean {
-  const thread = b.thread as { id?: unknown } | null | undefined;
-  if (thread && typeof thread.id === "string") return true;
+export function threadReadListsUser(b: Record<string, unknown>, asUser: string | null): boolean {
+  if (typeof b.userId !== "string") return false;
+  if (asUser !== null && b.userId === asUser) return true;
   return Array.isArray(b.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === b.userId);
 }
 

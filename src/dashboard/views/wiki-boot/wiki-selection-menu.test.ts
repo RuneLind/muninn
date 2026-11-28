@@ -2094,7 +2094,7 @@ test("fix round 1 F1: a page render's light read keeps no user: the bot is learn
   }
 });
 
-test("fix round 1 F2: the light read's `userListed` is the full read's rule: a default user holding the page's thread is sent, one the read lists on an authenticating instance (no `users`) is not", async () => {
+test("fix round 1 F2: the light read's `userListed` is the full read's rule: a default user holding the page's thread but not listed is not sent (fix round 2), nor one an authenticating instance names (no `users`)", async () => {
   let releaseFull: () => void = () => {};
   const fullHeld = new Promise<void>((r) => (releaseFull = r));
   try {
@@ -2109,7 +2109,7 @@ test("fix round 1 F2: the light read's `userListed` is the full read's rule: a d
     await selectText(NIGHT);
     act(document.getElementById("wikiExplainBtn")!);
     await settle();
-    expect(posts.at(-1)!.userId).toBe("u9");
+    expect(posts.at(-1)!.userId).toBeUndefined();
     push!("turn", { turnId: "l1-1", seq: 1, discussionId: "t9", userId: "u9" });
     push!("done", { answer: "ok", proposedEdit: null });
     close!();

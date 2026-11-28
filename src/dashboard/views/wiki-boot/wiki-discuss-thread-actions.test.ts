@@ -957,7 +957,7 @@ test("R4: a user kept by another window is followed on a tab show (the tab's cli
   document.body.innerHTML = "";
 });
 
-test("R1/R2: a default user the route would refuse as a posted id (no thread, not listed) is neither kept nor sent", async () => {
+test("R1/R2: a default user the route would refuse as a posted id (not listed) is neither kept nor sent, holding a thread or not", async () => {
   wiki = "r12";
   relPath = "plans/a.mdx";
   reads.length = 0;
@@ -978,12 +978,19 @@ test("R1/R2: a default user the route would refuse as a posted id (no thread, no
   await askBox("Hello?");
   expect(posts.length).toBe(1);
   expect(posts[0]!.userId).toBeUndefined();
-  // Its turn event: the user holds this thread now, so it is kept (R2).
+  // Its turn event: the user holds this thread now, but is still no chat
+  // user the engine takes as a posted id (fix round 2 batch 1): not kept, and
+  // the follow-up names the thread with no id (the engine's default is its owner).
   stream!.push("turn", { turnId: "tg1", seq: 1, discussionId: "th-ghost", userId: "ghost" });
   stream!.push("done", { answer: "ok", proposedEdit: null });
   stream!.end();
   await settle();
-  expect(localStorage.getItem("muninn-discuss-user-g-bot")).toBe("ghost");
+  expect(localStorage.getItem("muninn-discuss-user-g-bot")).toBe(null);
+  await askBox("And then?");
+  expect(posts.length).toBe(2);
+  expect({ userId: posts[1]!.userId, discussionId: posts[1]!.discussionId }).toEqual({ userId: undefined, discussionId: "th-ghost" });
+  stream!.end();
+  await settle();
   document.body.innerHTML = "";
 });
 

@@ -24,6 +24,7 @@ import type { Thread } from "../../db/threads.ts";
 import { discussWhoFor, type DiscussThreadStore } from "../../wiki/discuss-engine.ts";
 import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
 import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
+import { threadReadListsUser } from "../views/components/wiki-discuss-state.ts";
 import type { RunOutcome } from "../../wiki/plan-card-run.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest, getWikiRegistry } from "../../wiki/registry-memo.ts";
@@ -1203,6 +1204,27 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     threads.rows.push({ id: "t-kari", userId: "kari", botName: "ivar", name: "ferry", isActive: false, autoRespondPaused: false, createdAt: 1, updatedAt: 1, kind: "wiki", wiki: "agent", relPath: "plans/ferry.mdx" });
     const { app } = setup({ threads, deps: { authMode: () => "entra" } });
     expect(await (await read(app, {})).json()).toMatchObject({ userId: "kari", users: [], thread: { id: "t-kari" } });
+  });
+  test("fix round 2 batch 1: a default user who is not a chat user but holds the page's thread: the id the client posts (none, by `threadReadListsUser`) starts the turn; posting theirs is refused", async () => {
+    const T = "7d3c1a52-0b6e-4c1f-9a7e-2f0d8b4c6e11"; // the route takes a uuid discussionId
+    const threads = new MemThreads();
+    threads.rows.push({ id: T, userId: "popp", botName: "ivar", name: "ferry", isActive: false, autoRespondPaused: false, createdAt: 1, updatedAt: 1, kind: "wiki", wiki: "agent", relPath: "plans/ferry.mdx" });
+    for (const auth of ["off", "entra"] as const) {
+      const { app } = setup({ threads, oneShot: (async () => ({ result: "Done.", toolCalls: [] })) as never, deps: { authMode: () => auth, defaultUser: async () => "popp" } });
+      const who = (await (await read(app, {})).json()) as Record<string, unknown>;
+      expect(who).toMatchObject({ userId: "popp", userName: null, thread: { id: T } });
+      // The client's rule (R2): nothing posted it, and it is in no `users`: not listed, so no id is sent with its thread.
+      expect(threadReadListsUser(who, null)).toBe(false);
+      const res = await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Why?", discussionId: T });
+      if (!res.headers.get("content-type")?.includes("event-stream")) throw new Error(`${res.status} ${await res.text()}`);
+      const evs = await frames(res);
+      expect(evs.find((e) => e.event === "turn")!.data).toMatchObject({ discussionId: T, userId: "popp" });
+      expect(evs.find((e) => e.event === "done")).toBeDefined();
+      // What the unfixed client posted (the holder's id): the engine's user rule refuses it.
+      const refused = await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Why?", discussionId: T, userId: "popp" });
+      expect(refused.status).toBe(422);
+      expect(((await refused.json()) as { reason: string }).reason).toBe("unknown-user");
+    }
   });
   // Fix round 1 batch 4: with discovery not injected, the light read (run on
   // every page navigation) used to rediscover every bot and log the missing-pin
