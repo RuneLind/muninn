@@ -2474,3 +2474,55 @@ test("fix round 1 batch 2 F3b: Escape closes the who box while the bar is hidden
     resetWho();
   }
 });
+
+// ── Fix round 1 batch 3 ─────────────────────────────────────────────────
+
+/** Select `text` as the keyboard does: no mouse event, so no bar. */
+function selectByKeys(text: string): void {
+  const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, 4);
+  for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+    const i = (t.textContent ?? "").indexOf(text);
+    if (i === -1) continue;
+    window.getSelection()!.setBaseAndExtent(t, i, t, i + text.length);
+    return;
+  }
+  throw new Error(text);
+}
+
+test("fix round 1 batch 3 K1: the keyboard menu names who Explain runs as and offers «Change…» to the arrow keys; it opens the who box with focus in it, and Escape puts focus back on «Change…»", async () => {
+  discussWiki = "w-k1";
+  threadRead = (url: string) => json({ ...whoBody("u1", { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  try {
+    renderWhoPage();
+    await settle();
+    selectByKeys(NIGHT);
+    expect(document.getElementById("wikiSelBar")?.style.display ?? "none").toBe("none");
+    expect(key(document.body, "F10", true).defaultPrevented).toBe(true);
+    const m = document.getElementById("wikiSelMenu")!;
+    expect(m.style.display).toBe("block");
+    expect(m.querySelector("[data-seltip-who]")?.textContent ?? null).toBe("Runs as Kari · claude-sonnet-5.5 · copilot-sdk");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selact")).toBe("explain");
+    // ↓ from Explain: «Change…», a menu item.
+    key(document.activeElement!, "ArrowDown");
+    const change = m.querySelector<HTMLElement>("[data-selwho-open]");
+    expect(change?.getAttribute("role") ?? null).toBe("menuitem");
+    expect(document.activeElement === change).toBe(true);
+    // Enter on a button is its click (detail 0).
+    change!.click();
+    await settle();
+    const box = document.getElementById("wikiSelWho")!;
+    expect(box.style.display).toBe("block");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selwho-user")).toBe("u1");
+    // Escape closes the box only: focus back on «Change…», the menu still open.
+    escape();
+    expect(box.style.display).toBe("none");
+    expect(m.style.display).toBe("block");
+    expect(document.activeElement === change).toBe(true);
+    key(document.activeElement!, "ArrowDown");
+    expect((document.activeElement as HTMLElement).getAttribute("data-selact")).toBe("where");
+    escape();
+    expect(m.style.display).toBe("none");
+  } finally {
+    resetWho();
+  }
+});

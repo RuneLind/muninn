@@ -460,6 +460,44 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     expect(await page.evaluate(() => getSelection()!.toString())).toBe("The night route is unchanged.");
   });
 
+  test("fix round 1 batch 3 K3: closing the panel after its passage was scrolled out of the pane brings it back and focuses the bar's item; with no selection to offer, focus lands on the article pane, never <body>", async ({ page }) => {
+    await openPage(page, WIKI);
+    await select(page, "The pier opens at six.", 1);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await btn.click();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    const wrap = page.locator("#articleWrap");
+    await wrap.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    // The passage is out of the pane: the bar for it would be hidden.
+    const outOfPane = () =>
+      page.evaluate(() => {
+        const r = getSelection()!.rangeCount ? getSelection()!.getRangeAt(0).getBoundingClientRect() : null;
+        const pane = document.getElementById("articleWrap")!.getBoundingClientRect();
+        return !r || r.bottom <= pane.top || r.top >= pane.bottom;
+      });
+    expect(await page.evaluate(() => document.getElementById("articleWrap")!.scrollTop)).toBeGreaterThan(0);
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(btn).toBeVisible();
+    await expect(btn).toBeFocused();
+    expect(await outOfPane()).toBe(false);
+
+    // The passage's text gone while the panel was open: no bar to return to.
+    await btn.click();
+    await expect(panel.locator("textarea.wiki-handoff-q")).toBeFocused();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) if (t.data.includes("The pier opens at six.")) return void t.remove();
+    });
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await page.waitForTimeout(100);
+    const active = await page.evaluate(() => ({ tag: document.activeElement?.tagName ?? null, id: document.activeElement?.id ?? null }));
+    expect(active.tag).not.toBe("BODY");
+    expect(active.id).toBe("articleWrap");
+  });
+
   test("Copy is disabled while its request runs, and a non-JSON answer shows its status", async ({ page }) => {
     await openPage(page, WIKI);
     let release: () => void = () => {};
@@ -542,5 +580,66 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     // Explain shows for the same selection: the selection was read.
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();
     await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+  });
+});
+
+test.describe("Wiki reader: Ask Claude Code on a touch screen", () => {
+  test.use({ hasTouch: true });
+
+  /** A tap on `text`'s middle: the touch pointer a long-press starts with. */
+  async function tapOn(page: Page, text: string): Promise<void> {
+    const at = await page.evaluate((text) => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf(text);
+        if (i === -1) continue;
+        const r = document.createRange();
+        r.setStart(t, i);
+        r.setEnd(t, i + text.length);
+        const b = r.getBoundingClientRect();
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+      }
+      throw new Error(`no text ${text}`);
+    }, text);
+    await page.touchscreen.tap(at.x, at.y);
+  }
+
+  test("fix round 1 batch 3 K2: a long-press selection (a touch pointer, then the selection, no mouseup) shows the bar once it settles, and a tap on its item opens the panel on it; Shift+arrow steps after a touch show no bar", async ({ page }) => {
+    await openPage(page, WIKI);
+    const passage = "The night route is unchanged.";
+    // The long-press: its touch, then the selection it leaves (no mouseup follows one on iOS).
+    await tapOn(page, passage);
+    // The tap's emulated mouse events (their mouseup shows the bar for any live selection) let through first.
+    await page.waitForTimeout(700);
+    await select(page, passage, 1, undefined, false);
+    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+    await expect(btn).toBeVisible();
+    await expect(btn).toHaveText("⌘ Ask Claude Code");
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+    await btn.tap();
+    const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
+    await expect(panel.locator(".wiki-handoff-quote")).toHaveText(passage);
+    await panel.locator("[data-handoff=close]").tap();
+    await expect(panel).toBeHidden();
+
+    // A touch, then a keyboard selection: no bar on its steps (the keyboard's way in is ⇧F10).
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    // Apart from the last tap (no double tap), and its emulated mouse events let through before the keys.
+    await page.waitForTimeout(700);
+    await tapOn(page, "The pier opens at six.");
+    await page.waitForTimeout(700);
+    await page.evaluate(() => getSelection()!.removeAllRanges());
+    await expect(page.locator("#wikiSelBar")).toBeHidden();
+    await page.evaluate(() => {
+      const walker = document.createTreeWalker(document.querySelector(".wiki-article")!, NodeFilter.SHOW_TEXT);
+      for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+        const i = t.data.indexOf("The pier opens");
+        if (i !== -1) return void getSelection()!.setBaseAndExtent(t, i, t, i + 1);
+      }
+    });
+    for (let i = 1; i < "The pier opens at six.".length; i++) await page.keyboard.press("Shift+ArrowRight");
+    expect(await page.evaluate(() => getSelection()!.toString())).toBe("The pier opens at six.");
+    await page.waitForTimeout(800);
+    await expect(page.locator("#wikiSelBar")).toBeHidden();
   });
 });

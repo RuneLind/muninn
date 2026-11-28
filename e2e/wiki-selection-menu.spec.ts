@@ -816,7 +816,7 @@ test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on 
   }, NIGHT.slice(0, NIGHT.indexOf(KEY)));
   for (let i = 1; i < NIGHT.length; i++) await page.keyboard.press("Shift+ArrowRight");
   expect(await page.evaluate(() => getSelection()!.toString())).toBe(NIGHT);
-  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-selact") ?? document.activeElement?.tagName ?? null);
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("data-selact") ?? (document.activeElement?.hasAttribute("data-selwho-open") ? "change" : null) ?? document.activeElement?.tagName ?? null);
   expect(await focused()).toBe("BODY");
 
   await page.keyboard.press("Shift+F10");
@@ -827,8 +827,12 @@ test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on 
   const box = (await menu(page).boundingBox())!;
   expect(box.y).toBeGreaterThan(at.y1);
   expect(box.y).toBeLessThan(at.y1 + 40);
+  // Explain's «Change…» (who answers, fix round 1 batch 3) comes first, then «Where else».
+  await page.keyboard.press("ArrowDown");
+  expect(await focused()).toBe("change");
   await page.keyboard.press("ArrowDown");
   expect(await focused()).toBe("where");
+  await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowUp");
   // Wraps to the last item: the key chip.
@@ -843,6 +847,7 @@ test("the keyboard reaches the menu: ⇧F10 on a keyboard selection opens it on 
 
   // ↓ to «Where else», Enter: its card (no model), focus off the closed menu.
   await page.keyboard.press("Shift+F10");
+  await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowDown");
   expect(await focused()).toBe("where");
   await page.keyboard.press("Enter");
@@ -1005,6 +1010,8 @@ test("fix round 2 R2-2: the menu stays open while the Discuss pane scrolls; the 
   // The keyboard's menu, being arrowed through: the pane's scroll leaves it and its focus.
   await page.keyboard.press("Shift+F10");
   await expect(menu(page)).toBeVisible();
+  // Past Explain's «Change…» (fix round 1 batch 3) to «Where else».
+  await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowDown");
   expect(await focusedEl(page)).toBe("where");
   expect(await paneScroll(0)).toBe(0);
@@ -1367,6 +1374,49 @@ test("Discuss v3 P1 fix round 1 batch 2 F3b: Escape closes the who box while the
   await page.locator("#articleWrap").evaluate((el) => (el.scrollTop = 0));
   await expect(bar(page)).toBeVisible();
   await expect(box).toBeHidden();
+});
+
+test("Discuss v3 P1 fix round 1 batch 3 K1: a keyboard-only reader: ⇧F10 on a Shift+arrow selection names who Explain runs as, ↓ reaches «Change…», Enter opens the who box with focus in it, Escape puts focus back on «Change…»", async ({ page }) => {
+  await openPage(page, OTHER);
+  const PIER_TEXT = "The pier opens at six.";
+  // The first character by script (no caret browsing), the rest with ⇧→: no mouse event.
+  await page.evaluate((text) => {
+    const walker = document.createTreeWalker(document.querySelector("#articleWrap .wiki-article")!, NodeFilter.SHOW_TEXT);
+    for (let t = walker.nextNode() as Text | null; t; t = walker.nextNode() as Text | null) {
+      const i = t.data.indexOf(text);
+      if (i !== -1) return void getSelection()!.setBaseAndExtent(t, i, t, i + 1);
+    }
+    throw new Error(text);
+  }, PIER_TEXT);
+  for (let i = 1; i < PIER_TEXT.length; i++) await page.keyboard.press("Shift+ArrowRight");
+  expect(await page.evaluate(() => getSelection()!.toString())).toBe(PIER_TEXT);
+  await expect(bar(page)).toBeHidden();
+  await page.keyboard.press("Shift+F10");
+  await expect(menu(page)).toBeVisible();
+  // The default user, named as the read names it (its display name once an earlier test gave it a thread), never «…».
+  await expect(menu(page).locator("[data-seltip-who]")).toHaveText(new RegExp(`^Runs as (E2E Selection|${USER}) · ${MODEL} · claude-sdk$`));
+  await expect(menu(page).locator('[data-selact="explain"]')).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  const change = menu(page).locator("[data-selwho-open]");
+  await expect(change).toBeFocused();
+  await shot(page, "17-keyboard-who");
+  await page.keyboard.press("Enter");
+  const box = page.locator("#wikiSelWho");
+  await expect(box).toBeVisible();
+  // Focus in the box: on the current user where users can be picked, else on its ✕.
+  await expect.poll(() => box.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+  // Beside the menu, not over it, level with «Change…».
+  const mb = (await menu(page).boundingBox())!;
+  const bb = (await box.boundingBox())!;
+  const cb = (await change.boundingBox())!;
+  expect(bb.x >= mb.x + mb.width || bb.x + bb.width <= mb.x).toBe(true);
+  expect(Math.abs(bb.y - cb.y)).toBeLessThan(4);
+  await page.keyboard.press("Escape");
+  await expect(box).toBeHidden();
+  await expect(menu(page)).toBeVisible();
+  await expect(change).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu(page)).toBeHidden();
 });
 
 test("Discuss v3 P1: /models?bot=x opens on bot x and leaves the stored selection alone", async ({ page }) => {

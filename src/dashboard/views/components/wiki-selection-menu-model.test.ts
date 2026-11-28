@@ -63,6 +63,24 @@ describe("selMenuItems", () => {
     expect(menuEl.textContent).toContain("For this selection");
     expect(menuEl.textContent).toContain("⇧ right-click");
   });
+
+  test("fix round 1 batch 3 K1: with `who`, the menu puts the «Runs as» line and a «Change…» menu item right after Explain; a missing bot gets the line and no «Change…»; no Explain, no line", () => {
+    const doc = new Window().document;
+    const who = { bot: "b", origin: "owner" as const, connector: "copilot-sdk", model: "m-1" };
+    const runsAs = { state: "user" as const, userId: "u1", name: "Kari" };
+    const el = doc.createElement("div");
+    el.innerHTML = selMenuHtml(selMenuItems(input({})), "The pier opens at six.", { who, runsAs });
+    const seq = Array.from(el.querySelectorAll("[data-selact], [data-seltip-who], [data-selwho-open]")).map((e) => e.getAttribute("data-selact") ?? (e.hasAttribute("data-selwho-open") ? "change" : "who"));
+    expect(seq).toEqual(["explain", "who", "change", "where", "history", "factcheck", "copy"]);
+    expect(el.querySelector("[data-seltip-who]")!.textContent).toBe("Runs as Kari · m-1 · copilot-sdk");
+    expect(el.querySelector("[data-selwho-open]")!.getAttribute("role")).toBe("menuitem");
+    expect(el.querySelector('[data-selact="explain"]')!.getAttribute("aria-describedby")).toBe("wikiSelMenuWho");
+    el.innerHTML = selMenuHtml(selMenuItems(input({})), "x", { who: null, runsAs });
+    expect(el.querySelector("[data-seltip-who]")!.textContent).toContain("No bot answers here");
+    expect(el.querySelector("[data-selwho-open]")).toBeNull();
+    el.innerHTML = selMenuHtml(selMenuItems(input({ long: true, handoff: "code" })), "x", { who, runsAs });
+    expect(el.querySelector("[data-seltip-who]")).toBeNull();
+  });
 });
 
 describe("detectKeys: the mentions route's check and classifier", () => {

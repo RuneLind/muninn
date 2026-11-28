@@ -218,15 +218,27 @@ export function selWhoHtml(opts: { wiki: string; who: SelWho; runsAs: SelRunsAs;
   );
 }
 
-/** The right-click menu: the quoted selection, the same actions, the key
- *  chips under «For this selection», and how to reach the browser's menu. */
-export function selMenuHtml(items: SelMenuItem[], text: string): string {
+/** The menu's «Runs as» line under Explain (its `aria-describedby` target). */
+export const SEL_MENU_WHO_ID = "wikiSelMenuWho";
+
+/** The right-click and keyboard menu: the quoted selection, the same actions,
+ *  the key chips under «For this selection», and how to reach the browser's
+ *  menu. With `who` (Explain is a thread turn here) Explain is followed by the
+ *  tooltip's «Runs as» line and a «Change…» menu item (`data-selwho-open`),
+ *  which the arrow keys reach (Discuss v3 P1 fix round 1 batch 3). */
+export function selMenuHtml(items: SelMenuItem[], text: string, who?: { who: SelWho | null; runsAs: SelRunsAs }): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const quote = flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
   const main = items.filter((it) => it.act !== "key");
   const chips = items.filter((it) => it.act === "key");
+  const whoRows = (it: SelMenuItem) =>
+    it.act !== "explain" || !who
+      ? ""
+      : `<div class="wiki-selmenu-who" id="${SEL_MENU_WHO_ID}"><span data-seltip-who>${selRunsAsHtml(who.who, who.runsAs)}</span></div>` +
+        (who.who ? `<button type="button" role="menuitem" class="wiki-selmenu-it wiki-selmenu-change" data-selwho-open aria-label="Change who answers"><span>Change…</span></button>` : "");
   const row = (it: SelMenuItem, i: number) =>
-    `<button type="button" role="menuitem" class="wiki-selmenu-it${i === 0 ? " def" : ""}" ${itemAttrs(it)}><span>${esc(it.label)}</span>${i === 0 ? '<span class="k">↵</span>' : ""}</button>`;
+    `<button type="button" role="menuitem" class="wiki-selmenu-it${i === 0 ? " def" : ""}" ${itemAttrs(it)}${it.act === "explain" && who ? ` aria-describedby="${SEL_MENU_WHO_ID}"` : ""}><span>${esc(it.label)}</span>${i === 0 ? '<span class="k">↵</span>' : ""}</button>` +
+    whoRows(it);
   return (
     `<div class="wiki-selmenu-hd">«${esc(quote)}»</div>` +
     main.map(row).join("") +
@@ -512,6 +524,8 @@ export function selectionMenuStyles(): string {
     .wiki-selmenu-sep { border-top: 1px solid var(--border-secondary); margin: 4px 0; }
     .wiki-selmenu-hd { font-size: 11px; color: var(--text-dim); padding: 4px 10px 2px; text-transform: uppercase; letter-spacing: 0.04em; }
     .wiki-selmenu-hd:first-child { text-transform: none; letter-spacing: 0; font-style: italic; }
+    .wiki-selmenu-who { padding: 0 10px 2px 28px; font-size: 12px; color: var(--text-secondary); }
+    .wiki-selmenu-it.wiki-selmenu-change { padding: 2px 10px 4px 28px; font-size: 12px; color: var(--accent-light); }
     .wiki-selmenu-foot { display: flex; justify-content: space-between; gap: 12px; padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
     .${SEL_CARD_CLASS} {
       border: 1px solid var(--accent); border-left-width: 4px; border-radius: 8px;
