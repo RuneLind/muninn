@@ -86,6 +86,7 @@ import {
   applyThreadWho,
   dropStoredCopy,
   mergeThreadTurns,
+  turnLive,
   turnsFromThread,
   type EarlierDiscussions,
   type StoredThreadMessage,
@@ -372,7 +373,7 @@ export function discussPopOutHrefHere(): string | null {
  *  gone (Start over, another page). */
 export function discussTurnForCard(key: string): { turn: DiscussTurnView; current: boolean } | null {
   const d = here();
-  const t = d?.turns.find((x) => x.key === key) ?? null;
+  const t = d?.turns.find((x) => x.key === key) ?? d?.closedCardTurns?.find((x) => x.key === key) ?? null;
   return d && t ? { turn: t, current: currentTurn(d) === t } : null;
 }
 
@@ -581,12 +582,15 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
 /** A card's send found the page's discussion closed elsewhere (Start over in
  *  another tab, /chat): its turns leave this view (they are under «Earlier
  *  discussions» now), the thread is read again, and the card that sent it
- *  closes and says so (`closedElsewhere`, which the card reads). */
+ *  closes and says so (`closedElsewhere`, which the card reads from
+ *  `closedCardTurns`: the refused turn leaves `turns` too, so the tab holds
+ *  only the re-read thread's turns, plus a send still in flight). */
 function closedElsewhere(d: DiscussionView, refused: DiscussTurnView): void {
   refused.closedElsewhere = true;
+  (d.closedCardTurns ??= []).push(refused);
   const gone = d.turns.filter((t) => t !== refused && t.turnId);
   for (const t of gone) anchors.delete(t.key);
-  d.turns = d.turns.filter((t) => t === refused || !t.turnId);
+  d.turns = d.turns.filter((t) => t !== refused && !t.turnId && turnLive(t));
   d.discussionId = null;
   reloadThread(d);
 }
@@ -783,9 +787,12 @@ function revealPassage(key: string): void {
   if (article && range) revealRange(article, range, block);
 }
 
-async function continueInClaudeCode(key: string): Promise<void> {
+/** `from`: the pressed control. A copy failure selects the prompt box beside
+ *  it: the inline card's, or the tab's turn's. */
+async function continueInClaudeCode(key: string, from: HTMLElement): Promise<void> {
   const t = turnByKey(key);
   if (!t?.turnId || t.handover?.state === "busy") return;
+  const card = from.closest<HTMLElement>(".wiki-sel-card");
   t.handover = { state: "busy", note: "Building the prompt…" };
   paint();
   let prompt: string | null = null;
@@ -807,7 +814,9 @@ async function continueInClaudeCode(key: string): Promise<void> {
     : { state: "failed", note: "Copy failed. The prompt is below: copy it by hand.", prompt };
   paint();
   if (!ok) {
-    const out = document.querySelector<HTMLTextAreaElement>(`[data-turn-key="${key}"] .wiki-discuss-cont-out`);
+    const out = card
+      ? card.querySelector<HTMLTextAreaElement>(".wiki-sel-card-cont .wiki-discuss-cont-out")
+      : document.querySelector<HTMLTextAreaElement>(`#${DISCUSS_BODY_ID} [data-turn-key="${key}"] .wiki-discuss-cont-out`);
     out?.focus();
     out?.select();
   }
@@ -1412,7 +1421,7 @@ export function initDiscussTab(d: DiscussTabDeps): void {
     }
     const cont = t.closest<HTMLElement>("[data-discuss-continue]");
     if (cont) {
-      void continueInClaudeCode(cont.dataset.discussContinue ?? "");
+      void continueInClaudeCode(cont.dataset.discussContinue ?? "", cont);
       return;
     }
     // The edit card's controls also sit in the selection menu's inline card,

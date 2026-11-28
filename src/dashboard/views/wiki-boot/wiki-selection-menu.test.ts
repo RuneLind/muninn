@@ -2854,3 +2854,110 @@ test("Discuss v3 P2: a follow-up the server refuses 409 closed (Start over elsew
     localStorage.clear();
   }
 });
+
+// ── Discuss v3 P2 fix round 1 batch 2 (C, D, F) ──
+
+/** A fresh page's Explain card with its first turn and one follow-up answered (ids `<p>-1`, `<p>-2`). */
+async function cardWithFollowUp(p: string): Promise<HTMLElement> {
+  renderPage();
+  await settle();
+  await selectText(NIGHT);
+  act(document.getElementById("wikiExplainBtn")!);
+  await settle();
+  const card = document.querySelector<HTMLElement>("#articleWrap .wiki-sel-card[data-sel-turn]")!;
+  push!("turn", { turnId: `${p}-1`, seq: 1, discussionId: `thread-${p}` });
+  push!("done", { answer: "First.", proposedEdit: null });
+  close!();
+  await settle();
+  sendCardFollowUp(card, "And then?");
+  await settle();
+  push!("turn", { turnId: `${p}-2`, seq: 2, discussionId: `thread-${p}`, originTurnId: `${p}-1` });
+  push!("done", { answer: "Second.", proposedEdit: null });
+  close!();
+  await settle();
+  return card;
+}
+
+function sendCardFollowUp(card: HTMLElement, q: string): void {
+  card.querySelector<HTMLInputElement>("[data-sel-followup-input]")!.value = q;
+  card.querySelector("form.wiki-sel-follow")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+}
+
+test("fix round 1 batch 2 C: a follow-up refused 409 busy after one that ran keeps «Continue in Claude Code» on the card, for the answered follow-up", async () => {
+  discussWiki = "w-b2-c";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("c");
+    const keys = card.getAttribute("data-sel-turns")!.split(" ");
+    expect(card.querySelector("[data-discuss-continue]")?.getAttribute("data-discuss-continue")).toBe(keys[1]!);
+    postAnswer = () => json({ error: "the discussion is busy", reason: "busy" }, 409);
+    sendCardFollowUp(card, "Busy now?");
+    await settle();
+    expect(card.getAttribute("data-sel-turns")!.split(" ").length).toBe(3);
+    expect(card.hasAttribute("data-sel-closed")).toBe(false);
+    expect(card.querySelector("[data-discuss-continue]")?.getAttribute("data-discuss-continue") ?? null).toBe(keys[1]!);
+  } finally {
+    postAnswer = null;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 batch 2 D: a card's Continue whose copy fails focuses and selects the card's own prompt box", async () => {
+  discussWiki = "w-b2-d";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  const PROMPT = "THE CONTINUE PROMPT";
+  const prevFetch = globalThis.fetch;
+  const nav = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const exec = document.execCommand;
+  try {
+    const card = await cardWithFollowUp("d");
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/wiki/discuss/continue") return json({ prompt: PROMPT });
+      return prevFetch(input, init);
+    }) as typeof fetch;
+    Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => { throw new Error("denied"); } }, configurable: true });
+    document.execCommand = () => false;
+    card.querySelector<HTMLElement>("[data-discuss-continue]")!.click();
+    await settle();
+    const out = card.querySelector<HTMLTextAreaElement>(".wiki-sel-card-cont .wiki-discuss-cont-out");
+    expect(out?.value ?? null).toBe(PROMPT);
+    expect(document.activeElement === out).toBe(true);
+    expect([out!.selectionStart, out!.selectionEnd]).toEqual([0, PROMPT.length]);
+  } finally {
+    globalThis.fetch = prevFetch;
+    if (nav) Object.defineProperty(navigator, "clipboard", nav);
+    else delete (navigator as unknown as Record<string, unknown>).clipboard;
+    document.execCommand = exec;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 batch 2 F: after a card's 409 closed the Discuss tab holds only the re-read thread's turns, and the card still says why it closed", async () => {
+  discussWiki = "w-b2-f";
+  let reread = false;
+  const fresh = { id: "f-new", discussionId: "thread-f-new", seq: 1, selection: null, question: "Fresh?", answer: "Fresh answer.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 5 };
+  threadRead = (url: string) =>
+    reread && !url.includes("who=1")
+      ? json({ userId: "u1", bot: "b", thread: { id: "thread-f-new", name: "wiki: f", createdAt: 5 }, messages: [{ id: "m-f1", role: "user", content: "Fresh?", createdAt: 5, turn: fresh }, { id: "m-f2", role: "assistant", content: "Fresh answer.", createdAt: 6, turn: null }], closed: [], closedTotal: 0, oneShot: [] })
+      : json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("f");
+    reread = true;
+    postAnswer = () => json({ error: "that discussion was closed (Start over); ask without it to start a new one", reason: "closed" }, 409);
+    sendCardFollowUp(card, "Still there?");
+    await settle();
+    const tabTurns = Array.from(document.querySelectorAll("#discussBody .wiki-discuss-turn"));
+    expect(tabTurns.map((t) => t.querySelector(".wiki-discuss-q")?.textContent ?? "")).toEqual(["Fresh?"]);
+    expect(card.hasAttribute("data-sel-closed")).toBe(true);
+    expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("started over elsewhere");
+  } finally {
+    postAnswer = null;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});

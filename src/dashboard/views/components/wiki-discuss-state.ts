@@ -292,6 +292,9 @@ export interface DiscussionView {
   userPick?: { users: { id: string; name: string }[]; message: string } | null;
   /** «Earlier discussions»: the page's closed threads and old one-shot turns. */
   earlier?: EarlierDiscussions | null;
+  /** Card follow-ups refused 409 `closed`: off `turns`, so the tab never
+   *  draws them, kept for the card that reads why it closed. */
+  closedCardTurns?: DiscussTurnView[];
 }
 
 // ── The page's thread as `GET /api/wiki/discuss/thread` answers it (PR 4) ──

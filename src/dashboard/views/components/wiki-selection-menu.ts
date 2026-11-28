@@ -1082,8 +1082,8 @@ function paintTurnCard(card: Element): void {
 
 /** A thread card's foot and head link: the follow-up box once its first turn
  *  has an id (the origin a follow-up names, D9), disabled while a turn of it
- *  runs; «⌘ Continue in Claude Code» for its last turn once it has a
- *  follow-up (D4); «Open in chat ↗» once the thread is known. A closed card
+ *  runs; «⌘ Continue in Claude Code» for its newest answered turn once a
+ *  follow-up of it ran (D4); «Open in chat ↗» once the thread is known. A closed card
  *  keeps none of them. Each is set only when it changed (a typed follow-up
  *  and focus survive the stream's repaints). */
 function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed: boolean): void {
@@ -1099,9 +1099,14 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
   }
   const cont = card.querySelector<HTMLElement>(".wiki-sel-card-cont");
   if (cont) {
-    const key = cardKeys(card).at(-1) ?? "";
-    const show = !closed && turns.length >= 2 && !!last?.turnId && !turnLive(last) && last.state !== "refused";
-    const html = show ? cardContinueHtml(key, last!.handover) : "";
+    // Its answered turns (a refused follow-up stays in the card's keys but
+    // never ran): Continue needs the first and a follow-up, for the newest
+    // answered one; hidden while the newest turn still runs.
+    const keys = cardKeys(card);
+    const answered = turns.flatMap((t, i) => (t?.turnId && !turnLive(t) && t.state !== "refused" ? [{ key: keys[i] ?? "", t }] : []));
+    const target = answered.at(-1);
+    const show = !closed && answered.length >= 2 && !!target && !(last && turnLive(last));
+    const html = show ? cardContinueHtml(target!.key, target!.t.handover) : "";
     if (cont.dataset.drawn !== html) {
       cont.innerHTML = html;
       cont.dataset.drawn = html;
