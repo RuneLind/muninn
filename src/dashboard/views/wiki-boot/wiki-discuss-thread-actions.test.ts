@@ -820,7 +820,7 @@ test("V3: a thread stays with its user when /chat's default user changes: the fi
   document.body.innerHTML = "";
 });
 
-test("V4: «Open in Discuss →» on an inline turn of a view read for another user than the kept one keeps the turn", async () => {
+test("V4: `showTurnInDiscuss` on an inline turn of a view read for another user than the kept one keeps the turn", async () => {
   wiki = "v4";
   relPath = "plans/a.mdx";
   reads.length = 0;

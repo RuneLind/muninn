@@ -1456,7 +1456,7 @@ describe("a card's follow-up: origin, stored passage, sent_from", () => {
     const discussionId = f.find((x) => x.event === "turn")!.data.discussionId as string;
     await frames(await post(app, { ...PASSAGE, discussionId, sentFrom: "tab" }));
     expect(store.rows[1]!.sentFrom).toBe("tab");
-    // A turn with no selection stores no passage.
+    // A tab turn with a selection stores its passage too; one with no selection stores none.
     expect(store.rows[1]!.passage).toMatchObject({ before: PASSAGE.before });
     await frames(await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Whole page?", discussionId }));
     expect(store.rows[2]!.passage).toBeNull();

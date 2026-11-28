@@ -91,6 +91,7 @@ import { discussHandoffMode, mayBePassage, openDiscussHandoff, readSelectionPass
 import {
   discussAgentOn,
   discussRunsAsHere,
+  discussHeldOffHere,
   discussSendBlocked,
   discussTurnForCard,
   discussUserNameHere,
@@ -1081,8 +1082,8 @@ function paintTurnCard(card: Element): void {
 }
 
 /** A thread card's foot and head link: the follow-up box once its first turn
- *  has an id (the origin a follow-up names, D9), disabled while a turn of it
- *  runs; «⌘ Continue in Claude Code» for its newest answered turn once a
+ *  has an id (the origin a follow-up names, D9), its Send disabled with the
+ *  reason while any turn or Apply of the discussion runs; «⌘ Continue in Claude Code» for its newest answered turn once a
  *  follow-up of it ran (D4); «Open in chat ↗» once the thread is known. A closed card
  *  keeps none of them. Each is set only when it changed (a typed follow-up
  *  and focus survive the stream's repaints). */
@@ -1090,12 +1091,29 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
   if (closed !== card.hasAttribute("data-sel-closed")) card.toggleAttribute("data-sel-closed", closed);
   const first = turns[0] ?? null;
   const last = turns[turns.length - 1] ?? null;
-  const live = turns.some((t) => !!t && turnLive(t));
   const form = card.querySelector<HTMLFormElement>("form.wiki-sel-follow");
   if (form) {
     const open = !closed && !!first?.turnId && !!first.passage && first.state !== "refused";
     if (form.hidden === open) form.hidden = !open;
-    for (const el of Array.from(form.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button"))) if (el.disabled !== live) el.disabled = live;
+    // Send waits while any turn of the discussion (this card's or the tab's)
+    // or an Apply runs, saying why; the input stays enabled so its focus and
+    // a drafted question survive, as in the tab's box.
+    const held = open ? discussHeldOffHere() : null;
+    const send = form.querySelector<HTMLButtonElement>("[data-sel-followup-send]");
+    const input = form.querySelector<HTMLInputElement>("[data-sel-followup-input]");
+    if (send && send.disabled !== !!held) {
+      // A click on Send left focus on it: disabling it would drop focus to <body>.
+      if (held && document.activeElement === send) input?.focus();
+      send.disabled = !!held;
+    }
+    const msg = card.querySelector<HTMLElement>(".wiki-sel-follow-msg");
+    if (msg && held) {
+      if (msg.textContent !== held) msg.textContent = held;
+      msg.setAttribute(FOLLOW_MSG_HELD_ATTR, "");
+    } else if (msg?.hasAttribute(FOLLOW_MSG_HELD_ATTR)) {
+      msg.textContent = "";
+      msg.removeAttribute(FOLLOW_MSG_HELD_ATTR);
+    }
   }
   const cont = card.querySelector<HTMLElement>(".wiki-sel-card-cont");
   if (cont) {
@@ -1120,6 +1138,10 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
   }
 }
 
+/** Marks the follow-up line as {@link paintCardFoot}'s reason, cleared when
+ *  that work ends (a send's own refusal stays until the next send). */
+const FOLLOW_MSG_HELD_ATTR = "data-sel-follow-held";
+
 /** The follow-up box's send (Discuss v3 P2): an Explore turn of the page's
  *  thread naming the card's first turn as its origin (D9), about the passage
  *  that turn stored, so it works after the selection is gone. The posted user
@@ -1135,9 +1157,11 @@ function sendFollowUp(card: HTMLElement): void {
   const r = startInlineTurn(q.slice(0, HANDOFF_QUESTION_MAX), first.passage, null, "explore", { originTurnId: first.turnId });
   if ("refused" in r) {
     if (msg) msg.textContent = r.refused;
+    if (msg && r.busy) msg.setAttribute(FOLLOW_MSG_HELD_ATTR, "");
     return;
   }
   if (msg) msg.textContent = "";
+  msg?.removeAttribute(FOLLOW_MSG_HELD_ATTR);
   input.value = "";
   card.setAttribute("data-sel-turns", [...keys, r.key].join(" "));
   paintTurnCard(card);

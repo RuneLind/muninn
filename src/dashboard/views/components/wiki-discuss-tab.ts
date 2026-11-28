@@ -348,8 +348,18 @@ export function startInlineTurn(question: string, passage: DiscussPassage, selec
   if (!enabled) return { refused: "This wiki has no wiki agent here." };
   if (discussSendBlocked()) return { refused: "This wiki is read-only: nothing on it is sent to a model." };
   const d = ensureHere();
-  if (d && discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended.", busy: true };
-  const unsettled = d ? currentTurn(d)?.edit : null;
+  const held = d ? heldOff(d) : null;
+  if (held) return held;
+  const key = startTurn(question, passage, selected, null, { mode, openPane: false, sentFrom: "card", ...card });
+  return key ? { key } : { refused: "The turn could not start here." };
+}
+
+/** What holds off a new turn of `d` (its refusal): a turn of it still
+ *  running, from the tab or a card, or an Apply in flight or with a lost
+ *  answer not settled. Null when a turn may start. */
+function heldOff(d: DiscussionView): { refused: string; busy: true; busyWhy?: string } | null {
+  if (discussionLive(d)) return { refused: "This page's discussion has a turn still running: ask when it has ended.", busy: true };
+  const unsettled = currentTurn(d)?.edit;
   if (unsettled?.state === "applying")
     return { refused: "This page's discussion has an Apply still running: ask when it has ended.", busy: true, busyWhy: "an Apply in the page's discussion is still running, so not in it" };
   if (unsettled?.retry === "lost")
@@ -358,8 +368,15 @@ export function startInlineTurn(question: string, passage: DiscussPassage, selec
       busy: true,
       busyWhy: "an Apply in the page's discussion has no known outcome yet, so not in it",
     };
-  const key = startTurn(question, passage, selected, null, { mode, openPane: false, sentFrom: "card", ...card });
-  return key ? { key } : { refused: "The turn could not start here." };
+  return null;
+}
+
+/** Why a card's follow-up cannot be sent now (the refusal
+ *  {@link startInlineTurn} would give for a turn or Apply of the open page's
+ *  discussion), or null. The card disables its Send and shows this. */
+export function discussHeldOffHere(): string | null {
+  const d = here();
+  return d ? (heldOff(d)?.refused ?? null) : null;
 }
 
 /** «Open in chat ↗» on a card: the open page's thread in /chat

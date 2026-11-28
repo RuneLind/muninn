@@ -261,9 +261,13 @@ async function explainGamma(page: Page): Promise<void> {
 async function followUp(page: Page, question: string, n: number): Promise<void> {
   await page.evaluate(() => getSelection()!.removeAllRanges());
   const input = card(page).locator("[data-sel-followup-input]");
-  await expect(input).toBeEnabled({ timeout: 30_000 });
+  // Send waits while any turn or Apply of the discussion runs; the input never does.
+  await expect(card(page).locator("[data-sel-followup-send]")).toBeEnabled({ timeout: 30_000 });
+  await expect(input).toBeEnabled();
   await input.fill(question);
   await input.press("Enter");
+  // Enter keeps the focus in the box (fix round 1 batch 3 E), in a real browser.
+  await expect(input).toBeFocused();
   await expect(card(page).locator(".wiki-sel-turn")).toHaveCount(n);
   await expect(card(page).locator(".wiki-sel-turn").nth(n - 1).locator(".wiki-sel-turn-q")).toHaveText(question);
   await expect(card(page).locator(".wiki-sel-turn").nth(n - 1).locator(".wiki-discuss-answer")).toContainText("FOLLOW-ANSWER", { timeout: 90_000 });

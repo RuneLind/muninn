@@ -14,9 +14,11 @@
  * mirror of it. Deleting the thread deletes its turns (CASCADE).
  *
  * Discuss v3 P2 (migration 095): a reader card's follow-up stores its card's
- * first turn (`origin_turn_id`), a card's first turn where its passage stands
- * (`passage`, {@link DiscussStoredPassage}), and every turn from 095 on where
- * the reader typed it (`sent_from`). Null on older rows.
+ * first turn (`origin_turn_id`); a turn with a selection and no origin (a
+ * card's first turn, a tab «Ask here» turn) stores where its passage stands
+ * (`passage`, {@link DiscussStoredPassage}); a turn stores where the reader
+ * typed it (`sent_from`), null for a send from a reader tab opened before the
+ * restart. All three are null on older rows.
  */
 import type postgres from "postgres";
 import { getDb } from "./client.ts";
@@ -38,7 +40,7 @@ export interface DiscussToolCall {
 /** Where the reader typed a turn (migration 095's check). */
 export type DiscussSentFrom = "card" | "chat" | "tab" | "trace";
 
-/** A card's first turn's passage as stored (D12): the reader's context in
+/** A turn's passage as stored (D12; a turn with a selection and no origin): the reader's context in
  *  authored order (`findPassage`, and the body a follow-up sends again), and
  *  the DOM-order held passage (`findSamePassage`) whose own text is stored
  *  only when it differs from the turn's `selection` with white space ignored. */
@@ -74,7 +76,8 @@ export interface DiscussTurnStart {
   surface: unknown;
   /** The card's first turn, on a card's follow-up (migration 095). */
   originTurnId?: string | null;
-  /** On a card's first turn: where its passage stands. */
+  /** On a turn with a selection and no origin (a card's first turn, a tab
+   *  «Ask here» turn): where its passage stands. */
   passage?: DiscussStoredPassage | null;
   sentFrom?: DiscussSentFrom | null;
 }
@@ -126,7 +129,8 @@ export interface DiscussTurn {
   /** When the turn's proposed edit was applied to the page (P4: `proposed_edit.appliedAt`); null until then. */
   editAppliedAt: number | null;
   /** Migration 095: the card's first turn on a follow-up, the passage on a
-   *  card's first turn, where the reader typed it. Null on older rows. */
+   *  turn with a selection and no origin, where the reader typed it. Null on
+   *  older rows. */
   originTurnId: string | null;
   passage: DiscussStoredPassage | null;
   sentFrom: DiscussSentFrom | null;

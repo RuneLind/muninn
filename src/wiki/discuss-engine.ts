@@ -464,11 +464,13 @@ export function parseDiscussBody(raw: unknown): DiscussBody | string {
 
 const compactText = (s: string) => s.replace(/\s+/g, "");
 
-/** A card's first turn's stored passage (D12): the context the reader sent in
+/** A turn's stored passage (D12): the context the reader sent in
  *  authored order, and its held passage, whose text is kept only when it
  *  differs from the selection with white space ignored (DOM and authored
  *  order part on a selection across DecisionLog items shown newest first).
- *  Null for a follow-up, a trace turn and a turn with no selection. */
+ *  Stored on any turn with a selection and no origin: a card's first turn,
+ *  and a tab «Ask here» turn too. Null for a follow-up, a trace turn and a
+ *  turn with no selection. */
 export function storedPassageFor(body: DiscussBody): DiscussStoredPassage | null {
   if (body.originTurnId || body.traceKey !== undefined || !body.selection?.trim()) return null;
   const out: DiscussStoredPassage = {
@@ -783,13 +785,14 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     }
     const earlier = thread ? await store.list(thread.id) : [];
     if (body.originTurnId) {
-      // D9/D12: a card's first turn of this very thread (no thread yet: none
-      // is), which is the one kind of turn that stores where its passage
-      // stands. A whole-page tab question, a /chat or trace turn, an older row
-      // and a follow-up whose origin was deleted store none, so none is an origin.
+      // D9/D12: a turn of this very thread (no thread yet: none is) that
+      // stored where its passage stands and names no origin: a card's first
+      // turn, or a tab «Ask here» turn, which stores one too. A whole-page tab
+      // question, a /chat or trace turn and an older row store none; a
+      // follow-up whose origin was deleted names none but stored none either.
       const origin = earlier.find((t) => t.id === body.originTurnId);
       if (!origin || origin.originTurnId !== null || !origin.passage || !origin.selection) {
-        return refuse(409, { error: "that turn is not the first turn of a card on this page's discussion; select the passage again to ask", reason: "origin" });
+        return refuse(409, { error: "that turn does not start a passage's discussion on this thread; select the passage again to ask", reason: "origin" });
       }
       // The follow-up asks about its card's passage: the same words, white space ignored.
       if (compactText(body.selection ?? "") !== compactText(origin.selection)) {

@@ -1082,8 +1082,9 @@ CREATE TABLE wiki_discuss_turns (
   assistant_message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
   trace_key      TEXT,
   -- Discuss v3 P2 (migration 095): a reader card's follow-up names its card's
-  -- first turn (null on that turn); a card's first turn stores where its
-  -- passage stands; and where the reader typed the turn.
+  -- first turn (null on that turn); a turn with a selection and no origin (a
+  -- card's first turn, a tab «Ask here» turn) stores where its passage stands;
+  -- and where the reader typed the turn.
   origin_turn_id UUID REFERENCES wiki_discuss_turns(id) ON DELETE SET NULL,
   passage        JSONB,
   sent_from      TEXT,

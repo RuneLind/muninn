@@ -332,8 +332,9 @@ test("«Explain with context»: one turn through the pane's entry, drawn by the 
   expect(posts[1]).toMatchObject({ originTurnId: "turn-1", sentFrom: "card", mode: "explore", question: "And on Sundays?", selection: NIGHT, before: posts[0]!.before, after: posts[0]!.after, discussionId: "thread-1" });
   expect(posts[1]!.held).toBeUndefined();
   expect(input.value).toBe("");
-  // The box is disabled while the follow-up runs; the card holds both turns in order.
-  expect(input.disabled).toBe(true);
+  // Send waits while the follow-up runs (the input keeps its focus); the card holds both turns in order.
+  expect(card.querySelector<HTMLButtonElement>("[data-sel-followup-send]")!.disabled).toBe(true);
+  expect(input.disabled).toBe(false);
   push!("turn", { turnId: "turn-1f", seq: 2, discussionId: "thread-1", originTurnId: "turn-1" });
   push!("done", { answer: "FOLLOW-ANSWER.", proposedEdit: null });
   close!();
@@ -342,7 +343,7 @@ test("«Explain with context»: one turn through the pane's entry, drawn by the 
   const parts = Array.from(card.querySelectorAll(".wiki-sel-turn"));
   expect(parts.map((p) => p.querySelector(".wiki-discuss-answer")?.textContent?.trim())).toEqual(["CARD-ANSWER whole.", "FOLLOW-ANSWER."]);
   expect(parts[1]!.querySelector(".wiki-sel-turn-q")?.textContent).toBe("And on Sundays?");
-  expect(input.disabled).toBe(false);
+  expect(card.querySelector<HTMLButtonElement>("[data-sel-followup-send]")!.disabled).toBe(false);
   // Two turns: «Continue in Claude Code» for the last one.
   expect(card.querySelector("[data-discuss-continue]")?.getAttribute("data-discuss-continue")).toBe(parts[1]!.getAttribute("data-sel-turn-key"));
   // Collapse is the card's own state.
@@ -2956,6 +2957,112 @@ test("fix round 1 batch 2 F: after a card's 409 closed the Discuss tab holds onl
     expect(card.querySelector(".wiki-sel-card-body")!.textContent).toContain("started over elsewhere");
   } finally {
     postAnswer = null;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+// ── Discuss v3 P2 fix round 1 batch 3 (E): the card's box against other running work ──
+
+/** The card's follow-up box: its input, Send and the line under it. */
+function cardBox(card: Element): { input: HTMLInputElement; send: HTMLButtonElement; msg: HTMLElement } {
+  return {
+    input: card.querySelector<HTMLInputElement>("[data-sel-followup-input]")!,
+    send: card.querySelector<HTMLButtonElement>("[data-sel-followup-send]")!,
+    msg: card.querySelector<HTMLElement>(".wiki-sel-follow-msg")!,
+  };
+}
+
+test("fix round 1 batch 3 E: a Discuss-tab turn running while a card is open disables the card's Send with the reason; when it ends, Send is back and the reason gone", async () => {
+  discussWiki = "w-b3-tab";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("tb");
+    const box = cardBox(card);
+    expect(box.send.disabled).toBe(false);
+    (document.getElementById("wikiDiscussInput") as HTMLTextAreaElement).value = "From the tab?";
+    (document.getElementById("wikiDiscussAskBtn") as HTMLElement).click();
+    await settle();
+    expect(posts.at(-1)).toMatchObject({ question: "From the tab?", sentFrom: "tab" });
+    expect(box.send.disabled).toBe(true);
+    expect(box.input.disabled).toBe(false);
+    expect(box.msg.textContent).toContain("turn still running");
+    push!("turn", { turnId: "tb-3", seq: 3, discussionId: "thread-tb" });
+    push!("done", { answer: "Tab answer.", proposedEdit: null });
+    close!();
+    await settle();
+    expect(box.send.disabled).toBe(false);
+    expect(box.msg.textContent).toBe("");
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 batch 3 E: an Apply running disables the open card's Send with the reason; when it ends, Send is back and the reason gone", async () => {
+  // «Add to Oppfølging»'s card, its follow-up box open, while its own Apply runs.
+  const card = await followCardWithEdit("turn-b3a", 93);
+  const box = cardBox(card);
+  expect(card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!.hidden).toBe(false);
+  expect(box.send.disabled).toBe(false);
+  await applyHeld(card, stale, async () => {
+    expect(box.send.disabled).toBe(true);
+    expect(box.input.disabled).toBe(false);
+    expect(box.msg.textContent).toContain("Apply still running");
+  });
+  // The stale refusal leaves the card in place.
+  expect(card.isConnected).toBe(true);
+  expect(box.send.disabled).toBe(false);
+  expect(box.msg.textContent).toBe("");
+});
+
+test("fix round 1 batch 3 E: a card follow-up submitted with Enter keeps the input focused while it runs and after it ends", async () => {
+  discussWiki = "w-b3-focus";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("fo");
+    const box = cardBox(card);
+    box.input.focus();
+    box.input.value = "Next one?";
+    // Enter in the box: the form's implicit submission.
+    box.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    card.querySelector("form.wiki-sel-follow")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(posts.at(-1)).toMatchObject({ question: "Next one?", originTurnId: "fo-1" });
+    // Only Send waits: a disabled input would drop the browser's focus to <body>.
+    expect(box.input.disabled).toBe(false);
+    expect(box.send.disabled).toBe(true);
+    expect(document.activeElement === box.input).toBe(true);
+    push!("turn", { turnId: "fo-3", seq: 3, discussionId: "thread-fo", originTurnId: "fo-1" });
+    push!("done", { answer: "Third.", proposedEdit: null });
+    close!();
+    await settle();
+    expect(document.activeElement === box.input).toBe(true);
+    expect(box.input.disabled).toBe(false);
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 batch 3 E: a card follow-up sent by clicking Send moves focus to the input before Send is disabled", async () => {
+  discussWiki = "w-b3-click";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("ck");
+    const box = cardBox(card);
+    box.input.value = "Clicked?";
+    box.send.focus();
+    expect(document.activeElement === box.send).toBe(true);
+    card.querySelector("form.wiki-sel-follow")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await settle();
+    expect(box.send.disabled).toBe(true);
+    expect(document.activeElement === box.input).toBe(true);
+    await endTurn();
+  } finally {
     discussWiki = "w";
     threadRead = null;
     localStorage.clear();
