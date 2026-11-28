@@ -3068,3 +3068,96 @@ test("fix round 1 batch 3 E: a card follow-up sent by clicking Send moves focus 
     localStorage.clear();
   }
 });
+
+// ── Discuss v3 P2 fix round 2 batch 1: the card's own turn is no busy refusal ──
+
+test("fix round 2 batch 1: while the card's own first turn streams, Send waits with no reason line", async () => {
+  discussWiki = "w-r2b1-own";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector<HTMLElement>("#articleWrap .wiki-sel-card[data-sel-turn]")!;
+    push!("turn", { turnId: "ow-1", seq: 1, discussionId: "thread-ow" });
+    push!("delta", { text: "Streaming…" });
+    await settle();
+    const box = cardBox(card);
+    // The box is open (its first turn has an id) while that turn still streams.
+    expect(card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!.hidden).toBe(false);
+    expect(box.send.disabled).toBe(true);
+    expect(box.msg.textContent).toBe("");
+    push!("done", { answer: "First.", proposedEdit: null });
+    close!();
+    await settle();
+    expect(box.send.disabled).toBe(false);
+    expect(box.msg.textContent).toBe("");
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 2 batch 1: while the card's own follow-up runs, before and after its `turn` frame, Send waits with no reason line", async () => {
+  discussWiki = "w-r2b1-fu";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  try {
+    const card = await cardWithFollowUp("fu");
+    const box = cardBox(card);
+    expect(box.send.disabled).toBe(false);
+    sendCardFollowUp(card, "And after that?");
+    await settle();
+    expect(posts.at(-1)).toMatchObject({ originTurnId: "fu-1" });
+    // Sent, before its `turn` frame.
+    expect(box.send.disabled).toBe(true);
+    expect(box.msg.textContent).toBe("");
+    push!("turn", { turnId: "fu-3", seq: 3, discussionId: "thread-fu", originTurnId: "fu-1" });
+    push!("delta", { text: "More…" });
+    await settle();
+    expect(box.send.disabled).toBe(true);
+    expect(box.msg.textContent).toBe("");
+    push!("done", { answer: "Third.", proposedEdit: null });
+    close!();
+    await settle();
+    expect(box.send.disabled).toBe(false);
+    expect(box.msg.textContent).toBe("");
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 2 batch 1: a card whose box is hidden (its first turn never got an id) shows no busy line while a Discuss-tab turn runs", async () => {
+  discussWiki = "w-r2b1-gate";
+  threadRead = () => json({ userId: "u1", bot: "b", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  postAnswer = () => json({ error: "the model is not reachable" }, 500);
+  try {
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    const card = document.querySelector<HTMLElement>("#articleWrap .wiki-sel-card[data-sel-turn]")!;
+    postAnswer = null;
+    const box = cardBox(card);
+    expect(card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!.hidden).toBe(true);
+    (document.getElementById("wikiDiscussInput") as HTMLTextAreaElement).value = "From the tab?";
+    (document.getElementById("wikiDiscussAskBtn") as HTMLElement).click();
+    await settle();
+    expect(posts.at(-1)).toMatchObject({ question: "From the tab?", sentFrom: "tab" });
+    expect(card.isConnected).toBe(true);
+    expect(card.querySelector<HTMLFormElement>("form.wiki-sel-follow")!.hidden).toBe(true);
+    expect(box.msg.textContent).toBe("");
+    expect(box.msg.hasAttribute("data-sel-follow-held")).toBe(false);
+    await endTurn();
+  } finally {
+    postAnswer = null;
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});

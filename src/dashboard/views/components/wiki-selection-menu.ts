@@ -1096,9 +1096,11 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
     const open = !closed && !!first?.turnId && !!first.passage && first.state !== "refused";
     if (form.hidden === open) form.hidden = !open;
     // Send waits while any turn of the discussion (this card's or the tab's)
-    // or an Apply runs, saying why; the input stays enabled so its focus and
-    // a drafted question survive, as in the tab's box.
+    // or an Apply runs; the input stays enabled so its focus and a drafted
+    // question survive, as in the tab's box. The reason shows only when what
+    // holds it is not this card's own running turn. A hidden box shows none.
     const held = open ? discussHeldOffHere() : null;
+    const why = held && !turns.some((t) => t && turnLive(t)) ? held : null;
     const send = form.querySelector<HTMLButtonElement>("[data-sel-followup-send]");
     const input = form.querySelector<HTMLInputElement>("[data-sel-followup-input]");
     if (send && send.disabled !== !!held) {
@@ -1107,8 +1109,8 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
       send.disabled = !!held;
     }
     const msg = card.querySelector<HTMLElement>(".wiki-sel-follow-msg");
-    if (msg && held) {
-      if (msg.textContent !== held) msg.textContent = held;
+    if (msg && why) {
+      if (msg.textContent !== why) msg.textContent = why;
       msg.setAttribute(FOLLOW_MSG_HELD_ATTR, "");
     } else if (msg?.hasAttribute(FOLLOW_MSG_HELD_ATTR)) {
       msg.textContent = "";
@@ -1139,7 +1141,8 @@ function paintCardFoot(card: Element, turns: (DiscussTurnView | null)[], closed:
 }
 
 /** Marks the follow-up line as {@link paintCardFoot}'s reason, cleared when
- *  that work ends (a send's own refusal stays until the next send). */
+ *  that work ends. A send's other refusals (no wiki agent here, the turn could
+ *  not start) stay until the next send; a read-only wiki never sends. */
 const FOLLOW_MSG_HELD_ATTR = "data-sel-follow-held";
 
 /** The follow-up box's send (Discuss v3 P2): an Explore turn of the page's
