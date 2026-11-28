@@ -61,8 +61,11 @@ export const WIKI_READ_SLICE_HIDDEN_SELECTOR = [
   "#wikiBoardLink",
   ".wiki-gardener-icon",
   // Discuss P1's «Ask Claude Code» (both controls) and its panel:
-  // `POST /api/wiki/discuss/handoff` is in the dropped `wiki` group.
+  // `POST /api/wiki/discuss/handoff` is in the dropped `wiki` group. The
+  // passage control is the selection bar's item since Discuss v3 P1 (its id
+  // in the bar, `data-selact` in the bar and the right-click menu alike).
   "#wikiDiscussHandoffBtn",
+  '[data-selact="handoff"]',
   "#wikiDiscussHandoffPageBtn",
   "#wikiDiscussHandoffPanel",
   // Discuss P3's tab and its body: `POST /api/wiki/discuss` and

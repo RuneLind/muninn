@@ -105,7 +105,7 @@ import { realGhCheckDeps, type GhCheckDeps } from "./work-map/gh-check.ts";
 import { planCardConfigFromEnv, planCardRootFor, type PlanCardConfig } from "./plan-card.ts";
 import { planCardFromOutcome, runPlanCard } from "./plan-card-run.ts";
 import { getWikiRegistry } from "./registry-memo.ts";
-import { botWikis, resolveWikiRequest } from "./registry.ts";
+import { botWikis, resolveWikiRequest, type WikiRegistryEntry } from "./registry.ts";
 import { isReadonlyWikiRoot, wikiNoEgressReason } from "./readonly.ts";
 import { getWikiIndex, parseFrontmatter, readWikiPage, readWikiText, resolveWikiRoot, type WikiIndex } from "./store.ts";
 import { discussToolLine } from "./discuss-tool-line.ts";
@@ -205,6 +205,37 @@ export function startDiscussTurnSweep(close: typeof closeAbandonedDiscussTurns =
 export function stopDiscussTurnSweep(): void {
   if (sweepTimer) clearInterval(sweepTimer);
   sweepTimer = null;
+}
+
+/** The model a Discuss turn is asked to run on: the bot's, else the
+ *  instance's. One function for the engine's `turn` frame and the reader's
+ *  «Runs as» line (Discuss v3 P1), so the two cannot disagree. */
+export function discussPlannedModel(bot: Pick<BotConfig, "model">, config: Pick<Config, "claudeModel">): string | null {
+  return bot.model ?? config.claudeModel ?? null;
+}
+
+/** The bot Discuss runs on for a wiki, by the thread read's rule: a pinned
+ *  wiki runs on its pin or on nothing (Ask's resolver falls back; Discuss
+ *  refuses `no-bot`). Null when no bot answers. */
+export function resolveDiscussBot(entry: WikiRegistryEntry | undefined, bots: BotConfig[]): { bot: BotConfig; origin: "pinned" | "owner" | "fallback" } | null {
+  const { bot, origin } = resolveWikiSynthesisBot(entry, bots);
+  if (!bot || (entry?.synthesisBot && origin !== "pinned")) return null;
+  return { bot, origin };
+}
+
+/** Who answers a Discuss turn on this wiki, for the reader's tooltip and who
+ *  box: the bot, where it comes from, its connector and planned model. */
+export interface DiscussWho {
+  bot: string;
+  origin: "pinned" | "owner" | "fallback";
+  connector: ConnectorType;
+  model: string | null;
+}
+
+export function discussWhoFor(entry: WikiRegistryEntry | undefined, bots: BotConfig[], config: Pick<Config, "claudeModel">): DiscussWho | null {
+  const hit = resolveDiscussBot(entry, bots);
+  if (!hit) return null;
+  return { bot: hit.bot.name, origin: hit.origin, connector: hit.bot.connector ?? "claude-cli", model: discussPlannedModel(hit.bot, config) };
 }
 
 type SurfaceKind = "readSearch" | "mcpTools";
@@ -476,8 +507,8 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
   // Read-only roots never get here (the egress prologue refuses them), so a miss may start the refresh.
   const defaultMentions = (input: MentionsInput) => buildMentions(input, { git, gh: (gh ??= realGhCheckDeps()), now: Date.now });
   let inflight = 0;
-  /** The model a turn is asked to run on: the bot's, else the instance's. */
-  const plannedModel = (p: Prepared): string | null => p.bot.model ?? config.claudeModel ?? null;
+  /** The model a turn is asked to run on (`discussPlannedModel`). */
+  const plannedModel = (p: Prepared): string | null => discussPlannedModel(p.bot, config);
 
   async function resolveUser(botName: string, posted: string | undefined): Promise<{ userId: string; username: string | null; users: { id: string; name: string }[] } | DiscussRefusal> {
     const users = deps.chatUsers ? await deps.chatUsers(botName) : [];

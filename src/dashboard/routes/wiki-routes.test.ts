@@ -5022,3 +5022,83 @@ describe("GET /wiki — aliased roots inject the requested name and the rows nam
     }
   });
 });
+
+// Discuss v3 P1: the page JSON carries who a Discuss turn runs on, by the
+// thread read's bot rule; a wiki pinned to a missing bot gets null there while
+// the shell's Ask line (`askBot`) still falls back to another bot.
+describe("/api/wiki/page discussWho (Discuss v3 P1)", () => {
+  let root = "";
+  let botsDir = "";
+  let prevBotsDir: string | undefined;
+  let prevResearch: string | undefined;
+  const REL = "plans/who.mdx";
+
+  beforeEach(async () => {
+    root = await testTempDir(path.join(tmpdir(), "wiki-discuss-who-"));
+    botsDir = await testTempDir(path.join(tmpdir(), "wiki-discuss-who-bots-"));
+    await Bun.write(path.join(root, REL), "---\ntitle: Who\n---\n\nBody.\n");
+    await Bun.write(path.join(root, ".wiki-agent.md"), "# Rules\n\nAnswer first.\n");
+    await Bun.write(path.join(botsDir, "whobot", "CLAUDE.md"), "# whobot\n");
+    await Bun.write(path.join(botsDir, "whobot", "config.json"), JSON.stringify({ connector: "copilot-sdk", model: "who-model-1" }));
+    await Bun.write(path.join(botsDir, "nomodel", "CLAUDE.md"), "# nomodel\n");
+    await Bun.write(path.join(botsDir, "nomodel", "config.json"), JSON.stringify({ connector: "claude-sdk" }));
+    prevBotsDir = process.env.MUNINN_BOTS_DIR;
+    prevResearch = process.env.RESEARCH_BOT;
+    process.env.MUNINN_BOTS_DIR = botsDir;
+    process.env.RESEARCH_BOT = "whobot";
+    __resetWikiCacheForTest();
+    __setWikiRegistryForTest([
+      { name: "pinned", root, source: "extra", synthesisBot: "whobot" },
+      { name: "pinnedbare", root, source: "extra", synthesisBot: "nomodel" },
+      { name: "ghost", root, source: "extra", synthesisBot: "not-a-bot" },
+      { name: "plain", root, source: "extra" },
+    ]);
+  });
+
+  afterEach(async () => {
+    if (prevBotsDir === undefined) delete process.env.MUNINN_BOTS_DIR;
+    else process.env.MUNINN_BOTS_DIR = prevBotsDir;
+    if (prevResearch === undefined) delete process.env.RESEARCH_BOT;
+    else process.env.RESEARCH_BOT = prevResearch;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+    await rm(botsDir, { recursive: true, force: true });
+  });
+
+  const app = (claudeModel = "instance-model") => {
+    const a = new Hono();
+    registerWikiRoutes(a, { profile: "default", claudeModel } as Parameters<typeof registerWikiRoutes>[1]);
+    return a;
+  };
+  const reader = async (a: Hono, wiki: string) => {
+    const res = await a.request(`/api/wiki/page?wiki=${wiki}&relPath=${encodeURIComponent(REL)}`);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { reader: Record<string, unknown> }).reader;
+  };
+
+  test("a pinned bot: its name, origin, connector and model; a bot with no model plans the instance's", async () => {
+    const a = app();
+    expect((await reader(a, "pinned")).discussWho).toEqual({ bot: "whobot", origin: "pinned", connector: "copilot-sdk", model: "who-model-1" });
+    expect((await reader(a, "pinnedbare")).discussWho).toEqual({ bot: "nomodel", origin: "pinned", connector: "claude-sdk", model: "instance-model" });
+    // Unpinned: the research bot role answers.
+    expect((await reader(a, "plain")).discussWho).toEqual({ bot: "whobot", origin: "fallback", connector: "copilot-sdk", model: "who-model-1" });
+  });
+
+  test("a wiki pinned to a missing bot: null, while the shell's Ask line falls back to another bot", async () => {
+    const a = app();
+    const r = await reader(a, "ghost");
+    expect(r.discussAgent).toBe(true);
+    expect("discussWho" in r).toBe(true);
+    expect(r.discussWho).toBeNull();
+    const shell = await (await a.request("/wiki?wiki=ghost")).text();
+    expect(shell).toContain("Answered by <strong>whobot</strong>");
+  });
+
+  test("no wiki agent: no discussWho at all", async () => {
+    await rm(path.join(root, ".wiki-agent.md"), { force: true });
+    const r = await reader(app(), "pinned");
+    expect(r.discussAgent).toBe(false);
+    expect("discussWho" in r).toBe(false);
+  });
+});

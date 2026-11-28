@@ -20,17 +20,17 @@ import { __setClaudeCliVersionForTest, type ToolSurface } from "../../ai/tool-su
 import type { Snapshot } from "../../ai/snapshots.ts";
 import type { DiscussTurn, DiscussTurnFinish, DiscussTurnStart } from "../../db/wiki-discuss-turns.ts";
 import type { Thread } from "../../db/threads.ts";
-import type { DiscussThreadStore } from "../../wiki/discuss-engine.ts";
+import { discussWhoFor, type DiscussThreadStore } from "../../wiki/discuss-engine.ts";
 import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
 import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
 import type { RunOutcome } from "../../wiki/plan-card-run.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
-import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest, getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { DISCUSS_TURN_TIMEOUT_MS, NOT_IN_REACH, WIKI_AGENT_RULES_FILE, WIKI_AGENT_RULES_MAX_BYTES } from "../../wiki/discuss-agent.ts";
 import { testTempDir, testTempDirSync } from "../../test/temp-dir.ts";
 import { copilotNamedToolsSession } from "../../ai/connectors/copilot-sdk.ts";
-import { COPILOT_DISCUSS_TOOLS, copilotDiscussReach, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_CONTINUE_PATH, WIKI_DISCUSS_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
+import { COPILOT_DISCUSS_TOOLS, copilotDiscussReach, DISCUSS_CONNECTOR_GRACE_MS, DISCUSS_MAX_INFLIGHT, registerWikiDiscussRoute, WIKI_DISCUSS_CONTINUE_PATH, WIKI_DISCUSS_PATH, WIKI_DISCUSS_THREAD_PATH, type DiscussRouteDeps, type DiscussStore } from "./wiki-discuss.ts";
 
 // Whether this disk folds case (APFS default): the case-only rename test needs one.
 const caseProbe = testTempDirSync(path.join(tmpdir(), "discuss-case-"));
@@ -515,6 +515,17 @@ describe("a turn", () => {
     expect(evs2.find((e) => e.event === "turn")!.data).toMatchObject({ model: "fallback-model", connector: "copilot-sdk" });
     expect(evs2.find((e) => e.event === "done")!.data.model).toBe("fallback-model");
     expect(planned.store.rows[0]!.model).toBe("fallback-model");
+  });
+  test("Discuss v3 P1: the turn frame's model is the one the page payload names (`discussWhoFor`), with and without a bot model", async () => {
+    const cfg = { claudeModel: "fallback-model" };
+    const entry = getWikiRegistry().find((e) => e.name === "agent");
+    for (const b of [bot("claude-sdk"), { ...bot("copilot-sdk"), model: undefined }]) {
+      const s = setup({ oneShot: (async () => ({ result: "Done.", toolCalls: [] })) as never, deps: { bots: () => [b] } });
+      const turn = (await frames(await post(s.app, PASSAGE))).find((e) => e.event === "turn")!.data;
+      const who = discussWhoFor(entry, [b], cfg)!;
+      expect(turn.model).toBe(who.model);
+      expect(turn.connector).toBe(who.connector);
+    }
   });
   test("a page whose repos: names a repo outside discuss.repos gets no snapshot of it, and the pack says so", async () => {
     const { app, calls } = setup();
@@ -1159,6 +1170,42 @@ describe("copilotDiscussReach", () => {
     expect(copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", researchServes: false })).toEqual({ tools: COPILOT_DISCUSS_TOOLS });
     for (const excludedTools of [["mcp__research"], ["research-*"], ["mcp:*"], ["research-wiki_read"], ["mcp__research__wiki_*"]]) {
       expect({ excludedTools, r: copilotDiscussReach({ ...on, mcpServers: ["research"], botWikis: wikis, pageWiki: "melosys", excludedTools }) }).toEqual({ excludedTools, r: { tools: COPILOT_DISCUSS_TOOLS } });
+    }
+  });
+});
+
+describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
+  const read = (app: Hono, q: Record<string, string>) => app.request(`${WIKI_DISCUSS_THREAD_PATH}?${new URLSearchParams({ wiki: "agent", relPath: "plans/ferry.mdx", who: "1", ...q }).toString()}`);
+  test("the user fields and the bot only: no thread, messages, closed list or one-shot turns", async () => {
+    const { app } = setup({ deps: { authMode: () => "off" } });
+    const res = await read(app, {});
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: true, users: [{ id: "kari", name: "Kari" }], userListed: true, bot: "ivar" });
+  });
+  test("a posted user: that user; one not listed is refused as the full read refuses it", async () => {
+    const { app } = setup({ deps: { authMode: () => "off", chatUsers: async () => [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }] } });
+    expect(await (await read(app, { userId: "ola" })).json()).toMatchObject({ userId: "ola", userName: "Ola", userListed: true });
+    const refused = await read(app, { userId: "nobody" });
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as { reason: string }).reason).toBe("unknown-user");
+  });
+  test("a default user who is not listed: named by id only, `userListed` false (rule R2: never sent as a posted id)", async () => {
+    const { app } = setup({ deps: { authMode: () => "off", defaultUser: async () => "popp" } });
+    expect(await (await read(app, {})).json()).toMatchObject({ userId: "popp", userName: null, userListed: false });
+  });
+  test("a wiki pinned to a missing bot: 503 no-bot, as the full read", async () => {
+    __setWikiRegistryForTest([{ name: "agent", root: agent, source: "extra", synthesisBot: "missing" }]);
+    try {
+      const { app } = setup();
+      const res = await read(app, {});
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { reason: string }).reason).toBe("no-bot");
+    } finally {
+      __setWikiRegistryForTest([
+        { name: "agent", root: agent, source: "extra" },
+        { name: "bare", root: bare, source: "extra" },
+        { name: "norules", root: norules, source: "extra" },
+      ]);
     }
   });
 });

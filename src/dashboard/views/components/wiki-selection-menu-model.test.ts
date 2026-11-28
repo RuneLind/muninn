@@ -15,9 +15,14 @@ import {
   inlineCardHtml,
   inlineTurnSub,
   keyKindsFrom,
+  runsAsSub,
   selBarHtml,
   selMenuHtml,
   selMenuItems,
+  selMenuOffers,
+  selTipHtml,
+  selWhoFrom,
+  selWhoHtml,
   whereElseHtml,
   type SelMenuInput,
 } from "./wiki-selection-menu-model.ts";
@@ -301,5 +306,59 @@ describe("a thread turn card's sub line", () => {
     expect(inlineTurnSub("Popp")).toBe("a turn in Popp's discussion of this page");
     expect(inlineTurnSub(null)).toBe("a turn in this page's discussion");
     expect(inlineCardHtml("explain", inlineTurnSub("Popp"), "", "t1")).toContain("· a turn in Popp&#39;s discussion of this page");
+  });
+});
+
+describe("Discuss v3 P1: the handoff item, Explain's tooltip and the who box", () => {
+  test("the handoff item after Copy, with the wiki's label and the breadcrumb's id; a long selection gets only it and Copy", () => {
+    expect(acts(input({ mentions: false, handoff: "code" }))).toEqual(["explain", "factcheck", "copy", "handoff"]);
+    expect(selMenuItems(input({ mentions: false, handoff: "code" })).at(-1)!.label).toBe("⌘ Ask Claude Code");
+    expect(selMenuItems(input({ mentions: false, handoff: "agent" })).at(-1)!.label).toBe("💬 Ask about this");
+    expect(acts(input({ mentions: false, handoff: "agent", follow: true }))).toEqual(["explain", "factcheck", "copy", "handoff", "follow"]);
+    expect(acts(input({ mentions: false, handoff: "code", explainer: true }))).not.toContain("handoff");
+    expect(acts(input({ mentions: false, handoff: "code", long: true }))).toEqual(["handoff", "copy"]);
+    expect(selMenuOffers(selMenuItems(input({ mentions: false, handoff: null, long: true })))).toBe(false);
+    const bar = selBarHtml(selMenuItems(input({ mentions: false, handoff: "code" })));
+    expect(bar).toContain('id="wikiDiscussHandoffBtn" data-selact="handoff"');
+    // Explain has the drawn tooltip, not a native title.
+    expect(bar).toMatch(/id="wikiExplainBtn" data-selact="explain" aria-describedby="wikiSelTip">/);
+  });
+  test("the tooltip: the sentence, then «Runs as» with the model, the connector and «Change…»; «…» while pending; no line without an agent", () => {
+    const who = { bot: "melosys", origin: "pinned" as const, connector: "copilot-sdk", model: "claude-sonnet-5.5" };
+    const shown = (html: string) => new Window().document.createRange().createContextualFragment(html).textContent;
+    expect(shown(selTipHtml(who, { state: "user", userId: "u", name: "Rune" }))).toBe("What this means, why it is here and what led to itRuns as Rune · claude-sonnet-5.5 · copilot-sdk · Change…");
+    expect(shown(selTipHtml(who, { state: "pending" }))).toContain("Runs as … · claude-sonnet-5.5");
+    expect(shown(selTipHtml(who, { state: "refused", text: "pick the user" }))).toContain("Runs as pick the user ·");
+    expect(shown(selTipHtml(null, { state: "pending" }))).toContain("No bot answers here");
+    expect(selTipHtml(null, { state: "pending" })).not.toContain("data-selwho-open");
+    expect(shown(selTipHtml(undefined, { state: "pending" }))).toBe("What this means, why it is here and what led to it");
+    expect(selTipHtml(who, { state: "user", userId: "u", name: "<b>" })).toContain("&lt;b&gt;");
+  });
+  test("the payload's discussWho: an object, null (no bot) or undefined (not sent)", () => {
+    expect(selWhoFrom({ bot: "b", origin: "owner", connector: "claude-sdk", model: null })).toEqual({ bot: "b", origin: "owner", connector: "claude-sdk", model: null });
+    expect(selWhoFrom(null)).toBeNull();
+    expect(selWhoFrom(undefined)).toBeUndefined();
+    expect(selWhoFrom({ bot: 1 })).toBeUndefined();
+  });
+  test("the who box: users to pick only where choosable, the bot's origin, «Change on /models ↗», the connector fixed on a pinned wiki", () => {
+    const who = { bot: "melosys", origin: "pinned" as const, connector: "copilot-sdk", model: "m" };
+    const runsAs = { state: "user" as const, userId: "u2", name: "Rune" };
+    const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
+    const html = selWhoHtml({ wiki: "kode", who, runsAs, users, choosable: true, message: null });
+    expect(html).toContain('data-selwho-user="u2" aria-pressed="true"');
+    expect(html).toContain('data-selwho-user="u1" aria-pressed="false"');
+    expect(html).toContain('href="/models?bot=melosys"');
+    expect(html).toContain("The connector is fixed on this wiki");
+    expect(html).not.toContain('role="dialog"');
+    const fixedName = selWhoHtml({ wiki: "kode", who: { ...who, origin: "fallback" }, runsAs, users, choosable: false, message: "A turn is still running" });
+    expect(fixedName).not.toContain("data-selwho-user");
+    expect(fixedName).toContain("Not choosable on this instance.");
+    expect(fixedName).toContain("The research bot role on /models");
+    expect(fixedName).toContain('role="alert">A turn is still running');
+  });
+  test("a card's head from the «Runs as» user", () => {
+    expect(runsAsSub({ state: "user", userId: "u", name: "Popp" })).toBe("a turn in Popp's discussion of this page");
+    expect(runsAsSub({ state: "pending" })).toBe("a turn in …'s discussion of this page");
+    expect(runsAsSub({ state: "refused", text: "no chat user" })).toBe("no chat user");
   });
 });

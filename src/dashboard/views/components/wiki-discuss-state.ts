@@ -255,6 +255,14 @@ export interface DiscussionView {
   mode?: "explore" | "edit";
   /** Where the thread read stands for this page. */
   load?: "loading" | "done" | "failed";
+  /** Discuss v3 P1: a read (the light one or the full one) has named the
+   *  user, or refused (`whoRefusal`): the «Runs as» line is no longer «…». */
+  whoKnown?: boolean;
+  /** The light read is in flight. */
+  whoLoading?: boolean;
+  /** A read's refusal text (no chat user set up, no bot), shown in the
+   *  user's place; cleared by a read that names the user. */
+  whoRefusal?: string | null;
   /** Why the thread read failed; a successful read clears it. */
   loadError?: string | null;
   /** Why «Start over» or a Delete failed; kept through the read that follows
@@ -507,6 +515,26 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
     ? (b.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" && u.name ? u.name : (u.id as string) }))
     : [];
   if (!d.userChoosable) d.userMenu = false;
+}
+
+/** Who the next turn runs as: «…» until a read answers, a read's refusal,
+ *  or the user (by /chat name, else by id). */
+export type DiscussRunsAs = { state: "pending" } | { state: "refused"; text: string } | { state: "user"; userId: string; name: string };
+
+/**
+ * Discuss v3 P1: the «Runs as» user for a view. `sendUser` is what the send
+ * names (`sendUserOf`, rule R2); when it names none the engine runs the turn
+ * as the user the read resolved (`d.userId`, the bot's default user). Pending
+ * while no read has named the user or refused (`whoKnown`). The name is the
+ * read's when it is the read's user, else from the users the read listed,
+ * else the id: a default user who is not listed has no /chat name.
+ */
+export function discussRunsAs(d: DiscussionView | null, sendUser: string | null): DiscussRunsAs {
+  if (!d) return { state: "pending" };
+  const id = sendUser ?? d.userId ?? null;
+  if (!d.whoKnown || !id) return d.whoRefusal ? { state: "refused", text: d.whoRefusal } : { state: "pending" };
+  const name = (id === d.userId ? d.userName : null) ?? d.users?.find((u) => u.id === id)?.name ?? id;
+  return { state: "user", userId: id, name };
 }
 
 /** The «as <name> ▾» button in the tab's bar: the thread's user by name, a

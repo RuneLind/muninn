@@ -79,6 +79,11 @@ const REL = "plans/ferry.mdx";
 const OTHER = "plans/harbour.mdx";
 const BOT = "selbot";
 const USER = "e2e-selection-user";
+// Discuss v3 P1: a second /chat user of the bot, a default user no thread lists, and a second bot for /models.
+const USER2 = "e2e-selection-user-2";
+const USER3 = "e2e-selection-unlisted";
+const BOT2 = "selbot-two";
+const MODEL = "claude-sonnet-4-5";
 const KEY = "MEL-1029036";
 const NIGHT = `The night route for ${KEY} is unchanged.`;
 const PAGE = ["---", "title: Ferry plan", "---", "", "# Ferry plan", "", "## Brief", "", NIGHT, "", "The morning route adds a stop.", "", "## Oppfølging", "", "- Check the berth list.", ""].join("\n");
@@ -209,16 +214,22 @@ test.beforeAll(async () => {
   const bot = path.join(scratch, "bots", BOT);
   await mkdir(bot, { recursive: true });
   await writeFile(path.join(bot, "CLAUDE.md"), "# e2e selection bot\n\nCreated by e2e/wiki-selection-menu.spec.ts.\n");
-  await writeFile(path.join(bot, "config.json"), JSON.stringify({ connector: "claude-sdk", model: "claude-sonnet-4-5", timeoutMs: 120000 }));
+  await writeFile(path.join(bot, "config.json"), JSON.stringify({ connector: "claude-sdk", model: MODEL, timeoutMs: 120000 }));
+  const bot2 = path.join(scratch, "bots", BOT2);
+  await mkdir(bot2, { recursive: true });
+  await writeFile(path.join(bot2, "CLAUDE.md"), "# e2e second bot\n\nCreated by e2e/wiki-selection-menu.spec.ts for /models?bot=.\n");
+  await writeFile(path.join(bot2, "config.json"), JSON.stringify({ connector: "claude-sdk", model: MODEL }));
   await mkdir(path.join(scratch, "claude-config"), { recursive: true });
   await mkdir(path.join(scratch, "agent-home"), { recursive: true });
   const f = await startFake();
   requestsUrl = f.requests;
 
   sql = postgres(TEST_DB, { max: 2, onnotice: () => {} });
-  await sql`DELETE FROM threads WHERE user_id = ${USER}`;
+  await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2}, ${USER3})`;
   await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`;
   await sql`INSERT INTO users (id, username, platform) VALUES (${USER}, 'E2E Selection', 'web') ON CONFLICT (id) DO NOTHING`;
+  await sql`INSERT INTO users (id, username, platform) VALUES (${USER2}, 'E2E Other', 'web') ON CONFLICT (id) DO NOTHING`;
+  await sql`INSERT INTO users (id, username, platform) VALUES (${USER3}, 'E2E Unlisted', 'web') ON CONFLICT (id) DO NOTHING`;
   await sql`INSERT INTO bot_default_user (bot_name, user_id) VALUES (${BOT}, ${USER}) ON CONFLICT (bot_name) DO UPDATE SET user_id = EXCLUDED.user_id`;
 
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -272,7 +283,7 @@ test.afterAll(async () => {
     }
   }
   if (sql) {
-    await sql`DELETE FROM threads WHERE user_id = ${USER}`.catch(() => {});
+    await sql`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2}, ${USER3})`.catch(() => {});
     await sql`DELETE FROM wiki_discuss_turns WHERE wiki = ${WIKI}`.catch(() => {});
     await sql.end({ timeout: 2 });
   }
@@ -342,7 +353,9 @@ test("the bar and the right-click menu offer the same actions; ⇧-right-click i
   const barActs = await bar(page).locator("[data-selact]").evaluateAll((els) => els.map((e) => `${e.getAttribute("data-selact")}${e.getAttribute("data-selkey") ? `:${e.getAttribute("data-selkey")}` : ""}`));
   // The default first; one line of 3–80 characters is searchable as written; the key it
   // holds gets its own chip; Oppfølging is on this page.
-  expect(barActs).toEqual(["explain", "where", "history", "factcheck", "copy", "follow", `key:${KEY}`]);
+  // The passage item (Discuss v3 P1, «One button»): an agent and no handoff here, so the agent's label.
+  expect(barActs).toEqual(["explain", "where", "history", "factcheck", "copy", "handoff", "follow", `key:${KEY}`]);
+  await expect(bar(page).locator("#wikiDiscussHandoffBtn")).toHaveText("💬 Ask about this");
   await expect(bar(page).locator("#wikiExplainBtn")).toHaveText("✨ Explain with context");
   // The bar sits just under the selection's line.
   const box = (await bar(page).boundingBox())!;
@@ -375,7 +388,7 @@ test("the bar and the right-click menu offer the same actions; ⇧-right-click i
   // The key alone: no chip beside «Where else», which already searches it.
   await dragSelect(page, KEY);
   await expect(bar(page)).toBeVisible();
-  expect(await bar(page).locator("[data-selact]").evaluateAll((els) => els.map((e) => e.getAttribute("data-selact")))).toEqual(["explain", "where", "history", "factcheck", "copy", "follow"]);
+  expect(await bar(page).locator("[data-selact]").evaluateAll((els) => els.map((e) => e.getAttribute("data-selact")))).toEqual(["explain", "where", "history", "factcheck", "copy", "handoff", "follow"]);
   // Two lines are no key the route takes: no «Where else» or «History».
   await page.evaluate(() => {
     const article = document.querySelector("#articleWrap .wiki-article")!;
@@ -1151,6 +1164,157 @@ test("class check S3: an explainer's card hides with its frame in graph mode and
   await page.evaluate(() => document.getElementById("articleWrap")!.classList.remove("wiki-graph-on"));
   await expect(frameEl).toBeVisible();
   await expect(card).toBeVisible();
+});
+
+// ── Discuss v3 P1: who answers ─────────────────────────────────────────
+
+/** Hover Explain in the bar: its drawn tooltip. */
+async function explainTip(page: Page) {
+  await bar(page).locator("#wikiExplainBtn").hover();
+  const tip = page.locator("#wikiSelTip");
+  await expect(tip).toBeVisible();
+  return tip;
+}
+
+/** The Discuss POSTs the page sends, with their bodies. */
+function discussPosts(page: Page): Record<string, unknown>[] {
+  const posts: Record<string, unknown>[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/wiki/discuss") posts.push(JSON.parse(r.postData() ?? "{}") as Record<string, unknown>);
+  });
+  return posts;
+}
+
+test("Discuss v3 P1: the tooltip names the kept user and the bot's model before any POST; a pick in the who box is refused while a turn runs, then closes the open card, changes the next turn's userId and names the new user from the card's placing", async ({ page }) => {
+  test.setTimeout(240_000);
+  // Both users listed for the bot (a thread each), the first one kept in this browser.
+  await sql!`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'e2e-p1-main', false), (${USER2}, ${BOT}, 'e2e-p1-main', false)`;
+  try {
+    await page.addInitScript(([wiki, bot, user]) => {
+      if (sessionStorage.getItem("p1-seeded")) return;
+      sessionStorage.setItem("p1-seeded", "1");
+      localStorage.setItem(`muninn-discuss-bot-${wiki}`, bot);
+      localStorage.setItem(`muninn-discuss-user-${bot}`, user);
+    }, [WIKI, BOT, USER] as const);
+    const posts = discussPosts(page);
+    await openPage(page, OTHER);
+    await dragSelect(page, "The pier opens at six.");
+    const tip = await explainTip(page);
+    await expect(tip).toContainText("What this means, why it is here and what led to it");
+    await expect(tip.locator(".wiki-seltip-l2")).toHaveText(`Runs as E2E Selection · ${MODEL} · claude-sdk · Change…`);
+    expect(posts).toEqual([]);
+    await shot(page, "15-runs-as-tooltip");
+
+    // The turn's answer held back: it is still running while the reader picks.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route("**/api/wiki/discuss", async (route) => {
+      await held;
+      await route.continue();
+    }, { times: 1 });
+    await bar(page).locator("#wikiExplainBtn").click();
+    const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+    await expect(card.locator(".wiki-sel-card-sub")).toHaveText("· a turn in E2E Selection's discussion of this page");
+    await expect.poll(() => posts.length).toBe(1);
+    expect(posts[0]!.userId).toBe(USER);
+
+    // «Change…» opens the who box: a group, the users, the bot and «Change on /models ↗».
+    await dragSelect(page, "The harbour waits for", "The harbour waits for");
+    await (await explainTip(page)).locator("[data-selwho-open]").click();
+    const box = page.locator("#wikiSelWho");
+    await expect(box).toBeVisible();
+    await expect(box).toHaveAttribute("role", "group");
+    await expect(box.locator('a[href="/models?bot=selbot"]')).toHaveText("Change on /models ↗");
+    await expect(box.locator(`[data-selwho-user="${USER}"]`)).toHaveAttribute("aria-pressed", "true");
+    await shot(page, "16-who-box");
+    // A pick while the turn runs: refused, said in the box; the card stays.
+    await box.locator(`[data-selwho-user="${USER2}"]`).click();
+    await expect(box.locator("[role=alert]")).toContainText("A turn is still running");
+    await expect(card).toHaveCount(1);
+    expect(await page.evaluate((b) => localStorage.getItem(`muninn-discuss-user-${b}`), BOT)).toBe(USER);
+
+    release();
+    await expect(card.locator(".wiki-discuss-answer")).toContainText("EXPLAIN-ANSWER", { timeout: 90_000 });
+    // The answer streams before the turn ends: wait for its end (the status line goes).
+    await expect(card.locator(".wiki-discuss-status")).toHaveCount(0, { timeout: 60_000 });
+    // The pick now: the open card closes (its thread is the other user's), the kept user moves.
+    await box.locator(`[data-selwho-user="${USER2}"]`).click();
+    await expect(card).toHaveCount(0);
+    expect(await page.evaluate((b) => localStorage.getItem(`muninn-discuss-user-${b}`), BOT)).toBe(USER2);
+    await expect(box.locator(`[data-selwho-user="${USER2}"]`)).toHaveAttribute("aria-pressed", "true");
+    // The next card names the new user from the moment it is placed, and its turn carries that user.
+    await bar(page).locator("#wikiExplainBtn").click();
+    const next = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+    await expect(next.locator(".wiki-sel-card-sub")).toHaveText("· a turn in E2E Other's discussion of this page");
+    await expect.poll(() => posts.length).toBe(2);
+    expect(posts[1]!.userId).toBe(USER2);
+    await expect(next.locator(".wiki-discuss-answer")).toContainText("EXPLAIN-ANSWER", { timeout: 90_000 });
+    await expect(next.locator(".wiki-sel-card-sub")).toHaveText("· a turn in E2E Other's discussion of this page");
+    const [row] = await sql!`SELECT t.user_id FROM wiki_discuss_turns d JOIN threads t ON t.id = d.thread_id WHERE d.wiki = ${WIKI} AND d.rel_path = ${OTHER} ORDER BY d.created_at DESC LIMIT 1`;
+    expect(row!.user_id).toBe(USER2);
+  } finally {
+    await sql!`DELETE FROM threads WHERE user_id IN (${USER}, ${USER2}) AND name = 'e2e-p1-main'`;
+    await sql!`DELETE FROM threads WHERE user_id = ${USER2} AND kind = 'wiki'`;
+  }
+});
+
+test("Discuss v3 P1: no kept user and a default user who is not listed: the tooltip and the card head name that default user, and the turn runs as it", async ({ page }) => {
+  test.setTimeout(180_000);
+  await sql!`UPDATE bot_default_user SET user_id = ${USER3} WHERE bot_name = ${BOT}`;
+  try {
+    const posts = discussPosts(page);
+    await openPage(page, OTHER);
+    await dragSelect(page, "The pier opens at six.");
+    // No /chat name for a user no thread lists: named by id.
+    await expect((await explainTip(page)).locator(".wiki-seltip-l2")).toHaveText(`Runs as ${USER3} · ${MODEL} · claude-sdk · Change…`);
+    await bar(page).locator("#wikiExplainBtn").click();
+    const card = page.locator('#articleWrap .wiki-sel-card[data-sel-card="explain"][data-sel-turn]');
+    await expect(card.locator(".wiki-sel-card-sub")).toHaveText(`· a turn in ${USER3}'s discussion of this page`);
+    await expect(card.locator(".wiki-discuss-answer")).toContainText("EXPLAIN-ANSWER", { timeout: 90_000 });
+    // Rule R2: a default user the route would refuse as a posted id is not sent; the engine runs the turn as it.
+    expect(posts.length).toBe(1);
+    expect(posts[0]!.userId).toBeUndefined();
+    const [row] = await sql!`SELECT t.user_id FROM wiki_discuss_turns d JOIN threads t ON t.id = d.thread_id WHERE d.wiki = ${WIKI} AND d.rel_path = ${OTHER} ORDER BY d.created_at DESC LIMIT 1`;
+    expect(row!.user_id).toBe(USER3);
+  } finally {
+    await sql!`UPDATE bot_default_user SET user_id = ${USER} WHERE bot_name = ${BOT}`;
+    await sql!`DELETE FROM threads WHERE user_id = ${USER3}`;
+  }
+});
+
+test("Discuss v3 P1: /models?bot=x opens on bot x and leaves the stored selection alone", async ({ page }) => {
+  // The selector lists bots with messages: the first bot has some; the second
+  // gets its pill from the parameter (a discovered bot), then from a message.
+  await page.addInitScript((b) => {
+    if (sessionStorage.getItem("models-seeded")) return;
+    sessionStorage.setItem("models-seeded", "1");
+    localStorage.setItem("muninn-selected-bot", b);
+  }, BOT2);
+  const overview: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/api/models/overview")) overview.push(new URL(r.url()).searchParams.get("bot") ?? "");
+  });
+  await sql!`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES (${USER}, ${BOT}, 'user', 'e2e-p1-models', 'web')`;
+  try {
+    await page.goto(`${BASE}/models?bot=${BOT2}`);
+    await expect(page.locator(`#botSelector .bot-pill[data-bot="${BOT2}"]`)).toHaveClass(/active/);
+    await expect.poll(() => overview.includes(BOT2)).toBe(true);
+    await page.goto(`${BASE}/models?bot=${BOT}`);
+    await expect(page.locator(`#botSelector .bot-pill[data-bot="${BOT}"]`)).toHaveClass(/active/);
+    await expect.poll(() => overview.includes(BOT)).toBe(true);
+    expect(await page.evaluate(() => localStorage.getItem("muninn-selected-bot"))).toBe(BOT2);
+    // From here the second bot has a message, so its own pill. A parameter naming no bot: the stored one.
+    await sql!`INSERT INTO messages (user_id, bot_name, role, content, platform) VALUES (${USER}, ${BOT2}, 'user', 'e2e-p1-models', 'web')`;
+    await page.goto(`${BASE}/models?bot=not-a-bot`);
+    await expect(page.locator(`#botSelector .bot-pill[data-bot="${BOT2}"]`)).toHaveClass(/active/);
+    // Without the parameter the stored bot is the one shown; a pick on the page writes it.
+    await page.goto(`${BASE}/models`);
+    await expect(page.locator(`#botSelector .bot-pill[data-bot="${BOT2}"]`)).toHaveClass(/active/);
+    await page.locator(`#botSelector .bot-pill[data-bot="${BOT}"]`).click();
+    expect(await page.evaluate(() => localStorage.getItem("muninn-selected-bot"))).toBe(BOT);
+  } finally {
+    await sql!`DELETE FROM messages WHERE content = 'e2e-p1-models'`;
+  }
 });
 
 const FOLLOW_OLD = "The morning route adds a stop.";

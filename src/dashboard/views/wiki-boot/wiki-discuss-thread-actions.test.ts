@@ -24,6 +24,7 @@ let wiki = "jarvis";
 let relPath = "plans/a.mdx";
 let route: (url: string, init?: RequestInit) => Response | Promise<Response> = () => json({}, 404);
 const reads: string[] = [];
+let whoRoute: (url: string) => Response | Promise<Response> = () => json({ error: "no light read in this case" }, 503);
 
 beforeAll(() => {
   const win = new GlobalWindow({ url: "http://localhost:3011/wiki" });
@@ -38,6 +39,9 @@ beforeAll(() => {
   g.confirm = () => true;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    // The page render's light read (Discuss v3 P1) is not one of the reads these
+    // cases count: answered apart, inert by default (a refusal sets no user).
+    if (url.startsWith("/api/wiki/discuss/thread?") && new URL(url, "http://x").searchParams.get("who") === "1") return whoRoute(url);
     if (url.startsWith("/api/wiki/discuss/thread?")) reads.push(url);
     return route(url, init);
   }) as typeof fetch;

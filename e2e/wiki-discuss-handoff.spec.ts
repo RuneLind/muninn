@@ -15,15 +15,17 @@
  *     characters (offered, located whole), and a checklist row selected from
  *     its ✗ (the mark is hidden from the reading by CSS, the `[ ]` dropped by
  *     the collapse).
- *  4. **The controls as a keyboard user meets them.** A selection made or
- *     extended with Shift+ArrowRight is the one offered and quoted; Tab to the
- *     selection's control and press Enter; Escape closes the panel wherever
- *     focus is and returns focus to the control, which a late `selectionchange`
- *     does not hide; a passage selected with the mouse while the panel is
- *     open is the one a second activation asks about, and closing the panel
- *     keeps it; Copy is disabled while its request runs; a
- *     non-JSON answer shows its status. The whole-page control shows on an
- *     HTML explainer page too.
+ *  4. **The controls as a keyboard user meets them.** Since Discuss v3 P1 the
+ *     passage control is the selection bar's item (`#wikiDiscussHandoffBtn`
+ *     in the bar; the breadcrumb keeps the whole-page one). A selection made
+ *     or extended with Shift+ArrowRight is the one offered and quoted; ⇧F10
+ *     opens the menu on a keyboard selection, End reaches the item and Enter
+ *     opens it; Escape closes the panel wherever focus is and puts the bar
+ *     back with focus on its item, which a late `selectionchange` does not
+ *     hide; a passage selected with the mouse while the panel is open is the
+ *     one a second activation asks about, and closing the panel keeps it;
+ *     Copy is disabled while its request runs; a non-JSON answer shows its
+ *     status. The whole-page control shows on an HTML explainer page too.
  *  5. **Off the page.** A selection inside a link's peek card offers no
  *     control; the start view closes the panel and removes the controls,
  *     and a page shown again brings them back.
@@ -203,6 +205,13 @@ async function select(page: Page, text: string, n: number, upTo?: string, mouseu
       const sel = getSelection()!;
       sel.removeAllRanges();
       sel.addRange(r);
+      // A reader selects what is on screen: the selection bar hides while its selection is scrolled away.
+      if (mouseup) {
+        const wrapEl = document.getElementById("articleWrap")!;
+        const box = r.getBoundingClientRect();
+        const pane = wrapEl.getBoundingClientRect();
+        if (box.bottom > pane.bottom || box.top < pane.top) wrapEl.scrollTop += box.top - pane.top - pane.height / 3;
+      }
       if (mouseup) document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
     },
     { text, n, upTo, mouseup },
@@ -330,21 +339,18 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     expect(clip).not.toContain("✗");
   });
 
-  test("keyboard: Tab to the control, Enter opens; Escape with focus on the page closes and returns focus", async ({ page }) => {
+  test("keyboard: ⇧F10 opens the menu, End reaches the item, Enter opens; Escape with focus on the page closes and returns focus to the bar's item", async ({ page }) => {
     await openPage(page, WIKI);
-    // No mouseup: Explain and Fact check stay hidden, the handoff shows.
+    // No mouseup: no bar. The keyboard's way in is the menu.
     await select(page, "The night route is unchanged.", 1, undefined, false);
     const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
-    await expect(btn).toBeVisible();
-    // Reach the control from the nearest shown control before it, as Tab does.
-    await btn.evaluate((b) => {
-      let el = b.previousElementSibling as HTMLElement | null;
-      while (el && (el.tagName !== "BUTTON" || el.offsetParent === null)) el = el.previousElementSibling as HTMLElement | null;
-      if (!el) throw new Error("no shown control before the handoff");
-      el.focus();
-    });
-    await page.keyboard.press("Tab");
-    await expect(btn).toBeFocused();
+    await expect(btn).toHaveCount(0);
+    await page.keyboard.press("Shift+F10");
+    const item = page.locator('#wikiSelMenu [data-selact="handoff"]');
+    await expect(item).toBeVisible();
+    await expect(item).toHaveText("⌘ Ask Claude Code");
+    await page.keyboard.press("End");
+    await expect(item).toBeFocused();
     await page.keyboard.press("Enter");
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
     await expect(panel).toBeVisible();
@@ -372,14 +378,14 @@ test.describe("Wiki reader: Ask Claude Code", () => {
       }
       throw new Error("no start text");
     });
-    const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
-    await page.waitForTimeout(150);
-    await expect(btn).toBeHidden();
     const passage = "The night route is unchanged.";
     for (let i = 1; i < passage.length; i++) await page.keyboard.press("Shift+ArrowRight");
     expect(await page.evaluate(() => getSelection()!.toString())).toBe(passage);
-    await expect(btn).toBeVisible();
-    await btn.click();
+    // The keyboard's menu on the keyboard's selection: the item is offered there.
+    await page.keyboard.press("Shift+F10");
+    await page.keyboard.press("End");
+    await expect(page.locator('#wikiSelMenu [data-selact="handoff"]')).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(page.locator(`#${DISCUSS_HANDOFF_PANEL_ID} .wiki-handoff-quote`)).toHaveText(passage);
     const clip = await askAndCopy(page, "Since when?");
     expect(clip).toContain("Passage (line 12, Harbour timetable › Brief):");
@@ -423,8 +429,8 @@ test.describe("Wiki reader: Ask Claude Code", () => {
   test("a passage selected with the mouse while the panel is open: activating the control asks about it", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI);
-    // No mouseup: Explain stays hidden, so the drag's press hides nothing and the article does not move under it.
-    await select(page, "The pier opens at six.", 1, undefined, false);
+    // The bar floats over the page: the drag's press that hides it moves no text.
+    await select(page, "The pier opens at six.", 1);
     const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
     await btn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
@@ -440,7 +446,7 @@ test.describe("Wiki reader: Ask Claude Code", () => {
 
   test("closing the panel keeps a selection made while it was open", async ({ page }) => {
     await openPage(page, WIKI);
-    await select(page, "The pier opens at six.", 1, undefined, false); // no mouseup: see the test above
+    await select(page, "The pier opens at six.", 1);
     const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
     await btn.click();
     const panel = page.locator(`#${DISCUSS_HANDOFF_PANEL_ID}`);
@@ -490,6 +496,8 @@ test.describe("Wiki reader: Ask Claude Code", () => {
     const btn = page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`);
     await select(page, "The gate opens at dawn", 1, "for the carts.");
     await expect(btn).toBeVisible();
+    // Let the bar go first: it covers the link the hover needs.
+    await page.keyboard.press("Escape");
     await page.locator(".wiki-article a", { hasText: "the first part" }).hover();
     const peek = page.locator(".wiki-article .wiki-ref-peek");
     await expect(peek).toContainText("The gate opens at dawn");
@@ -499,6 +507,8 @@ test.describe("Wiki reader: Ask Claude Code", () => {
         const i = t.data.indexOf("The gate opens");
         if (i === -1) continue;
         getSelection()!.setBaseAndExtent(t, i, t, t.data.length);
+        // Released as a mouse selection is: the bar reads it.
+        document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
         return;
       }
       throw new Error("no text in the peek card");

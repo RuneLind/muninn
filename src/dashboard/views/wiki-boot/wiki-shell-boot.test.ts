@@ -384,8 +384,9 @@ describe("wiki-browser.ts — listener order", () => {
       "window resize 2dqks", "#wikiPaneResizer pointerdown 3d9ri", "#wikiPaneResizer pointermove 3r8l6",
       "#wikiPaneResizer pointerup 2ipmi", "#wikiPaneResizer pointercancel 2ipmi",
       "#wikiPaneResizer lostpointercapture 2ipmi", "#wikiPaneResizer dblclick 2ix69", "#wikiPaneResizer keydown 2jzz2",
-      // Discuss P1 (`initDiscussHandoff`): show or hide the control on a settled selectionchange (the selection is read on click), keep the selection on a press, act on click, Escape.
-      "document selectionchange 3v0f0", "document mousedown 124c0", "document click 3pvli", "document keydown 27uoi",
+      // Discuss P1 (`initDiscussHandoff`): the whole-page control on click, Escape. (Discuss v3 P1: the
+      // passage control is the selection bar's item, so its selectionchange and press listeners are gone.)
+      "document click 6z6ez", "document keydown 27uoi",
       // Discuss P3 (`initDiscussTab`): the tab's Ask, chips and Continue on click (Discuss v2 PR 4 adds the
       // tab's own click, the mode toggle, Start over, an earlier thread's Delete and the user pick); a press
       // held in the tab (no follow-scroll meanwhile), ended by a pointerup or by what can take its place (a
@@ -426,9 +427,12 @@ describe("wiki-browser.ts — listener order", () => {
       // then the whole-page Fact check's press, which the pill's mousedown used to hold. (PR 5 fix round 1
       // batch 4: the context menu on the document, where the keyboard's goes; ⇧F10 and the arrows in the
       // keydown; a closed card let go; the menu closed on a scroll. PR 6: a closed card runs its drop
-      // hook, which lets a Trace card go.)
-      "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 2417h",
-      "document mousedown 2jzhg", "document click 396t9", "document scroll capture 32kwe", "window resize 2k8ec",
+      // hook, which lets a Trace card go. Discuss v3 P1: Escape closes the who box first; its press keeps
+      // the selection; «Change…», the box's ✕ and its users on click; then Explain's tooltip on hover or
+      // focus, after the bar's resize.)
+      "#articleWrap mouseup 16zwr", "document contextmenu 1hvte", "document selectionchange 2qi06", "document keydown 1km0d",
+      "document mousedown lvaou", "document click ypayc", "document scroll capture 32kwe", "window resize 2k8ec",
+      "document mouseover 1xprt", "document mouseout 2a7ug", "document focusin 2jm8i",
       "document mousedown 2qltq", "window message 3ipik",
       "window storage 3sulz", "#wikiList keydown agmpg", "document keydown 3m3iv", "document click 1asqt",
       "window focus 8kg09", "document visibilitychange 29s0r",
