@@ -1636,16 +1636,16 @@ describe("discussRunsAs (Discuss v3 P1): who the next turn runs as", () => {
     expect(discussRunsAs(null, null)).toEqual({ state: "pending" });
     // A kept user before any read: still pending (no name known yet).
     expect(discussRunsAs(view({}), "u2")).toEqual({ state: "pending" });
-    const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
-    const read = view({ whoKnown: true, userId: "u1", userName: "Popp", users });
-    expect(discussRunsAs(read, "u1")).toEqual({ state: "user", userId: "u1", name: "Popp" });
+    const users = [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }];
+    const read = view({ whoKnown: true, userId: "u1", userName: "Kari", users });
+    expect(discussRunsAs(read, "u1")).toEqual({ state: "user", userId: "u1", name: "Kari" });
     // A send that names another user (a pick): named from the read's list.
-    expect(discussRunsAs(read, "u2")).toEqual({ state: "user", userId: "u2", name: "Rune" });
+    expect(discussRunsAs(read, "u2")).toEqual({ state: "user", userId: "u2", name: "Ola" });
     // A send that names none (a default user who is not listed, rule R2): the read's user, by id when unnamed.
-    expect(discussRunsAs(view({ whoKnown: true, userId: "popp", userName: null, users }), null)).toEqual({ state: "user", userId: "popp", name: "popp" });
+    expect(discussRunsAs(view({ whoKnown: true, userId: "per", userName: null, users }), null)).toEqual({ state: "user", userId: "per", name: "per" });
   });
   test("a read's refusal is the text, until a read names the user", () => {
     expect(discussRunsAs(view({ whoRefusal: "pick the user" }), null)).toEqual({ state: "refused", text: "pick the user" });
-    expect(discussRunsAs(view({ whoKnown: true, whoRefusal: null, userId: "u1", userName: "Popp" }), null)).toEqual({ state: "user", userId: "u1", name: "Popp" });
+    expect(discussRunsAs(view({ whoKnown: true, whoRefusal: null, userId: "u1", userName: "Kari" }), null)).toEqual({ state: "user", userId: "u1", name: "Kari" });
   });
 });

@@ -1191,8 +1191,8 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     expect(((await refused.json()) as { reason: string }).reason).toBe("unknown-user");
   });
   test("a default user who is not listed: named by id only, not in `users` (rule R2: never sent as a posted id)", async () => {
-    const { app } = setup({ deps: { authMode: () => "off", defaultUser: async () => "popp" } });
-    expect(await (await read(app, {})).json()).toMatchObject({ userId: "popp", userName: null, users: [{ id: "kari", name: "Kari" }], thread: null });
+    const { app } = setup({ deps: { authMode: () => "off", defaultUser: async () => "per" } });
+    expect(await (await read(app, {})).json()).toMatchObject({ userId: "per", userName: null, users: [{ id: "kari", name: "Kari" }], thread: null });
   });
   test("fix round 1 F2: on an authenticating instance no `users` and no `userListed` claim: the client decides by the full read's rule", async () => {
     const { app } = setup({ deps: { authMode: () => "entra" } });

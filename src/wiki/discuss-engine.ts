@@ -248,7 +248,6 @@ export type DiscussBotRef = Pick<BotConfig, "name" | "connector" | "model">;
  *  `discoverAllBots()`, valid while `wikiSynthesisInputsKey()` is unchanged. */
 let botHereInputs: string | null = null;
 const botHere = new Map<string, { bot: DiscussBotRef; origin: DiscussWho["origin"] } | null>();
-let botHereDiscoveries = 0;
 
 /**
  * {@link resolveDiscussBot} over the discovered bots, memoized for the reads a
@@ -269,7 +268,6 @@ export function resolveDiscussBotHere(entry: WikiRegistryEntry | undefined): { b
   }
   const key = `${entry?.name ?? ""}\0${entry?.source ?? ""}\0${entry?.synthesisBot ?? ""}`;
   if (botHere.has(key)) return botHere.get(key)!;
-  botHereDiscoveries++;
   const hit = resolveDiscussBot(entry, discoverAllBots());
   const ref = hit ? { bot: { name: hit.bot.name, connector: hit.bot.connector, model: hit.bot.model }, origin: hit.origin } : null;
   botHere.set(key, ref);
@@ -279,11 +277,6 @@ export function resolveDiscussBotHere(entry: WikiRegistryEntry | undefined): { b
 /** {@link discussWhoFor} through {@link resolveDiscussBotHere}. */
 export function discussWhoHere(entry: WikiRegistryEntry | undefined, config: Pick<Config, "claudeModel">): DiscussWho | null {
   return whoOf(resolveDiscussBotHere(entry), config);
-}
-
-/** Test-only: how many times {@link resolveDiscussBotHere} discovered bots. */
-export function __discussBotHereDiscoveriesForTest(): number {
-  return botHereDiscoveries;
 }
 
 type SurfaceKind = "readSearch" | "mcpTools";

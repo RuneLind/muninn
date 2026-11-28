@@ -344,7 +344,7 @@ describe("Discuss v3 P1: the handoff item, Explain's tooltip and the who box", (
   test("the tooltip: the sentence, then «Runs as» with the model, the connector and «Change…»; «…» while pending; no line without an agent", () => {
     const who = { bot: "melosys", origin: "pinned" as const, connector: "copilot-sdk", model: "claude-sonnet-5.5" };
     const shown = (html: string) => new Window().document.createRange().createContextualFragment(html).textContent;
-    expect(shown(selTipHtml(who, { state: "user", userId: "u", name: "Rune" }))).toBe("What this means, why it is here and what led to itRuns as Rune · claude-sonnet-5.5 · copilot-sdk · Change…");
+    expect(shown(selTipHtml(who, { state: "user", userId: "u", name: "Ola" }))).toBe("What this means, why it is here and what led to itRuns as Ola · claude-sonnet-5.5 · copilot-sdk · Change…");
     expect(shown(selTipHtml(who, { state: "pending" }))).toContain("Runs as … · claude-sonnet-5.5");
     expect(shown(selTipHtml(who, { state: "refused", text: "pick the user" }))).toContain("Runs as pick the user ·");
     expect(shown(selTipHtml(null, { state: "pending" }))).toContain("No bot answers here");
@@ -360,8 +360,8 @@ describe("Discuss v3 P1: the handoff item, Explain's tooltip and the who box", (
   });
   test("the who box: users to pick only where choosable, the bot's origin, «Change on /models ↗», the connector fixed on a pinned wiki", () => {
     const who = { bot: "melosys", origin: "pinned" as const, connector: "copilot-sdk", model: "m" };
-    const runsAs = { state: "user" as const, userId: "u2", name: "Rune" };
-    const users = [{ id: "u1", name: "Popp" }, { id: "u2", name: "Rune" }];
+    const runsAs = { state: "user" as const, userId: "u2", name: "Ola" };
+    const users = [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }];
     const html = selWhoHtml({ wiki: "kode", who, runsAs, users, choosable: true, message: null });
     expect(html).toContain('data-selwho-user="u2" aria-pressed="true"');
     expect(html).toContain('data-selwho-user="u1" aria-pressed="false"');
@@ -375,7 +375,7 @@ describe("Discuss v3 P1: the handoff item, Explain's tooltip and the who box", (
     expect(fixedName).toContain('role="alert">A turn is still running');
   });
   test("a card's head from the «Runs as» user", () => {
-    expect(runsAsSub({ state: "user", userId: "u", name: "Popp" })).toBe("a turn in Popp's discussion of this page");
+    expect(runsAsSub({ state: "user", userId: "u", name: "Kari" })).toBe("a turn in Kari's discussion of this page");
     expect(runsAsSub({ state: "pending" })).toBe("a turn in …'s discussion of this page");
     expect(runsAsSub({ state: "refused", text: "no chat user" })).toBe("no chat user");
   });

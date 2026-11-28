@@ -19,7 +19,6 @@ import { readerArticle } from "./discuss-reader-article.ts";
 import {
   DISCUSS_HANDOFF_PAGE_BTN_ID,
   DISCUSS_HANDOFF_PANEL_ID,
-  DISCUSS_HANDOFF_SEL_BTN_ID,
   discussHandoffMode,
   initDiscussHandoff,
   mayBePassage,
@@ -28,6 +27,7 @@ import {
 } from "../components/wiki-discuss-handoff.ts";
 import { DISCUSS_ASK_BTN_ID, DISCUSS_INPUT_ID, discussAgentOn, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
+import { SEL_HANDOFF_BTN_ID } from "../components/wiki-selection-menu-model.ts";
 import { applyWikiReadonlyInputLocks, installWikiReadonlyGuard, WIKI_READONLY_INPUT_PLACEHOLDER } from "../components/wiki-readonly-client.ts";
 
 const g = globalThis as unknown as Record<string, unknown>;
@@ -778,7 +778,7 @@ describe("«Ask Claude Code»: the selection is read when the control is activat
     setDiscussHandoffEnabled(true);
     expect(discussHandoffMode()).toBe("code");
     // The passage control is no longer in the breadcrumb; the whole-page one is.
-    expect(document.getElementById(DISCUSS_HANDOFF_SEL_BTN_ID)).toBeNull();
+    expect(document.getElementById(SEL_HANDOFF_BTN_ID)).toBeNull();
     expect(document.getElementById(DISCUSS_HANDOFF_PAGE_BTN_ID)).not.toBeNull();
     const root = document.documentElement;
     const list = root.classList;

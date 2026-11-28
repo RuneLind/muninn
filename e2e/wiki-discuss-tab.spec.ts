@@ -60,7 +60,8 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
-import { DISCUSS_HANDOFF_PANEL_ID, DISCUSS_HANDOFF_SEL_BTN_ID } from "../src/dashboard/views/components/wiki-discuss-handoff.ts";
+import { DISCUSS_HANDOFF_PANEL_ID } from "../src/dashboard/views/components/wiki-discuss-handoff.ts";
+import { SEL_HANDOFF_BTN_ID } from "../src/dashboard/views/components/wiki-selection-menu-model.ts";
 
 const PORT = e2ePort("wiki-discuss-tab");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -334,7 +335,7 @@ async function passageControl(page: Page): Promise<Locator> {
     if (box.bottom > pane.bottom || box.top < pane.top) wrapEl.scrollTop += box.top - pane.top - pane.height / 3;
     document.getElementById("articleWrap")!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
   });
-  const btn = page.locator(`#wikiSelBar #${DISCUSS_HANDOFF_SEL_BTN_ID}`);
+  const btn = page.locator(`#wikiSelBar #${SEL_HANDOFF_BTN_ID}`);
   await expect(btn).toBeVisible();
   return btn;
 }
@@ -993,7 +994,7 @@ test.describe("Wiki reader: the Discuss tab", () => {
     // No passage control either: the wiki has no handoff, and the agent is off here.
     await selectBullet(page);
     await page.waitForTimeout(200);
-    await expect(page.locator(`#${DISCUSS_HANDOFF_SEL_BTN_ID}`)).toHaveCount(0);
+    await expect(page.locator(`#${SEL_HANDOFF_BTN_ID}`)).toHaveCount(0);
     // Forced visible, the tab's controls still send nothing: click, mousedown, Enter.
     await page.evaluate(() => {
       document.querySelector<HTMLElement>('[data-conntab="discuss"]')!.hidden = false;

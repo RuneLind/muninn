@@ -1220,12 +1220,6 @@ function toggleTools(key: string): void {
   paint();
 }
 
-/** The thread's user by /chat name for the open page, once the read named it
- *  (the inline card's sub line). */
-export function discussUserNameHere(): string | null {
-  return here()?.userName ?? null;
-}
-
 /** A pick, from the «as» menu or a refusal's picker (R3). */
 function pickUser(): void {
   const sel = document.querySelector<HTMLSelectElement>(`#${DISCUSS_BODY_ID} .wiki-discuss-user-select`);

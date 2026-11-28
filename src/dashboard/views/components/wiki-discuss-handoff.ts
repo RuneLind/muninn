@@ -43,10 +43,7 @@ import { readerSelectionText } from "./wiki-lens.ts";
 import { DISCUSS_TEXT_HIDDEN, discussContext, touchesPeek, type DiscussContext } from "./wiki-discuss-text.ts";
 import { HANDOFF_QUESTION_MAX, HANDOFF_SELECTION_MAX, HANDOFF_SELECTION_MIN } from "../../../wiki/discuss-bounds.ts";
 import { askInDiscuss, discussAgentOn, discussSendBlocked, setDiscussAgentEnabled } from "./wiki-discuss-tab.ts";
-import { SEL_HANDOFF_BTN_ID } from "./wiki-selection-menu-model.ts";
 
-/** The passage control: the selection bar's item since Discuss v3 P1 (its id). */
-export const DISCUSS_HANDOFF_SEL_BTN_ID = SEL_HANDOFF_BTN_ID;
 export const DISCUSS_HANDOFF_PAGE_BTN_ID = "wikiDiscussHandoffPageBtn";
 export const DISCUSS_HANDOFF_PANEL_ID = "wikiDiscussHandoffPanel";
 const HANDOFF_PATH = "/api/wiki/discuss/handoff";
