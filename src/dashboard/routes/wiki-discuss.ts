@@ -47,6 +47,7 @@ import { HANDOFF_BODY_MAX } from "../../wiki/discuss-bounds.ts";
 import { renderContinuePrompt } from "../../wiki/discuss-prompt.ts";
 import {
   createDiscussEngine,
+  discussUserPostable,
   parseDiscussBody,
   resolveDiscussBot,
   resolveDiscussBotHere,
@@ -294,11 +295,10 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       const who = await engine.resolveUser(bot.name, postedUser || undefined);
       if ("refused" in who) return c.json(who.body, who.status);
       const wikiName = entry?.name ?? "";
-      // The light read (Discuss v3 P1): the user fields only, for the reader's
-      // «Runs as» line before any turn, and the live thread's id alone (no
-      // messages, closed list or one-shot turns). The client decides
-      // `userListed` from `users` and the id it posted with the one rule both
-      // reads use (`threadReadListsUser`), so the light read never claims it.
+      // The light read (Discuss v3 P1): the user fields only (`userPostable`
+      // among them, as on the full read), for the reader's «Runs as» line
+      // before any turn, and the live thread's id alone (no messages, closed
+      // list or one-shot turns).
       if (c.req.query("who") === "1") {
         const live = await (deps.threads?.live ?? getLiveWikiThread)(who.userId, bot.name, wikiName, meta.relPath);
         return c.json({ userId: who.userId, ...whoFields(who), thread: live ? { id: live.id } : null, bot: bot.name });
@@ -336,12 +336,15 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
     }
   });
 
-  /** The thread's user by name, and whether the reader may choose another:
-   *  only with `MUNINN_AUTH=off`, where the pane's `userId` picks the thread.
-   *  On an authenticating instance no user list is sent and no picker shows. */
-  function whoFields(who: { username: string | null; users: { id: string; name: string }[] }): { userName: string | null; userChoosable: boolean; users: { id: string; name: string }[] } {
+  /** The thread's user by name, whether the engine would take that id if it
+   *  were posted (`userPostable`, from `resolveUser`'s own list whatever the
+   *  auth mode: the client's only source for posting it), and whether the
+   *  reader may choose another: only with `MUNINN_AUTH=off`, where the pane's
+   *  `userId` picks the thread. On an authenticating instance no user list is
+   *  sent and no picker shows. */
+  function whoFields(who: { userId: string; username: string | null; users: { id: string; name: string }[] }): { userName: string | null; userPostable: boolean; userChoosable: boolean; users: { id: string; name: string }[] } {
     const choosable = (deps.authMode ?? authMode)() === "off";
-    return { userName: who.username, userChoosable: choosable, users: choosable ? who.users : [] };
+    return { userName: who.username, userPostable: discussUserPostable(who.users, who.userId), userChoosable: choosable, users: choosable ? who.users : [] };
   }
 
   async function traceThreadRead(c: Context, raw: string): Promise<Response> {

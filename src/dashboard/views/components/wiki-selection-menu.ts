@@ -112,7 +112,6 @@ import {
   inlineCardAnchor,
   inlineCardHtml,
   keyKindsFrom,
-  runsAsSub,
   inlineTurnSub,
   selRunsAsHtml,
   selTipHtml,
@@ -949,14 +948,17 @@ function threadCard(kind: CardKind, s: Shown, question: string, mode: "explore" 
     placeCard(s, inlineCardHtml(kind, "", `<div class="wiki-discuss-error" role="alert">${escText(r.refused)}</div>`, null));
     return;
   }
-  // The head names the user the tooltip names (R6): set now, or, while no
-  // read has named the user (pending, or a refusal such as an unanswered
-  // light read), «…» or the refusal, filled once from the card's own turn
-  // (`fillPendingWho`).
+  // The head names the id the turn's POST carried (R6), set now when a read
+  // has named it; else «…» (or a read's refusal) is reserved, filled once
+  // from the card's own turn (`fillPendingWho`). Never «Runs as»: a POST
+  // that carried no id runs as the engine's default user, which may have
+  // moved since the read «Runs as» comes from.
+  const sent = discussTurnForCard(r.key)?.turn.sentUser;
+  const name = typeof sent === "string" ? discussUserNameHere(sent) : null;
   const runsAs = discussRunsAsHere();
-  const card = placeCard(s, inlineCardHtml(kind, runsAsSub(runsAs), "", r.key));
+  const card = placeCard(s, inlineCardHtml(kind, name ? inlineTurnSub(name) : runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…"), "", r.key));
   if (!card) return;
-  if (runsAs.state !== "user") card.setAttribute(WHO_PENDING_ATTR, "");
+  if (!name) card.setAttribute(WHO_PENDING_ATTR, "");
   holdCard(card, s);
   paintTurnCard(card);
 }
@@ -1048,33 +1050,34 @@ function paintTurnCard(card: Element): void {
 }
 
 /** Fill a pending card's sub line once, from its own turn (the head is one
- *  `nowrap` line, so nothing below it moves), never again after: the user
- *  the turn's `turn` frame says it ran as, once a read knows that user's
- *  name; before that frame, while the turn is live, the «Runs as» user once
- *  a read names one. Never a later turn's user: a pick after the turn (R3)
- *  names another. A turn the route refused never ran: «not sent». A turn
- *  that ended, or left the discussion (a pick, Start over), before its user
- *  was named: the nameless line. While the turn is live with no user named,
- *  a read's refusal shows its text and the card stays pending. */
+ *  `nowrap` line, so nothing below it moves), never again after (R6): the id
+ *  its POST carried, else the user its `turn` frame says it ran as, once a
+ *  read knows that user's name. Never «Runs as»: a read that lands while the
+ *  POST is in flight may name a default user who moved after the engine took
+ *  the turn (fix round 3). Never a later turn's user: a pick after the turn
+ *  (R3) names another. A turn the route refused never ran: «not sent». A
+ *  turn that ended, or left the discussion (a pick, Start over), before its
+ *  user was named: the nameless line. While the turn is live with no user
+ *  named, a read's refusal shows its text and the card stays pending. */
 function fillPendingWho(card: Element): void {
   if (!card.hasAttribute(WHO_PENDING_ATTR)) return;
   const key = card.getAttribute("data-sel-turn");
   const turn = key ? (discussTurnForCard(key)?.turn ?? null) : null;
+  const id = typeof turn?.sentUser === "string" ? turn.sentUser : (turn?.userId ?? null);
   let text: string;
-  if (turn?.userId) {
-    const name = discussUserNameHere(turn.userId);
+  if (turn?.state === "refused") text = TURN_NOT_SENT;
+  else if (id) {
+    const name = discussUserNameHere(id);
     if (!name) return;
     text = inlineTurnSub(name);
-  } else if (turn?.state === "refused") text = TURN_NOT_SENT;
-  else if (!turn || (turn.state !== "sending" && turn.state !== "running")) text = inlineTurnSub(null);
+  } else if (!turn || (turn.state !== "sending" && turn.state !== "running")) text = inlineTurnSub(null);
   else {
-    // Still sending or running, its user not named by the route yet: no pick
-    // can land meanwhile (R3 refuses one while a turn of the bot is live), so
-    // «Runs as» is the user this turn runs as.
+    // Still sending or running, its POST carried no id and its `turn` frame
+    // has not named the user yet: wait for it, «…» reserved (a read's
+    // refusal meanwhile in its place, gone again once a read answers).
     const runsAs = discussRunsAsHere();
-    if (runsAs.state === "refused") setCardSub(card, runsAs.text);
-    if (runsAs.state !== "user") return;
-    text = inlineTurnSub(runsAs.name);
+    setCardSub(card, runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…"));
+    return;
   }
   card.removeAttribute(WHO_PENDING_ATTR);
   setCardSub(card, text);

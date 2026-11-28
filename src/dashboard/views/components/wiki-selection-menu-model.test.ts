@@ -15,7 +15,6 @@ import {
   inlineCardHtml,
   inlineTurnSub,
   keyKindsFrom,
-  runsAsSub,
   selBarHtml,
   selMenuHtml,
   selMenuItems,
@@ -373,10 +372,5 @@ describe("Discuss v3 P1: the handoff item, Explain's tooltip and the who box", (
     expect(fixedName).toContain("Not choosable on this instance.");
     expect(fixedName).toContain("The research bot role on /models");
     expect(fixedName).toContain('role="alert">A turn is still running');
-  });
-  test("a card's head from the «Runs as» user", () => {
-    expect(runsAsSub({ state: "user", userId: "u", name: "Kari" })).toBe("a turn in Kari's discussion of this page");
-    expect(runsAsSub({ state: "pending" })).toBe("a turn in …'s discussion of this page");
-    expect(runsAsSub({ state: "refused", text: "no chat user" })).toBe("no chat user");
   });
 });

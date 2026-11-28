@@ -110,7 +110,9 @@ interface TraceState {
   discussionId: string | null;
   /** The user of the read or turn that gave `discussionId`: a send naming the thread names this user. */
   userId: string | null;
-  /** The route can take `userId` as a posted id (R2: it holds a thread, or the read listed it). */
+  /** The route can take `userId` as a posted id: the server's `userPostable`
+   *  for it, on the read or `turn` frame that named it (fix round 3; never
+   *  from `users` or from holding a thread). */
   userListed: boolean;
   busy: boolean;
   /** The running send's stream, aborted when the card leaves for good. */
@@ -190,6 +192,14 @@ function syncTraceSend(card: HTMLElement, busy: boolean): void {
   if (input && btn) btn.disabled = busy || !input.value.trim();
 }
 
+/** The id a read or a send of the card posts, by the Discuss tab's R1/R2:
+ *  U when the server said it is postable; else none with the key's thread
+ *  (the engine's default user, its owner), K without. */
+function postedUserOf(st: TraceState): string | null {
+  if (st.userListed && st.userId) return st.userId;
+  return st.discussionId && st.userId ? null : discussUserFor(st.wiki);
+}
+
 /** The key's live trace thread, read back into the card from its ledger
  *  rows; again while a turn of it is still running, and after a failed read
  *  ({@link tracePollStep}). */
@@ -199,7 +209,7 @@ async function loadThread(st: TraceState): Promise<void> {
   const ctl = new AbortController();
   st.pollCtl = ctl;
   const q = new URLSearchParams({ wiki: st.wiki, traceKey: st.key });
-  const user = st.discussionId && st.userId ? st.userId : discussUserFor(st.wiki); // R1
+  const user = postedUserOf(st); // R1
   if (user) q.set("userId", user);
   let read: TraceThreadRead;
   let thread: { id: string; messages: TraceThreadMessage[] } | null = null;
@@ -210,11 +220,11 @@ async function loadThread(st: TraceState): Promise<void> {
     const res = await fetch(`${THREAD_PATH}?${q.toString()}`, { headers: { Accept: "application/json" }, signal: ctl.signal });
     if (res.ok) {
       // Not JSON, or JSON that is no thread: `malformed`, read again under the bound.
-      const b = (await res.json().catch(() => undefined)) as { userId?: unknown; bot?: unknown; users?: unknown } | undefined;
+      const b = (await res.json().catch(() => undefined)) as { userId?: unknown; bot?: unknown; userPostable?: unknown } | undefined;
       ({ read, thread } = traceReadOf(b));
       readUser = typeof b?.userId === "string" ? b.userId : null;
       if (readUser) readBot = typeof b?.bot === "string" ? b.bot : null;
-      readListed = Array.isArray(b?.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === readUser);
+      readListed = b?.userPostable === true;
     } else {
       const err = (await res.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
       read = {
@@ -232,7 +242,7 @@ async function loadThread(st: TraceState): Promise<void> {
   if (ctl.signal.aborted || !live(st)) return;
   if (readUser) {
     st.userId = readUser; // R1
-    st.userListed = !!thread || readListed;
+    st.userListed = readListed;
     if (st.userListed) adoptDiscussUser(st.wiki, readBot, readUser);
   }
   if (thread) {
@@ -279,7 +289,7 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
   paintTurns(st);
   const body: Record<string, unknown> = { wiki: st.wiki, traceKey: st.key, question: turn.question, mode: "explore" };
   if (st.discussionId) body.discussionId = st.discussionId;
-  const user = st.discussionId && st.userId ? st.userId : ((st.userListed ? st.userId : null) ?? discussUserFor(st.wiki)); // R2
+  const user = postedUserOf(st); // R2
   if (user) body.userId = user;
   const fail = (msg: string) => {
     turn.state = "error";
@@ -319,8 +329,8 @@ async function send(st: TraceState, question: string, onStart?: () => void): Pro
           if (typeof m.discussionId === "string") st.discussionId = m.discussionId;
           if (typeof m.userId === "string") {
             st.userId = m.userId; // R2
-            st.userListed = true;
-            adoptDiscussUser(st.wiki, null, m.userId);
+            st.userListed = m.userPostable === true;
+            if (st.userListed) adoptDiscussUser(st.wiki, null, m.userId);
           }
           if (typeof m.turnId === "string") turn.turnId = m.turnId;
         } else if (f.event === "status") turn.status = traceStatusFrom(m, turn.status);

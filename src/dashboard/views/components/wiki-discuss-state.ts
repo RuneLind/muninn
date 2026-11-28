@@ -87,8 +87,13 @@ export interface DiscussTurnView {
   passageGone: boolean;
   /** The send's request had no answer after {@link DISCUSS_WAITING_MS}. */
   waiting?: boolean;
-  /** The user the route ran the turn as (its `turn` frame): an inline card's head. */
+  /** The user the route ran the turn as (its `turn` frame): an inline card's
+   *  head when the POST carried no id. */
   userId?: string | null;
+  /** The id the turn's POST carried, null when it carried none (the engine's
+   *  default user runs it), undefined for a turn read back from the thread:
+   *  an inline card's head names it (R6). */
+  sentUser?: string | null;
 }
 
 /** How long a Discuss send may wait for response headers before the turn says so. */
@@ -249,8 +254,9 @@ export interface DiscussionView {
   userName?: string | null;
   users?: { id: string; name: string }[];
   userChoosable?: boolean;
-  /** The engine takes `userId` as a posted id: a read or send posted it and
-   *  was answered as it, or a read listed it in `users` (never "holds a thread"). */
+  /** The engine takes `userId` as a posted id: the server's `userPostable`
+   *  for that id, from the read or `turn` frame that named it (never derived
+   *  from `users`, from holding a thread or from a send answered as it). */
   userListed?: boolean;
   /** The «as <name> ▾» picker is open. */
   userMenu?: boolean;
@@ -518,21 +524,6 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
     ? (b.users as { id?: unknown; name?: unknown }[]).filter((u) => typeof u?.id === "string").map((u) => ({ id: u.id as string, name: typeof u.name === "string" && u.name ? u.name : (u.id as string) }))
     : [];
   if (!d.userChoosable) d.userMenu = false;
-}
-
-/**
- * Rule R2's `userListed`, one rule for both thread reads (the full read and
- * the light `?who=1` read): the engine takes the read's user as a posted id.
- * It does exactly when that id is one of the bot's chat users, so: the read
- * posted it (`asUser`) and was answered as it, or it is in the `users` the
- * read sent (empty on an authenticating instance). Holding the page's live
- * thread is no evidence: a default user who is not a chat user holds one,
- * and a turn posted as them is refused 422 `unknown-user` (fix round 2).
- */
-export function threadReadListsUser(b: Record<string, unknown>, asUser: string | null): boolean {
-  if (typeof b.userId !== "string") return false;
-  if (asUser !== null && b.userId === asUser) return true;
-  return Array.isArray(b.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === b.userId);
 }
 
 /** Who the next turn runs as: «…» until a read answers, a read's refusal,

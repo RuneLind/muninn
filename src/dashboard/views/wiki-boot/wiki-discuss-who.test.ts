@@ -15,7 +15,11 @@
  * must be one of the bot's chat users or it is refused 422 `unknown-user`;
  * with none posted the bot's default user answers, refused `no-user` when
  * there is none; a send naming a thread must be its owner's (409). The route
- * sends `users` only with `MUNINN_AUTH=off`.
+ * sends `users` only with `MUNINN_AUTH=off`, and `userPostable` (would the
+ * engine take this `userId` if it were posted) on every answer naming a user,
+ * the `turn` frame too, whatever the auth mode (fix round 3: the rows marked
+ * C1 posted nothing on an authenticating instance before it). The second
+ * test is fix round 3's class table over the id an inline send posts.
  *
  * Own process: it installs happy-dom's globals and wires the tab's and the
  * menu's document listeners once, so it is alone in its `bun test` link.
@@ -64,6 +68,12 @@ const srv = {
   fail: null as Fail,
   /** Every thread read: no answer at all (the check phase holds them). */
   holdAll: false,
+  /** Thread reads held until `releaseReads`, answered then from the server as it is then. */
+  holdReads: false,
+  heldReads: [] as (() => void)[],
+  /** The POST's response held until `releasePost` (the user resolved at request time). */
+  holdPost: false,
+  heldPost: null as (() => void) | null,
   gates: [] as Gate[],
   reads: [] as URL[],
   posts: [] as { body: Record<string, unknown>; status: number }[],
@@ -73,6 +83,9 @@ let wiki = "w";
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
+
+/** The route's `userPostable`: the engine would take this id if it were posted. */
+const postable = (id: string): boolean => srv.users.some((u) => u.id === id);
 
 /** The engine's `resolveUser`. */
 function resolve(posted: string | null): { userId: string; username: string | null } | { status: number; body: Record<string, unknown> } {
@@ -93,7 +106,7 @@ function readAnswer(u: URL, posted: string | null): Response {
   const who = resolve(posted);
   if ("status" in who) return json(who.body, who.status);
   const t = srv.threads.get(who.userId);
-  const body: Record<string, unknown> = { userId: who.userId, userName: who.username, userChoosable: srv.auth === "off", users: srv.auth === "off" ? srv.users : [], bot: srv.bot, thread: t ? { id: t } : null };
+  const body: Record<string, unknown> = { userId: who.userId, userName: who.username, userPostable: postable(who.userId), userChoosable: srv.auth === "off", users: srv.auth === "off" ? srv.users : [], bot: srv.bot, thread: t ? { id: t } : null };
   if (u.searchParams.get("who") !== "1") Object.assign(body, { messages: [], closed: [], closedTotal: 0, oneShot: [] });
   return json(body);
 }
@@ -101,6 +114,10 @@ function readAnswer(u: URL, posted: string | null): Response {
 async function serveRead(u: URL): Promise<Response> {
   srv.reads.push(u);
   if (srv.holdAll) return new Promise<Response>(() => {});
+  if (srv.holdReads) {
+    await new Promise<void>((r) => srv.heldReads.push(r));
+    return readAnswer(u, u.searchParams.get("userId"));
+  }
   const light = u.searchParams.get("who") === "1";
   const i = srv.gates.findIndex((gt) => gt.light === light);
   if (i >= 0) {
@@ -113,7 +130,13 @@ async function serveRead(u: URL): Promise<Response> {
 
 /** The engine's start: the user rule, then the thread's owner; a turn that
  *  starts streams its `turn` frame and ends at once. */
-function servePost(body: Record<string, unknown>): Response {
+async function servePost(body: Record<string, unknown>): Promise<Response> {
+  const res = answerPost(body);
+  // Held whatever the answer (a refusal too): the engine resolved the user already.
+  if (srv.holdPost) await new Promise<void>((r) => (srv.heldPost = r));
+  return res;
+}
+function answerPost(body: Record<string, unknown>): Response {
   const done = (status: number, b: unknown) => {
     srv.posts.push({ body, status });
     return json(b, status);
@@ -128,7 +151,7 @@ function servePost(body: Record<string, unknown>): Response {
   const thread = srv.threads.get(who.userId) ?? `t-${who.userId}`;
   srv.threads.set(who.userId, thread);
   srv.posts.push({ body, status: 200 });
-  const frames = `event: turn\ndata: ${JSON.stringify({ turnId: `turn-${srv.posts.length}`, seq: 1, discussionId: thread, userId: who.userId })}\n\nevent: done\ndata: ${JSON.stringify({ answer: "ok", proposedEdit: null })}\n\n`;
+  const frames = `event: turn\ndata: ${JSON.stringify({ turnId: `turn-${srv.posts.length}`, seq: 1, discussionId: thread, userId: who.userId, userName: who.username, userPostable: postable(who.userId) })}\n\nevent: done\ndata: ${JSON.stringify({ answer: "ok", proposedEdit: null })}\n\n`;
   return new Response(frames, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
@@ -232,7 +255,9 @@ function fresh(o: { auth: "off" | "on"; def?: string | null; K?: string; botKnow
   tabSwitch("conn");
   localStorage.clear();
   for (const gt of srv.gates) gt.release();
-  Object.assign(srv, { bot: BOT, users: o.users ?? [KARI, OLA], def: o.def === undefined ? "u1" : o.def, auth: o.auth, threads: new Map(o.threads ?? []), fail: null, holdAll: false, gates: [] });
+  for (const r of srv.heldReads) r();
+  srv.heldPost?.();
+  Object.assign(srv, { bot: BOT, users: o.users ?? [KARI, OLA], def: o.def === undefined ? "u1" : o.def, auth: o.auth, threads: new Map(o.threads ?? []), fail: null, holdAll: false, holdReads: false, heldReads: [], holdPost: false, heldPost: null, gates: [] });
   if (o.K || o.botKnown) localStorage.setItem(`muninn-discuss-bot-${wiki}`, BOT);
   if (o.K) localStorage.setItem(`muninn-discuss-user-${BOT}`, o.K);
 }
@@ -274,7 +299,7 @@ const BOTH = ["u1", "u2"];
 /* Light read, the view holds no thread. Rows by outcome; auth off, then on. */
 const LIGHT: Row[] = [
   { kind: "light", outcome: "okListed", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", BOTH, true, null, false) },
-  { kind: "light", outcome: "okListed", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "light", outcome: "okListed", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, null, false), pins: "C1" },
   { kind: "light", outcome: "okKept", holds: false, auth: "off", want: W("u2", null, 200, "u2 Ola", BOTH, true, "u2", false) },
   { kind: "light", outcome: "okKept", holds: false, auth: "on", want: W("u2", null, 200, "u2 Ola", [], false, "u2", false) },
   { kind: "light", outcome: "okUnlisted", holds: false, auth: "off", want: W(null, null, 200, "u9 u9", BOTH, true, null, false) },
@@ -284,7 +309,7 @@ const LIGHT: Row[] = [
   { kind: "light", outcome: "noUser", holds: false, auth: "off", want: W(null, null, 422, `! ${NOUSER}`, BOTH, true, null, false) },
   { kind: "light", outcome: "noUser", holds: false, auth: "on", want: W(null, null, 422, `! ${NOUSER}`, BOTH, true, null, false) },
   { kind: "light", outcome: "unknownUser", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", BOTH, true, null, false) },
-  { kind: "light", outcome: "unknownUser", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "light", outcome: "unknownUser", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, null, false), pins: "C1" },
   { kind: "light", outcome: "noBot", holds: false, auth: "off", want: W(null, null, 503, `! ${NOBOT}`, [], null, null, false) },
   { kind: "light", outcome: "noBot", holds: false, auth: "on", want: W(null, null, 503, `! ${NOBOT}`, [], null, null, false) },
   { kind: "light", outcome: "net0", holds: false, auth: "off", want: W(null, null, 200, `! ${NET}`, [], null, null, true) },
@@ -293,7 +318,7 @@ const LIGHT: Row[] = [
   { kind: "light", outcome: "5xx", holds: false, auth: "on", want: W(null, null, 200, `! ${DOWN}`, [], null, null, true) },
   // Stale: the full read (the tab shown) starts while it is in flight; its answer (as u2) is dropped.
   { kind: "light", outcome: "stale", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", BOTH, true, "u1", false) },
-  { kind: "light", outcome: "stale", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "light", outcome: "stale", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, "u1", false), pins: "C1" },
 ];
 
 /* Light read, the view holds a thread: the reader's look after a failed
@@ -326,7 +351,7 @@ const LIGHT_HOLDS: Row[] = [
 /* Full read (the tab shown; the page's light read is dropped as stale), no thread held before it. */
 const FULL: Row[] = [
   { kind: "full", outcome: "okListed", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", BOTH, true, "u1", false) },
-  { kind: "full", outcome: "okListed", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "full", outcome: "okListed", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, "u1", false), pins: "C1" },
   { kind: "full", outcome: "okKept", holds: false, auth: "off", want: W("u2", null, 200, "u2 Ola", BOTH, true, "u2", false) },
   { kind: "full", outcome: "okKept", holds: false, auth: "on", want: W("u2", null, 200, "u2 Ola", [], false, "u2", false) },
   { kind: "full", outcome: "okUnlisted", holds: false, auth: "off", want: W(null, null, 200, "u9 u9", BOTH, true, null, false) },
@@ -336,7 +361,7 @@ const FULL: Row[] = [
   { kind: "full", outcome: "noUser", holds: false, auth: "off", want: W(null, null, 422, `! ${NOUSER}`, BOTH, true, null, false) },
   { kind: "full", outcome: "noUser", holds: false, auth: "on", want: W(null, null, 422, `! ${NOUSER}`, BOTH, true, null, false) },
   { kind: "full", outcome: "unknownUser", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", BOTH, true, "u1", false) },
-  { kind: "full", outcome: "unknownUser", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "full", outcome: "unknownUser", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, "u1", false), pins: "C1" },
   { kind: "full", outcome: "noBot", holds: false, auth: "off", want: W(null, null, 503, `! ${NOBOT}`, [], null, null, false) },
   { kind: "full", outcome: "noBot", holds: false, auth: "on", want: W(null, null, 503, `! ${NOBOT}`, [], null, null, false) },
   { kind: "full", outcome: "net0", holds: false, auth: "off", want: W(null, null, 200, `! ${NET}`, [], null, null, true), pins: "3" },
@@ -379,7 +404,7 @@ const PICK: Row[] = [
   { kind: "pick", outcome: "okListed", holds: false, auth: "off", want: W("u2", null, 200, "u2 Ola", BOTH, true, "u2", false) },
   { kind: "pick", outcome: "okListed", holds: false, auth: "on", want: W("u2", null, 200, "u2 Ola", [], false, "u2", false) },
   { kind: "pick", outcome: "unknownUser", holds: false, auth: "off", want: W("u1", null, 200, "u1 Kari", ["u1"], true, "u1", false) },
-  { kind: "pick", outcome: "unknownUser", holds: false, auth: "on", want: W(null, null, 200, "u1 Kari", [], false, null, false) },
+  { kind: "pick", outcome: "unknownUser", holds: false, auth: "on", want: W("u1", null, 200, "u1 Kari", [], false, "u1", false), pins: "C1" },
   { kind: "pick", outcome: "noBot", holds: false, auth: "off", want: W("u2", null, 503, `! ${NOBOT}`, BOTH, null, "u2", false) },
   { kind: "pick", outcome: "noBot", holds: false, auth: "on", want: W("u2", null, 503, `! ${NOBOT}`, [], null, "u2", false) },
   { kind: "pick", outcome: "net0", holds: false, auth: "off", want: W("u2", null, 200, `! ${NET}`, BOTH, null, "u2", true), pins: "3" },
@@ -669,3 +694,292 @@ test("who answers, enumerated: every read × outcome × thread held × auth row,
   srv.holdAll = false;
   expect(failures).toEqual([]);
 }, 120_000);
+
+// ── Fix round 3, the class check: the id a send posts, enumerated ──────────
+/*
+ * Rounds 1–2 had the client guess which ids the engine's `resolveUser` takes
+ * (from `users`, empty with `MUNINN_AUTH` on; from holding a thread; from a
+ * send answered as it). Now every user-bearing answer (both thread reads and
+ * the `turn` frame) states `userPostable` for its `userId`, and that is the
+ * only source of "listed". This table walks the whole state space of one
+ * inline (selection-menu) send, S, and states for every row: the id S posts
+ * (null: none, the engine's default user), the thread it names, the engine's
+ * status, the card head's name, the head while a read lands with S's POST
+ * still held, and «Runs as» once everything settled.
+ *
+ * Axes (2 × 3 × 2 × 2 × 3 × 2 = 144 rows, none pruned):
+ *   auth    `MUNINN_AUTH` off (the route sends `users`) or on (`users: []`).
+ *   K       the kept user: none, u2 (a chat user), u7 (none: the first read
+ *           is refused `unknown-user` and R5 clears K, so the row then runs
+ *           as K none; kept to pin that path, not pruned).
+ *   D0      the bot's default user at the start: u1 (a chat user) or u9 (not
+ *           one: the engine runs a turn as it only when nothing is posted).
+ *   T       the view holds the page's thread before S (U's thread, from the
+ *           full read when the tab shows) or not (only the light read ran,
+ *           so S's own full read runs beside its POST).
+ *   move    the default user: unchanged; moved to u3 between the read and S;
+ *           moved to u3 between a first send S1 (the tab's box) and S.
+ *   flight  no; or yes: S's POST is held after the engine resolved its user,
+ *           the default moves to u4, a full read (a Delete's) lands, then the
+ *           POST answers. The read names u4 whenever it posts no id.
+ *
+ * The head names the id S posted (by the name the view knows), else, when S
+ * posted none, the `turn` frame's user (pending «…» until then: never
+ * «Runs as», which may be a moved default's). A refused S: «not sent».
+ *
+ * No good outcome (the 24 rows with status 409): the view holds the thread
+ * of u9, who is no chat user, and the default has moved. No posted id can
+ * take u9's thread (u9 is refused `unknown-user`; none runs as the new
+ * default, who does not own it), so the honest outcome is the engine's
+ * refusal: the card says «not sent» and the turn shows the refusal; «Runs
+ * as» names u9 until a read names the new default (with flight, u4: the
+ * read landed). Which thread a send names after that is the thread-pairing
+ * gap R4 lists, not the posted id this table closes.
+ */
+type ClassAxes = { auth: "off" | "on"; K: "none" | "u2" | "u7"; D0: "u1" | "u9"; T: "no" | "yes"; move: "none" | "readSend" | "sends"; flight: "no" | "yes" };
+interface ClassWant {
+  post: string | null;
+  T: string | null;
+  status: number;
+  head: string | null;
+  mid: string | null;
+  runs: string;
+}
+const C = (auth: ClassAxes["auth"], K: ClassAxes["K"], D0: ClassAxes["D0"], T: ClassAxes["T"], move: ClassAxes["move"], flight: ClassAxes["flight"], post: string | null, Tp: string | null, status: number, head: string | null, mid: string | null, runs: string): { axes: ClassAxes; want: ClassWant } => ({
+  axes: { auth, K, D0, T, move, flight },
+  want: { post, T: Tp, status, head, mid, runs },
+});
+const LISE = { id: "u3", name: "Lise" };
+const MARI = { id: "u4", name: "Mari" };
+const FOUR = [KARI, OLA, LISE, MARI];
+
+const CLASS = [
+  C("off", "none", "u1", "no", "none", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "no", "none", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u1", "no", "readSend", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "no", "readSend", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u1", "no", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "no", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u1", "yes", "none", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "yes", "none", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u1", "yes", "readSend", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "yes", "readSend", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u1", "yes", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "none", "u1", "yes", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "none", "u9", "no", "none", "no", null, null, 200, "u9", null, "u9 u9"),
+  C("off", "none", "u9", "no", "none", "yes", null, null, 200, "u9", "…", "u9 u9"),
+  C("off", "none", "u9", "no", "readSend", "no", null, null, 200, "Lise", null, "u3 Lise"),
+  C("off", "none", "u9", "no", "readSend", "yes", null, null, 200, "Lise", "…", "u3 Lise"),
+  C("off", "none", "u9", "no", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "none", "u9", "no", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("off", "none", "u9", "yes", "none", "no", null, "t-u9", 200, "u9", null, "u9 u9"),
+  C("off", "none", "u9", "yes", "none", "yes", null, "t-u9", 200, "u9", "…", "u9 u9"),
+  C("off", "none", "u9", "yes", "readSend", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "none", "u9", "yes", "readSend", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("off", "none", "u9", "yes", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "none", "u9", "yes", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("off", "u2", "u1", "no", "none", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "no", "none", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u1", "no", "readSend", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "no", "readSend", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u1", "no", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "no", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u1", "yes", "none", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "yes", "none", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u1", "yes", "readSend", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "yes", "readSend", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u1", "yes", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u1", "yes", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "no", "none", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "no", "none", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "no", "readSend", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "no", "readSend", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "no", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "no", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "yes", "none", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "yes", "none", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "yes", "readSend", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "yes", "readSend", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u2", "u9", "yes", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("off", "u2", "u9", "yes", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("off", "u7", "u1", "no", "none", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "no", "none", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u1", "no", "readSend", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "no", "readSend", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u1", "no", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "no", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u1", "yes", "none", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "yes", "none", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u1", "yes", "readSend", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "yes", "readSend", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u1", "yes", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("off", "u7", "u1", "yes", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("off", "u7", "u9", "no", "none", "no", null, null, 200, "u9", null, "u9 u9"),
+  C("off", "u7", "u9", "no", "none", "yes", null, null, 200, "u9", "…", "u9 u9"),
+  C("off", "u7", "u9", "no", "readSend", "no", null, null, 200, "Lise", null, "u3 Lise"),
+  C("off", "u7", "u9", "no", "readSend", "yes", null, null, 200, "Lise", "…", "u3 Lise"),
+  C("off", "u7", "u9", "no", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "u7", "u9", "no", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("off", "u7", "u9", "yes", "none", "no", null, "t-u9", 200, "u9", null, "u9 u9"),
+  C("off", "u7", "u9", "yes", "none", "yes", null, "t-u9", 200, "u9", "…", "u9 u9"),
+  C("off", "u7", "u9", "yes", "readSend", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "u7", "u9", "yes", "readSend", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("off", "u7", "u9", "yes", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("off", "u7", "u9", "yes", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "none", "u1", "no", "none", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "no", "none", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u1", "no", "readSend", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "no", "readSend", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u1", "no", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "no", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u1", "yes", "none", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "yes", "none", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u1", "yes", "readSend", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "yes", "readSend", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u1", "yes", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "none", "u1", "yes", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "none", "u9", "no", "none", "no", null, null, 200, "u9", null, "u9 u9"),
+  C("on", "none", "u9", "no", "none", "yes", null, null, 200, "u9", "…", "u9 u9"),
+  C("on", "none", "u9", "no", "readSend", "no", null, null, 200, "Lise", null, "u3 Lise"),
+  C("on", "none", "u9", "no", "readSend", "yes", null, null, 200, "Lise", "…", "u3 Lise"),
+  C("on", "none", "u9", "no", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "none", "u9", "no", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "none", "u9", "yes", "none", "no", null, "t-u9", 200, "u9", null, "u9 u9"),
+  C("on", "none", "u9", "yes", "none", "yes", null, "t-u9", 200, "u9", "…", "u9 u9"),
+  C("on", "none", "u9", "yes", "readSend", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "none", "u9", "yes", "readSend", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "none", "u9", "yes", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "none", "u9", "yes", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "u2", "u1", "no", "none", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "no", "none", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u1", "no", "readSend", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "no", "readSend", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u1", "no", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "no", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u1", "yes", "none", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "yes", "none", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u1", "yes", "readSend", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "yes", "readSend", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u1", "yes", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u1", "yes", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "no", "none", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "no", "none", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "no", "readSend", "no", "u2", null, 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "no", "readSend", "yes", "u2", null, 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "no", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "no", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "yes", "none", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "yes", "none", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "yes", "readSend", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "yes", "readSend", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u2", "u9", "yes", "sends", "no", "u2", "t-u2", 200, "Ola", null, "u2 Ola"),
+  C("on", "u2", "u9", "yes", "sends", "yes", "u2", "t-u2", 200, "Ola", "Ola", "u2 Ola"),
+  C("on", "u7", "u1", "no", "none", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "no", "none", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u1", "no", "readSend", "no", "u1", null, 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "no", "readSend", "yes", "u1", null, 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u1", "no", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "no", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u1", "yes", "none", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "yes", "none", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u1", "yes", "readSend", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "yes", "readSend", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u1", "yes", "sends", "no", "u1", "t-u1", 200, "Kari", null, "u1 Kari"),
+  C("on", "u7", "u1", "yes", "sends", "yes", "u1", "t-u1", 200, "Kari", "Kari", "u1 Kari"),
+  C("on", "u7", "u9", "no", "none", "no", null, null, 200, "u9", null, "u9 u9"),
+  C("on", "u7", "u9", "no", "none", "yes", null, null, 200, "u9", "…", "u9 u9"),
+  C("on", "u7", "u9", "no", "readSend", "no", null, null, 200, "Lise", null, "u3 Lise"),
+  C("on", "u7", "u9", "no", "readSend", "yes", null, null, 200, "Lise", "…", "u3 Lise"),
+  C("on", "u7", "u9", "no", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "u7", "u9", "no", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "u7", "u9", "yes", "none", "no", null, "t-u9", 200, "u9", null, "u9 u9"),
+  C("on", "u7", "u9", "yes", "none", "yes", null, "t-u9", 200, "u9", "…", "u9 u9"),
+  C("on", "u7", "u9", "yes", "readSend", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "u7", "u9", "yes", "readSend", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+  C("on", "u7", "u9", "yes", "sends", "no", null, "t-u9", 409, "not sent", null, "u9 u9"),
+  C("on", "u7", "u9", "yes", "sends", "yes", null, "t-u9", 409, "not sent", "…", "u4 Mari"),
+];
+
+/** The newest inline turn card's head: the name, «…», «not sent», or null (no card). */
+function cardHead(): string | null {
+  const cards = document.querySelectorAll("#articleWrap .wiki-sel-card[data-sel-turn]");
+  const sub = cards[cards.length - 1]?.querySelector(".wiki-sel-card-sub")?.textContent ?? null;
+  if (sub === null) return null;
+  const m = /a turn in (.+)'s discussion of this page/.exec(sub);
+  return m ? m[1]! : sub.replace(/^· /, "");
+}
+
+/** «Explain with context» on the page's line: one inline turn. */
+async function inlineSend(): Promise<void> {
+  const p = document.querySelector(".wiki-article p")!.firstChild!;
+  const r = document.createRange();
+  r.setStart(p, 0);
+  r.setEnd(p, TEXT.length);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(r);
+  const wrap = document.getElementById("articleWrap")!;
+  wrap.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+  await settle();
+  document.getElementById("wikiExplainBtn")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, button: 0 }));
+  wrap.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+}
+
+async function driveClass(a: ClassAxes): Promise<ClassWant> {
+  // The user whose thread the page has, when the row holds one: the kept user when it is a chat user, else the default.
+  const u0 = a.K === "u2" ? "u2" : a.D0;
+  fresh({ auth: a.auth, def: a.D0, K: a.K === "none" ? undefined : a.K, users: FOUR, threads: a.T === "yes" ? [[u0, `t-${u0}`]] : [] });
+  render();
+  await settle();
+  if (a.T === "yes") {
+    showTab();
+    await settle();
+  }
+  if (a.move === "readSend") srv.def = "u3";
+  if (a.move === "sends") {
+    await send();
+    srv.def = "u3";
+  }
+  const n = srv.posts.length;
+  let mid: string | null = null;
+  if (a.flight === "yes") {
+    srv.holdReads = true;
+    srv.holdPost = true;
+    await inlineSend();
+    await settle();
+    deleteEarlier();
+    await settle();
+    srv.def = "u4";
+    srv.holdReads = false;
+    for (const r of srv.heldReads.splice(0)) r();
+    await settle();
+    mid = cardHead();
+    srv.holdPost = false;
+    srv.heldPost?.();
+    srv.heldPost = null;
+  } else await inlineSend();
+  await settle();
+  const p = srv.posts.length > n ? srv.posts.at(-1)! : null;
+  return {
+    post: p && typeof p.body.userId === "string" ? p.body.userId : null,
+    T: p && typeof p.body.discussionId === "string" ? p.body.discussionId : null,
+    status: p?.status ?? -1,
+    head: cardHead(),
+    mid,
+    runs: runsText(),
+  };
+}
+
+test("fix round 3 class check: the id an inline send posts, its card head and «Runs as», over auth × K × the default × T × a moved default × a read during the POST", async () => {
+  expect(CLASS.length).toBe(144);
+  const failures: string[] = [];
+  for (const row of CLASS) {
+    const got = await driveClass(row.axes);
+    const name = Object.entries(row.axes).map(([k, v]) => `${k}=${v}`).join(" ");
+    for (const k of Object.keys(row.want) as (keyof ClassWant)[]) {
+      if (JSON.stringify(got[k]) !== JSON.stringify(row.want[k])) failures.push(`${name}: ${k} ${JSON.stringify(got[k])}, want ${JSON.stringify(row.want[k])}`);
+    }
+  }
+  for (const r of srv.heldReads.splice(0)) r();
+  srv.heldPost?.();
+  expect(failures).toEqual([]);
+}, 240_000);

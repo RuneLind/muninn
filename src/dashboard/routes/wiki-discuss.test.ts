@@ -24,7 +24,6 @@ import type { Thread } from "../../db/threads.ts";
 import { discussWhoFor, type DiscussThreadStore } from "../../wiki/discuss-engine.ts";
 import { DiscussTurnConflict } from "../../db/wiki-discuss-turns.ts";
 import { realGit, type GitRun } from "../../wiki/decision-triage/git.ts";
-import { threadReadListsUser } from "../views/components/wiki-discuss-state.ts";
 import type { RunOutcome } from "../../wiki/plan-card-run.ts";
 import { __setReadonlyWikiRootsForTest } from "../../wiki/readonly.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest, getWikiRegistry } from "../../wiki/registry-memo.ts";
@@ -1182,7 +1181,7 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     const { app } = setup({ deps: { authMode: () => "off" } });
     const res = await read(app, {});
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: true, users: [{ id: "kari", name: "Kari" }], thread: null, bot: "ivar" });
+    expect(await res.json()).toEqual({ userId: "kari", userName: "Kari", userPostable: true, userChoosable: true, users: [{ id: "kari", name: "Kari" }], thread: null, bot: "ivar" });
   });
   test("a posted user: that user; one not listed is refused as the full read refuses it", async () => {
     const { app } = setup({ deps: { authMode: () => "off", chatUsers: async () => [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }] } });
@@ -1191,13 +1190,15 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { reason: string }).reason).toBe("unknown-user");
   });
-  test("a default user who is not listed: named by id only, not in `users` (rule R2: never sent as a posted id)", async () => {
+  test("a default user who is not listed: named by id only, not in `users`, and not postable (rule R2: never sent as a posted id)", async () => {
     const { app } = setup({ deps: { authMode: () => "off", defaultUser: async () => "per" } });
-    expect(await (await read(app, {})).json()).toMatchObject({ userId: "per", userName: null, users: [{ id: "kari", name: "Kari" }], thread: null });
+    expect(await (await read(app, {})).json()).toMatchObject({ userId: "per", userName: null, userPostable: false, users: [{ id: "kari", name: "Kari" }], thread: null });
   });
-  test("fix round 1 F2: on an authenticating instance no `users` and no `userListed` claim: the client decides by the full read's rule", async () => {
+  test("fix round 3: on an authenticating instance no `users`, but `userPostable` says whether the engine takes the user if posted", async () => {
     const { app } = setup({ deps: { authMode: () => "entra" } });
-    expect(await (await read(app, {})).json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: false, users: [], thread: null, bot: "ivar" });
+    expect(await (await read(app, {})).json()).toEqual({ userId: "kari", userName: "Kari", userPostable: true, userChoosable: false, users: [], thread: null, bot: "ivar" });
+    const { app: unlisted } = setup({ deps: { authMode: () => "entra", defaultUser: async () => "per" } });
+    expect(await (await read(unlisted, {})).json()).toEqual({ userId: "per", userName: null, userPostable: false, userChoosable: false, users: [], thread: null, bot: "ivar" });
   });
   test("fix round 1 F2: the user's live thread of the page goes out as its id, the full read's other input to `userListed`", async () => {
     const threads = new MemThreads();
@@ -1205,7 +1206,7 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
     const { app } = setup({ threads, deps: { authMode: () => "entra" } });
     expect(await (await read(app, {})).json()).toMatchObject({ userId: "kari", users: [], thread: { id: "t-kari" } });
   });
-  test("fix round 2 batch 1: a default user who is not a chat user but holds the page's thread: the id the client posts (none, by `threadReadListsUser`) starts the turn; posting theirs is refused", async () => {
+  test("fix round 2 batch 1: a default user who is not a chat user but holds the page's thread: the id the client posts (none: not `userPostable`) starts the turn; posting theirs is refused", async () => {
     const T = "7d3c1a52-0b6e-4c1f-9a7e-2f0d8b4c6e11"; // the route takes a uuid discussionId
     const threads = new MemThreads();
     threads.rows.push({ id: T, userId: "popp", botName: "ivar", name: "ferry", isActive: false, autoRespondPaused: false, createdAt: 1, updatedAt: 1, kind: "wiki", wiki: "agent", relPath: "plans/ferry.mdx" });
@@ -1213,12 +1214,12 @@ describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
       const { app } = setup({ threads, oneShot: (async () => ({ result: "Done.", toolCalls: [] })) as never, deps: { authMode: () => auth, defaultUser: async () => "popp" } });
       const who = (await (await read(app, {})).json()) as Record<string, unknown>;
       expect(who).toMatchObject({ userId: "popp", userName: null, thread: { id: T } });
-      // The client's rule (R2): nothing posted it, and it is in no `users`: not listed, so no id is sent with its thread.
-      expect(threadReadListsUser(who, null)).toBe(false);
+      // The client's rule (R2): the server says the id is not postable, so no id is sent with its thread.
+      expect(who.userPostable).toBe(false);
       const res = await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Why?", discussionId: T });
       if (!res.headers.get("content-type")?.includes("event-stream")) throw new Error(`${res.status} ${await res.text()}`);
       const evs = await frames(res);
-      expect(evs.find((e) => e.event === "turn")!.data).toMatchObject({ discussionId: T, userId: "popp" });
+      expect(evs.find((e) => e.event === "turn")!.data).toMatchObject({ discussionId: T, userId: "popp", userPostable: false });
       expect(evs.find((e) => e.event === "done")).toBeDefined();
       // What the unfixed client posted (the holder's id): the engine's user rule refuses it.
       const refused = await post(app, { wiki: "agent", relPath: "plans/ferry.mdx", question: "Why?", discussionId: T, userId: "popp" });

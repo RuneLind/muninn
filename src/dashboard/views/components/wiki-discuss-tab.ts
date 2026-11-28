@@ -98,7 +98,6 @@ import {
   discussRefusalMessage,
   discussRunsAs,
   discussUserName,
-  threadReadListsUser,
   type DiscussRunsAs,
   findPassage,
   keepAnchor,
@@ -460,6 +459,9 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
   body.mode = mode ?? d.mode ?? "explore";
   const user = sendUserOf(d); // R2
   if (user) body.userId = user;
+  // The id this POST carries, or none (the engine's default user): the
+  // inline card's head names it (R6), never a later read's «Runs as».
+  turn.sentUser = user;
   let res: Response;
   const stopWait = whenSlow(() => {
     if (turn.state !== "sending") return;
@@ -509,10 +511,13 @@ async function runTurn(d: DiscussionView, key: string, question: string, passage
     if (frame.event === "turn") {
       dropStoredCopy(d, turn);
       if (typeof data.userId === "string") {
-        // Listed only when the engine would take it as a posted id: this send
-        // posted it, or a read listed it. A default user it ran as unasked
-        // holds the thread but is not a chat user: never sent, never kept (R2).
-        d.userListed = (d.userListed === true && d.userId === data.userId) || data.userId === user || !!d.users?.some((u) => u.id === data.userId);
+        // Listed only as the server states it for this id (`userPostable`):
+        // a default user it ran as unasked who is no chat user holds the
+        // thread but is never sent, never kept (R2). The name is the frame's,
+        // so U and its name never disagree after a read named someone else.
+        const named = typeof data.userName === "string" && data.userName ? data.userName : null;
+        d.userName = named ?? d.users?.find((u) => u.id === data.userId)?.name ?? (data.userId === d.userId ? (d.userName ?? null) : null);
+        d.userListed = data.userPostable === true;
         d.userId = data.userId;
         if (d.userListed) adoptUser(botOf(d), data.userId); // R2
       }
@@ -789,20 +794,22 @@ function endPress(): void {
  * (`muninn-discuss-user-<bot>`; another window may change it). Per view (a
  * page here, or a Trace card), U is the user its last read or turn returned,
  * T its thread (owned by U), live a turn of it running.
- *  R1 A read: with T, as U; without, as K (none when K is null). Then
- *     U := read's user, and K := U when K is null (adopted once, so a thread
- *     stays with its user when /chat's default user changes). The light read
+ *  R1 A read posts what a send would (R2's rule, so a read beside a send
+ *     names the same user: fix round 3). Then U := read's user, and K := U
+ *     when K is null and U is listed (adopted once, so a thread stays with
+ *     its user when /chat's default user changes). The light read
  *     (`loadWho`) never adopts K.
- *  R2 A send: with T, as U; without, U, else K, else none. The `turn` event
- *     sets U and T, and K when null. (The engine refuses T with another user.)
- *     «As U» means U posted, and U is posted or adopted only when listed
- *     (`userListed`): the engine takes a posted id only if it is one of the
- *     bot's chat users, so listed is "a read or send posted U and was
- *     answered as U, or a read's `users` holds U". Holding T is no evidence:
- *     a default user who is no chat user holds one. With T and U not listed,
- *     a read and a send post none: the engine's default user, T's owner
- *     (fix round 2). With `MUNINN_AUTH` ≠ off `users` is empty, so only a
- *     posted-and-echoed K is ever listed; nothing else is posted or kept.
+ *  R2 A send: U when listed; else with T none, without T K, else none. The
+ *     `turn` event sets U and T, and K when null and U is listed. (The
+ *     engine refuses T with another user.) Listed (`userListed`) is the
+ *     server's fact, `userPostable`, stated on every answer that names U
+ *     (both reads and the `turn` frame) for that exact id: the engine takes
+ *     a posted id only if it is one of the bot's chat users, and the route
+ *     answers from that list whatever `MUNINN_AUTH` hides from `users`
+ *     (class check, fix round 3; rounds 1–2 guessed it from `users`, from
+ *     holding T and from a send answered as U, and missed cases each time).
+ *     With T and U not listed, a read and a send post none: the engine's
+ *     default user, T's owner while the default has not moved.
  *  R3 A pick (the «as» menu or a refusal's picker, one path) is refused while
  *     any view of the bot is live; else K := the pick and every view of the
  *     bot here (pages and Trace cards) drops U, T, its turns and «Earlier»;
@@ -821,18 +828,22 @@ function endPress(): void {
  *     way a turn can run, so they are offered there as well.
  *  Who state, enumerated (fix round 2): `wiki-boot/wiki-discuss-who.test.ts`
  *  walks read × outcome × T held × auth and asserts the posted id, «Runs
- *  as», the who box, K and the retry. A read (light or full) with no answer
+ *  as», the who box, K and the retry; its second table (fix round 3, the
+ *  class check) walks auth × K × the default user × T × a moved default ×
+ *  a read during the POST for an inline send's posted id, card head and
+ *  «Runs as». A read (light or full) with no answer
  *  or a 5xx other than `no-bot`, while no read has named the user, is read
  *  again (the light read) on the reader's next look (`retryDiscussWho`).
- *  R6 An inline turn card names the user known when it was placed (the
- *     «Runs as» user, `discussRunsAsHere`), never repainted; a card placed
- *     while no read has named the user (pending, or refused) reserves the
- *     line at its full height and gets a name once, from its own turn: the
- *     user its `turn` frame names (`DiscussTurnView.userId`), or «Runs as»
- *     while that turn is live (no pick lands then, R3). A turn the route
- *     refused says «not sent»; one that ended or left the discussion before
- *     naming its user, the nameless line. Never a later pick's user (Discuss
- *     v3 P1, fix round 2 batch 2).
+ *  R6 An inline turn card names the user its own POST carried
+ *     (`DiscussTurnView.sentUser`, set when the send starts), by the name the
+ *     view knows, never repainted; when the POST carried none (the engine's
+ *     default user) or no read has named that id yet, the line is reserved
+ *     at its full height and gets a name once: the posted id's, else the
+ *     user its `turn` frame names (`DiscussTurnView.userId`). Never «Runs
+ *     as» (a read landing while the POST is in flight may name a default
+ *     that moved since the engine took the turn: fix round 3), never a later
+ *     pick's user. A turn the route refused says «not sent»; one that ended
+ *     or left the discussion before naming its user, the nameless line.
  */
 
 const botOf = (d: DiscussionView): string | null => d.bot ?? lsGet(botKey(d.wiki));
@@ -841,15 +852,14 @@ const keptFor = (bot: string | null): string | null => (bot ? lsGet(userKey(bot)
 function adoptUser(bot: string | null, userId: string): void {
   if (bot && !lsGet(userKey(bot))) lsSet(userKey(bot), userId);
 }
-/** U as a posted id: only when the engine takes it (`userListed`: a read or
- *  send posted it and was answered as it, or a read listed it in `users`). */
+/** U as a posted id: only when the server said the engine takes it (`userListed`, from `userPostable`). */
 const listedUserOf = (d: DiscussionView): string | null => (d.userListed && d.userId ? d.userId : null);
 const holdsThread = (d: DiscussionView): boolean => !!(d.discussionId && d.userId);
-/** R1: the user a read sends. With T and U not listed, none: the engine's
- *  default user, who is U. */
-const readUserOf = (d: DiscussionView): string | null => (holdsThread(d) ? listedUserOf(d) : keptFor(botOf(d)));
-/** R2: the user a send sends (the same rule with T; without, U else K). */
+/** R2: the user a send sends: U when listed; else none with T (the engine's
+ *  default user, who is U), K without. */
 const sendUserOf = (d: DiscussionView): string | null => listedUserOf(d) ?? (holdsThread(d) ? null : keptFor(botOf(d)));
+/** R1: the user a read sends, by R2's rule. */
+const readUserOf = sendUserOf;
 
 /** The bot a wiki's discussions are on, as a read last named it. */
 export function discussBotFor(wiki: string): string | null {
@@ -1005,7 +1015,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     const threadId = thread && typeof thread.id === "string" ? thread.id : null;
     if (typeof b.userId === "string") {
       d.userId = b.userId; // R1
-      d.userListed = threadReadListsUser(b, asUser);
+      d.userListed = b.userPostable === true;
       if (d.userListed) adoptUser(botOf(d), b.userId);
     }
     mergeThreadTurns(d, threadId, turnsFromThread(Array.isArray(b.messages) ? (b.messages as StoredThreadMessage[]) : []));
@@ -1048,8 +1058,8 @@ function whoRefusalText(r: { status: number; body: Record<string, unknown> | nul
  * page per session, when a page renders on a wiki with the agent on; skipped
  * once a full read ran or runs. It reads as R1 does ({@link readThreadR1},
  * the re-reads and their `holds` guard included). Its answer sets U, the
- * names and `userListed` (`threadReadListsUser`, the full read's rule), and
- * never K: only a full read or a turn adopts K, so a browser that only read
+ * names and `userListed` (the server's `userPostable`, as on the full read),
+ * and never K: only a full read or a turn adopts K, so a browser that only read
  * pages keeps no user when the bot's default user moves. It may learn the
  * wiki's bot, which is the server's fact, not a choice. Any newer read (a
  * full read, a pick) makes it stale; a reset view reads it again. Any other
@@ -1069,7 +1079,7 @@ async function loadWho(d: DiscussionView): Promise<void> {
     if (r.ok && r.body && typeof r.body.userId === "string") {
       applyThreadWho(d, r.body);
       d.userId = r.body.userId; // R1, but K is never adopted here (a page render alone keeps no user)
-      d.userListed = threadReadListsUser(r.body, asUser);
+      d.userListed = r.body.userPostable === true;
       d.whoKnown = true;
       d.whoRefusal = null;
       // A refusal's picker from an earlier light read is answered now.
@@ -1102,10 +1112,11 @@ export function retryDiscussWho(): void {
   if (d && whoRetry.has(d)) void loadWho(d);
 }
 
-/** Who the next turn on the open page runs as (the «Runs as» line and an
- *  inline card's head): `sendUserOf`'s user when it names one, else the
- *  user the read resolved (the bot's default user, which the engine runs a
- *  turn as when nothing is sent); «…» while no read has answered. */
+/** Who the next turn on the open page runs as (the «Runs as» line; an
+ *  inline card's head names its own POST's id instead, R6): `sendUserOf`'s
+ *  user when it names one, else the user the read resolved (the bot's
+ *  default user, which the engine runs a turn as when nothing is sent);
+ *  «…» while no read has answered. */
 export function discussRunsAsHere(): DiscussRunsAs {
   const d = here();
   return discussRunsAs(d, d ? sendUserOf(d) : null);

@@ -2072,7 +2072,7 @@ test("a send held back past 5 s: the inline card and the pane both say it is sti
 // Discuss v3 P1 fix round 1 batch 1: the light read (`?who=1`) keeps no user,
 // decides `userListed` by the full read's one rule, follows the full read's
 // re-reads with its `holds` guard, and a reset view reads it again.
-const whoBody = (userId: string, extra: Record<string, unknown> = {}) => ({ userId, userName: userId === "u2" ? "Ola" : userId === "u1" ? "Kari" : null, userChoosable: true, users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }], thread: null, ...extra });
+const whoBody = (userId: string, extra: Record<string, unknown> = {}) => ({ userId, userName: userId === "u2" ? "Ola" : userId === "u1" ? "Kari" : null, userPostable: userId === "u1" || userId === "u2", userChoosable: true, users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }], thread: null, ...extra });
 const fullExtra = { messages: [], closed: [], closedTotal: 0, oneShot: [] };
 
 test("fix round 1 F1: a page render's light read keeps no user: the bot is learned, the kept user stays unset, «Runs as» names the read's user", async () => {
@@ -2196,7 +2196,7 @@ test("fix round 1 F3b: a view holding a thread whose light read is refused unkno
     act(document.getElementById("wikiExplainBtn")!);
     await settle();
     expect(posts.at(-1)!.userId).toBe("u7");
-    push!("turn", { turnId: "h-1", seq: 1, discussionId: "t-u7", userId: "u7" });
+    push!("turn", { turnId: "h-1", seq: 1, discussionId: "t-u7", userId: "u7", userPostable: true });
     push!("done", { answer: "ok", proposedEdit: null });
     close!();
     await settle();
@@ -2256,7 +2256,7 @@ function resetWho(): void {
   localStorage.clear();
 }
 
-test("fix round 1 batch 2 F1a: a light read that got no answer: the card head is filled once with the user the turn's full read names", async () => {
+test("fix round 1 batch 2 F1a, fix round 3: a light read that got no answer: the refusal leaves the card head when the full read answers, and the head is filled once with the user the turn's own frame names (the POST carried no id)", async () => {
   let releaseFull: () => void = () => {};
   const fullHeld = new Promise<void>((r) => (releaseFull = r));
   discussWiki = "w-f1a";
@@ -2276,7 +2276,8 @@ test("fix round 1 batch 2 F1a: a light read that got no answer: the card head is
     releaseFull();
     await settle();
     expect(card.querySelector(".wiki-sel-card-sub") === subEl).toBe(true);
-    expect(subEl.textContent).toBe("· a turn in Kari's discussion of this page");
+    // The read answered: its refusal is gone, but «Runs as» never names the turn (fix round 3).
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
     await finishWhoTurn("f1a", "u1");
     expect(subEl.textContent).toBe("· a turn in Kari's discussion of this page");
   } finally {
@@ -2406,6 +2407,38 @@ test("fix round 2 batch 2 F1: a pending card whose turn ends before the route na
     await settle();
     expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u1", name: "Kari" });
     expect(subEl.textContent).toBe("· a turn in this page's discussion");
+  } finally {
+    releaseReads();
+    await settle();
+    resetWho();
+  }
+});
+
+test("fix round 3: a pending card whose POST carried the kept user names that user once a read knows the name, though its turn ended before any `turn` frame", async () => {
+  discussWiki = "w-r3-sent";
+  localStorage.setItem("muninn-discuss-bot-w-r3-sent", "b-f");
+  localStorage.setItem("muninn-discuss-user-b-f", "u2");
+  let releaseReads: () => void = () => {};
+  const held = new Promise<void>((r) => (releaseReads = r));
+  threadRead = ((url: string) => {
+    const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
+    return held.then(() => json({ ...whoBody(userId, { bot: "b-f" }), ...(url.includes("who=1") ? {} : fullExtra) }));
+  }) as unknown as (url: string) => Response;
+  try {
+    renderWhoPage();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    const card = lastTurnCard();
+    const subEl = card.querySelector(".wiki-sel-card-sub")!;
+    expect(posts.at(-1)!.userId).toBe("u2");
+    expect(subEl.textContent).toBe("· a turn in …'s discussion of this page");
+    await settle();
+    // The stream closes with no frame; the POST carried u2, so the head is u2's once named.
+    close!();
+    await settle();
+    releaseReads();
+    await settle();
+    expect(subEl.textContent).toBe("· a turn in Ola's discussion of this page");
   } finally {
     releaseReads();
     await settle();

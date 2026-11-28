@@ -396,12 +396,6 @@ export function inlineTurnSub(userName: string | null | undefined): string {
   return userName ? `a turn in ${userName}'s discussion of this page` : "a turn in this page's discussion";
 }
 
-/** A thread turn card's sub line from the «Runs as» user (Discuss v3 P1):
- *  the same user the tooltip names; «…» in the name's place while the read
- *  is pending (the card fills it once, when the read lands); a refusal's text. */
-export function runsAsSub(runsAs: SelRunsAs): string {
-  return runsAs.state === "user" ? inlineTurnSub(runsAs.name) : runsAs.state === "refused" ? runsAs.text : inlineTurnSub("…");
-}
 
 /** A card's frame: its title, «Open in Discuss →» for a thread turn, and ✕.
  *  `data-reader-only` keeps it out of every read of the page's own text (a

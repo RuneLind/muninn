@@ -138,7 +138,7 @@ function apps(users: { id: string; name: string }[] = [{ id: "kari", name: "Kari
     ...extra,
     bots: () => [ivar],
     chatUsers: async () => users,
-    defaultUser: async () => "kari",
+    defaultUser: extra.defaultUser ?? (async () => "kari"),
     surfaceBlocker: async () => null,
     // A fresh snapshot directory per turn: a copy of the wiki as it is now.
     wikiSnapshot: async (d) => {
@@ -1041,4 +1041,33 @@ test("on an instance that authenticates, the thread read names the user but offe
   const app = apps([{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }], { authMode: () => "entra" });
   const read = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md")).json()) as { userName: string; userChoosable: boolean; users: unknown[] };
   expect(read).toMatchObject({ userName: "Kari", userChoosable: false, users: [] });
+});
+
+// Discuss v3 P1 class check (fix round 3): the client no longer guesses which
+// ids the engine takes. Every user-bearing answer says whether its `userId`
+// would be taken if posted (`userPostable`), from the engine's own chat-user
+// list whatever `MUNINN_AUTH` hides from the wire.
+test("every user-bearing answer states `userPostable` for its user: the light read, the full read, the trace read and the turn frame, auth off and on, a listed and an unlisted default", async () => {
+  const users = [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }];
+  for (const auth of ["off", "entra"] as const) {
+    for (const def of ["kari", "popp"]) {
+      const app = apps(users, { authMode: () => auth, defaultUser: async () => def });
+      const listed = def === "kari";
+      const where = `auth ${auth}, default ${def}`;
+      const page = "/api/wiki/discuss/thread?wiki=harbour&relPath=notes%2Fharbour.md";
+      for (const q of ["&who=1", ""]) {
+        const b = (await (await app.request(`${page}${q}`)).json()) as Record<string, unknown>;
+        expect({ where, q, b: { userId: b.userId, userPostable: b.userPostable, users: b.users } }).toEqual({ where, q, b: { userId: def, userPostable: listed, users: auth === "off" ? users : [] } });
+        const ola = (await (await app.request(`${page}${q}&userId=ola`)).json()) as Record<string, unknown>;
+        expect({ where, q, ola: { userId: ola.userId, userPostable: ola.userPostable } }).toEqual({ where, q, ola: { userId: "ola", userPostable: true } });
+      }
+      if (auth === "off") {
+        const t = (await (await app.request("/api/wiki/discuss/thread?wiki=harbour&traceKey=MEL-501")).json()) as Record<string, unknown>;
+        expect({ where, trace: { userId: t.userId, userPostable: t.userPostable } }).toEqual({ where, trace: { userId: def, userPostable: listed } });
+      }
+      const evs = await frames(await pane(app, { question: "When does it open?" }));
+      const turn = evs.find((e) => e.event === "turn")!.data;
+      expect({ where, turn: { userId: turn.userId, userPostable: turn.userPostable } }).toEqual({ where, turn: { userId: def, userPostable: listed } });
+    }
+  }
 });

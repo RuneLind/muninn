@@ -413,7 +413,7 @@ test("«as <name> ▾» switches the page's discussion to another user's own thr
     const userId = new URL(url, "http://x").searchParams.get("userId") ?? "popp";
     const name = users.find((u) => u.id === userId)!.name;
     const row = turnRow(userId, `${name}'s question`);
-    return json({ userId, userName: name, userChoosable: true, users, bot: "harbour-bot", thread: { id: `th-${userId}`, name: "t", createdAt: 1 }, messages: [{ id: `m-${userId}`, role: "user", content: row.question, createdAt: 1, turn: row }], closed: [], closedTotal: 0, oneShot: [] });
+    return json({ userId, userName: name, userPostable: users.some((u) => u.id === userId), userChoosable: true, users, bot: "harbour-bot", thread: { id: `th-${userId}`, name: "t", createdAt: 1 }, messages: [{ id: `m-${userId}`, role: "user", content: row.question, createdAt: 1, turn: row }], closed: [], closedTotal: 0, oneShot: [] });
   };
   await openTab();
   const as = document.querySelector<HTMLButtonElement>("[data-discuss-as]");
@@ -458,7 +458,7 @@ function perUserReads(users = [{ id: "popp", name: "Popp" }, { id: "rune", name:
     const row = { id: `${userId}-${page}`, discussionId: `th-${userId}-${page}`, seq: 1, selection: null, question: `${name}'s question on ${page}`, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 };
     const held = userId === "popp";
     return json({
-      userId, userName: name, userChoosable: true, users, bot: "f1-bot",
+      userId, userName: name, userPostable: users.some((u) => u.id === userId), userChoosable: true, users, bot: "f1-bot",
       thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null,
       messages: held ? [{ id: `m-${row.id}`, role: "user", content: row.question, createdAt: 1, turn: row }] : [],
       closed: [], closedTotal: 0, oneShot: [],
@@ -593,7 +593,7 @@ function d1Reads(failFor: Set<string>) {
     const row = { id: `${userId}-${page}`, discussionId: `th-${userId}-${page}`, seq: 1, selection: null, question: `${name}'s question on ${page}`, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 };
     const held = userId === "popp";
     return json({
-      userId, userName: name, userChoosable: true, users, bot: "d-bot",
+      userId, userName: name, userPostable: users.some((u) => u.id === userId), userChoosable: true, users, bot: "d-bot",
       thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null,
       messages: held ? [{ id: `m-${row.id}`, role: "user", content: row.question, createdAt: 1, turn: row }] : [],
       closed: held ? [{ id: `closed-${page}`, name: "old", createdAt: 1, closedAt: 2, messages: [{ id: "c1", role: "user", content: "Popp's closed question", createdAt: 1 }], messageTotal: 1 }] : [],
@@ -640,7 +640,7 @@ test("D1: a user kept by another window while a page's turn runs: the follow-up 
   // it read, and kept from then on (R1's adoption).
   expect(posts[0]).toMatchObject({ discussionId: "th-popp-plans/a.mdx", userId: "popp" });
   expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe("popp");
-  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp", userPostable: true });
   await settle();
   localStorage.setItem("muninn-discuss-user-d-bot", "rune"); // another window picked Rune
   const before = reads.length;
@@ -682,7 +682,7 @@ test("D2a: a turn event for one user never writes the kept user back over one an
   await askBox("First?"); // its stream is open, no turn event yet
   localStorage.setItem("muninn-discuss-user-d-bot", "rune"); // another window
   // A's turn event names Popp: Rune stays kept.
-  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp" });
+  stream!.push("turn", { turnId: "tA2", seq: 2, discussionId: "th-popp-plans/a.mdx", userId: "popp", userPostable: true });
   await settle();
   expect(localStorage.getItem("muninn-discuss-user-d-bot")).toBe("rune");
   stream!.push("done", { answer: "Done.", proposedEdit: null });
@@ -747,7 +747,7 @@ function stateReads(opts: { runeHolds?: boolean; def?: { user: string }; refused
     const held = userId === "popp" || (userId === "rune" && !!opts.runeHolds);
     const row = { id: `${userId}-${page}`, discussionId: `th-${userId}-${page}`, seq: 1, selection: null, question: `${name}'s question on ${page}`, answer: "A.", endState: "done", error: null, toolCalls: [], proposedEdit: null, editAppliedAt: null, createdAt: 1 };
     return json({
-      userId, userName: name, userChoosable: true, users, bot: "s-bot",
+      userId, userName: name, userPostable: users.some((u) => u.id === userId), userChoosable: true, users, bot: "s-bot",
       thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null,
       messages: held ? [{ id: `m-${row.id}`, role: "user", content: row.question, createdAt: 1, turn: row }] : [],
       closed: userId === "popp" ? [{ id: `closed-${page}`, name: "old", createdAt: 1, closedAt: 2, messages: [{ id: "c1", role: "user", content: "closed q", createdAt: 1 }], messageTotal: 1 }] : [],
@@ -966,7 +966,7 @@ test("R1/R2: a default user the route would refuse as a posted id (not listed) i
   const users = [{ id: "popp", name: "Popp" }];
   let stream: ReturnType<typeof heldStream> | null = null;
   route = (url, init) => {
-    if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "ghost", userName: null, userChoosable: true, users, bot: "g-bot", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+    if (url.startsWith("/api/wiki/discuss/thread?")) return json({ userId: "ghost", userName: null, userPostable: false, userChoosable: true, users, bot: "g-bot", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
     if (url === "/api/wiki/discuss" && init?.method === "POST") {
       posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return (stream = heldStream()).res;
@@ -1005,7 +1005,7 @@ test("R4: Apply's own page render does not follow a user another window kept: th
     if (url.startsWith("/api/wiki/discuss/thread?")) {
       const userId = userOf(url) ?? "popp";
       const held = userId === "popp";
-      return json({ userId, userName: userId === "popp" ? "Popp" : "Rune", userChoosable: true, users, bot: "a-bot", thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null, messages: held ? [{ id: "m1", role: "user", content: row.question, createdAt: 1, turn: row }] : [], closed: [], closedTotal: 0, oneShot: [] });
+      return json({ userId, userName: userId === "popp" ? "Popp" : "Rune", userPostable: users.some((u) => u.id === userId), userChoosable: true, users, bot: "a-bot", thread: held ? { id: row.discussionId, name: "t", createdAt: 1 } : null, messages: held ? [{ id: "m1", role: "user", content: row.question, createdAt: 1, turn: row }] : [], closed: [], closedTotal: 0, oneShot: [] });
     }
     if (url === "/api/wiki/discuss/apply") {
       const b = JSON.parse(String(init?.body)) as Record<string, unknown>;
