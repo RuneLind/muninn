@@ -268,7 +268,7 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
   // `no-bot` · 422 `no-user` / `unknown-user` (the engine's user rule) · 500.
   // Beside `userId`: `userName` (its /chat name), `userChoosable` and `users`
   // (the bot's /chat users, empty unless choosable), for the tab's «as <name> ▾».
-  // `?who=1` is the light read: those fields, `userListed` and `bot` only.
+  // `?who=1` is the light read: those fields, `bot` and the live thread's id only.
   //
   // `?traceKey=` in place of `relPath` reads a key's live trace thread (PR 6,
   // the Trace view): the thread and its messages; a trace has no closed list
@@ -290,14 +290,16 @@ export function registerWikiDiscussRoute(app: Hono, config: Config, deps: Discus
       if (!bot) return c.json({ error: "no bot answers on this wiki here", reason: "no-bot" }, 503);
       const who = await engine.resolveUser(bot.name, postedUser || undefined);
       if ("refused" in who) return c.json(who.body, who.status);
-      // The light read (Discuss v3 P1): the user fields only, for the reader's
-      // «Runs as» line before any turn. No thread, no closed list, no one-shot
-      // turns. `userListed`: the route would take this user as a posted id
-      // (rule R2), which the full read's client works out from `users`.
-      if (c.req.query("who") === "1") {
-        return c.json({ userId: who.userId, ...whoFields(who), userListed: who.users.some((u) => u.id === who.userId), bot: bot.name });
-      }
       const wikiName = entry?.name ?? "";
+      // The light read (Discuss v3 P1): the user fields only, for the reader's
+      // «Runs as» line before any turn, and the live thread's id alone (no
+      // messages, closed list or one-shot turns). The client decides
+      // `userListed` from `thread` and `users` with the one rule both reads
+      // use (`threadReadListsUser`), so the light read never claims it.
+      if (c.req.query("who") === "1") {
+        const live = await (deps.threads?.live ?? getLiveWikiThread)(who.userId, bot.name, wikiName, meta.relPath);
+        return c.json({ userId: who.userId, ...whoFields(who), thread: live ? { id: live.id } : null, bot: bot.name });
+      }
       const thread = await getLiveWikiThread(who.userId, bot.name, wikiName, meta.relPath);
       const [messages, closed, closedTotal, oneShot] = await Promise.all([
         thread ? listThreadMessagesWithTurns(thread.id) : Promise.resolve([]),

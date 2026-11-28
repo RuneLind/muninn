@@ -1176,22 +1176,32 @@ describe("copilotDiscussReach", () => {
 
 describe("the thread read's light form (`?who=1`, Discuss v3 P1)", () => {
   const read = (app: Hono, q: Record<string, string>) => app.request(`${WIKI_DISCUSS_THREAD_PATH}?${new URLSearchParams({ wiki: "agent", relPath: "plans/ferry.mdx", who: "1", ...q }).toString()}`);
-  test("the user fields and the bot only: no thread, messages, closed list or one-shot turns", async () => {
+  test("the user fields, the bot and the live thread's id only: no messages, closed list or one-shot turns", async () => {
     const { app } = setup({ deps: { authMode: () => "off" } });
     const res = await read(app, {});
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: true, users: [{ id: "kari", name: "Kari" }], userListed: true, bot: "ivar" });
+    expect(await res.json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: true, users: [{ id: "kari", name: "Kari" }], thread: null, bot: "ivar" });
   });
   test("a posted user: that user; one not listed is refused as the full read refuses it", async () => {
     const { app } = setup({ deps: { authMode: () => "off", chatUsers: async () => [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }] } });
-    expect(await (await read(app, { userId: "ola" })).json()).toMatchObject({ userId: "ola", userName: "Ola", userListed: true });
+    expect(await (await read(app, { userId: "ola" })).json()).toMatchObject({ userId: "ola", userName: "Ola", users: [{ id: "kari", name: "Kari" }, { id: "ola", name: "Ola" }] });
     const refused = await read(app, { userId: "nobody" });
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as { reason: string }).reason).toBe("unknown-user");
   });
-  test("a default user who is not listed: named by id only, `userListed` false (rule R2: never sent as a posted id)", async () => {
+  test("a default user who is not listed: named by id only, not in `users` (rule R2: never sent as a posted id)", async () => {
     const { app } = setup({ deps: { authMode: () => "off", defaultUser: async () => "popp" } });
-    expect(await (await read(app, {})).json()).toMatchObject({ userId: "popp", userName: null, userListed: false });
+    expect(await (await read(app, {})).json()).toMatchObject({ userId: "popp", userName: null, users: [{ id: "kari", name: "Kari" }], thread: null });
+  });
+  test("fix round 1 F2: on an authenticating instance no `users` and no `userListed` claim: the client decides by the full read's rule", async () => {
+    const { app } = setup({ deps: { authMode: () => "entra" } });
+    expect(await (await read(app, {})).json()).toEqual({ userId: "kari", userName: "Kari", userChoosable: false, users: [], thread: null, bot: "ivar" });
+  });
+  test("fix round 1 F2: the user's live thread of the page goes out as its id, the full read's other input to `userListed`", async () => {
+    const threads = new MemThreads();
+    threads.rows.push({ id: "t-kari", userId: "kari", botName: "ivar", name: "ferry", isActive: false, autoRespondPaused: false, createdAt: 1, updatedAt: 1, kind: "wiki", wiki: "agent", relPath: "plans/ferry.mdx" });
+    const { app } = setup({ threads, deps: { authMode: () => "entra" } });
+    expect(await (await read(app, {})).json()).toMatchObject({ userId: "kari", users: [], thread: { id: "t-kari" } });
   });
   test("a wiki pinned to a missing bot: 503 no-bot, as the full read", async () => {
     __setWikiRegistryForTest([{ name: "agent", root: agent, source: "extra", synthesisBot: "missing" }]);

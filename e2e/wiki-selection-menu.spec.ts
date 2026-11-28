@@ -1282,6 +1282,20 @@ test("Discuss v3 P1: no kept user and a default user who is not listed: the tool
   }
 });
 
+test("Discuss v3 P1 fix round 1 F1: rendering a page and reading Explain's tooltip keeps no user in the browser; only the wiki's bot is learned", async ({ page }) => {
+  // The default user listed for the bot (a thread), so the light read names a user the route takes.
+  await sql!`INSERT INTO threads (user_id, bot_name, name, is_active) VALUES (${USER}, ${BOT}, 'e2e-p1-f1', false)`;
+  try {
+    await openPage(page, OTHER);
+    await dragSelect(page, "The pier opens at six.");
+    await expect((await explainTip(page)).locator(".wiki-seltip-l2")).toContainText(`Runs as `);
+    const kept = await page.evaluate(([w, b]) => ({ bot: localStorage.getItem(`muninn-discuss-bot-${w}`), user: localStorage.getItem(`muninn-discuss-user-${b}`) }), [WIKI, BOT]);
+    expect(kept).toEqual({ bot: BOT, user: null });
+  } finally {
+    await sql!`DELETE FROM threads WHERE user_id = ${USER} AND name = 'e2e-p1-f1'`;
+  }
+});
+
 test("Discuss v3 P1: /models?bot=x opens on bot x and leaves the stored selection alone", async ({ page }) => {
   // The selector lists bots with messages: the first bot has some; the second
   // gets its pill from the parameter (a discovered bot), then from a message.

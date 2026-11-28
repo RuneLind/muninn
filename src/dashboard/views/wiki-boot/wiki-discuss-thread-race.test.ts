@@ -62,7 +62,7 @@ test("a thread read that lands after «Start over» does not bring the closed th
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     // The page render's light read (Discuss v3 P1): the user only, not counted.
-    if (url.startsWith("/api/wiki/discuss/thread?") && url.includes("who=1")) return json({ userId: "kari", userName: "Kari", userChoosable: false, users: [], userListed: true, bot: "ivar" });
+    if (url.startsWith("/api/wiki/discuss/thread?") && url.includes("who=1")) return json({ userId: "kari", userName: "Kari", userChoosable: false, users: [], thread: null, bot: "ivar" });
     if (url.startsWith("/api/wiki/discuss/thread?")) {
       const n = ++reads;
       if (n === 1) {

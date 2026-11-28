@@ -517,6 +517,17 @@ export function applyThreadWho(d: DiscussionView, b: Record<string, unknown>): v
   if (!d.userChoosable) d.userMenu = false;
 }
 
+/**
+ * Rule R2's `userListed`, one rule for both thread reads (the full read and
+ * the light `?who=1` read): the read's user holds the page's live thread, or
+ * is in the `users` the read sent (empty on an authenticating instance).
+ */
+export function threadReadListsUser(b: Record<string, unknown>): boolean {
+  const thread = b.thread as { id?: unknown } | null | undefined;
+  if (thread && typeof thread.id === "string") return true;
+  return Array.isArray(b.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === b.userId);
+}
+
 /** Who the next turn runs as: «…» until a read answers, a read's refusal,
  *  or the user (by /chat name, else by id). */
 export type DiscussRunsAs = { state: "pending" } | { state: "refused"; text: string } | { state: "user"; userId: string; name: string };

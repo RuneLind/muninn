@@ -97,6 +97,7 @@ import {
   discussionLive,
   discussRefusalMessage,
   discussRunsAs,
+  threadReadListsUser,
   type DiscussRunsAs,
   findPassage,
   keepAnchor,
@@ -786,7 +787,8 @@ function endPress(): void {
  * T its thread (owned by U), live a turn of it running.
  *  R1 A read: with T, as U; without, as K (none when K is null). Then
  *     U := read's user, and K := U when K is null (adopted once, so a thread
- *     stays with its user when /chat's default user changes).
+ *     stays with its user when /chat's default user changes). The light read
+ *     (`loadWho`) never adopts K.
  *  R2 A send: with T, as U; without, U, else K, else none. The `turn` event
  *     sets U and T, and K when null. (The engine refuses T with another user.)
  *     A U the route would refuse as a posted id (a default user who holds no
@@ -852,7 +854,8 @@ function botLive(bot: string | null): boolean {
 function resetView(d: DiscussionView): void {
   for (const t of d.turns) anchors.delete(t.key);
   readGen.set(d, (readGen.get(d) ?? 0) + 1);
-  Object.assign(d, { turns: [], discussionId: null, earlier: null, userId: null, userListed: false, userName: null, userMenu: false, userPick: null, load: undefined });
+  // The light read too: the next page render reads «Runs as» again.
+  Object.assign(d, { turns: [], discussionId: null, earlier: null, userId: null, userListed: false, userName: null, userMenu: false, userPick: null, load: undefined, whoKnown: false, whoLoading: false, whoRefusal: null });
 }
 
 /** The route named the wiki's bot (a thread read or a refusal): kept for the
@@ -908,6 +911,42 @@ async function getThread(d: DiscussionView, user: string | null, light = false):
   }
 }
 
+/**
+ * A thread read as R1, with both re-reads (the full read and the light read
+ * share it, so their rules cannot drift apart): an unknown kept user clears K
+ * and reads again as the default (R5), and a bot other than the cached one
+ * reads again with that bot's kept user. Neither re-read runs for a view that
+ * holds a thread (`holds`): it reads as its thread's user, and a re-read as
+ * someone else would pair that thread with another user. Null once stale.
+ */
+async function readThreadR1(d: DiscussionView, light: boolean, stale: () => boolean): Promise<{ r: { ok: boolean; status: number; body: Record<string, unknown> | null }; asUser: string | null } | null> {
+  const cachedBot = botOf(d);
+  const holds = !!(d.discussionId && d.userId);
+  let asUser = readUserOf(d); // R1
+  let r = await getThread(d, asUser, light);
+  if (stale()) return null;
+  if (asUser && !holds && r.status === 422 && r.body?.reason === "unknown-user") {
+    // K is no longer listed (R5: it is the user refused): read as the default.
+    if (keptFor(cachedBot) === asUser) lsSet(userKey(cachedBot!), null);
+    asUser = null;
+    r = await getThread(d, null, light);
+    if (stale()) return null;
+  }
+  // The wiki answers on another bot than last time: that bot's kept user, if any.
+  const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
+  if (bot) learnBot(d, bot);
+  if (bot && bot !== cachedBot && !holds) {
+    const forBot = lsGet(userKey(bot));
+    if (forBot && forBot !== r.body?.userId) {
+      const again = await getThread(d, forBot, light);
+      if (stale()) return null;
+      if (again.ok) r = again;
+      else if (again.body?.reason === "unknown-user") lsSet(userKey(bot), null);
+    }
+  }
+  return { r, asUser };
+}
+
 /** Each discussion's newest thread read: a read applies its result only while
  *  it is still the newest, so one that started before «Start over», a delete
  *  or a user pick (each starts a new read) never lands over the reset. */
@@ -919,30 +958,9 @@ async function loadThread(d: DiscussionView): Promise<void> {
   const gen = (readGen.get(d) ?? 0) + 1;
   readGen.set(d, gen);
   const stale = () => readGen.get(d) !== gen;
-  const cachedBot = botOf(d);
-  const holds = !!(d.discussionId && d.userId);
-  let asUser = readUserOf(d); // R1
-  let r = await getThread(d, asUser);
-  if (stale()) return;
-  if (asUser && !holds && r.status === 422 && r.body?.reason === "unknown-user") {
-    // K is no longer listed (R5: it is the user refused): read as the default.
-    if (keptFor(cachedBot) === asUser) lsSet(userKey(cachedBot!), null);
-    asUser = null;
-    r = await getThread(d, null);
-    if (stale()) return;
-  }
-  // The wiki answers on another bot than last time: that bot's kept user, if any.
-  const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
-  if (bot) learnBot(d, bot);
-  if (bot && bot !== cachedBot && !holds) {
-    const forBot = lsGet(userKey(bot));
-    if (forBot && forBot !== r.body?.userId) {
-      const again = await getThread(d, forBot);
-      if (stale()) return;
-      if (again.ok) r = again;
-      else if (again.body?.reason === "unknown-user") lsSet(userKey(bot), null);
-    }
-  }
+  const read = await readThreadR1(d, false, stale);
+  if (!read) return;
+  const { r, asUser } = read;
   if (r.ok && r.body) {
     const b = r.body;
     d.bot = typeof b.bot === "string" ? b.bot : (d.bot ?? null);
@@ -955,7 +973,7 @@ async function loadThread(d: DiscussionView): Promise<void> {
     const threadId = thread && typeof thread.id === "string" ? thread.id : null;
     if (typeof b.userId === "string") {
       d.userId = b.userId; // R1
-      d.userListed = !!threadId || (Array.isArray(b.users) && (b.users as { id?: unknown }[]).some((u) => u?.id === b.userId));
+      d.userListed = threadReadListsUser(b);
       if (d.userListed) adoptUser(botOf(d), b.userId);
     }
     mergeThreadTurns(d, threadId, turnsFromThread(Array.isArray(b.messages) ? (b.messages as StoredThreadMessage[]) : []));
@@ -991,12 +1009,14 @@ function whoRefusalText(r: { status: number; body: Record<string, unknown> | nul
 /**
  * The light read (Discuss v3 P1, `?who=1`): the user fields only, once per
  * page per session, when a page renders on a wiki with the agent on; skipped
- * once a full read ran or runs. It reads as R1 does without a thread (K, none
- * when null) and follows both of {@link loadThread}'s re-reads: an unknown
- * kept user clears K and reads again as the default (R5), and a bot other
- * than the cached one reads again with that bot's kept user. Its answer sets
- * U, the names and, when listed, K (R1); any newer read (a full read, a pick)
- * makes it stale. Any other refusal is the «Runs as» line's text.
+ * once a full read ran or runs. It reads as R1 does ({@link readThreadR1},
+ * the re-reads and their `holds` guard included). Its answer sets U, the
+ * names and `userListed` (`threadReadListsUser`, the full read's rule), and
+ * never K: only a full read or a turn adopts K, so a browser that only read
+ * pages keeps no user when the bot's default user moves. It may learn the
+ * wiki's bot, which is the server's fact, not a choice. Any newer read (a
+ * full read, a pick) makes it stale; a reset view reads it again. Any other
+ * refusal is the «Runs as» line's text.
  */
 async function loadWho(d: DiscussionView): Promise<void> {
   if (d.whoKnown || d.whoLoading || d.load === "loading" || d.load === "done") return;
@@ -1005,32 +1025,13 @@ async function loadWho(d: DiscussionView): Promise<void> {
   const gen = readGen.get(d);
   const stale = () => readGen.get(d) !== gen;
   try {
-    const cachedBot = botOf(d);
-    let asUser = readUserOf(d);
-    let r = await getThread(d, asUser, true);
-    if (stale()) return;
-    if (asUser && r.status === 422 && r.body?.reason === "unknown-user") {
-      if (keptFor(cachedBot) === asUser) lsSet(userKey(cachedBot!), null);
-      asUser = null;
-      r = await getThread(d, null, true);
-      if (stale()) return;
-    }
-    const bot = r.ok && typeof r.body?.bot === "string" ? r.body.bot : null;
-    if (bot) learnBot(d, bot);
-    if (bot && bot !== cachedBot) {
-      const forBot = lsGet(userKey(bot));
-      if (forBot && forBot !== r.body?.userId) {
-        const again = await getThread(d, forBot, true);
-        if (stale()) return;
-        if (again.ok) r = again;
-        else if (again.body?.reason === "unknown-user") lsSet(userKey(bot), null);
-      }
-    }
+    const read = await readThreadR1(d, true, stale);
+    if (!read) return;
+    const { r } = read;
     if (r.ok && r.body && typeof r.body.userId === "string") {
       applyThreadWho(d, r.body);
-      d.userId = r.body.userId; // R1
-      d.userListed = r.body.userListed === true;
-      if (d.userListed) adoptUser(botOf(d), r.body.userId);
+      d.userId = r.body.userId; // R1, but K is never adopted here (a page render alone keeps no user)
+      d.userListed = threadReadListsUser(r.body);
       d.whoKnown = true;
       d.whoRefusal = null;
     } else {

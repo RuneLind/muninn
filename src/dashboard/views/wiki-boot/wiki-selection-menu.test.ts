@@ -59,7 +59,7 @@
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { DISCUSS_TAB, initDiscussTab, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
+import { DISCUSS_TAB, discussRunsAsHere, initDiscussTab, pickDiscussUser, setDiscussAgentEnabled } from "../components/wiki-discuss-tab.ts";
 import { discussTabBodyHtml } from "../components/wiki-discuss-tab-view.ts";
 import { DISCUSS_WAITING_MS, DISCUSS_WAITING_TEXT, LOST_APPLY_APPLIED } from "../components/wiki-discuss-state.ts";
 import { MENTIONS_FRESH_MS, MOVED_UNFINDABLE, initSelectionMenu, inlineCardLive, placeInlineCard, setSelectionMenuPage, showSelectionBarForExplainer } from "../components/wiki-selection-menu.ts";
@@ -1855,7 +1855,7 @@ test("PR 913 F4 + CI, Discuss v3 P1: a turn card's head names the «Runs as» us
   const whoHeld = new Promise<void>((r) => (releaseWho = r));
   let releaseFull: () => void = () => {};
   const fullHeld = new Promise<void>((r) => (releaseFull = r));
-  const body = (userId: string) => ({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, userListed: true, bot: "b-owner", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+  const body = (userId: string) => ({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-owner", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
   threadRead = ((url: string) => {
     const q = new URL(url, "http://x").searchParams;
     const userId = q.get("userId") ?? "u1";
@@ -1917,7 +1917,7 @@ test("Discuss v3 P1: Explain's tooltip names the user and the bot's model before
   threadRead = (url: string) => {
     reads.push(url);
     const userId = new URL(url, "http://x").searchParams.get("userId") ?? "u1";
-    return json({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, userListed: true, bot: "b-who", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
+    return json({ userId, userName: users.find((u) => u.id === userId)!.name, userChoosable: true, users, bot: "b-who", thread: null, messages: [], closed: [], closedTotal: 0, oneShot: [] });
   };
   const who = { bot: "b-who", origin: "pinned", connector: "copilot-sdk", model: "claude-sonnet-5.5" };
   try {
@@ -2063,5 +2063,156 @@ test("a send held back past 5 s: the inline card and the pane both say it is sti
     Object.defineProperty(globalThis, "clearTimeout", ct);
     postGate = null;
     discussWiki = "w";
+  }
+});
+
+// Discuss v3 P1 fix round 1 batch 1: the light read (`?who=1`) keeps no user,
+// decides `userListed` by the full read's one rule, follows the full read's
+// re-reads with its `holds` guard, and a reset view reads it again.
+const whoBody = (userId: string, extra: Record<string, unknown> = {}) => ({ userId, userName: userId === "u2" ? "Ola" : userId === "u1" ? "Kari" : null, userChoosable: true, users: [{ id: "u1", name: "Kari" }, { id: "u2", name: "Ola" }], thread: null, ...extra });
+const fullExtra = { messages: [], closed: [], closedTotal: 0, oneShot: [] };
+
+test("fix round 1 F1: a page render's light read keeps no user: the bot is learned, the kept user stays unset, «Runs as» names the read's user", async () => {
+  discussWiki = "w-k1";
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    // `userListed: true` as the light read's server sent it before this fix (the client now ignores it): u1 is listed either way.
+    return json({ ...whoBody(new URL(url, "http://x").searchParams.get("userId") ?? "u1", { bot: "b-k1", userListed: true }), ...(url.includes("who=1") ? {} : fullExtra) });
+  };
+  try {
+    renderPage();
+    await settle();
+    expect(reads.filter((u) => u.includes("who=1")).length).toBe(1);
+    expect(localStorage.getItem("muninn-discuss-bot-w-k1")).toBe("b-k1");
+    expect(localStorage.getItem("muninn-discuss-user-b-k1")).toBeNull();
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u1", name: "Kari" });
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F2: the light read's `userListed` is the full read's rule: a default user holding the page's thread is sent, one the read lists on an authenticating instance (no `users`) is not", async () => {
+  let releaseFull: () => void = () => {};
+  const fullHeld = new Promise<void>((r) => (releaseFull = r));
+  try {
+    // (a) The default user u9 is not in `users` but holds the page's live thread.
+    discussWiki = "w-l1";
+    threadRead = ((url: string) => {
+      if (!url.includes("who=1")) return fullHeld.then(() => json({ error: "held" }, 503));
+      return json({ userId: "u9", userName: null, userChoosable: true, users: [{ id: "u1", name: "Kari" }], thread: { id: "t9" }, bot: "b-l1" });
+    }) as unknown as (url: string) => Response;
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.userId).toBe("u9");
+    push!("turn", { turnId: "l1-1", seq: 1, discussionId: "t9", userId: "u9" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    // (b) MUNINN_AUTH ≠ off: no `users`, no thread; even a body claiming
+    // `userListed` (the old light read's server rule) is not taken.
+    discussWiki = "w-l2";
+    threadRead = ((url: string) => {
+      if (!url.includes("who=1")) return fullHeld.then(() => json({ error: "held" }, 503));
+      return json({ userId: "kari", userName: "Kari", userChoosable: false, users: [], thread: null, userListed: true, bot: "b-l2" });
+    }) as unknown as (url: string) => Response;
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.wiki).toBe("w-l2");
+    expect(posts.at(-1)!.userId).toBeUndefined();
+    push!("turn", { turnId: "l2-1", seq: 1, discussionId: "t-kari", userId: "kari" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+  } finally {
+    releaseFull();
+    await settle();
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F3a: a view another page's pick resets reads its light read again on its next render, as the picked user", async () => {
+  const reads: string[] = [];
+  threadRead = (url: string) => {
+    reads.push(url);
+    return json({ ...whoBody(new URL(url, "http://x").searchParams.get("userId") ?? "u1", { bot: "b-r" }), ...(url.includes("who=1") ? {} : fullExtra) });
+  };
+  const lightFor = (wiki: string) => reads.filter((u) => u.includes("who=1") && new URL(u, "http://x").searchParams.get("wiki") === wiki);
+  try {
+    discussWiki = "w-r1";
+    renderPage();
+    await settle();
+    expect(lightFor("w-r1").length).toBe(1);
+    discussWiki = "w-r2";
+    renderPage();
+    await settle();
+    expect(pickDiscussUser("u2")).toEqual({ ok: true });
+    await settle();
+    discussWiki = "w-r1";
+    renderPage();
+    await settle();
+    expect(lightFor("w-r1").length).toBe(2);
+    expect(new URL(lightFor("w-r1")[1]!, "http://x").searchParams.get("userId")).toBe("u2");
+    expect(discussRunsAsHere()).toEqual({ state: "user", userId: "u2", name: "Ola" });
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
+  }
+});
+
+test("fix round 1 F3b: a view holding a thread whose light read is refused unknown-user does not read again as the default: its user and thread stay paired", async () => {
+  discussWiki = "w-h";
+  localStorage.setItem("muninn-discuss-bot-w-h", "b-h");
+  localStorage.setItem("muninn-discuss-user-b-h", "u7");
+  const reads: string[] = [];
+  let light = 0;
+  threadRead = (url: string) => {
+    reads.push(url);
+    if (!url.includes("who=1")) return json({ error: "down" }, 503);
+    light++;
+    if (light === 1) return json({ error: "down" }, 503);
+    const userId = new URL(url, "http://x").searchParams.get("userId");
+    if (userId === "u7") return json({ error: 'the user "u7" is not one of b-h\'s chat users', reason: "unknown-user", users: [{ id: "u1", name: "Kari" }] }, 422);
+    return json({ ...whoBody(userId ?? "u1", { bot: "b-h" }) });
+  };
+  try {
+    renderPage();
+    await settle();
+    await selectText(NIGHT);
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect(posts.at(-1)!.userId).toBe("u7");
+    push!("turn", { turnId: "h-1", seq: 1, discussionId: "t-u7", userId: "u7" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+    const mark = reads.length;
+    renderPage();
+    await settle();
+    const after = reads.slice(mark).filter((u) => u.includes("who=1"));
+    expect(after.map((u) => new URL(u, "http://x").searchParams.get("userId"))).toEqual(["u7"]);
+    await selectText("Check the berth list.");
+    act(document.getElementById("wikiExplainBtn")!);
+    await settle();
+    expect({ userId: posts.at(-1)!.userId, discussionId: posts.at(-1)!.discussionId }).toEqual({ userId: "u7", discussionId: "t-u7" });
+    push!("turn", { turnId: "h-2", seq: 2, discussionId: "t-u7", userId: "u7" });
+    push!("done", { answer: "ok", proposedEdit: null });
+    close!();
+    await settle();
+  } finally {
+    discussWiki = "w";
+    threadRead = null;
+    localStorage.clear();
   }
 });
