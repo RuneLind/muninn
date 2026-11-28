@@ -295,7 +295,8 @@ test("renderWikiPage shows the Ask tab's resolved synthesis bot", async () => {
 // measured from a script (1,000,301 → 1,000,934), so the pin moves by that, to 1,001,133.
 // 2026-11-28, Discuss v3 P1 who answers (the bar's tooltip, the who box, the light read, the posted-id rule): 1,012,727 (343,004 gzipped), so the pin moves to 1,012,800.
 // 2026-11-28, Discuss v3 P2 follow-up (the card's turns, box, Collapse, Copy answer, Continue, held passage): +5,338 bytes to 1,018,065 (344,637 gzipped), so the pin moves to 1,018,200.
-const WIKI_CLIENT_MAX_BYTES = 1_018_200;
+// 2026-11-28, P2 fix round 1 (a stored follow-up takes its origin's context): +211 bytes to 1,018,276 (344,703 gzipped), so the pin moves to 1,018,400.
+const WIKI_CLIENT_MAX_BYTES = 1_018_400;
 
 test("wikiClientScript stays under its size pin", async () => {
   const js = await wikiClientScript();

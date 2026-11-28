@@ -371,8 +371,8 @@ const STORED_END_WORDS: Record<string, string> = {
  *  tab streamed and the same turn read back are one turn. A turn still running
  *  reads as `dropped` (this tab has no stream for it, and sending is left to
  *  the route, which answers busy). */
-export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null): DiscussTurnView {
-  const view = newTurn(`s:${t.id}`, t.question, storedPassageView(t));
+export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null, origin?: StoredDiscussTurn | null): DiscussTurnView {
+  const view = newTurn(`s:${t.id}`, t.question, storedPassageView(t, origin));
   view.originTurnId = t.originTurnId ?? null;
   view.held = storedHeld(t);
   view.sentFrom = t.sentFrom ?? null;
@@ -396,11 +396,16 @@ export function turnFromStored(t: StoredDiscussTurn, answerModel?: string | null
 }
 
 /** A stored turn's passage: its selection with the context its row stored
- *  (a card's first turn, migration 095), else empty context (an older row, a
- *  follow-up: its card's first turn holds the context). */
-function storedPassageView(t: StoredDiscussTurn): DiscussPassage | null {
+ *  (a card's first turn, migration 095); a follow-up takes its origin's (its
+ *  card's first turn holds it), as the live follow-up borrows `first.passage`,
+ *  so its chip reaches the copy its card was asked on. A follow-up whose
+ *  origin is not in the read (outside it; a deleted origin nulls the link
+ *  outright), or whose selection is not its origin's, and an older row get
+ *  empty context: the chip then reaches the page's first copy of the words. */
+function storedPassageView(t: StoredDiscussTurn, origin?: StoredDiscussTurn | null): DiscussPassage | null {
   if (!t.selection) return null;
-  const p = t.passage ?? null;
+  const fromOrigin = !t.passage && origin?.passage && origin.selection && compact(origin.selection) === compact(t.selection);
+  const p = (fromOrigin ? origin!.passage : t.passage) ?? null;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   return {
     selection: t.selection,
@@ -438,10 +443,13 @@ export function turnsFromThread(messages: StoredThreadMessage[]): DiscussTurnVie
   const out: DiscussTurnView[] = [];
   // The answer's own model (the one the connector reported), by message id.
   const modelOf = new Map(messages.filter((m) => m.role === "assistant" && m.model).map((m) => [m.id, m.model!]));
+  // A follow-up's origin, by turn id: its context is the follow-up's (`storedPassageView`).
+  const byId = new Map(messages.filter((m) => m.turn).map((m) => [m.turn!.id, m.turn!]));
   for (const m of messages) {
     if (!m.turn || seen.has(m.turn.id)) continue;
     seen.add(m.turn.id);
-    out.push(turnFromStored(m.turn, m.turn.assistantMessageId ? modelOf.get(m.turn.assistantMessageId) : null));
+    const origin = m.turn.originTurnId ? byId.get(m.turn.originTurnId) : null;
+    out.push(turnFromStored(m.turn, m.turn.assistantMessageId ? modelOf.get(m.turn.assistantMessageId) : null, origin));
   }
   return out.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }

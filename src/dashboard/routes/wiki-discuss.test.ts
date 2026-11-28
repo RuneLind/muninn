@@ -1401,6 +1401,54 @@ describe("a card's follow-up: origin, stored passage, sent_from", () => {
     });
   });
 
+  // Fix round 1 (finding A): an origin is a card's first turn, the one turn
+  // that stores where its passage stands; a first turn of any other kind, and
+  // a follow-up whose selection is not its origin's, is refused.
+  async function cardThread() {
+    const { app, store } = setup();
+    const first = await frames(await post(app, { ...SECOND, held }));
+    const discussionId = first.find((f) => f.event === "turn")!.data.discussionId as string;
+    return { app, store, discussionId, card: store.rows[0]! };
+  }
+  async function refusedOrigin(res: Response) {
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ reason: "origin" });
+  }
+
+  test("a whole-page tab turn (no selection, no stored passage) named as origin is a 409 `origin`", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId } = await cardThread();
+      await frames(await post(app, { wiki: "agent", relPath: rel, question: "Whole page?", discussionId, sentFrom: "tab" }));
+      const tabTurn = store.rows[1]!;
+      expect([tabTurn.originTurnId, tabTurn.passage, tabTurn.sentFrom]).toEqual([null, null, "tab"]);
+      await refusedOrigin(await post(app, { ...SECOND, discussionId, originTurnId: tabTurn.id }));
+      expect(store.rows).toHaveLength(2);
+    });
+  });
+
+  test("a /chat turn named as origin is a 409 `origin`", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId, card } = await cardThread();
+      // As the chat entry stores it: no selection, so no passage; sent_from chat.
+      const chat = await store.start({ discussionId, threadId: discussionId, wiki: "agent", relPath: rel, pageHash: "h", selection: null, question: "From chat", location: null, botName: card.botName, connector: card.connector, model: null, surface: card.surface, sentFrom: "chat" } as never);
+      await store.finish(chat.id, { endState: "done", answer: "ok" });
+      await refusedOrigin(await post(app, { ...SECOND, discussionId, originTurnId: chat.id }));
+      expect(store.rows).toHaveLength(2);
+    });
+  });
+
+  test("a follow-up whose selection is not its origin's, or that has none, is a 409 `origin`; other white space is the same words", async () => {
+    await withTwice(async () => {
+      const { app, store, discussionId, card } = await cardThread();
+      await refusedOrigin(await post(app, { ...SECOND, selection: "TWFA gate", discussionId, originTurnId: card.id }));
+      await refusedOrigin(await post(app, { wiki: "agent", relPath: rel, question: "And then?", discussionId, originTurnId: card.id, sentFrom: "card" }));
+      expect(store.rows).toHaveLength(1);
+      const ok = await frames(await post(app, { ...SECOND, selection: "TW\nFA", discussionId, originTurnId: card.id }));
+      expect(ok.some((f) => f.event === "done")).toBe(true);
+      expect(store.rows[1]!.originTurnId).toBe(card.id);
+    });
+  });
+
   test("a body that names no sentFrom stores null; a tab turn stores tab", async () => {
     const { app, store } = setup();
     const f = await frames(await post(app, PASSAGE));

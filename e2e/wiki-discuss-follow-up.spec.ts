@@ -11,7 +11,9 @@
  * «⌘ Continue in Claude Code» absent on a one-turn card and present once it
  * has a follow-up (D4); a follow-up naming another page's turn as its origin
  * refused 409 `origin`; and the card put back after a render of the page (not
- * a browser reload), with a follow-up from it that still works.
+ * a browser reload), with a follow-up from it that still works; and, after a
+ * browser reload, the Discuss tab's chip on a follow-up (read back from the
+ * thread) reaching the card's copy, not the page's first.
  *
  * Its own muninn with `e2eEnv()`, a git wiki with no remote in a temp dir
  * (`WIKI_EXTRA`), a throwaway `claude-sdk` bot under `MUNINN_BOTS_DIR`, a chat
@@ -359,4 +361,57 @@ test("after a render of the page (not a browser reload) the card is back under i
   const r = await rows();
   expect(r[1]!.origin_turn_id).toBe(r[0]!.id);
   expect(r.map((x) => x.location?.fromLine)).toEqual([GAMMA_LINE, GAMMA_LINE]);
+});
+
+/** Which copy of «TWFA» (0-based, page order) the Discuss chip flashed: the
+ *  first flash seen within 3 s of the press (it fades), else -1. */
+function flashedCopy(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    const until = Date.now() + 3_000;
+    for (;;) {
+      const k = once();
+      if (k !== -1 || Date.now() > until) return k;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    function once(): number {
+      const article = document.querySelector("#articleWrap .wiki-article")!;
+      const hl = (globalThis as unknown as { CSS: { highlights?: Map<string, Set<Range>> } }).CSS.highlights?.get("wiki-range-flash");
+      const range = hl && hl.size ? [...hl][0]! : null;
+      const el = article.querySelector(".wiki-hash-flash");
+      const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+      let k = 0;
+      for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+        if (n.parentElement?.closest(".wiki-sel-card, button")) continue;
+        for (let at = n.data.indexOf("TWFA"); at !== -1; at = n.data.indexOf("TWFA", at + 1), k++) {
+          const copy = document.createRange();
+          copy.setStart(n, at);
+          copy.setEnd(n, at + 4);
+          const hit = range ? range.compareBoundaryPoints(Range.START_TO_START, copy) <= 0 && range.compareBoundaryPoints(Range.END_TO_END, copy) >= 0 : !!el?.contains(n);
+          if (hit) return k;
+        }
+      }
+      return -1;
+    }
+  });
+}
+
+// Fix round 1 (finding B): after a reload the tab reads the turns back from the
+// thread; a follow-up takes its card's first turn's stored context, so its chip
+// reaches the copy the card was asked on, as the first turn's chip does.
+test("after a browser reload, the Discuss tab's chip on a follow-up reaches its card's copy, not the page's first «TWFA»", async ({ page }) => {
+  test.setTimeout(240_000);
+  await openPage(page);
+  await explainGamma(page);
+  await followUp(page, "Who holds the gate there?", 2);
+  await expect.poll(async () => (await rows()).length, { timeout: 30_000 }).toBe(2);
+  await page.reload();
+  await expect(page.locator("#articleWrap .wiki-article")).toContainText("The morning route adds a stop");
+  await page.locator('[data-conntab="discuss"]').click();
+  for (const seq of [1, 2]) {
+    const chip = page.locator(`.wiki-discuss-turn[data-turn-seq="${seq}"] [data-discuss-chip]`);
+    await expect(chip).toBeVisible({ timeout: 30_000 });
+    await chip.click();
+    expect(await flashedCopy(page)).toBe(2);
+    await shot(page, `4-reload-chip-${seq}`);
+  }
 });

@@ -37,7 +37,8 @@
  * on any connector: 503 `no-snapshot` when the wiki is no git work tree or has no commit yet) · 422
  * `no-user` / `unknown-user` the thread's user · 404/409 the discussion (a
  * given id must be this page's live wiki thread) · 409 `origin` (Discuss v3
- * P2: a follow-up's `originTurnId` must be a first turn of that thread) ·
+ * P2: a follow-up's `originTurnId` must be a card's first turn of that thread,
+ * one with a stored passage, and its `selection` that turn's) ·
  * 409 `busy` · 429 `busy` (the
  * in-flight cap). Only then is the thread created (so a refused request leaves
  * no empty thread) and the turn row inserted with the user message in one
@@ -378,7 +379,8 @@ export interface DiscussBody extends HandoffBody {
   /** The thread's user; else the bot's `bot_default_user`. */
   userId?: string;
   /** Discuss v3 P2 (D9): a card's follow-up names its card's first turn,
-   *  which must be a first turn of the thread this turn runs on (409 `origin`). */
+   *  which must be a first turn with a stored passage on the thread this turn
+   *  runs on, and sends that turn's selection (409 `origin`). */
   originTurnId?: string;
   /** A card's first turn: the passage as the reader held it in DOM order
    *  (`holdPassage`), for re-placing the card (D12). Its own text only when it
@@ -781,10 +783,17 @@ export function createDiscussEngine(config: Config, deps: DiscussEngineDeps = {}
     }
     const earlier = thread ? await store.list(thread.id) : [];
     if (body.originTurnId) {
-      // D9: a card's first turn of this very thread (no thread yet: none is).
+      // D9/D12: a card's first turn of this very thread (no thread yet: none
+      // is), which is the one kind of turn that stores where its passage
+      // stands. A whole-page tab question, a /chat or trace turn, an older row
+      // and a follow-up whose origin was deleted store none, so none is an origin.
       const origin = earlier.find((t) => t.id === body.originTurnId);
-      if (!origin || origin.originTurnId !== null) {
-        return refuse(409, { error: "that card's first turn is not a first turn of this page's discussion; select the passage again to ask", reason: "origin" });
+      if (!origin || origin.originTurnId !== null || !origin.passage || !origin.selection) {
+        return refuse(409, { error: "that turn is not the first turn of a card on this page's discussion; select the passage again to ask", reason: "origin" });
+      }
+      // The follow-up asks about its card's passage: the same words, white space ignored.
+      if (compactText(body.selection ?? "") !== compactText(origin.selection)) {
+        return refuse(409, { error: "a card's follow-up asks about its card's passage, and this one names another; select the passage again to ask", reason: "origin" });
       }
     }
     const last = earlier[earlier.length - 1];

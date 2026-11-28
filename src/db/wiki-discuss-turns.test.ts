@@ -78,6 +78,14 @@ describe("wiki_discuss_turns", () => {
     expect(refused).toContain("sent_from_check");
   });
 
+  // Fix round 1 (finding G): the self-referencing FK has an index, so a
+  // deleted turn (every turn of a deleted thread) does not scan the table.
+  test("origin_turn_id has an index", async () => {
+    const rows = await getDb()<{ indexdef: string }[]>`
+      SELECT indexdef FROM pg_indexes WHERE tablename = 'wiki_discuss_turns' AND schemaname = current_schema()`;
+    expect(rows.some((r) => /\(origin_turn_id\)/.test(r.indexdef))).toBe(true);
+  });
+
   test("a turn starts running and is finished once, with how it ended", async () => {
     const d = crypto.randomUUID();
     const t = await startDiscussTurn(start(d));

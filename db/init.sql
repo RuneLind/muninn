@@ -1095,6 +1095,8 @@ CREATE TABLE wiki_discuss_turns (
 CREATE INDEX idx_wiki_discuss_turns_page ON wiki_discuss_turns (wiki, rel_path, created_at DESC);
 CREATE INDEX idx_wiki_discuss_turns_running ON wiki_discuss_turns (heartbeat_at) WHERE end_state = 'running';
 CREATE INDEX idx_wiki_discuss_turns_thread ON wiki_discuss_turns (thread_id) WHERE thread_id IS NOT NULL;
+-- Migration 095: the self-referencing FK's index (a deleted turn looks up the rows naming it).
+CREATE INDEX idx_wiki_discuss_turns_origin ON wiki_discuss_turns (origin_turn_id) WHERE origin_turn_id IS NOT NULL;
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
